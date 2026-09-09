@@ -33,8 +33,10 @@
 // uses these types as inputs to the shaders.
 //#import "AAPLShaderTypes.h"
 
+#include <stdlib.h>
 #import "MGLRenderer.h"
 #import "glm_context.h"
+#import "pixel_convert.h"
 
 #define TRACE_FUNCTION()    DEBUG_PRINT("%s\n", __FUNCTION__);
 
@@ -142,6 +144,25 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
 
     id<MTLEvent> _currentEvent;
     GLsizei _currentSyncName;
+}
+
+// aligned_alloc on macOS wants an alignment of at least sizeof(void*) and a size
+// that is a whole number of alignments; the format alignments here are often 4,
+// which silently fails. Wrap it so callers get memory instead of NULL.
+static void *mgl_aligned_alloc(size_t alignment, size_t size)
+{
+    size_t a = alignment < sizeof(void *) ? sizeof(void *) : alignment;
+    size_t sz;
+
+    if (a & (a - 1))                      // not a power of two
+        a = sizeof(void *);
+
+    sz = ((size + a - 1) / a) * a;
+
+    if (sz == 0)
+        return NULL;
+
+    return aligned_alloc(a, sz);
 }
 
 MTLVertexFormat glTypeSizeToMtlType(GLuint type, GLuint size, bool normalized)
@@ -458,8 +479,14 @@ void logDirtyBits(GLMContext ctx)
                 GLuint spirv_binding;
                 Buffer *buf;
 
-                // get the ubo binding from spirv
-                spirv_binding = [self getProgramBinding:stage type:spvc_type index: i];
+                // Plain uniforms carry a layout location, not a binding, and
+                // SPIRV-Cross numbers them per stage in declaration order. The
+                // slot they end up in here is the array position, so only the
+                // GL-side lookup needs the location.
+                if (spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT)
+                    spirv_binding = [self getProgramLocation:stage type:spvc_type index: i];
+                else
+                    spirv_binding = [self getProgramBinding:stage type:spvc_type index: i];
 
                 buf = buffers[spirv_binding].buf;
 
@@ -1140,7 +1167,7 @@ void logDirtyBits(GLMContext ctx)
                         if (addr % 256 != 0 || alignedBytesPerRow != bytesPerRow) {
                             // Data is not aligned OR bytesPerRow needs alignment - allocate aligned buffer and copy row by row
                             NSUInteger alignedSize = ((bytesPerImage + alignment - 1) / alignment) * alignment;
-                            void *alignedData = aligned_alloc(alignment, alignedSize);
+                            void *alignedData = mgl_aligned_alloc(alignment, alignedSize);
 
                             if (alignedData) {
                                 // Copy data row by row to handle bytesPerRow alignment
@@ -1261,7 +1288,7 @@ void logDirtyBits(GLMContext ctx)
                                 if (addr % alignment != 0 || alignedBytesPerRow != bytesPerRow) {
                                     // Data is not aligned OR bytesPerRow needs alignment - allocate aligned buffer and copy
                                     NSUInteger alignedSize = ((bytesPerImage + alignment - 1) / alignment) * alignment;
-                                    void *alignedData = aligned_alloc(alignment, alignedSize);
+                                    void *alignedData = mgl_aligned_alloc(alignment, alignedSize);
 
                                     if (alignedData) {
                                         // Copy data with row alignment
@@ -1354,7 +1381,7 @@ void logDirtyBits(GLMContext ctx)
                             if (addr % alignment != 0 || alignedBytesPerRow != bytesPerRow) {
                                 // Data is not aligned OR bytesPerRow needs alignment - allocate aligned buffer and copy
                                 NSUInteger alignedSize = ((bytesPerImage + alignment - 1) / alignment) * alignment;
-                                void *alignedData = aligned_alloc(alignment, alignedSize);
+                                void *alignedData = mgl_aligned_alloc(alignment, alignedSize);
 
                                 if (alignedData) {
                                     // Copy data row by row to handle bytesPerRow alignment
@@ -1478,7 +1505,7 @@ void logDirtyBits(GLMContext ctx)
                 NSLog(@"MGL WARNING: Skipping texture fill due to excessive size: %lu bytes", (unsigned long)dataSize);
             } else {
                 // Allocate aligned black data and clear the texture
-                void *blackData = aligned_alloc(alignment, dataSize);
+                void *blackData = mgl_aligned_alloc(alignment, dataSize);
                 if (blackData) {
                     // CRITICAL SECURITY FIX: Comprehensive validation to prevent Metal driver crashes
                     memset(blackData, 0, dataSize); // Clear to black
@@ -1819,8 +1846,13 @@ void logDirtyBits(GLMContext ctx)
 
     tex->dirty_bits = 0;
 
-    // EMERGENCY FALLBACK: Ensure all textures have some content to prevent magenta
-    if (tex->target == GL_TEXTURE_2D && tex->num_levels == 1 &&
+    // Debug aid only. GL says new texture storage is undefined, so writing a
+    // pattern here corrupts render targets and anything the app uploads itself.
+    static int emergency_fill = -1;
+    if (emergency_fill < 0)
+        emergency_fill = getenv("MGL_DEBUG_TEXTURE_FILL") ? 1 : 0;
+
+    if (emergency_fill && tex->target == GL_TEXTURE_2D && tex->num_levels == 1 &&
         (texture.width <= 512 && texture.height <= 512)) {
 
         NSLog(@"MGL EMERGENCY: Applying emergency texture fill to prevent magenta screen");
@@ -2590,6 +2622,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     switch(type)
     {
        case SPVC_RESOURCE_TYPE_UNIFORM_BUFFER:
+       case SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT:
        case SPVC_RESOURCE_TYPE_STORAGE_BUFFER:
        case SPVC_RESOURCE_TYPE_ATOMIC_COUNTER:
        case SPVC_RESOURCE_TYPE_STAGE_INPUT:
@@ -2629,60 +2662,56 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
 -(bool)bindMTLProgram:(Program *)ptr
 {
+    // The compiled library and function belong to the program, not the shader
+    // objects. GL lets an app detach and delete its shaders straight after
+    // linking, and the program has to keep working.
     if (ptr->dirty_bits & DIRTY_PROGRAM)
     {
-        // release mtl shaders
         for(int i=_VERTEX_SHADER; i<_MAX_SHADER_TYPES; i++)
         {
-            Shader *shader;
-            shader = ptr->shader_slots[i];
-
-            if (shader)
+            if (ptr->spirv[i].mtl_library)
             {
-                if (shader->mtl_data.library)
-                {
-                    CFBridgingRelease(shader->mtl_data.library);
-                    CFBridgingRelease(shader->mtl_data.function);
-                    shader->mtl_data.library = NULL;
-                    shader->mtl_data.function = NULL;
-                }
+                CFBridgingRelease(ptr->spirv[i].mtl_library);
+                ptr->spirv[i].mtl_library = NULL;
+            }
+
+            if (ptr->spirv[i].mtl_function)
+            {
+                CFBridgingRelease(ptr->spirv[i].mtl_function);
+                ptr->spirv[i].mtl_function = NULL;
             }
         }
 
         ptr->dirty_bits &= ~DIRTY_PROGRAM;
     }
 
-    // bind mtl functions to shaders
     for(int i=_VERTEX_SHADER; i<_MAX_SHADER_TYPES; i++)
     {
-        Shader *shader;
-        shader = ptr->shader_slots[i];
+        if (ptr->spirv[i].msl_str == NULL || ptr->spirv[i].entry_point == NULL)
+            continue;
 
-        if (shader)
+        if (ptr->spirv[i].mtl_library)
+            continue;
+
+        id<MTLLibrary> library = [self compileShader: ptr->spirv[i].msl_str];
+
+        if (!library)
         {
-            if (shader->mtl_data.library == NULL)
-            {
-                id<MTLLibrary> library;
-                id<MTLFunction> function;
-
-                library = [self compileShader: ptr->spirv[i].msl_str];
-                if (!library) {
-                    NSLog(@"MGL ERROR: Failed to compile %s shader, skipping render", i == _VERTEX_SHADER ? "vertex" : "fragment");
-                    shader->mtl_data.library = NULL;
-                    shader->mtl_data.function = NULL;
-                    return false;  // Signal shader compilation failure
-                }
-                function = [library newFunctionWithName:[NSString stringWithUTF8String: shader->entry_point]];
-                if (!function) {
-                    NSLog(@"MGL ERROR: Failed to find function '%s' in compiled shader", shader->entry_point);
-                    shader->mtl_data.library = NULL;
-                    shader->mtl_data.function = NULL;
-                    return false;  // Signal function lookup failure
-                }
-                shader->mtl_data.library = (void *)CFBridgingRetain(library);
-                shader->mtl_data.function = (void *)CFBridgingRetain(function);
-            }
+            NSLog(@"MGL ERROR: failed to compile MSL for stage %d", i);
+            return false;
         }
+
+        id<MTLFunction> function = [library newFunctionWithName:
+            [NSString stringWithUTF8String: ptr->spirv[i].entry_point]];
+
+        if (!function)
+        {
+            NSLog(@"MGL ERROR: entry point '%s' missing from stage %d", ptr->spirv[i].entry_point, i);
+            return false;
+        }
+
+        ptr->spirv[i].mtl_library = (void *)CFBridgingRetain(library);
+        ptr->spirv[i].mtl_function = (void *)CFBridgingRetain(function);
     }
 
     return true;
@@ -2914,7 +2943,8 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             return false;
         }
 
-        _drawable = [_layer nextDrawable];
+        [self syncLayerSize];
+            _drawable = [_layer nextDrawable];
 
         // late init of gl scissor box on attachment to window system
         NSRect frame;
@@ -3033,7 +3063,8 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                 NSLog(@"MGL WARNING: Drawable texture is NULL (sleep mode or window not visible), attempting to get new drawable");
 
                 // Try to get a new drawable
-                _drawable = [_layer nextDrawable];
+                [self syncLayerSize];
+            _drawable = [_layer nextDrawable];
                 if (_drawable) {
                     texture = _drawable.texture;
                     NSLog(@"MGL INFO: Successfully obtained new drawable with texture");
@@ -3111,9 +3142,17 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         if (ctx->state.framebuffer) {
             Framebuffer * fbo = ctx->state.framebuffer;
+            bool clear_all = (ctx->state.clear_bitmask & GL_COLOR_BUFFER_BIT) != 0;
+
             for(int i=0; i<STATE(max_color_attachments);i++) {
                 FBOAttachment * fboa;
                 fboa = &fbo->color_attachments[i];
+
+                if (_renderPassDescriptor.colorAttachments[i].texture == nil)
+                    continue;
+
+                // glClearBuffer* sets a per-attachment colour; a plain glClear
+                // uses the context clear colour for every attachment.
                 if (fboa->clear_bitmask & GL_COLOR_BUFFER_BIT) {
                     _renderPassDescriptor.colorAttachments[i].clearColor =
                         MTLClearColorMake(fboa->clear_color[0],
@@ -3122,9 +3161,20 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                                         fboa->clear_color[3]);
 
                     _renderPassDescriptor.colorAttachments[i].loadAction = MTLLoadActionClear;
+                    fboa->clear_bitmask &= ~GL_COLOR_BUFFER_BIT;
+                } else if (clear_all) {
+                    _renderPassDescriptor.colorAttachments[i].clearColor =
+                        MTLClearColorMake(STATE(color_clear_value[0]),
+                                          STATE(color_clear_value[1]),
+                                          STATE(color_clear_value[2]),
+                                          STATE(color_clear_value[3]));
+
+                    _renderPassDescriptor.colorAttachments[i].loadAction = MTLLoadActionClear;
                 } else {
                     _renderPassDescriptor.colorAttachments[i].loadAction = MTLLoadActionLoad;
                 }
+
+                _renderPassDescriptor.colorAttachments[i].storeAction = MTLStoreActionStore;
             }
         }
 
@@ -3568,15 +3618,17 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     }
 
     program = ctx->state.program;
-    vertex_shader = program->shader_slots[_VERTEX_SHADER];
-    fragment_shader = program->shader_slots[_FRAGMENT_SHADER];
-    assert(vertex_shader);
-    assert(fragment_shader);
 
-    vertexFunction = (__bridge id<MTLFunction>)(vertex_shader->mtl_data.function);
-    fragmentFunction = (__bridge id<MTLFunction>)(fragment_shader->mtl_data.function);
-    assert(vertexFunction);
-    assert(fragmentFunction);
+    vertexFunction = (__bridge id<MTLFunction>)(program->spirv[_VERTEX_SHADER].mtl_function);
+    fragmentFunction = (__bridge id<MTLFunction>)(program->spirv[_FRAGMENT_SHADER].mtl_function);
+
+    if (!vertexFunction || !fragmentFunction)
+    {
+        NSLog(@"MGL ERROR: program %u has no linked %s stage", program->name,
+              vertexFunction ? "fragment" : "vertex");
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        return NULL;
+    }
 
     // Configure a pipeline descriptor that is used to create a pipeline state.
     pipelineStateDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
@@ -3750,10 +3802,19 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         case GL_ONE_MINUS_SRC_ALPHA: factor = MTLBlendFactorOneMinusSourceAlpha; break;
         case GL_DST_ALPHA: factor = MTLBlendFactorDestinationAlpha; break;
         case GL_ONE_MINUS_DST_ALPHA: factor = MTLBlendFactorOneMinusDestinationAlpha; break;
-        case GL_CONSTANT_COLOR: factor = MTLBlendFactorSource1Color; break;
-        case GL_ONE_MINUS_CONSTANT_COLOR: factor = MTLBlendFactorOneMinusSource1Color; break;
-        case GL_CONSTANT_ALPHA: factor = MTLBlendFactorSource1Alpha; break;
-        case GL_ONE_MINUS_CONSTANT_ALPHA: factor = MTLBlendFactorOneMinusSource1Alpha; break;
+        // the constant factors are glBlendColor, not dual source blending
+        case GL_CONSTANT_COLOR: factor = MTLBlendFactorBlendColor; break;
+        case GL_ONE_MINUS_CONSTANT_COLOR: factor = MTLBlendFactorOneMinusBlendColor; break;
+        case GL_CONSTANT_ALPHA: factor = MTLBlendFactorBlendAlpha; break;
+        case GL_ONE_MINUS_CONSTANT_ALPHA: factor = MTLBlendFactorOneMinusBlendAlpha; break;
+
+        case GL_SRC_ALPHA_SATURATE: factor = MTLBlendFactorSourceAlphaSaturated; break;
+
+        // dual source blending
+        case GL_SRC1_COLOR: factor = MTLBlendFactorSource1Color; break;
+        case GL_ONE_MINUS_SRC1_COLOR: factor = MTLBlendFactorOneMinusSource1Color; break;
+        case GL_SRC1_ALPHA: factor = MTLBlendFactorSource1Alpha; break;
+        case GL_ONE_MINUS_SRC1_ALPHA: factor = MTLBlendFactorOneMinusSource1Alpha; break;
 
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
@@ -3827,7 +3888,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     {
         if (pipelineStateDescriptor.colorAttachments[i].pixelFormat != MTLPixelFormatInvalid)
         {
-            pipelineStateDescriptor.colorAttachments[i].blendingEnabled = true;
+            pipelineStateDescriptor.colorAttachments[i].blendingEnabled = ctx->state.caps.blend;
 
             pipelineStateDescriptor.colorAttachments[i].sourceRGBBlendFactor = _src_blend_rgb_factor[i];
             pipelineStateDescriptor.colorAttachments[i].destinationRGBBlendFactor = _dst_blend_rgb_factor[i];
@@ -4072,6 +4133,10 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     if (ctx->state.dirty_bits)
     {
+        // The branches below clear bits as they handle them, so remember what
+        // was dirty on entry - the pipeline rebuild check further down needs it.
+        GLuint dirty_on_entry = ctx->state.dirty_bits;
+
         // dirty state covers all rendering attachments and general state
         if (ctx->state.dirty_bits & DIRTY_STATE)
         {
@@ -4082,7 +4147,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                 {
                     // Validate framebuffer pointer is within reasonable bounds
                     uintptr_t fb_addr = (uintptr_t)ctx->state.framebuffer;
-                    if (fb_addr < 0x1000 || fb_addr > 0x100000000) {
+                    if (fb_addr < 0x1000 || fb_addr > 0x100000000000ULL) {
                         NSLog(@"MGL ERROR: Invalid framebuffer pointer detected: 0x%lx", fb_addr);
                         return false;
                     }
@@ -4173,8 +4238,9 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             ctx->state.dirty_bits &= ~DIRTY_RENDER_STATE;
         }
 
-        // new pipeline / vertex / renderbuffer and pipelinestate descriptor, should probably make this a single dirty bit
-        if (ctx->state.dirty_bits & (DIRTY_PROGRAM | DIRTY_VAO | DIRTY_FBO | DIRTY_ALPHA_STATE | DIRTY_RENDER_STATE))
+        // blend factors and colour write masks live in the pipeline descriptor,
+        // so DIRTY_STATE has to rebuild it too
+        if (dirty_on_entry & (DIRTY_PROGRAM | DIRTY_VAO | DIRTY_FBO | DIRTY_ALPHA_STATE | DIRTY_RENDER_STATE | DIRTY_STATE))
         {
             // create pipeline descriptor
             MTLRenderPipelineDescriptor *pipelineStateDescriptor;
@@ -4188,18 +4254,16 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             vertexDescriptor = [self generateVertexDescriptor];
             RETURN_FALSE_ON_NULL(vertexDescriptor);
 
-            if (ctx->state.caps.blend)
+            // colour write masks apply whether or not blending is on, so this
+            // runs unconditionally; the binder decides about blendingEnabled.
+            if (ctx->state.dirty_bits & DIRTY_ALPHA_STATE)
             {
-                // cache these rather than recalculating them each time
-                if (ctx->state.dirty_bits & DIRTY_ALPHA_STATE)
-                {
-                    [self updateBlendStateCache];
+                [self updateBlendStateCache];
 
-                    ctx->state.dirty_bits &= ~DIRTY_ALPHA_STATE;
-                }
-
-                [self bindBlendStateToPipelineStateDescriptor: pipelineStateDescriptor];
+                ctx->state.dirty_bits &= ~DIRTY_ALPHA_STATE;
             }
+
+            [self bindBlendStateToPipelineStateDescriptor: pipelineStateDescriptor];
 
             pipelineStateDescriptor.vertexDescriptor = vertexDescriptor;
 
@@ -4311,18 +4375,20 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         // we missed something
         //assert(ctx->state.dirty_bits == 0);
     }
-    else // if (ctx->state.dirty_bits)
+
+    // A uniform or glBufferSubData changes the data behind a binding that is
+    // already in place. This has to run whatever else was dirty, otherwise an
+    // unrelated dirty bit makes the draw miss the new value. Only meaningful
+    // while an encoder is open; a readback may have just closed one.
+    if (_currentRenderEncoder != nil)
     {
-        // buffer data can be changed but the bindings remain in place.. so we need to update the data if this is the case
-        // like a uniform or buffer sub data call
-        
         if( [self checkForDirtyBufferData: &ctx->state.vertex_buffer_map_list])
         {
             RETURN_FALSE_ON_FAILURE([self updateDirtyBaseBufferList: &ctx->state.vertex_buffer_map_list]);
 
             RETURN_FALSE_ON_FAILURE([self bindVertexBuffersToCurrentRenderEncoder]);
         }
-        
+
         if( [self checkForDirtyBufferData: &ctx->state.fragment_buffer_map_list])
         {
             RETURN_FALSE_ON_FAILURE([self updateDirtyBaseBufferList: &ctx->state.fragment_buffer_map_list]);
@@ -4509,13 +4575,15 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         [self bindMTLProgram: program];
     }
 
-    Shader *computeShader;
-    computeShader = program->shader_slots[_COMPUTE_SHADER];
-    assert(computeShader);
-
     id <MTLFunction> func;
-    func = (__bridge id<MTLFunction>)(computeShader->mtl_data.function);
-    assert(func);
+    func = (__bridge id<MTLFunction>)(program->spirv[_COMPUTE_SHADER].mtl_function);
+
+    if (!func)
+    {
+        NSLog(@"MGL ERROR: program %u has no linked compute stage", program->name);
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        return false;
+    }
 
     id <MTLComputePipelineState> computePipelineState;
     NSError *errors;
@@ -4958,6 +5026,7 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
 
         if (_drawable == NULL)
         {
+            [self syncLayerSize];
             _drawable = [_layer nextDrawable];
         }
 
@@ -4974,6 +5043,7 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
         // CRITICAL FIX: Comprehensive drawable validation for AGX compatibility
         if (_drawable == NULL) {
             NSLog(@"MGL WARNING: Drawable is NULL in mtlSwapBuffers, getting new drawable");
+            [self syncLayerSize];
             _drawable = [_layer nextDrawable];
             if (_drawable == NULL) {
                 NSLog(@"MGL ERROR: Failed to obtain any drawable from Metal layer");
@@ -5051,7 +5121,8 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
             [self recordGPUError];
         }
 
-        _drawable = [_layer nextDrawable];
+        [self syncLayerSize];
+            _drawable = [_layer nextDrawable];
         if (_drawable == NULL) {
             NSLog(@"MGL WARNING: Failed to get next drawable in mtlSwapBuffers");
             // Don't assert - just continue without creating new command buffer
@@ -5185,178 +5256,344 @@ void mtlFlushBufferRange(GLMContext glm_ctx, Buffer *buf, GLintptr offset, GLsiz
 }
 
 
-#pragma mark C interface to mtlReadDrawable
--(void) mtlReadDrawable:(GLMContext) glm_ctx pixelBytes:(void *)pixelBytes bytesPerRow:(NSUInteger)bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage fromRegion:(MTLRegion)region
+#pragma mark pixel readback
+
+// Metal layouts we know how to decode; anything else fails the read cleanly.
+static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
 {
-    id<MTLTexture> texture;
-
-    // if tex is null we are pulling from a readbuffer or a drawable
-    if (glm_ctx->state.readbuffer)
+    switch(f)
     {
-        Framebuffer *fbo;
-        GLuint drawbuffer;
+        case MTLPixelFormatR8Unorm:         return MGL_NF_R8_UNORM;
+        case MTLPixelFormatRG8Unorm:        return MGL_NF_RG8_UNORM;
+        case MTLPixelFormatRGBA8Unorm:      return MGL_NF_RGBA8_UNORM;
+        case MTLPixelFormatBGRA8Unorm:      return MGL_NF_BGRA8_UNORM;
+        case MTLPixelFormatRGBA8Unorm_sRGB: return MGL_NF_RGBA8_UNORM_SRGB;
+        case MTLPixelFormatBGRA8Unorm_sRGB: return MGL_NF_BGRA8_UNORM_SRGB;
+        case MTLPixelFormatR8Snorm:         return MGL_NF_R8_SNORM;
+        case MTLPixelFormatRG8Snorm:        return MGL_NF_RG8_SNORM;
+        case MTLPixelFormatRGBA8Snorm:      return MGL_NF_RGBA8_SNORM;
+        case MTLPixelFormatR8Uint:          return MGL_NF_R8_UINT;
+        case MTLPixelFormatRG8Uint:         return MGL_NF_RG8_UINT;
+        case MTLPixelFormatRGBA8Uint:       return MGL_NF_RGBA8_UINT;
+        case MTLPixelFormatR8Sint:          return MGL_NF_R8_SINT;
+        case MTLPixelFormatRG8Sint:         return MGL_NF_RG8_SINT;
+        case MTLPixelFormatRGBA8Sint:       return MGL_NF_RGBA8_SINT;
 
-        fbo = ctx->state.readbuffer;
-        drawbuffer = ctx->state.read_buffer - GL_COLOR_ATTACHMENT0;
-        assert(drawbuffer >= 0);
-        assert(drawbuffer <= STATE(max_color_attachments));
+        case MTLPixelFormatR16Unorm:        return MGL_NF_R16_UNORM;
+        case MTLPixelFormatRG16Unorm:       return MGL_NF_RG16_UNORM;
+        case MTLPixelFormatRGBA16Unorm:     return MGL_NF_RGBA16_UNORM;
+        case MTLPixelFormatR16Snorm:        return MGL_NF_R16_SNORM;
+        case MTLPixelFormatRG16Snorm:       return MGL_NF_RG16_SNORM;
+        case MTLPixelFormatRGBA16Snorm:     return MGL_NF_RGBA16_SNORM;
+        case MTLPixelFormatR16Uint:         return MGL_NF_R16_UINT;
+        case MTLPixelFormatRG16Uint:        return MGL_NF_RG16_UINT;
+        case MTLPixelFormatRGBA16Uint:      return MGL_NF_RGBA16_UINT;
+        case MTLPixelFormatR16Sint:         return MGL_NF_R16_SINT;
+        case MTLPixelFormatRG16Sint:        return MGL_NF_RG16_SINT;
+        case MTLPixelFormatRGBA16Sint:      return MGL_NF_RGBA16_SINT;
+        case MTLPixelFormatR16Float:        return MGL_NF_R16_FLOAT;
+        case MTLPixelFormatRG16Float:       return MGL_NF_RG16_FLOAT;
+        case MTLPixelFormatRGBA16Float:     return MGL_NF_RGBA16_FLOAT;
 
-        // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
-            return;
-        
-        //tex = [self framebufferAttachmentTexture: &fbo->color_attachments[drawbuffer]];
-        //assert(tex);
+        case MTLPixelFormatR32Uint:         return MGL_NF_R32_UINT;
+        case MTLPixelFormatRG32Uint:        return MGL_NF_RG32_UINT;
+        case MTLPixelFormatRGBA32Uint:      return MGL_NF_RGBA32_UINT;
+        case MTLPixelFormatR32Sint:         return MGL_NF_R32_SINT;
+        case MTLPixelFormatRG32Sint:        return MGL_NF_RG32_SINT;
+        case MTLPixelFormatRGBA32Sint:      return MGL_NF_RGBA32_SINT;
+        case MTLPixelFormatR32Float:        return MGL_NF_R32_FLOAT;
+        case MTLPixelFormatRG32Float:       return MGL_NF_RG32_FLOAT;
+        case MTLPixelFormatRGBA32Float:     return MGL_NF_RGBA32_FLOAT;
 
-        //texture = (__bridge id<MTLTexture>)(tex->mtl_data);
-        //assert(texture);
+        case MTLPixelFormatRGB10A2Unorm:    return MGL_NF_RGB10A2_UNORM;
+        case MTLPixelFormatRGB10A2Uint:     return MGL_NF_RGB10A2_UINT;
+        case MTLPixelFormatRG11B10Float:    return MGL_NF_RG11B10_FLOAT;
+        case MTLPixelFormatRGB9E5Float:     return MGL_NF_RGB9E5_FLOAT;
+
+        case MTLPixelFormatDepth16Unorm:        return MGL_NF_DEPTH16_UNORM;
+        case MTLPixelFormatDepth32Float:        return MGL_NF_DEPTH32_FLOAT;
+        case MTLPixelFormatStencil8:            return MGL_NF_STENCIL8;
+        case MTLPixelFormatDepth32Float_Stencil8: return MGL_NF_DEPTH32_FLOAT_STENCIL8;
+        case MTLPixelFormatDepth24Unorm_Stencil8: return MGL_NF_DEPTH24_UNORM_STENCIL8;
+
+        default: return MGL_NF_UNKNOWN;
     }
-    else
+}
+
+// Picks the texture a read should come from: an attachment when an FBO is bound
+// for reading, otherwise the default framebuffer's drawable.
+-(id<MTLTexture>) readSourceTexture: (GLMContext) glm_ctx forFormat: (GLenum) format
+{
+    Framebuffer *fbo = glm_ctx->state.readbuffer;
+
+    if (fbo)
     {
-        GLuint mgl_drawbuffer;
-        id<MTLTexture> texture;
+        FBOAttachment *att = NULL;
 
-        // reading from the drawbuffer
-        switch(ctx->state.read_buffer)
+        if (format == GL_DEPTH_COMPONENT)
         {
-            case GL_FRONT: mgl_drawbuffer = _FRONT; break;
-            case GL_BACK: mgl_drawbuffer = _BACK; break;
-            case GL_FRONT_LEFT: mgl_drawbuffer = _FRONT_LEFT; break;
-            case GL_FRONT_RIGHT: mgl_drawbuffer = _FRONT_RIGHT; break;
-            case GL_BACK_LEFT: mgl_drawbuffer = _BACK_LEFT; break;
-            case GL_BACK_RIGHT: mgl_drawbuffer = _BACK_RIGHT; break;
-            default:
-                // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
-            return;
+            att = &fbo->depth;
         }
-
-        if (mgl_drawbuffer == _FRONT)
+        else if (format == GL_STENCIL_INDEX)
         {
-            [self endRenderEncoding];
-            
-            assert(_currentCommandBuffer);
-            if (_currentCommandBuffer.status < MTLCommandBufferStatusCommitted)
-            {
-                [_currentCommandBuffer presentDrawable: _drawable];
-
-                [_currentCommandBuffer commit];
-            }
-            
-            id<MTLTexture> drawableTexture = _drawable.texture;
-            assert(drawableTexture);
-            
-            // Create a downscale texture
-            MTLTextureDescriptor *downScaleTextureDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:drawableTexture.pixelFormat
-                                                                                                                 width:region.size.width
-                                                                                                                height:region.size.height
-                                                                                                             mipmapped:NO];
-            downScaleTextureDescriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-            id<MTLTexture> downscaledTexture = [_device newTextureWithDescriptor:downScaleTextureDescriptor];
-            
-            // Create a command buffer
-            [self newCommandBuffer];
-            
-            // Use a blit command encoder to copy texture data to the buffer
-            id<MTLBlitCommandEncoder> blitEncoder = [_currentCommandBuffer blitCommandEncoder];
-            
-            // Set up the source and destination sizes
-            MTLOrigin sourceOrigin = MTLOriginMake(0, 0, 0);
-            MTLSize sourceSize = MTLSizeMake(drawableTexture.width, drawableTexture.height, 1);
-            MTLOrigin destinationOrigin = MTLOriginMake(region.origin.x, region.origin.y, 0);
-
-            // Perform the scaling operation
-            [blitEncoder copyFromTexture:drawableTexture
-                             sourceSlice:0
-                             sourceLevel:0
-                            sourceOrigin:sourceOrigin
-                              sourceSize:sourceSize
-                               toTexture:downscaledTexture
-                      destinationSlice:0
-                      destinationLevel:0
-                     destinationOrigin:destinationOrigin];
-            [blitEncoder endEncoding];
-
-            // Create a CPU-accessible buffer
-            NSUInteger bytesPerPixel = 4; // For RGBA8Unorm format
-            NSUInteger bytesPerRow = region.size.width * bytesPerPixel;
-
-            id<MTLBuffer> readBuffer = [_device newBufferWithLength:bytesPerRow * region.size.height
-                                                           options:MTLResourceStorageModeShared];
-
-            // Use another blit command encoder to copy the texture into the buffer
-            id<MTLBlitCommandEncoder> readBlitEncoder = [_currentCommandBuffer blitCommandEncoder];
-            [readBlitEncoder copyFromTexture:downscaledTexture
-                                sourceSlice:0
-                                sourceLevel:0
-                               sourceOrigin:MTLOriginMake(0, 0, 0)
-                                  sourceSize:MTLSizeMake(region.size.width, region.size.height, 1)
-                                   toBuffer:readBuffer
-                          destinationOffset:0
-                     destinationBytesPerRow:bytesPerRow
-                   destinationBytesPerImage:bytesPerRow * region.size.height];
-            [readBlitEncoder endEncoding];
-
-            // Commit and wait for completion
-            [_currentCommandBuffer commit];
-            [_currentCommandBuffer waitUntilCompleted];
-            
-            // copy the data
-            void *data = [readBuffer contents];
-            memcpy(pixelBytes, data, bytesPerRow * region.size.height);
-            
-            // get a new command buffer
-            [self newCommandBuffer];
+            att = &fbo->stencil;
         }
-        else if(_drawBuffers[mgl_drawbuffer].drawbuffer)
+        else if (format == GL_DEPTH_STENCIL)
         {
-            texture = _drawBuffers[mgl_drawbuffer].drawbuffer;
+            att = fbo->depth.buf.tex ? &fbo->depth : &fbo->stencil;
         }
         else
         {
-            // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
-            return;
+            GLenum rb = glm_ctx->state.read_buffer;
+
+            if (rb == GL_NONE)
+            {
+                ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+                return nil;
+            }
+
+            GLint index = (rb >= GL_COLOR_ATTACHMENT0 && rb <= GL_COLOR_ATTACHMENT31)
+                        ? (GLint)(rb - GL_COLOR_ATTACHMENT0) : 0;
+
+            if (index >= (GLint)MAX_COLOR_ATTACHMENTS)
+            {
+                ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+                return nil;
+            }
+
+            att = &fbo->color_attachments[index];
         }
+
+        if (!att || (!att->buf.tex && !att->buf.rbo))
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            return nil;
+        }
+
+        Texture *tex = [self framebufferAttachmentTexture: att];
+
+        if (!tex || ![self bindMTLTexture: tex] || !tex->mtl_data)
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            return nil;
+        }
+
+        return (__bridge id<MTLTexture>)(tex->mtl_data);
     }
+
+    // default framebuffer: FRONT and BACK are the same surface here
+    GLenum rb = glm_ctx->state.read_buffer;
+
+    switch(rb)
+    {
+        case GL_FRONT: case GL_BACK:
+        case GL_FRONT_LEFT: case GL_FRONT_RIGHT:
+        case GL_BACK_LEFT: case GL_BACK_RIGHT:
+        case GL_COLOR_ATTACHMENT0:
+            break;
+
+        case GL_NONE:
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            return nil;
+
+        default:
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_ENUM);
+            return nil;
+    }
+
+    // Don't ask the layer for a drawable here. Headless never presents, so the
+    // pool runs dry and nextDrawable blocks. Read whatever the last render pass
+    // used, or the cached back buffer.
+    if (_drawable != nil)
+        return _drawable.texture;
+
+    if (_drawBuffers[_BACK].drawbuffer)
+        return _drawBuffers[_BACK].drawbuffer;
+
+    if (_drawBuffers[_FRONT].drawbuffer)
+        return _drawBuffers[_FRONT].drawbuffer;
+
+    ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+
+    return nil;
+}
+
+-(void) mtlReadPixels:(GLMContext) glm_ctx
+           pixelBytes:(void *)pixelBytes
+          bytesPerRow:(NSUInteger)bytesPerRow
+               format:(GLenum)format
+                 type:(GLenum)type
+           fromRegion:(MTLRegion)region
+{
+    if (!pixelBytes || region.size.width == 0 || region.size.height == 0)
+        return;
+
+    // glClear only records a bitmask; it lands as a load action when the render
+    // pass is built, so force that pass through before reading anything back.
+    if (glm_ctx->state.clear_bitmask)
+        [self processGLState: false];
+
+    [self endRenderEncoding];
+
+    id<MTLTexture> src = [self readSourceTexture: glm_ctx forFormat: format];
+
+    if (src == nil)
+        return;
+
+    MGLNativeFormat nf = nativeFormatForMTL(src.pixelFormat);
+
+    if (nf == MGL_NF_UNKNOWN)
+    {
+        NSLog(@"MGL: cannot read back MTLPixelFormat %lu", (unsigned long)src.pixelFormat);
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        return;
+    }
+
+    NSUInteger x = region.origin.x;
+    NSUInteger w = region.size.width;
+    NSUInteger h = region.size.height;
+
+    if (x >= src.width || region.origin.y >= (NSInteger)src.height)
+        return;
+
+    if (x + w > src.width)  w = src.width - x;
+    if (region.origin.y + h > src.height) h = src.height - region.origin.y;
+
+    // GL counts rows from the bottom, Metal from the top
+    NSUInteger flipped_y = src.height - (region.origin.y + h);
+
+    GLuint  bpp = mglNativeFormatBytesPerPixel(nf);
+    NSUInteger staging_pitch = ((w * bpp) + 255) & ~(NSUInteger)255;   // blit wants 256 byte alignment
+    NSUInteger staging_size  = staging_pitch * h;
+
+    id<MTLBuffer> staging = [_device newBufferWithLength: staging_size
+                                                 options: MTLResourceStorageModeShared];
+    if (!staging)
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_OUT_OF_MEMORY);
+        return;
+    }
+
+    if (_currentCommandBuffer == nil)
+        [self newCommandBuffer];
+
+    id<MTLBlitCommandEncoder> blit = [_currentCommandBuffer blitCommandEncoder];
+
+    [blit copyFromTexture: src
+              sourceSlice: 0
+              sourceLevel: 0
+             sourceOrigin: MTLOriginMake(x, flipped_y, 0)
+               sourceSize: MTLSizeMake(w, h, 1)
+                 toBuffer: staging
+        destinationOffset: 0
+   destinationBytesPerRow: staging_pitch
+ destinationBytesPerImage: staging_size];
+
+    if ([src storageMode] == MTLStorageModeManaged)
+        [blit synchronizeResource: staging];
+
+    [blit endEncoding];
+
+    [_currentCommandBuffer commit];
+    [_currentCommandBuffer waitUntilCompleted];
+    _currentCommandBuffer = nil;
+
+    if (!mglConvertPixels([staging contents], staging_pitch, nf,
+                          pixelBytes, bytesPerRow, format, type,
+                          (GLsizei)w, (GLsizei)h, GL_TRUE))
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+    }
+
+    [self newCommandBuffer];
 }
 
 #pragma mark C interface to mtlGetTexImage
--(void) mtlGetTexImage:(GLMContext) glm_ctx tex: (Texture *)tex pixelBytes:(void *)pixelBytes bytesPerRow:(NSUInteger)bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage fromRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice
+-(void) mtlGetTexImage:(GLMContext) glm_ctx tex: (Texture *)tex pixelBytes:(void *)pixelBytes bytesPerRow:(NSUInteger)bytesPerRow format:(GLenum)format type:(GLenum)type fromRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice
 {
-    id<MTLTexture> texture;
+    if (!tex || !pixelBytes)
+        return;
 
-    if (tex)
+    [self endRenderEncoding];
+
+    if (![self bindMTLTexture: tex] || !tex->mtl_data)
     {
-        texture = (__bridge id<MTLTexture>)(tex->mtl_data);
-        assert(texture);
-    }
-    else
-    {
- 
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        return;
     }
 
-    if ([texture isFramebufferOnly] == NO)
+    id<MTLTexture> texture = (__bridge id<MTLTexture>)(tex->mtl_data);
+
+    if (texture.framebufferOnly)
     {
-        //[texture getBytes:pixelBytes bytesPerRow:bytesPerRow bytesPerImage:bytesPerImage fromRegion:region mipmapLevel:level slice:slice];
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        return;
     }
-    else
+
+    MGLNativeFormat nf = nativeFormatForMTL(texture.pixelFormat);
+
+    if (nf == MGL_NF_UNKNOWN)
     {
-        // issue a gl error as we can't read a framebuffer only texture
-        NSLog(@"Cannot read from framebuffer only texture\n");
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        return;
+    }
+
+    NSUInteger w = region.size.width;
+    NSUInteger h = region.size.height;
+    GLuint bpp = mglNativeFormatBytesPerPixel(nf);
+    NSUInteger staging_pitch = ((w * bpp) + 255) & ~(NSUInteger)255;
+    NSUInteger staging_size  = staging_pitch * h;
+
+    id<MTLBuffer> staging = [_device newBufferWithLength: staging_size
+                                                 options: MTLResourceStorageModeShared];
+    if (!staging)
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_OUT_OF_MEMORY);
+        return;
+    }
+
+    if (_currentCommandBuffer == nil)
+        [self newCommandBuffer];
+
+    id<MTLBlitCommandEncoder> blit = [_currentCommandBuffer blitCommandEncoder];
+
+    [blit copyFromTexture: texture
+              sourceSlice: slice
+              sourceLevel: level
+             sourceOrigin: region.origin
+               sourceSize: MTLSizeMake(w, h, region.size.depth ? region.size.depth : 1)
+                 toBuffer: staging
+        destinationOffset: 0
+   destinationBytesPerRow: staging_pitch
+ destinationBytesPerImage: staging_size];
+
+    [blit endEncoding];
+
+    [_currentCommandBuffer commit];
+    [_currentCommandBuffer waitUntilCompleted];
+    _currentCommandBuffer = nil;
+
+    // GetTexImage keeps the texture's own top-down row order
+    if (!mglConvertPixels([staging contents], staging_pitch, nf,
+                          pixelBytes, bytesPerRow, format, type,
+                          (GLsizei)w, (GLsizei)h, GL_FALSE))
+    {
         ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
     }
+
+    [self newCommandBuffer];
 }
 
-void mtlReadDrawable(GLMContext glm_ctx, void *pixelBytes, GLuint bytesPerRow, GLuint bytesPerImage, GLint x, GLint y, GLsizei width, GLsizei height)
+void mtlReadPixels(GLMContext glm_ctx, void *pixelBytes, GLuint bytesPerRow, GLenum format, GLenum type, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlReadDrawable:glm_ctx pixelBytes:pixelBytes bytesPerRow:bytesPerRow bytesPerImage:bytesPerImage fromRegion:MTLRegionMake2D(x,y,width,height)];
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlReadPixels:glm_ctx pixelBytes:pixelBytes bytesPerRow:bytesPerRow format:format type:type fromRegion:MTLRegionMake2D(x,y,width,height)];
 }
 
-void mtlGetTexImage(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint bytesPerRow, GLuint bytesPerImage, GLint x, GLint y, GLsizei width, GLsizei height, GLuint level, GLuint slice)
+void mtlGetTexImage(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint bytesPerRow, GLenum format, GLenum type, GLint x, GLint y, GLsizei width, GLsizei height, GLuint level, GLuint slice)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlGetTexImage:glm_ctx tex:tex pixelBytes:pixelBytes bytesPerRow:bytesPerRow bytesPerImage:bytesPerImage fromRegion:MTLRegionMake2D(x,y,width,height) mipmapLevel:level slice:slice];
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlGetTexImage:glm_ctx tex:tex pixelBytes:pixelBytes bytesPerRow:bytesPerRow format:format type:type fromRegion:MTLRegionMake2D(x,y,width,height) mipmapLevel:level slice:slice];
 }
+
 
 #pragma mark C interface to mtlGenerateMipmaps
 
@@ -6207,7 +6444,7 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
     glm_ctx->mtl_funcs.mtlMapUnmapBuffer = mtlMapUnmapBuffer;
     glm_ctx->mtl_funcs.mtlFlushBufferRange = mtlFlushBufferRange;
 
-    glm_ctx->mtl_funcs.mtlReadDrawable = mtlReadDrawable;
+    glm_ctx->mtl_funcs.mtlReadPixels = mtlReadPixels;
     glm_ctx->mtl_funcs.mtlGetTexImage = mtlGetTexImage;
     
     glm_ctx->mtl_funcs.mtlGenerateMipmaps = mtlGenerateMipmaps;
@@ -6310,6 +6547,33 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     return  (__bridge void *)(renderer);
 }
 
+// Keeps the drawable the same size as the view. Setting drawableSize by hand
+// stops CAMetalLayer updating it on its own, so a resize has to come through here.
+- (void) syncLayerSize
+{
+    if (_layer == nil || _view == nil)
+        return;
+
+    CGRect bounds = [_view bounds];
+
+    if (bounds.size.width < 1.0 || bounds.size.height < 1.0)
+        return;
+
+    CGFloat scale = [_view window] ? [[_view window] backingScaleFactor] : [_layer contentsScale];
+
+    if (scale < 1.0)
+        scale = 1.0;
+
+    CGSize want = CGSizeMake(bounds.size.width * scale, bounds.size.height * scale);
+
+    if (want.width == _layer.drawableSize.width && want.height == _layer.drawableSize.height)
+        return;
+
+    _layer.frame = bounds;
+    [_layer setContentsScale: scale];
+    _layer.drawableSize = want;
+}
+
 - (void) createMGLRendererAndBindToContext: (GLMContext) glm_ctx view: (NSView *) view
 {
     ctx = glm_ctx;
@@ -6382,20 +6646,34 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     _layer.device = _device;
     _layer.pixelFormat = ctx->pixel_format.mtl_pixel_format;
     _layer.framebufferOnly = NO; // enable blitting to main color buffer
-    _layer.frame = view.layer.frame;
     _layer.magnificationFilter = kCAFilterNearest;
     _layer.presentsWithTransaction = NO;
 
-    // AGX-safe scale factor handling
-    int scaleFactor = [[NSScreen mainScreen] backingScaleFactor];
-    [_layer setContentsScale: scaleFactor];
+    // Size from the view itself. view.layer is nil until the view is
+    // layer backed, so reading view.layer.frame gave a zero sized layer.
+    CGRect bounds = [view bounds];
 
-    // AGX-safe layer attachment
-    if ([_view layer]) {
-        [[_view layer] addSublayer: _layer];
-    } else {
-        [_view setLayer: _layer];
-    }
+    if (bounds.size.width < 1.0 || bounds.size.height < 1.0)
+        bounds = CGRectMake(0, 0, 1, 1);
+
+    CGFloat scaleFactor = [view window] ? [[view window] backingScaleFactor]
+                                        : [[NSScreen mainScreen] backingScaleFactor];
+    if (scaleFactor < 1.0)
+        scaleFactor = 1.0;
+
+    _layer.frame = bounds;
+    [_layer setContentsScale: scaleFactor];
+    _layer.drawableSize = CGSizeMake(bounds.size.width * scaleFactor,
+                                     bounds.size.height * scaleFactor);
+
+    // host the layer rather than adding a sublayer, so it tracks the view
+    [_view setLayer: _layer];
+    [_view setWantsLayer: YES];
+    [_view setLayerContentsRedrawPolicy: NSViewLayerContentsRedrawDuringViewResize];
+
+    NSLog(@"MGL INFO: metal layer %.0fx%.0f scale %.0f drawable %.0fx%.0f",
+          bounds.size.width, bounds.size.height, scaleFactor,
+          _layer.drawableSize.width, _layer.drawableSize.height);
 
     mglDrawBuffer(glm_ctx, GL_FRONT);
 

@@ -155,7 +155,9 @@ GLFWbool _glfwCreateContextMGL(_GLFWwindow* window,
         return GLFW_FALSE;
     }
 
-    [window->ns.view wantsLayer];
+    // must be a setter: without a layer-backed view the CAMetalLayer below
+    // is never composited and the window just stays black
+    [window->ns.view setWantsLayer:YES];
 
     MGLRenderer *renderer = [[MGLRenderer alloc] init];
     assert(renderer);
@@ -165,6 +167,11 @@ GLFWbool _glfwCreateContextMGL(_GLFWwindow* window,
     [window->context.mgl.renderer createMGLRendererAndBindToContext: window->context.mgl.ctx view: window->ns.view];
 
     //[window->context.mgl.object setView: window->ns.view];
+
+    if (getenv("MGL_DEBUG_CONTEXT"))
+        fprintf(stderr, "MGLCTX: _glfwCreateContextMGL ran, ctx=%p renderer=%p view=%p\n",
+                (void *)window->context.mgl.ctx, (__bridge void *)renderer,
+                (__bridge void *)window->ns.view);
 
     window->context.makeCurrent = makeContextCurrentMGL;
     window->context.swapBuffers = swapBuffersMGL;

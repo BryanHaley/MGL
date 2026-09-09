@@ -34,7 +34,7 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
 {
     if (isProgram(ctx, program) == GL_FALSE)
     {
-        ERROR_RETURN(GL_INVALID_OPERATION); // also may be GL_INVALID_VALUE ????
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, 0); // also may be GL_INVALID_VALUE ????
 
         return -1;
     }
@@ -46,7 +46,7 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
 
     if (ptr->linked_glsl_program == NULL)
     {
-        ERROR_RETURN(GL_INVALID_OPERATION);
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, 0);
 
         return -1;
     }
@@ -63,11 +63,9 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
 
             if (!strcmp(str, name))
             {
-                GLuint binding;
-
-                binding = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].list[i].binding;
-
-                return binding;
+                // plain uniforms are keyed by layout location; binding is
+                // always 0 for them
+                return ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].list[i].location;
             }
         }
     }
@@ -122,7 +120,7 @@ GLuint  mglGetUniformBlockIndex(GLMContext ctx, GLuint program, const GLchar *un
 
     if (ptr->linked_glsl_program == NULL)
     {
-        ERROR_RETURN(GL_INVALID_OPERATION);
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, 0);
 
         return -1;
     }
@@ -175,27 +173,31 @@ bool checkUniformParams(GLMContext ctx, GLint location)
 {
     Program* ptr = ctx->state.program;
     
-    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, false)
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, false);
 
-    ERROR_CHECK_RETURN_VALUE(location >= 0, GL_INVALID_OPERATION, false)
+    ERROR_CHECK_RETURN_VALUE(location >= 0, GL_INVALID_OPERATION, false);
         
-    ERROR_CHECK_RETURN_VALUE(location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION, false)
+    ERROR_CHECK_RETURN_VALUE(location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION, false);
 
     return true;
 }
 
 void mglUniform(GLMContext ctx, GLint location, void *ptr, GLsizei size)
 {
-    assert(checkUniformParams(ctx, location));
-    
-    Buffer *buf = ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf;
-    
+    Buffer *buf;
+
+    // not inside assert(): that would drop the checks in an NDEBUG build
+    if (checkUniformParams(ctx, location) == false)
+        return;
+
+    buf = ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf;
+
     if(buf == NULL)
     {
         ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf = newBuffer(ctx, GL_UNIFORM_BUFFER, location);
         buf = ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf;
     }
-    
+
     initBufferData(ctx, buf, size, ptr, true);
 }
 

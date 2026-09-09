@@ -29,6 +29,8 @@
 
 #include "internal.h"
 
+#include <stdlib.h>
+
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -369,6 +371,15 @@ GLFWbool _glfwRefreshContextAttribs(_GLFWwindow* window,
     }
 
     version = (const char*) window->context.GetString(GL_VERSION);
+
+    if (getenv("MGL_DEBUG_CONTEXT"))
+        fprintf(stderr, "MGLCTX: source=0x%04x client=0x%04x requested=%d.%d "
+                        "GetString=%p GL_VERSION=\"%s\"\n",
+                ctxconfig->source, ctxconfig->client,
+                ctxconfig->major, ctxconfig->minor,
+                (void *)window->context.GetString,
+                version ? version : "(null)");
+
     if (!version)
     {
         if (ctxconfig->client == GLFW_OPENGL_API)

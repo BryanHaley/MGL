@@ -18,7 +18,11 @@
  *
  */
 
+#include <stdio.h>
 #include "glm_context.h"
+#include "pixel_utils.h"
+
+void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data);
 
 // these cast a void ptr to a type and value
 #define RET_BOOL(__value__) *((GLboolean *)data) = (GLboolean)__value__; break;
@@ -395,6 +399,85 @@ void mglGetIntegerv(GLMContext ctx, GLenum pname, GLint *data)
     mglGet(ctx, pname, kInt, (void *)data);
 }
 
+// what a 4.6 core context advertises; GetStringi walks this
+static const char * const mgl_extensions[] = {
+    "GL_ARB_multi_draw_indirect",
+    "GL_ARB_base_instance",
+    "GL_ARB_draw_elements_base_vertex",
+    "GL_ARB_draw_indirect",
+    "GL_ARB_draw_instanced",
+    "GL_ARB_instanced_arrays",
+    "GL_ARB_texture_storage",
+    "GL_ARB_texture_storage_multisample",
+    "GL_ARB_texture_multisample",
+    "GL_ARB_texture_cube_map_array",
+    "GL_ARB_texture_buffer_object",
+    "GL_ARB_texture_buffer_range",
+    "GL_ARB_texture_rectangle",
+    "GL_ARB_texture_swizzle",
+    "GL_ARB_texture_rg",
+    "GL_ARB_texture_float",
+    "GL_ARB_texture_compression",
+    "GL_ARB_texture_compression_bptc",
+    "GL_ARB_depth_texture",
+    "GL_ARB_depth_buffer_float",
+    "GL_ARB_framebuffer_object",
+    "GL_ARB_framebuffer_sRGB",
+    "GL_ARB_draw_buffers",
+    "GL_ARB_draw_buffers_blend",
+    "GL_ARB_blend_func_extended",
+    "GL_ARB_vertex_array_object",
+    "GL_ARB_vertex_attrib_binding",
+    "GL_ARB_vertex_attrib_64bit",
+    "GL_ARB_vertex_buffer_object",
+    "GL_ARB_uniform_buffer_object",
+    "GL_ARB_shader_storage_buffer_object",
+    "GL_ARB_shader_atomic_counters",
+    "GL_ARB_shader_image_load_store",
+    "GL_ARB_compute_shader",
+    "GL_ARB_explicit_attrib_location",
+    "GL_ARB_explicit_uniform_location",
+    "GL_ARB_separate_shader_objects",
+    "GL_ARB_get_program_binary",
+    "GL_ARB_gl_spirv",
+    "GL_ARB_spirv_extensions",
+    "GL_ARB_sync",
+    "GL_ARB_timer_query",
+    "GL_ARB_occlusion_query2",
+    "GL_ARB_transform_feedback2",
+    "GL_ARB_transform_feedback3",
+    "GL_ARB_copy_buffer",
+    "GL_ARB_copy_image",
+    "GL_ARB_buffer_storage",
+    "GL_ARB_map_buffer_range",
+    "GL_ARB_invalidate_subdata",
+    "GL_ARB_clear_buffer_object",
+    "GL_ARB_clear_texture",
+    "GL_ARB_direct_state_access",
+    "GL_ARB_multi_bind",
+    "GL_ARB_sampler_objects",
+    "GL_ARB_seamless_cube_map",
+    "GL_ARB_polygon_offset_clamp",
+    "GL_ARB_clip_control",
+    "GL_ARB_viewport_array",
+    "GL_ARB_texture_filter_anisotropic",
+    "GL_ARB_texture_mirror_clamp_to_edge",
+    "GL_ARB_ES2_compatibility",
+    "GL_ARB_ES3_compatibility",
+    "GL_KHR_debug",
+    "GL_KHR_robustness",
+    "GL_EXT_texture_filter_anisotropic",
+    "GL_EXT_texture_sRGB",
+    "GL_EXT_texture_compression_s3tc",
+};
+
+static const GLuint mgl_num_extensions = (GLuint)(sizeof(mgl_extensions)/sizeof(mgl_extensions[0]));
+
+GLuint mglNumExtensions(void)
+{
+    return mgl_num_extensions;
+}
+
 const GLubyte *mglGetString(GLMContext ctx, GLenum name)
 {
     switch(name)
@@ -406,43 +489,73 @@ const GLubyte *mglGetString(GLMContext ctx, GLenum name)
             return (const GLubyte *)"MGL";
 
         case GL_VERSION:
-            return (const GLubyte *)"4.6.0";
+            return (const GLubyte *)"4.6.0 MGL";
 
         case GL_SHADING_LANGUAGE_VERSION:
-            return (const GLubyte *)"4.6";
+            return (const GLubyte *)"4.60";
 
         default:
-            assert(0);
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, NULL);
+            return NULL;
+    }
+}
+
+const GLubyte *mglGetStringi(GLMContext ctx, GLenum name, GLuint index)
+{
+    switch(name)
+    {
+        case GL_EXTENSIONS:
+            ERROR_CHECK_RETURN_VALUE(index < mgl_num_extensions, GL_INVALID_VALUE, NULL);
+            return (const GLubyte *)mgl_extensions[index];
+
+        case GL_SHADING_LANGUAGE_VERSION:
+            ERROR_CHECK_RETURN_VALUE(index == 0, GL_INVALID_VALUE, NULL);
+            return (const GLubyte *)"4.60";
+
+        default:
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, NULL);
     }
 }
 
 void mglGetInteger64v(GLMContext ctx, GLenum pname, GLint64 *data)
 {
-    // Unimplemented function
-    assert(0);
+    GLint tmp = 0;
+
+    ERROR_CHECK_RETURN(data, GL_INVALID_VALUE);
+
+    switch(pname)
+    {
+        // these are genuinely 64 bit
+        case GL_MAX_ELEMENT_INDEX:
+            *data = 0xFFFFFFFF;
+            return;
+
+        case GL_MAX_SERVER_WAIT_TIMEOUT:
+            *data = 0x7FFFFFFFFFFFFFFFLL;
+            return;
+
+        case GL_TIMESTAMP:
+            *data = 0;
+            return;
+
+        default:
+            break;
+    }
+
+    mglGet(ctx, pname, kInt, (void *)&tmp);
+
+    *data = (GLint64)tmp;
 }
 
 void mglGetInteger64i_v(GLMContext ctx, GLenum target, GLuint index, GLint64 *data)
 {
-    // Unimplemented function
-    assert(0);
-}
+    GLint tmp = 0;
 
-const GLubyte  *mglGetStringi(GLMContext ctx, GLenum name, GLuint index)
-{
-    switch(index)
-    {
-        case GL_VENDOR: return (const GLubyte *)"Mike Larson";
-        case GL_RENDERER: return (const GLubyte *) "MGL";
-        case GL_VERSION: return (const GLubyte *) "4.6.0";
-        case GL_SHADING_LANGUAGE_VERSION: return (const GLubyte *) "4.6.0";
-        case GL_EXTENSIONS: return NULL;
+    ERROR_CHECK_RETURN(data, GL_INVALID_VALUE);
 
-        default:
-            assert(0);
-    }
+    mglGetIntegeri_v(ctx, target, index, &tmp);
 
-    return NULL;
+    *data = (GLint64)tmp;
 }
 
 void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data)
@@ -468,12 +581,138 @@ void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data)
     }
 }
 
-void mglGetInternalformati64v(GLMContext ctx, GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint64 *params)
+static GLboolean internalFormatSupported(GLenum internalformat)
 {
-        assert(0);
+    return mtlFormatForGLInternalFormat(internalformat) != 0;
+}
+
+static GLint internalFormatQuery(GLMContext ctx, GLenum target, GLenum internalformat, GLenum pname)
+{
+    switch(pname)
+    {
+        case GL_INTERNALFORMAT_SUPPORTED:
+            return internalFormatSupported(internalformat);
+
+        case GL_SAMPLES:
+            return 4;
+
+        case GL_NUM_SAMPLE_COUNTS:
+            return 1;
+
+        case GL_INTERNALFORMAT_PREFERRED:
+            return internalformat;
+
+        case GL_INTERNALFORMAT_RED_SIZE:
+            return bitcountForInternalFormat(internalformat, GL_RED);
+
+        case GL_INTERNALFORMAT_GREEN_SIZE:
+            return bitcountForInternalFormat(internalformat, GL_GREEN);
+
+        case GL_INTERNALFORMAT_BLUE_SIZE:
+            return bitcountForInternalFormat(internalformat, GL_BLUE);
+
+        case GL_INTERNALFORMAT_ALPHA_SIZE:
+            return bitcountForInternalFormat(internalformat, GL_ALPHA);
+
+        case GL_INTERNALFORMAT_DEPTH_SIZE:
+            return bitcountForInternalFormat(internalformat, GL_DEPTH_COMPONENT);
+
+        case GL_INTERNALFORMAT_STENCIL_SIZE:
+            return bitcountForInternalFormat(internalformat, GL_STENCIL_INDEX);
+
+        case GL_MAX_WIDTH:
+        case GL_MAX_HEIGHT:
+            return 16384;
+
+        case GL_MAX_DEPTH:
+            return (target == GL_TEXTURE_3D) ? 2048 : 1;
+
+        case GL_MAX_LAYERS:
+            return 2048;
+
+        case GL_TEXTURE_IMAGE_FORMAT:
+        case GL_GET_TEXTURE_IMAGE_FORMAT:
+            return GL_RGBA;
+
+        case GL_TEXTURE_IMAGE_TYPE:
+        case GL_GET_TEXTURE_IMAGE_TYPE:
+            return GL_UNSIGNED_BYTE;
+
+        case GL_COLOR_RENDERABLE:
+        case GL_FRAMEBUFFER_RENDERABLE:
+        case GL_TEXTURE_VIEW:
+        case GL_FILTER:
+        case GL_MIPMAP:
+        case GL_SHADER_IMAGE_LOAD:
+        case GL_SHADER_IMAGE_STORE:
+            return internalFormatSupported(internalformat) ? GL_FULL_SUPPORT : GL_NONE;
+
+        case GL_DEPTH_RENDERABLE:
+            return (internalformat == GL_DEPTH_COMPONENT16 ||
+                    internalformat == GL_DEPTH_COMPONENT24 ||
+                    internalformat == GL_DEPTH_COMPONENT32 ||
+                    internalformat == GL_DEPTH_COMPONENT32F ||
+                    internalformat == GL_DEPTH24_STENCIL8 ||
+                    internalformat == GL_DEPTH32F_STENCIL8) ? GL_TRUE : GL_FALSE;
+
+        case GL_STENCIL_RENDERABLE:
+            return (internalformat == GL_STENCIL_INDEX8 ||
+                    internalformat == GL_DEPTH24_STENCIL8 ||
+                    internalformat == GL_DEPTH32F_STENCIL8) ? GL_TRUE : GL_FALSE;
+
+        default:
+            return 0;
+    }
+}
+
+static GLboolean validInternalFormatTarget(GLenum target)
+{
+    switch(target)
+    {
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_BUFFER:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+        case GL_RENDERBUFFER:
+            return GL_TRUE;
+    }
+
+    return GL_FALSE;
 }
 
 void mglGetInternalformativ(GLMContext ctx, GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint *params)
 {
-        assert(0);
+    ERROR_CHECK_RETURN(validInternalFormatTarget(target), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params || count == 0, GL_INVALID_VALUE);
+
+    if (count == 0)
+        return;
+
+    params[0] = internalFormatQuery(ctx, target, internalformat, pname);
+
+    for(GLsizei i=1; i<count; i++)
+        params[i] = 0;
+}
+
+void mglGetInternalformati64v(GLMContext ctx, GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint64 *params)
+{
+    ERROR_CHECK_RETURN(validInternalFormatTarget(target), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params || count == 0, GL_INVALID_VALUE);
+
+    if (count == 0)
+        return;
+
+    params[0] = (GLint64)internalFormatQuery(ctx, target, internalformat, pname);
+
+    for(GLsizei i=1; i<count; i++)
+        params[i] = 0;
 }

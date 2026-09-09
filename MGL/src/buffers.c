@@ -235,11 +235,11 @@ void *getBufferData(GLMContext ctx, Buffer *ptr)
 
     ptr = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
 
-    ERROR_CHECK_RETURN(ptr->mapped == false, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN_VALUE(ptr->mapped == false, GL_INVALID_OPERATION, NULL);
 
     buffer_data = (void *)ptr->data.buffer_data;
 
-    ERROR_CHECK_RETURN(buffer_data, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN_VALUE(buffer_data, GL_INVALID_OPERATION, NULL);
 
     return buffer_data;
 }
@@ -435,7 +435,7 @@ void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
                     }
                     else
                     {
-                        vm_deallocate(mach_host_self(), ptr->data.buffer_data, ptr->data.buffer_size);
+                        vm_deallocate(mach_task_self(), ptr->data.buffer_data, ptr->data.buffer_size);
                     }
                 }
                 else
@@ -451,46 +451,34 @@ void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
 
             deleteHashElement(&STATE(buffer_table), buffer);
 
-            // remove any dangling references
-            GLuint target;
-
-            target = ptr->target;
-            if (STATE(buffers[target]))
+            // Drop every reference to this buffer. ptr->target is a GL enum, so
+            // it can never be used directly as an array index.
+            for(int t=0; t<_MAX_BUFFER_TYPES; t++)
             {
-                if (STATE(buffers[target])->name == buffer)
-                {
-                    STATE(buffers[target]) = NULL;
-                }
+                if (STATE(buffers[t]) == ptr)
+                    STATE(buffers[t]) = NULL;
             }
 
             if (VAO())
             {
-                if (VAO_ATTRIB_STATE(target).buffer)
+                for(int a=0; a<MAX_ATTRIBS; a++)
                 {
-                    if (VAO_ATTRIB_STATE(target).buffer->name == buffer)
-                    {
-                        VAO_ATTRIB_STATE(target).buffer = NULL;
-                    }
+                    if (VAO_ATTRIB_STATE(a).buffer == ptr)
+                        VAO_ATTRIB_STATE(a).buffer = NULL;
                 }
+
+                if (VAO()->element_array.buffer == ptr)
+                    VAO()->element_array.buffer = NULL;
             }
 
-            switch(target)
+            for(int b=0; b<_MAX_BUFFER_TYPES; b++)
             {
-                case GL_UNIFORM:
-                case GL_TRANSFORM_FEEDBACK_BUFFER:
-                case GL_SHADER_STORAGE_BUFFER:
-                case GL_ATOMIC_COUNTER_BUFFER:
+                for(int i=0; i<MAX_BINDABLE_BUFFERS; i++)
                 {
-                    GLuint index;
-
-                    index = bufferIndexFromTarget(ctx, target);
-
-                    for(int i=0; i<MAX_BINDABLE_BUFFERS; i++)
+                    if (ctx->state.buffer_base[b].buffers[i].buf == ptr)
                     {
-                        if (ctx->state.buffer_base[index].buffers[i].buffer == buffer)
-                        {
-                            bzero(&ctx->state.buffer_base[index], sizeof(BufferBaseTarget));
-                        }
+                        ctx->state.buffer_base[b].buffers[i].buf = NULL;
+                        ctx->state.buffer_base[b].buffers[i].buffer = 0;
                     }
                 }
             }
@@ -534,6 +522,19 @@ void mglBindBuffer(GLMContext ctx, GLenum target, GLuint buffer)
     {
         STATE(buffers[index]) = ptr;
         STATE(dirty_bits) |= DIRTY_BUFFER;
+    }
+
+    // the element array binding belongs to the VAO, not the context
+    if (target == GL_ELEMENT_ARRAY_BUFFER && VAO())
+    {
+        if (VAO()->element_array.buffer != ptr)
+        {
+            VAO()->element_array.buffer = ptr;
+            VAO()->dirty_bits |= DIRTY_VAO_BUFFER_BASE;
+
+            if (ptr)
+                ptr->data.dirty_bits |= DIRTY_BUFFER;
+        }
     }
 }
 
@@ -698,7 +699,7 @@ kern_return_t initBufferData(GLMContext ctx, Buffer *ptr, GLsizeiptr size, const
             }
             else
             {
-                vm_deallocate(mach_host_self(), ptr->data.buffer_data, ptr->data.buffer_size);
+                vm_deallocate(mach_task_self(), ptr->data.buffer_data, ptr->data.buffer_size);
             }
             
             ptr->data.buffer_data = 0;

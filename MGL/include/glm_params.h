@@ -193,8 +193,11 @@ typedef struct GLMParams_t {
     GLuint map1_grid_segments;
     GLuint map2_grid_domain;
     GLuint map2_grid_segments;
-    GLuint polygon_offset_units;
-    GLuint polygon_offset_factor;
+    GLfloat polygon_offset_units;
+    GLfloat polygon_offset_factor;
+    GLfloat polygon_offset_clamp;
+    GLfloat point_fade_threshold_size;
+    GLuint point_sprite_coord_origin;
     GLuint texture_binding_1d;
     GLuint texture_binding_2d;
     GLuint client_attrib_stack_depth;

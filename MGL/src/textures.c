@@ -1165,7 +1165,7 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
 
         ptr = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
 
-        ERROR_CHECK_RETURN(ptr->mapped == false, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN_VALUE(ptr->mapped == false, GL_INVALID_OPERATION, false);
 
         GLubyte *buffer_data;
         buffer_data = getBufferData(ctx, ptr);
@@ -1308,7 +1308,7 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
 
                 ptr = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
 
-                ERROR_CHECK_RETURN(ptr->mapped == false, GL_INVALID_OPERATION);
+                ERROR_CHECK_RETURN_VALUE(ptr->mapped == false, GL_INVALID_OPERATION, false);
 
                 GLubyte *buffer_data;
                 buffer_data = getBufferData(ctx, ptr);
@@ -1551,10 +1551,10 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
 
         ptr = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
 
-        // ERROR_CHECK_RETURN(ptr->mapped == false, GL_INVALID_OPERATION);
+        // ERROR_CHECK_RETURN_VALUE(ptr->mapped == false, GL_INVALID_OPERATION, false);
         if (ptr->mapped) {
             fprintf(stderr, "MGL Error: texSubImage: pixel unpack buffer is mapped\n");
-            ERROR_RETURN(GL_INVALID_OPERATION);
+            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
         }
 
         GLubyte *buffer_data;
@@ -1569,7 +1569,7 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
     }
 
     // no src data.. return
-    ERROR_CHECK_RETURN(pixels, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN_VALUE(pixels, GL_INVALID_OPERATION, false);
 
     size_t pixel_size;
     size_t src_size;
@@ -1582,7 +1582,7 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
     {
         size_t alignment;
 
-        // ERROR_CHECK_RETURN((ctx->state.unpack.row_length >> level) >= width, GL_INVALID_VALUE);
+        // ERROR_CHECK_RETURN_VALUE((ctx->state.unpack.row_length >> level) >= width, GL_INVALID_VALUE, false);
         // Fix: row_length applies to the source data for the current level, do not shift by level
         if (ctx->state.unpack.row_length < width) {
              ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
@@ -1720,15 +1720,15 @@ void mglTextureSubImage1D(GLMContext ctx, GLuint texture, GLint level, GLint xof
 #pragma mark texSubImage2D
 bool texSubImage2D(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels)
 {
-    ERROR_CHECK_RETURN(level >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(verifyInternalFormatAndFormatType(ctx, tex->internalformat, format, type), 0);
+    ERROR_CHECK_RETURN_VALUE(level >= 0, GL_INVALID_VALUE, false);
+    ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, false);
+    ERROR_CHECK_RETURN_VALUE(verifyInternalFormatAndFormatType(ctx, tex->internalformat, format, type), 0, false);
 
-    ERROR_CHECK_RETURN(width >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(height >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN_VALUE(width >= 0, GL_INVALID_VALUE, false);
+    ERROR_CHECK_RETURN_VALUE(height >= 0, GL_INVALID_VALUE, false);
 
-    ERROR_CHECK_RETURN(width + xoffset <= tex->width, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(height + yoffset <= tex->height, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN_VALUE(width + xoffset <= tex->width, GL_INVALID_VALUE, false);
+    ERROR_CHECK_RETURN_VALUE(height + yoffset <= tex->height, GL_INVALID_VALUE, false);
 
     texSubImage(ctx, tex, face, level, xoffset, yoffset, 0, width, height, 1, format, type, (void *)pixels);
 
@@ -2331,7 +2331,7 @@ void mglGetTexImage(GLMContext ctx, GLenum target, GLint level, GLenum format, G
     fprintf(stderr, "MGL: glGetTexImage - reading %dx%d, bytesPerRow=%u\n", width, height, bytesPerRow);
     
     // Use the Metal function to read the texture
-    ctx->mtl_funcs.mtlGetTexImage(ctx, tex, pixels, bytesPerRow, bytesPerImage, 0, 0, width, height, level, 0);
+    ctx->mtl_funcs.mtlGetTexImage(ctx, tex, pixels, bytesPerRow, format, type, 0, 0, width, height, level, 0);
 }
 
 void mglGetTextureImage(GLMContext ctx, GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void *pixels)
@@ -2360,7 +2360,7 @@ void mglGetTextureImage(GLMContext ctx, GLuint texture, GLint level, GLenum form
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
     
-    ctx->mtl_funcs.mtlGetTexImage(ctx, tex, pixels, bytesPerRow, bytesPerImage, 0, 0, width, height, level, 0);
+    ctx->mtl_funcs.mtlGetTexImage(ctx, tex, pixels, bytesPerRow, format, type, 0, 0, width, height, level, 0);
 }
 
 void mglGetTextureSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, GLsizei bufSize, void *pixels)
@@ -2376,7 +2376,7 @@ void mglGetTextureSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xo
     GLuint bytesPerRow = width * pixel_size;
     GLuint bytesPerImage = bytesPerRow * height;
     
-    ctx->mtl_funcs.mtlGetTexImage(ctx, tex, pixels, bytesPerRow, bytesPerImage, xoffset, yoffset, width, height, level, zoffset);
+    ctx->mtl_funcs.mtlGetTexImage(ctx, tex, pixels, bytesPerRow, format, type, xoffset, yoffset, width, height, level, zoffset);
 }
 
 void mglGetCompressedTexImage(GLMContext ctx, GLenum target, GLint level, void *img)

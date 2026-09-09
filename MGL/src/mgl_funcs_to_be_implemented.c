@@ -912,11 +912,6 @@ void mglPauseTransformFeedback(GLMContext ctx)
 	STATE(transform_feedback)->paused = GL_TRUE;
 }
 
-void mglPolygonOffsetClamp(GLMContext ctx, GLfloat factor, GLfloat units, GLfloat clamp)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
 void mglPopDebugGroup(GLMContext ctx)
 {

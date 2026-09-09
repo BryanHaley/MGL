@@ -21,6 +21,9 @@
 #include "mgl.h"
 #include "glm_context.h"
 
+static bool validBlendFactor(GLenum f);
+static bool validBlendEquation(GLenum mode);
+
 #define ENABLE_CAP(_cap_)   ctx->state.caps._cap_ = true; break
 #define DISABLE_CAP(_cap_)   ctx->state.caps._cap_ = false; break
 
@@ -66,7 +69,7 @@ void mglDisable(GLMContext ctx, GLenum cap)
             break;
     }
 
-    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglEnable(GLMContext ctx, GLenum cap)
@@ -112,7 +115,7 @@ void mglEnable(GLMContext ctx, GLenum cap)
             break;
     }
 
-    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglCullFace(GLMContext ctx, GLenum mode)
@@ -334,7 +337,7 @@ void mglColorMask(GLMContext ctx, GLboolean red, GLboolean green, GLboolean blue
         }
     }
 
-    ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+    ctx->state.dirty_bits |= DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglDepthMask(GLMContext ctx, GLboolean flag)
@@ -618,7 +621,7 @@ void mglBlendColor(GLMContext ctx, GLfloat red, GLfloat green, GLfloat blue, GLf
     ctx->state.var.blend_color[2] = blue;
     ctx->state.var.blend_color[3] = alpha;
 
-    ctx->state.dirty_bits |= DIRTY_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglBlendEquation(GLMContext ctx, GLenum mode)
@@ -642,7 +645,7 @@ void mglBlendEquation(GLMContext ctx, GLenum mode)
         ctx->state.var.blend_equation_alpha[i] = mode;
     }
 
-    ctx->state.dirty_bits |= DIRTY_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglBlendEquationi(GLMContext ctx, GLuint buf, GLenum mode)
@@ -665,7 +668,7 @@ void mglBlendEquationi(GLMContext ctx, GLuint buf, GLenum mode)
     ctx->state.var.blend_equation_rgb[buf] = mode;
     ctx->state.var.blend_equation_alpha[buf] = mode;
 
-    ctx->state.dirty_bits |= DIRTY_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglBlendEquationSeparatei(GLMContext ctx, GLuint buf, GLenum modeRGB, GLenum modeAlpha)
@@ -701,54 +704,13 @@ void mglBlendEquationSeparatei(GLMContext ctx, GLuint buf, GLenum modeRGB, GLenu
     ctx->state.var.blend_equation_rgb[buf] = modeRGB;
     ctx->state.var.blend_equation_alpha[buf] = modeAlpha;
 
-    ctx->state.dirty_bits |= DIRTY_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglBlendFunc(GLMContext ctx, GLenum sfactor, GLenum dfactor)
 {
-    switch(sfactor)
-    {
-        case GL_ZERO:
-        case GL_ONE:
-        case GL_SRC_COLOR:
-        case GL_ONE_MINUS_SRC_COLOR:
-        case GL_DST_COLOR:
-        case GL_ONE_MINUS_DST_COLOR:
-        case GL_SRC_ALPHA:
-        case GL_ONE_MINUS_SRC_ALPHA:
-        case GL_DST_ALPHA:
-        case GL_ONE_MINUS_DST_ALPHA:
-        case GL_CONSTANT_COLOR:
-        case GL_ONE_MINUS_CONSTANT_COLOR:
-        case GL_CONSTANT_ALPHA:
-        case GL_ONE_MINUS_CONSTANT_ALPHA:
-            break;
-
-        default:
-            ERROR_RETURN(GL_INVALID_ENUM);
-    }
-
-    switch(dfactor)
-    {
-        case GL_ZERO:
-        case GL_ONE:
-        case GL_SRC_COLOR:
-        case GL_ONE_MINUS_SRC_COLOR:
-        case GL_DST_COLOR:
-        case GL_ONE_MINUS_DST_COLOR:
-        case GL_SRC_ALPHA:
-        case GL_ONE_MINUS_SRC_ALPHA:
-        case GL_DST_ALPHA:
-        case GL_ONE_MINUS_DST_ALPHA:
-        case GL_CONSTANT_COLOR:
-        case GL_ONE_MINUS_CONSTANT_COLOR:
-        case GL_CONSTANT_ALPHA:
-        case GL_ONE_MINUS_CONSTANT_ALPHA:
-            break;
-
-        default:
-            ERROR_RETURN(GL_INVALID_ENUM);
-    }
+    ERROR_CHECK_RETURN(validBlendFactor(sfactor), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(validBlendFactor(dfactor), GL_INVALID_ENUM);
 
     for(int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
     {
@@ -758,54 +720,13 @@ void mglBlendFunc(GLMContext ctx, GLenum sfactor, GLenum dfactor)
         ctx->state.var.blend_dst_alpha[i] = dfactor;
     }
 
-    ctx->state.dirty_bits |= DIRTY_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglBlendFunci(GLMContext ctx, GLuint buf, GLenum sfactor, GLenum dfactor)
 {
-    switch(sfactor)
-    {
-        case GL_ZERO:
-        case GL_ONE:
-        case GL_SRC_COLOR:
-        case GL_ONE_MINUS_SRC_COLOR:
-        case GL_DST_COLOR:
-        case GL_ONE_MINUS_DST_COLOR:
-        case GL_SRC_ALPHA:
-        case GL_ONE_MINUS_SRC_ALPHA:
-        case GL_DST_ALPHA:
-        case GL_ONE_MINUS_DST_ALPHA:
-        case GL_CONSTANT_COLOR:
-        case GL_ONE_MINUS_CONSTANT_COLOR:
-        case GL_CONSTANT_ALPHA:
-        case GL_ONE_MINUS_CONSTANT_ALPHA:
-            break;
-
-        default:
-            ERROR_RETURN(GL_INVALID_ENUM);
-    }
-
-    switch(dfactor)
-    {
-        case GL_ZERO:
-        case GL_ONE:
-        case GL_SRC_COLOR:
-        case GL_ONE_MINUS_SRC_COLOR:
-        case GL_DST_COLOR:
-        case GL_ONE_MINUS_DST_COLOR:
-        case GL_SRC_ALPHA:
-        case GL_ONE_MINUS_SRC_ALPHA:
-        case GL_DST_ALPHA:
-        case GL_ONE_MINUS_DST_ALPHA:
-        case GL_CONSTANT_COLOR:
-        case GL_ONE_MINUS_CONSTANT_COLOR:
-        case GL_CONSTANT_ALPHA:
-        case GL_ONE_MINUS_CONSTANT_ALPHA:
-            break;
-
-        default:
-            ERROR_RETURN(GL_INVALID_ENUM);
-    }
+    ERROR_CHECK_RETURN(validBlendFactor(sfactor), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(validBlendFactor(dfactor), GL_INVALID_ENUM);
 
     ERROR_CHECK_RETURN(buf >=0 && buf < MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE);
 
@@ -814,61 +735,192 @@ void mglBlendFunci(GLMContext ctx, GLuint buf, GLenum sfactor, GLenum dfactor)
     ctx->state.var.blend_dst_rgb[buf] = dfactor;
     ctx->state.var.blend_dst_alpha[buf] = dfactor;
 
-    ctx->state.dirty_bits |= DIRTY_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_ALPHA_STATE;
+}
+
+static bool validBlendFactor(GLenum f)
+{
+    switch(f)
+    {
+        case GL_ZERO:
+        case GL_ONE:
+        case GL_SRC_COLOR:
+        case GL_ONE_MINUS_SRC_COLOR:
+        case GL_DST_COLOR:
+        case GL_ONE_MINUS_DST_COLOR:
+        case GL_SRC_ALPHA:
+        case GL_ONE_MINUS_SRC_ALPHA:
+        case GL_DST_ALPHA:
+        case GL_ONE_MINUS_DST_ALPHA:
+        case GL_CONSTANT_COLOR:
+        case GL_ONE_MINUS_CONSTANT_COLOR:
+        case GL_CONSTANT_ALPHA:
+        case GL_ONE_MINUS_CONSTANT_ALPHA:
+        case GL_SRC_ALPHA_SATURATE:
+        case GL_SRC1_COLOR:
+        case GL_ONE_MINUS_SRC1_COLOR:
+        case GL_SRC1_ALPHA:
+        case GL_ONE_MINUS_SRC1_ALPHA:
+            return true;
+    }
+
+    return false;
+}
+
+static bool validBlendEquation(GLenum mode)
+{
+    switch(mode)
+    {
+        case GL_FUNC_ADD:
+        case GL_FUNC_SUBTRACT:
+        case GL_FUNC_REVERSE_SUBTRACT:
+        case GL_MIN:
+        case GL_MAX:
+            return true;
+    }
+
+    return false;
 }
 
 void mglBlendFuncSeparatei(GLMContext ctx, GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(validBlendFactor(srcRGB), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(validBlendFactor(dstRGB), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(validBlendFactor(srcAlpha), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(validBlendFactor(dstAlpha), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(buf < MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE);
+
+    ctx->state.var.blend_src_rgb[buf] = srcRGB;
+    ctx->state.var.blend_dst_rgb[buf] = dstRGB;
+    ctx->state.var.blend_src_alpha[buf] = srcAlpha;
+    ctx->state.var.blend_dst_alpha[buf] = dstAlpha;
+
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglBlendEquationSeparate(GLMContext ctx, GLenum modeRGB, GLenum modeAlpha)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(validBlendEquation(modeRGB), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(validBlendEquation(modeAlpha), GL_INVALID_ENUM);
+
+    for(int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
+    {
+        ctx->state.var.blend_equation_rgb[i] = modeRGB;
+        ctx->state.var.blend_equation_alpha[i] = modeAlpha;
+    }
+
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_ALPHA_STATE;
 }
 
 
 void mglGetPointerv(GLMContext ctx, GLenum pname, void **params)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    switch(pname)
+    {
+        case GL_DEBUG_CALLBACK_FUNCTION:
+            *params = (void *)(uintptr_t)ctx->state.debug_callback;
+            break;
+
+        case GL_DEBUG_CALLBACK_USER_PARAM:
+            *params = (void *)ctx->state.debug_user_param;
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
 }
 
 void mglPolygonOffset(GLMContext ctx, GLfloat factor, GLfloat units)
 {
-    // Unimplemented function
-    assert(0);
+    ctx->state.var.polygon_offset_factor = factor;
+    ctx->state.var.polygon_offset_units = units;
+    ctx->state.var.polygon_offset_clamp = 0.0f;
+
+    ctx->state.dirty_bits |= DIRTY_STATE;
+}
+
+void mglPolygonOffsetClamp(GLMContext ctx, GLfloat factor, GLfloat units, GLfloat clamp)
+{
+    ctx->state.var.polygon_offset_factor = factor;
+    ctx->state.var.polygon_offset_units = units;
+    ctx->state.var.polygon_offset_clamp = clamp;
+
+    ctx->state.dirty_bits |= DIRTY_STATE;
 }
 
 void mglBlendFuncSeparate(GLMContext ctx, GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(validBlendFactor(sfactorRGB), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(validBlendFactor(dfactorRGB), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(validBlendFactor(sfactorAlpha), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(validBlendFactor(dfactorAlpha), GL_INVALID_ENUM);
+
+    for(int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
+    {
+        ctx->state.var.blend_src_rgb[i] = sfactorRGB;
+        ctx->state.var.blend_dst_rgb[i] = dfactorRGB;
+        ctx->state.var.blend_src_alpha[i] = sfactorAlpha;
+        ctx->state.var.blend_dst_alpha[i] = dfactorAlpha;
+    }
+
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_ALPHA_STATE;
+}
+
+static void pointParameter(GLMContext ctx, GLenum pname, GLfloat fval, GLint ival, bool is_int)
+{
+    switch(pname)
+    {
+        case GL_POINT_FADE_THRESHOLD_SIZE:
+        {
+            GLfloat v = is_int ? (GLfloat)ival : fval;
+
+            ERROR_CHECK_RETURN(v >= 0.0f, GL_INVALID_VALUE);
+
+            ctx->state.var.point_fade_threshold_size = v;
+            break;
+        }
+
+        case GL_POINT_SPRITE_COORD_ORIGIN:
+        {
+            GLenum v = is_int ? (GLenum)ival : (GLenum)fval;
+
+            ERROR_CHECK_RETURN(v == GL_LOWER_LEFT || v == GL_UPPER_LEFT, GL_INVALID_VALUE);
+
+            ctx->state.var.point_sprite_coord_origin = v;
+            break;
+        }
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+
+    ctx->state.dirty_bits |= DIRTY_STATE;
 }
 
 void mglPointParameterf(GLMContext ctx, GLenum pname, GLfloat param)
 {
-    // Unimplemented function
-    assert(0);
+    pointParameter(ctx, pname, param, 0, false);
 }
 
 void mglPointParameterfv(GLMContext ctx, GLenum pname, const GLfloat *params)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    pointParameter(ctx, pname, params[0], 0, false);
 }
 
 void mglPointParameteri(GLMContext ctx, GLenum pname, GLint param)
 {
-    // Unimplemented function
-    assert(0);
+    pointParameter(ctx, pname, 0.0f, param, true);
 }
 
 void mglPointParameteriv(GLMContext ctx, GLenum pname, const GLint *params)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    pointParameter(ctx, pname, 0.0f, params[0], true);
 }
+
 

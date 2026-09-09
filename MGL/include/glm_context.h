@@ -61,10 +61,12 @@
 #define VAO_STATE(_val_)   ctx->state.vao->_val_
 #define VAO_ATTRIB_STATE(_index_) ctx->state.vao->attrib[_index_]
 
-#define ERROR_RETURN(_type_) ctx->error_func(ctx, __FUNCTION__, _type_)
-#define ERROR_RETURN_VALUE(_type_, _val_) ctx->error_func(ctx, __FUNCTION__, _type_); return _val_
-#define ERROR_CHECK_RETURN(_expr_, _type_) if ((_expr_) == false) {ctx->error_func(ctx, __FUNCTION__, _type_);}
-#define ERROR_CHECK_RETURN_VALUE(_expr_, _type_, _val_) if ((_expr_) == false) {ctx->error_func(ctx, __FUNCTION__, _type_); return _val_;}
+// These really do return. Without that, every error path fell through and kept
+// running with the arguments it had just rejected.
+#define ERROR_RETURN(_type_) do { ctx->error_func(ctx, __FUNCTION__, _type_); return; } while(0)
+#define ERROR_RETURN_VALUE(_type_, _val_) do { ctx->error_func(ctx, __FUNCTION__, _type_); return _val_; } while(0)
+#define ERROR_CHECK_RETURN(_expr_, _type_) do { if ((_expr_) == false) { ctx->error_func(ctx, __FUNCTION__, _type_); return; } } while(0)
+#define ERROR_CHECK_RETURN_VALUE(_expr_, _type_, _val_) do { if ((_expr_) == false) { ctx->error_func(ctx, __FUNCTION__, _type_); return _val_; } } while(0)
 
 enum {
     _TEXTURE_BUFFER = 0, // duplicate of _TEXTURE_BUFFER_TARGET
@@ -552,7 +554,11 @@ typedef struct {
 
     // keep these out of the var struct for debugging and access
 
-    GLenum error;   // glGetError
+    GLenum error;
+
+    // KHR_debug
+    void *debug_callback;
+    const void *debug_user_param;   // glGetError
 
     GLuint draw_buffer; // GL_DRAW_BUFFER
     GLuint read_buffer; // GL_READ_BUFFER
@@ -646,8 +652,8 @@ struct GLMMetalFuncs {
     void *(*mtlMapUnmapBuffer)(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, GLenum access, bool map);
     void (*mtlFlushBufferRange)(GLMContext glm_ctx, Buffer *buf, GLintptr offset, GLsizeiptr length);
 
-    void (*mtlReadDrawable)(GLMContext glm_ctx, void *pixelBytes, GLuint bytesPerRow, GLuint bytesPerImage, GLint x, GLint y, GLsizei width, GLsizei height);
-    void (*mtlGetTexImage)(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint bytesPerRow, GLuint bytesPerImage, GLint x, GLint y, GLsizei width, GLsizei height, GLuint level, GLuint slice);
+    void (*mtlReadPixels)(GLMContext glm_ctx, void *pixelBytes, GLuint bytesPerRow, GLenum format, GLenum type, GLint x, GLint y, GLsizei width, GLsizei height);
+    void (*mtlGetTexImage)(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint bytesPerRow, GLenum format, GLenum type, GLint x, GLint y, GLsizei width, GLsizei height, GLuint level, GLuint slice);
 
     void (*mtlGenerateMipmaps)(GLMContext glm_ctx, Texture *tex);
     void (*mtlTexSubImage)(GLMContext glm_ctx, Texture *tex, Buffer *buf, size_t src_offset, size_t src_pitch, size_t src_image_size, size_t src_size, GLuint slice, GLuint level, size_t width, size_t height, size_t depth, size_t xoffset, size_t yoffset, size_t zoffset);

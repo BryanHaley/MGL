@@ -490,22 +490,7 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
-    kern_return_t err;
-    vm_address_t buffer_data;
-
-    err = vm_allocate((vm_map_t) mach_task_self(),
-                      (vm_address_t*) &buffer_data,
-                      (vm_size_t)buffer_size,
-                      VM_FLAGS_ANYWHERE);
-    if (err)
-    {
-        ERROR_RETURN(GL_OUT_OF_MEMORY);
-    }
-
-    ctx->mtl_funcs.mtlReadDrawable(ctx, (void *)buffer_data, pitch, (GLuint)buffer_size, x, y, width, height);
-
-    memcpy(pixels, (void *)buffer_data, buffer_size);
-    
-    vm_deallocate(mach_host_self(), buffer_data, buffer_size);
+    // the renderer converts straight into the caller's buffer
+    ctx->mtl_funcs.mtlReadPixels(ctx, pixels, pitch, format, type, x, y, width, height);
 }
 

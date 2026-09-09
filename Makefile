@@ -223,10 +223,15 @@ $(EXT_DIRS):
 	$(call check_and_clone,$@)
 
 
-deps += $(mgl_objs:.o=.d)
+# these must match the object lists actually built, or header edits
+# silently leave stale objects with mismatched struct layouts
+deps += $(mgl_core_objs:.o=.d)
+deps += $(mgl_core_arc_objs:.o=.d)
 deps += $(mgl_core_obj:.o=.d)
+deps += $(mgl_es_objs:.o=.d)
+deps += $(mgl_es_arc_objs:.o=.d)
 deps += $(mgl_es_obj:.o=.d)
-deps += $(mgl_arc_objs:.o=.d)
+deps += $(glfw_objs:.o=.d)
 
 
 mgl_lib := $(build_dir)/libmgl.dylib
@@ -235,15 +240,17 @@ mgl_es_lib := $(build_dir)/libmgl_es.dylib
 mgl_toolchain_obj := $(build_dir)/MGL/src/mgl_toolchain.o
 mgl_toolchain_lib := $(build_dir)/libmgl_toolchain.a
 
-$(mgl_lib): $(mgl_core_objs) $(mgl_core_arc_objs) $(mgl_gl_obj)
+$(mgl_lib): $(mgl_core_objs) $(mgl_core_arc_objs) $(mgl_core_obj)
 	@mkdir -p $(dir $@)
-	$(CC) -D$(CFLAGS_GL_CORE) -dynamiclib -o $@ $^ $(LIBS)
+	$(CC) -D$(CFLAGS_GL_CORE) -dynamiclib -o $@ $^ $(LIBS) \
+		-install_name @rpath/libmgl.dylib
 	# loading dynamic library requires this
 	ln -fs $(mgl_lib) .
 
 $(mgl_es_lib): $(mgl_es_objs) $(mgl_es_arc_objs) $(mgl_es_obj)
 	@mkdir -p $(dir $@)
-	$(CC) -D$(CFLAGS_GL_ES) -dynamiclib -o $@ $^ $(LIBS)
+	$(CC) -D$(CFLAGS_GL_ES) -dynamiclib -o $@ $^ $(LIBS) \
+		-install_name @rpath/libmgl_es.dylib
 	# loading dynamic library requires this
 	ln -fs $(mgl_es_lib) .
 
@@ -261,6 +268,7 @@ $(build_dir)/libglfw.dylib: external/glfw/build/src/libglfw3.a $(mgl_lib)
 		-L$(build_dir) -lmgl \
 		-o $@ \
 		$(GLFW_FRAMEWORKS) \
+		-Wl,-rpath,@loader_path \
 		-install_name @rpath/libglfw.dylib
 	@echo "✅ GLFW shared library built: $@"
 	@echo "This enables compatibility with Minecraft mods and Prism Launcher"
@@ -271,6 +279,69 @@ $(build_dir)/libglfw.dylib: external/glfw/build/src/libglfw3.a $(mgl_lib)
 lib: $(mgl_lib) $(mgl_es_lib) $(build_dir)/libglfw.dylib
 
 toolchain: $(mgl_toolchain_lib)
+
+# --- automated test suite ---
+test_dir := tests
+gears_dir := $(test_dir)/gears
+test_build_dir := $(build_dir)/tests
+test_srcs := $(wildcard $(test_dir)/*.c) $(wildcard $(test_dir)/unit/*.c) $(wildcard $(test_dir)/gpu/*.c)
+# gears_common is shared with the suite; the two demos have their own main()
+test_srcs += $(gears_dir)/gears_common.c
+test_objs := $(patsubst $(test_dir)/%.c,$(test_build_dir)/%.o,$(test_srcs))
+test_exe  := $(build_dir)/mgl_tests
+deps += $(test_objs:.o=.d)
+
+TEST_CFLAGS := -Wall -g -O1 -arch $(shell uname -m) -std=c11 \
+  -IMGL/include -IMGL/include/GL -I$(test_dir) -I$(gears_dir) -DMGL_GL_CORE
+ifneq ($(SDK_ROOT),)
+TEST_CFLAGS += -isysroot $(SDK_ROOT)
+endif
+
+$(test_build_dir)/%.o: $(test_dir)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -MMD $(TEST_CFLAGS) -c $< -o $@
+
+$(test_exe): $(test_objs) $(mgl_lib)
+	@mkdir -p $(dir $@)
+	$(CC) -arch $(shell uname -m) -o $@ $(test_objs) \
+	  -L$(build_dir) -lmgl -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
+	  -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore
+
+# --- gears demos: two ports of the classic gears, both runnable as tests ---
+gears_build_dir := $(build_dir)/gears
+gears_common_obj := $(gears_build_dir)/gears_common.o
+gears_compat_exe := $(build_dir)/gears_compat
+gears_gl46_exe   := $(build_dir)/gears_gl46
+deps += $(gears_common_obj:.o=.d)
+
+GEARS_CFLAGS := $(TEST_CFLAGS) -I$(gears_dir) -I./external/glfw/include
+# Link GLFW statically. As a dylib it is resolved by leaf name, so a
+# DYLD_LIBRARY_PATH or a Homebrew libglfw silently replaces the MGL-aware
+# build with a stock one that has no MGL backend.
+glfw_static := external/glfw/build/src/libglfw3.a
+GEARS_LIBS := $(glfw_static) -L$(build_dir) -lmgl -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
+  -framework Cocoa -framework Foundation -framework Metal -framework QuartzCore -framework IOKit
+
+$(gears_build_dir)/%.o: $(gears_dir)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -MMD $(GEARS_CFLAGS) -c $< -o $@
+
+$(gears_compat_exe): $(gears_build_dir)/gears_compat.o $(mgl_lib) $(build_dir)/libglfw.dylib
+	$(CC) -arch $(shell uname -m) -o $@ $< $(GEARS_LIBS)
+
+$(gears_gl46_exe): $(gears_build_dir)/gears_gl46.o $(gears_common_obj) $(mgl_lib) $(build_dir)/libglfw.dylib
+	$(CC) -arch $(shell uname -m) -o $@ $(gears_build_dir)/gears_gl46.o $(gears_common_obj) $(GEARS_LIBS)
+
+gears: $(gears_compat_exe) $(gears_gl46_exe)
+
+gears-test: gears
+	@echo "== straight port (fixed function) =="
+	@$(gears_compat_exe) --check
+	@echo ""
+	@echo "== OpenGL 4.6 port =="
+	@$(gears_gl46_exe) --check --frames 4 --size 256 256 --out $(build_dir)/gears_gl46.tga
+
+tests: $(test_exe)
 
 test: $(test_exe)
 	$(test_exe)
@@ -366,6 +437,6 @@ update-pkdeps:
 test-make:
 	@echo $(glfw_objs)
 
-.PHONY: default test dbg lib clean insall-pkgdeps test-make 
+.PHONY: default test tests gears gears-test dbg lib clean insall-pkgdeps test-make 
 
 -include $(deps)

@@ -23,6 +23,8 @@
 
 #include "glm_context.h"
 
+GLuint mglNumExtensions(void);
+
 #include <unistd.h>
 #include <dlfcn.h>
 #include <OpenGL/OpenGL.h>
@@ -176,9 +178,7 @@ void getMacOSDefaults(GLMContext glm_ctx)
 
     //glGetIntegerv(GL_MINOR_VERSION,&glm_ctx->state.var.minor_version);
     glm_ctx->state.var.minor_version = 6;
-
-    //glGetIntegerv(GL_NUM_EXTENSIONS,&glm_ctx->state.var.num_extensions);
-    glm_ctx->state.var.num_extensions = 0;
+    glm_ctx->state.var.num_extensions = mglNumExtensions();
 
     glGetIntegerv(GL_CONTEXT_FLAGS,&glm_ctx->state.var.context_flags);
     glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS,&glm_ctx->state.var.max_array_texture_layers);

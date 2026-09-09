@@ -267,7 +267,7 @@ GLuint mglCreateShader(GLMContext ctx, GLenum type)
             break;
 
         default:
-            ERROR_RETURN(GL_INVALID_ENUM);
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, 0);
     }
 
     shader = getNewName(&STATE(shader_table));
