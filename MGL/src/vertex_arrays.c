@@ -121,6 +121,10 @@ int isVAO(GLMContext ctx, GLuint vao)
 
 void mglGenVertexArrays(GLMContext ctx, GLsizei n, GLuint *arrays)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     while(n--)
     {
         *arrays++ = getNewName(&STATE(vao_table));
@@ -153,6 +157,10 @@ void mglBindVertexArray(GLMContext ctx, GLuint array)
 
 void mglDeleteVertexArrays(GLMContext ctx, GLsizei n, const GLuint *arrays)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     GLuint vao;
 
     while(n--)

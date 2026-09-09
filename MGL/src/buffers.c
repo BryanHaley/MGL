@@ -383,6 +383,10 @@ bool clearBufferData(GLMContext ctx, Buffer *ptr, GLenum internalformat, GLintpt
 #pragma mark GL Buffer Functions
 void mglGenBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     while(n--)
     {
         *buffers++ = getNewName(&STATE(buffer_table));
@@ -391,6 +395,10 @@ void mglGenBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 
 void mglCreateBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     GLuint name;
 
     while(n--)
@@ -406,6 +414,10 @@ void mglCreateBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 
 void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     GLuint buffer;
 
     if (n < 0)

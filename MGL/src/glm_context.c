@@ -266,6 +266,8 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     initHashTable(&STATE(texture_table), 32);
     initHashTable(&STATE(shader_table), 32);
     initHashTable(&STATE(program_table), 32);
+    initHashTable(&STATE(program_pipeline_table), 32);
+    initHashTable(&STATE(transform_feedback_table), 32);
     initHashTable(&STATE(renderbuffer_table), 32);
     initHashTable(&STATE(framebuffer_table), 32);
     initHashTable(&STATE(sampler_table), 32);

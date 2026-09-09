@@ -36,18 +36,31 @@ void initHashTable(HashTable *ptr, GLuint size)
 {
     size_t len;
 
+    if (size == 0)
+        size = HASH_TABLE_MIN_SIZE;
+
     len = sizeof(HashObj) * size;
 
-    ptr->current_name = 1;
+    ptr->current_name = 1;      // 0 is not a valid GL object name
     ptr->size = size;
     ptr->keys = (HashObj *)malloc(len);
-    assert(ptr->keys);
+
+    if (!ptr->keys)
+    {
+        fprintf(stderr, "MGL: hash table allocation of %zu bytes failed\n", len);
+        ptr->size = 0;
+        return;
+    }
 
     bzero(ptr->keys, len);
 }
 
 GLuint getNewName(HashTable *table)
 {
+    // A table that was never initialised starts at 0, and 0 is reserved in GL.
+    if (table->current_name == 0)
+        table->current_name = 1;
+
     return table->current_name++;
 }
 
@@ -82,6 +95,24 @@ void insertHashElement(HashTable *table, GLuint name, void *data)
     while(table->size <= name)
     {
         size_t old_size = table->size;
+
+        // Doubling cannot grow an empty table, so an uninitialised one used to
+        // spin here forever. Start from a real size instead.
+        if (old_size == 0)
+        {
+            table->size = (name < HASH_TABLE_MIN_SIZE) ? HASH_TABLE_MIN_SIZE : (size_t)name + 1;
+
+            table->keys = (HashObj *)calloc(table->size, sizeof(HashObj));
+
+            if (!table->keys)
+            {
+                fprintf(stderr, "MGL: hash table allocation failed\n");
+                table->size = 0;
+                return;
+            }
+
+            continue;
+        }
 
         // CRITICAL: Check for integer overflow before multiplication
         if (old_size > UINT_MAX / 2) {

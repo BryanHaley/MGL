@@ -242,6 +242,10 @@ bool checkInternalFormatForMetal(GLMContext ctx, GLuint internalformat)
 #pragma mark basic tex calls bind / delete / gen...
 void mglGenTextures(GLMContext ctx, GLsizei n, GLuint *textures)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     assert(textures);
 
     while(n--)
@@ -256,6 +260,10 @@ void mglGenTextures(GLMContext ctx, GLsizei n, GLuint *textures)
 
 void mglCreateTextures(GLMContext ctx, GLenum target, GLsizei n, GLuint *textures)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     mglGenTextures(ctx, n, textures);
 
     while(n--)
@@ -390,6 +398,10 @@ void mglBindImageTexture(GLMContext ctx, GLuint unit, GLuint texture, GLint leve
 
 void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     while(n--)
     {
         GLuint name;

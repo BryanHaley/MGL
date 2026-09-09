@@ -162,6 +162,10 @@ GLboolean mglIsFramebuffer(GLMContext ctx, GLuint framebuffer)
 
 void mglGenFramebuffers(GLMContext ctx, GLsizei n, GLuint *framebuffers)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     assert(framebuffers);
 
     while(n--)
@@ -284,6 +288,10 @@ GLboolean mglIsRenderbuffer(GLMContext ctx, GLuint renderbuffer)
 
 void mglGenRenderbuffers(GLMContext ctx, GLsizei n, GLuint *renderbuffers)
 {
+    // n is signed: a negative count used to run the loop billions of
+    // times straight past the caller's array
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
     assert(renderbuffers);
 
     while(n--)
@@ -295,7 +303,6 @@ void mglGenRenderbuffers(GLMContext ctx, GLsizei n, GLuint *renderbuffers)
 void mglBindRenderbuffer(GLMContext ctx, GLenum target, GLuint renderbuffer)
 {
     Renderbuffer    *ptr;
-    GLuint index;
 
     // if (ctx->state.framebuffer == NULL)
     // {
@@ -303,32 +310,101 @@ void mglBindRenderbuffer(GLMContext ctx, GLenum target, GLuint renderbuffer)
     //     assert(0);
     // }
 
-    assert(target == GL_RENDERBUFFER);
+    ERROR_CHECK_RETURN(target == GL_RENDERBUFFER, GL_INVALID_ENUM);
 
     if (renderbuffer)
     {
         ptr = getRenderbuffer(ctx, renderbuffer);
-        assert(ptr);
+
+        ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
     }
     else
     {
         ptr = NULL;
     }
 
-    index = textureIndexFromTarget(ctx, target);
-    if (index == _MAX_TEXTURE_TYPES)
-    {
-        assert(0);
-    }
-
     ctx->state.renderbuffer = ptr;
     // no dirty state
 }
 
+// Detaches a renderbuffer from every attachment point of one framebuffer.
+static void detachRenderbuffer(Framebuffer *fbo, Renderbuffer *rbo)
+{
+    FBOAttachment *points[MAX_COLOR_ATTACHMENTS + 2];
+    int count = 0;
+
+    for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+        points[count++] = &fbo->color_attachments[i];
+
+    points[count++] = &fbo->depth;
+    points[count++] = &fbo->stencil;
+
+    for (int i = 0; i < count; i++)
+    {
+        FBOAttachment *a = points[i];
+
+        if (a->textarget == GL_RENDERBUFFER && a->buf.rbo == rbo)
+        {
+            a->buf.rbo = NULL;
+            a->textarget = 0;
+            a->texture = 0;
+            a->dirty_bits |= DIRTY_FBO_BINDING;
+        }
+    }
+
+    fbo->dirty_bits |= DIRTY_FBO_BINDING;
+}
+
 void mglDeleteRenderbuffers(GLMContext ctx, GLsizei n, const GLuint *renderbuffers)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
+    if (n == 0)
+        return;
+
+    ERROR_CHECK_RETURN(renderbuffers, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < n; i++)
+    {
+        Renderbuffer *rbo;
+
+        // GL ignores 0 and any name that was never generated
+        if (renderbuffers[i] == 0)
+            continue;
+
+        rbo = findRenderbuffer(ctx, renderbuffers[i]);
+
+        if (!rbo)
+            continue;
+
+        if (ctx->state.renderbuffer == rbo)
+            ctx->state.renderbuffer = NULL;
+
+        // a deleted renderbuffer detaches itself from the bound framebuffers
+        if (ctx->state.framebuffer)
+            detachRenderbuffer(ctx->state.framebuffer, rbo);
+
+        if (ctx->state.readbuffer && ctx->state.readbuffer != ctx->state.framebuffer)
+            detachRenderbuffer(ctx->state.readbuffer, rbo);
+
+        if (rbo->tex)
+        {
+            if (rbo->tex->mtl_data)
+            {
+                ctx->mtl_funcs.mtlDeleteMTLObj(ctx, rbo->tex->mtl_data);
+                rbo->tex->mtl_data = NULL;
+            }
+
+            free(rbo->tex);
+            rbo->tex = NULL;
+        }
+
+        deleteHashElement(&STATE(renderbuffer_table), renderbuffers[i]);
+
+        free(rbo);
+    }
+
+    STATE(dirty_bits) |= DIRTY_FBO;
 }
 
 void mglRenderbufferStorage(GLMContext ctx, GLenum target, GLenum internalformat, GLsizei width, GLsizei height)
