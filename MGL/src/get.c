@@ -483,7 +483,7 @@ const GLubyte *mglGetString(GLMContext ctx, GLenum name)
     switch(name)
     {
         case GL_VENDOR:
-            return (const GLubyte *)"Mike Larson";
+            return (const GLubyte *)"MGL";
 
         case GL_RENDERER:
             return (const GLubyte *)"MGL";
