@@ -674,13 +674,19 @@ kern_return_t initBufferData(GLMContext ctx, Buffer *ptr, GLsizeiptr size, const
             // check the old size.. then if it can fit new size then reuse.
             if (size <= ptr->data.buffer_size)
             {
+                // buffer_size is page aligned, so a small uniform leaves a lot
+                // of room. size still has to track what the caller just wrote:
+                // the renderer binds ptr->size bytes, and a stale value silently
+                // hands the shader a short read.
+                ptr->size = size;
+
                 if (data)
                 {
                     memcpy((void *)ptr->data.buffer_data, data, size);
-                    
+
                     ptr->data.dirty_bits |= DIRTY_BUFFER_DATA;
                 }
-                
+
                 return 0;
             }
         }
