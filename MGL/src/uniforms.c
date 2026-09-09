@@ -74,100 +74,312 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
     return -1;
 }
 
+Program *findProgram(GLMContext ctx, GLuint program);
+
+// Walks every plain uniform the linker saw, across all stages, in a stable order.
+// index is what glGetUniformIndices and friends hand back.
+static int uniformCount(Program *ptr)
+{
+    int n = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        n += ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].count;
+
+    return n;
+}
+
+static SpirvResource *uniformAt(Program *ptr, GLuint index)
+{
+    GLuint seen = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        if (index < seen + list->count)
+            return &list->list[index - seen];
+
+        seen += list->count;
+    }
+
+    return NULL;
+}
+
+static int uniformIndexByName(Program *ptr, const char *name)
+{
+    GLuint seen = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        for (GLuint i = 0; i < list->count; i++)
+            if (!strcmp(list->list[i].name, name))
+                return (int)(seen + i);
+
+        seen += list->count;
+    }
+
+    return -1;
+}
+
+static int uniformBlockCount(Program *ptr)
+{
+    int n = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        n += ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER].count;
+
+    return n;
+}
+
+static SpirvResource *uniformBlockAt(Program *ptr, GLuint index)
+{
+    GLuint seen = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER];
+
+        if (index < seen + list->count)
+            return &list->list[index - seen];
+
+        seen += list->count;
+    }
+
+    return NULL;
+}
+
+static void copyName(const char *src, GLsizei bufSize, GLsizei *length, GLchar *dst)
+{
+    GLsizei n = 0;
+
+    if (dst && bufSize > 0)
+    {
+        while (n < bufSize - 1 && src[n])
+        {
+            dst[n] = src[n];
+            n++;
+        }
+
+        dst[n] = 0;
+    }
+
+    if (length)
+        *length = n;
+}
+
 void mglGetUniformfv(GLMContext ctx, GLuint program, GLint location, GLfloat *params)
 {
-    // Unimplemented function
-    assert(0);
+    Program *ptr = findProgram(ctx, program);
+    Buffer *buf;
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(location >= 0 && location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
+
+    buf = ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf;
+
+    ERROR_CHECK_RETURN(buf && buf->data.buffer_data, GL_INVALID_OPERATION);
+
+    memcpy(params, (void *)buf->data.buffer_data, (size_t)buf->size);
 }
 
 void mglGetUniformiv(GLMContext ctx, GLuint program, GLint location, GLint *params)
 {
-    // Unimplemented function
-    assert(0);
+    Program *ptr = findProgram(ctx, program);
+    Buffer *buf;
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(location >= 0 && location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
+
+    buf = ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf;
+
+    ERROR_CHECK_RETURN(buf && buf->data.buffer_data, GL_INVALID_OPERATION);
+
+    memcpy(params, (void *)buf->data.buffer_data, (size_t)buf->size);
 }
 
 
-void mglGetUniformIndices(GLMContext ctx, GLuint program, GLsizei uniformCount, const GLchar *const*uniformNames, GLuint *uniformIndices)
+void mglGetUniformIndices(GLMContext ctx, GLuint program, GLsizei uniformCountArg, const GLchar *const*uniformNames, GLuint *uniformIndices)
 {
-    // Unimplemented function
-    assert(0);
+    Program *ptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformCountArg >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformNames && uniformIndices, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < uniformCountArg; i++)
+    {
+        int idx = uniformNames[i] ? uniformIndexByName(ptr, uniformNames[i]) : -1;
+
+        uniformIndices[i] = (idx < 0) ? GL_INVALID_INDEX : (GLuint)idx;
+    }
 }
 
-void mglGetActiveUniformsiv(GLMContext ctx, GLuint program, GLsizei uniformCount, const GLuint *uniformIndices, GLenum pname, GLint *params)
+void mglGetActiveUniformsiv(GLMContext ctx, GLuint program, GLsizei uniformCountArg, const GLuint *uniformIndices, GLenum pname, GLint *params)
 {
-    // Unimplemented function
-    assert(0);
+    Program *ptr = findProgram(ctx, program);
+    int total;
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformCountArg >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformIndices && params, GL_INVALID_VALUE);
+
+    total = uniformCount(ptr);
+
+    for (GLsizei i = 0; i < uniformCountArg; i++)
+    {
+        SpirvResource *res;
+
+        ERROR_CHECK_RETURN(uniformIndices[i] < (GLuint)total, GL_INVALID_VALUE);
+
+        res = uniformAt(ptr, uniformIndices[i]);
+
+        switch(pname)
+        {
+            case GL_UNIFORM_NAME_LENGTH:
+                params[i] = (GLint)strlen(res->name) + 1;
+                break;
+
+            case GL_UNIFORM_SIZE:
+                params[i] = 1;
+                break;
+
+            case GL_UNIFORM_BLOCK_INDEX:
+                params[i] = -1;         // these live in the default block
+                break;
+
+            case GL_UNIFORM_OFFSET:
+                params[i] = -1;
+                break;
+
+            case GL_UNIFORM_ARRAY_STRIDE:
+            case GL_UNIFORM_MATRIX_STRIDE:
+                params[i] = 0;
+                break;
+
+            case GL_UNIFORM_IS_ROW_MAJOR:
+                params[i] = GL_FALSE;
+                break;
+
+            case GL_UNIFORM_TYPE:
+                // the linker does not record the GL type yet
+                params[i] = GL_NONE;
+                break;
+
+            default:
+                ERROR_RETURN(GL_INVALID_ENUM);
+        }
+    }
 }
 
 void mglGetActiveUniformName(GLMContext ctx, GLuint program, GLuint uniformIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformName)
 {
-    // Unimplemented function
-    assert(0);
+    Program *ptr = findProgram(ctx, program);
+    SpirvResource *res;
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformIndex < (GLuint)uniformCount(ptr), GL_INVALID_VALUE);
+
+    res = uniformAt(ptr, uniformIndex);
+
+    copyName(res->name, bufSize, length, uniformName);
 }
 
 GLuint  mglGetUniformBlockIndex(GLMContext ctx, GLuint program, const GLchar *uniformBlockName)
 {
     if (isProgram(ctx, program) == GL_FALSE)
     {
-        assert(0);
-
-        return 0;
+        ERROR_RETURN_VALUE(GL_INVALID_VALUE, GL_INVALID_INDEX);
     }
 
     Program *ptr;
 
     ptr = getProgram(ctx, program);
-    assert(program);
 
-    if (ptr->linked_glsl_program == NULL)
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_VALUE, GL_INVALID_INDEX);
+    ERROR_CHECK_RETURN_VALUE(ptr->linked_glsl_program, GL_INVALID_OPERATION, GL_INVALID_INDEX);
+
+    // GL wants the block's index, which is what the block queries take
+    for (GLuint i = 0; i < (GLuint)uniformBlockCount(ptr); i++)
     {
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, 0);
+        SpirvResource *blk = uniformBlockAt(ptr, i);
 
-        return -1;
+        if (blk && !strcmp(blk->name, uniformBlockName))
+            return i;
     }
 
-    for (int stage=_VERTEX_SHADER; stage<_MAX_SHADER_TYPES; stage++)
-    {
-        int count;
-
-        count = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER].count;
-
-        for (int i=0; i<count; i++)
-        {
-            const char *str = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER].list[i].name;
-
-            if (!strcmp(str, uniformBlockName))
-            {
-                GLuint binding;
-
-                binding = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER].list[i].binding;
-
-                return binding;
-            }
-        }
-    }
-
-    assert(0);
-
-    return 0xFFFFFFFF;
+    return GL_INVALID_INDEX;
 }
 
 void mglGetActiveUniformBlockiv(GLMContext ctx, GLuint program, GLuint uniformBlockIndex, GLenum pname, GLint *params)
 {
-    // Unimplemented function
-    assert(0);
+    Program *ptr = findProgram(ctx, program);
+    SpirvResource *blk;
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformBlockIndex < (GLuint)uniformBlockCount(ptr), GL_INVALID_VALUE);
+
+    blk = uniformBlockAt(ptr, uniformBlockIndex);
+
+    switch(pname)
+    {
+        case GL_UNIFORM_BLOCK_BINDING:
+            *params = (GLint)blk->binding;
+            break;
+
+        case GL_UNIFORM_BLOCK_NAME_LENGTH:
+            *params = (GLint)strlen(blk->name) + 1;
+            break;
+
+        case GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS:
+        case GL_UNIFORM_BLOCK_DATA_SIZE:
+            *params = 0;
+            break;
+
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER:
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_CONTROL_SHADER:
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_EVALUATION_SHADER:
+            *params = GL_FALSE;
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
 }
 
 void mglGetActiveUniformBlockName(GLMContext ctx, GLuint program, GLuint uniformBlockIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformBlockName)
 {
-    // Unimplemented function
-    assert(0);
+    Program *ptr = findProgram(ctx, program);
+    SpirvResource *blk;
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformBlockIndex < (GLuint)uniformBlockCount(ptr), GL_INVALID_VALUE);
+
+    blk = uniformBlockAt(ptr, uniformBlockIndex);
+
+    copyName(blk->name, bufSize, length, uniformBlockName);
 }
 
 void mglUniformBlockBinding(GLMContext ctx, GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding)
 {
-    // Unimplemented function
-    assert(0);
+    Program *ptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformBlockIndex < (GLuint)uniformBlockCount(ptr), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformBlockBinding < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+
+    uniformBlockAt(ptr, uniformBlockIndex)->binding = uniformBlockBinding;
+
+    ptr->dirty_bits |= DIRTY_PROGRAM;
 }
 
 bool checkUniformParams(GLMContext ctx, GLint location)

@@ -56,11 +56,10 @@ GLuint bufferIndexFromTarget(GLMContext ctx, GLenum target)
         case GL_SHADER_STORAGE_BUFFER: return _SHADER_STORAGE_BUFFER;
 
         default:
-            assert(0); // shouldn't get here without checking for error
             break;
     }
 
-    assert(0);
+    // callers gate on checkTarget, so this means an unsupported target slipped through
     return 0xFFFFFFFF;
 }
 
@@ -376,8 +375,6 @@ bool clearBufferData(GLMContext ctx, Buffer *ptr, GLenum internalformat, GLintpt
         memcpy(dst, data, pixel_size);
         dst += pixel_size;
     }
-
-    assert(0);
 }
 
 
@@ -1221,6 +1218,8 @@ void mglClearNamedBufferSubData(GLMContext ctx, GLuint buffer, GLenum internalfo
 }
 
 #pragma mark GL Buffer Map Functions
+static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsizeiptr length, GLbitfield access_flags);
+
 void *mglMapBuffer(GLMContext ctx, GLenum target, GLenum access)
 {
     GLuint index;
@@ -1261,8 +1260,22 @@ void *mglMapBuffer(GLMContext ctx, GLenum target, GLenum access)
 
 void *mglMapNamedBuffer(GLMContext ctx, GLuint buffer, GLenum access)
 {
-    // Unimplemented function
-    assert(0);
+    Buffer *ptr = findBuffer(ctx, buffer);
+    GLbitfield flags;
+
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, NULL);
+
+    switch(access)
+    {
+        case GL_READ_ONLY:  flags = GL_MAP_READ_BIT; break;
+        case GL_WRITE_ONLY: flags = GL_MAP_WRITE_BIT; break;
+        case GL_READ_WRITE: flags = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT; break;
+
+        default:
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, NULL);
+    }
+
+    return mapBufferRange(ctx, ptr, 0, ptr->size, flags);
 }
 
 GLboolean mglUnmapBuffer(GLMContext ctx, GLenum target)
@@ -1303,21 +1316,24 @@ GLboolean mglUnmapBuffer(GLMContext ctx, GLenum target)
 
 GLboolean mglUnmapNamedBuffer(GLMContext ctx, GLuint buffer)
 {
-    GLboolean ret = 0;
+    Buffer *ptr = findBuffer(ctx, buffer);
 
-    // Unimplemented function
-    assert(0);
-    return ret;
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, GL_FALSE);
+    ERROR_CHECK_RETURN_VALUE(ptr->mapped, GL_INVALID_OPERATION, GL_FALSE);
+
+    ptr->mapped = GL_FALSE;
+    ptr->access = 0;
+    ptr->access_flags = 0;
+    ptr->mapped_offset = 0;
+    ptr->mapped_length = 0;
+
+    ctx->mtl_funcs.mtlMapUnmapBuffer(ctx, ptr, 0, 0, 0, false);
+
+    return GL_TRUE;
 }
 
-void *mglMapBufferRange(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access_flags)
+static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsizeiptr length, GLbitfield access_flags)
 {
-    GLuint index;
-    Buffer *ptr;
-
-    // GL_INVALID_ENUM is generated if target is not supported.
-    ERROR_CHECK_RETURN_VALUE(checkTarget(ctx, target), GL_INVALID_ENUM, NULL);
-
     if (offset < 0)
     {
         MGL_ERR("MGL Error: mglMapBufferRange: offset < 0 (%ld)\n", offset);
@@ -1329,9 +1345,6 @@ void *mglMapBufferRange(GLMContext ctx, GLenum target, GLintptr offset, GLsizeip
         MGL_ERR("MGL Error: mglMapBufferRange: length < 0 (%ld)\n", length);
         ERROR_RETURN_VALUE(GL_INVALID_VALUE, NULL);
     }
-
-    index = bufferIndexFromTarget(ctx, target);
-    ptr = STATE(buffers[index]);
 
     ERROR_CHECK_RETURN_VALUE((ptr != NULL), GL_INVALID_OPERATION, NULL);
 
@@ -1385,10 +1398,21 @@ void *mglMapBufferRange(GLMContext ctx, GLenum target, GLintptr offset, GLsizeip
     return ctx->mtl_funcs.mtlMapUnmapBuffer(ctx, ptr, offset, length, access_flags, true);
 }
 
+void *mglMapBufferRange(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access_flags)
+{
+    ERROR_CHECK_RETURN_VALUE(checkTarget(ctx, target), GL_INVALID_ENUM, NULL);
+
+    return mapBufferRange(ctx, STATE(buffers[bufferIndexFromTarget(ctx, target)]), offset, length, access_flags);
+}
+
+
 void *mglMapNamedBufferRange(GLMContext ctx, GLuint buffer, GLintptr offset, GLsizeiptr length, GLbitfield access)
 {
-    // Unimplemented function
-    assert(0);
+    Buffer *ptr = findBuffer(ctx, buffer);
+
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, NULL);
+
+    return mapBufferRange(ctx, ptr, offset, length, access);
 }
 
 
@@ -1450,14 +1474,36 @@ void mglFlushMappedBufferRange(GLMContext ctx, GLenum target, GLintptr offset, G
 
 void mglFlushMappedNamedBufferRange(GLMContext ctx, GLuint buffer, GLintptr offset, GLsizeiptr length)
 {
-    // Unimplemented function
-    assert(0);
+    Buffer *ptr = findBuffer(ctx, buffer);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(offset >= 0 && length >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(ptr->mapped, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(ptr->access_flags & GL_MAP_FLUSH_EXPLICIT_BIT, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(offset + length <= ptr->mapped_length, GL_INVALID_VALUE);
+
+    ctx->mtl_funcs.mtlFlushBufferRange(ctx, ptr, ptr->mapped_offset + offset, length);
 }
 
 void mglBindBuffersRange(GLMContext ctx, GLenum target, GLuint first, GLsizei count, const GLuint *buffers, const GLintptr *offsets, const GLsizeiptr *sizes)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(checkTarget(ctx, target), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(first + count <= MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
+
+    for (GLsizei i = 0; i < count; i++)
+    {
+        // a null array unbinds the whole span
+        if (!buffers)
+        {
+            mglBindBufferRange(ctx, target, first + i, 0, 0, 0);
+            continue;
+        }
+
+        mglBindBufferRange(ctx, target, first + i, buffers[i],
+                           offsets ? offsets[i] : 0,
+                           sizes ? sizes[i] : 0);
+    }
 }
 
 #pragma mark GL Buffer Storage Functions
@@ -1513,14 +1559,25 @@ void mglNamedBufferStorage(GLMContext ctx, GLuint buffer, GLsizeiptr size, const
 
 void mglInvalidateBufferData(GLMContext ctx, GLuint buffer)
 {
-    // Unimplemented function
-    assert(0);
+    Buffer *ptr = findBuffer(ctx, buffer);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(ptr->mapped == GL_FALSE, GL_INVALID_OPERATION);
+
+    // contents become undefined; keeping them is a legal choice
+    ptr->data.dirty_bits |= DIRTY_BUFFER_DATA;
 }
 
 void mglInvalidateBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GLsizeiptr length)
 {
-    // Unimplemented function
-    assert(0);
+    Buffer *ptr = findBuffer(ctx, buffer);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(offset >= 0 && length >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(offset + length <= ptr->size, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(ptr->mapped == GL_FALSE, GL_INVALID_OPERATION);
+
+    ptr->data.dirty_bits |= DIRTY_BUFFER_DATA;
 }
 
 #pragma mark GL Buffer Get Functions
@@ -1761,13 +1818,30 @@ void mglGetNamedBufferParameteri64v(GLMContext ctx, GLuint buffer, GLenum pname,
 
 void mglGetNamedBufferPointerv(GLMContext ctx, GLuint buffer, GLenum pname, void **params)
 {
-    // Unimplemented function
-    assert(0);
+    Buffer *ptr = findBuffer(ctx, buffer);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(pname == GL_BUFFER_MAP_POINTER, GL_INVALID_ENUM);
+
+    *params = ptr->mapped ? (void *)(ptr->data.buffer_data + ptr->mapped_offset) : NULL;
 }
 
 void mglGetNamedBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GLsizeiptr size, void *data)
 {
-    // Unimplemented function
-    assert(0);
+    Buffer *ptr = findBuffer(ctx, buffer);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(offset >= 0 && size >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(offset + size <= ptr->size, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(ptr->mapped == GL_FALSE, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(data || size == 0, GL_INVALID_VALUE);
+
+    if (size == 0)
+        return;
+
+    ERROR_CHECK_RETURN(ptr->data.buffer_data, GL_INVALID_OPERATION);
+
+    memcpy(data, (void *)(ptr->data.buffer_data + offset), (size_t)size);
 }
 

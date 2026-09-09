@@ -19,6 +19,7 @@
  */
 
 #include "glm_context.h"
+#include "pixel_utils.h"
 
 extern GLuint textureIndexFromTarget(GLMContext ctx, GLenum target);
 extern Texture *currentTexture(GLMContext ctx, GLuint index);
@@ -38,7 +39,7 @@ bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, con
                     break;
 
                 default:
-                    assert(0);
+                    ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
             }
             break;
 
@@ -62,7 +63,7 @@ bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, con
                     break;
 
                 default:
-                    assert(0);
+                    ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
             }
             break;
 
@@ -75,7 +76,7 @@ bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, con
                     break;
 
                 default:
-                    assert(0);
+                    ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
             }
             break;
 
@@ -92,7 +93,7 @@ bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, con
                     break;
 
                 default:
-                    assert(0);
+                    ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
             }
             break;
 
@@ -105,7 +106,7 @@ bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, con
                     break;
 
                 default:
-                    assert(0);
+                    ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
             }
             break;
 
@@ -571,7 +572,7 @@ void mglTexParameteriv(GLMContext ctx, GLenum target, GLenum pname, const GLint 
     if (setParam(ctx, &tex->params, pname, *params, fparam))
         return;
 
-    assert(0);
+    ERROR_RETURN(GL_INVALID_ENUM);
 }
 
 void mglTexParameterIiv(GLMContext ctx, GLenum target, GLenum pname, const GLint *params)
@@ -601,7 +602,7 @@ void mglTexParameterIiv(GLMContext ctx, GLenum target, GLenum pname, const GLint
     if (setParam(ctx, &tex->params, pname, *params, fparam))
         return;
 
-    assert(0);
+    ERROR_RETURN(GL_INVALID_ENUM);
 }
 
 void mglTexParameterIuiv(GLMContext ctx, GLenum target, GLenum pname, const GLuint *params)
@@ -631,7 +632,7 @@ void mglTexParameterIuiv(GLMContext ctx, GLenum target, GLenum pname, const GLui
     if (setParam(ctx, &tex->params, pname, *params, fparam))
         return;
 
-    assert(0);
+    ERROR_RETURN(GL_INVALID_ENUM);
 }
 
 void mglTextureParameterf(GLMContext ctx, GLuint texture, GLenum pname, GLfloat param)
@@ -791,14 +792,89 @@ void mglGetTexParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint *pa
     }
 }
 
-void mglGetTexLevelParameterfv(GLMContext ctx, GLenum target, GLint level, GLenum pname, GLfloat *params)
+static bool getTexLevelParameter(GLMContext ctx, Texture *tex, GLint level, GLenum pname, GLint *out)
 {
-    // Unimplemented function
-    assert(0);
+    TextureLevel *lvl;
+
+    ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, false);
+    ERROR_CHECK_RETURN_VALUE(level >= 0, GL_INVALID_VALUE, false);
+    ERROR_CHECK_RETURN_VALUE((GLuint)level < tex->num_levels, GL_INVALID_VALUE, false);
+
+    lvl = &tex->faces[0].levels[level];
+
+    switch(pname)
+    {
+        case GL_TEXTURE_WIDTH:           *out = lvl->width;  return true;
+        case GL_TEXTURE_HEIGHT:          *out = lvl->height; return true;
+        case GL_TEXTURE_DEPTH:           *out = lvl->depth;  return true;
+        case GL_TEXTURE_INTERNAL_FORMAT: *out = tex->internalformat; return true;
+        case GL_TEXTURE_SAMPLES:         *out = tex->samples; return true;
+
+        case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:
+            *out = GL_TRUE;
+            return true;
+
+        case GL_TEXTURE_COMPRESSED:
+            *out = GL_FALSE;
+            return true;
+
+        case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:
+            *out = (GLint)lvl->data_size;
+            return true;
+
+        case GL_TEXTURE_BUFFER_OFFSET:
+        case GL_TEXTURE_BUFFER_SIZE:
+            *out = 0;
+            return true;
+
+        case GL_TEXTURE_RED_SIZE:
+            *out = bitcountForInternalFormat(tex->internalformat, GL_RED); return true;
+        case GL_TEXTURE_GREEN_SIZE:
+            *out = bitcountForInternalFormat(tex->internalformat, GL_GREEN); return true;
+        case GL_TEXTURE_BLUE_SIZE:
+            *out = bitcountForInternalFormat(tex->internalformat, GL_BLUE); return true;
+        case GL_TEXTURE_ALPHA_SIZE:
+            *out = bitcountForInternalFormat(tex->internalformat, GL_ALPHA); return true;
+        case GL_TEXTURE_DEPTH_SIZE:
+            *out = bitcountForInternalFormat(tex->internalformat, GL_DEPTH_COMPONENT); return true;
+        case GL_TEXTURE_STENCIL_SIZE:
+            *out = bitcountForInternalFormat(tex->internalformat, GL_STENCIL_INDEX); return true;
+
+        case GL_TEXTURE_RED_TYPE:
+        case GL_TEXTURE_GREEN_TYPE:
+        case GL_TEXTURE_BLUE_TYPE:
+        case GL_TEXTURE_ALPHA_TYPE:
+        case GL_TEXTURE_DEPTH_TYPE:
+            *out = GL_UNSIGNED_NORMALIZED;
+            return true;
+
+        default:
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
+    }
 }
 
 void mglGetTexLevelParameteriv(GLMContext ctx, GLenum target, GLint level, GLenum pname, GLint *params)
 {
-    // Unimplemented function
-    assert(0);
+    GLuint index;
+    GLint value = 0;
+
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    index = textureIndexFromTarget(ctx, target);
+
+    ERROR_CHECK_RETURN(index != _MAX_TEXTURE_TYPES, GL_INVALID_ENUM);
+
+    if (getTexLevelParameter(ctx, currentTexture(ctx, index), level, pname, &value))
+        *params = value;
+}
+
+void mglGetTexLevelParameterfv(GLMContext ctx, GLenum target, GLint level, GLenum pname, GLfloat *params)
+{
+    GLint value = 0;
+
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    mglGetTexLevelParameteriv(ctx, target, level, pname, &value);
+
+    *params = (GLfloat)value;
 }
