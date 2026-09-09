@@ -9,6 +9,7 @@
 #include <assert.h>
 
 #include "mgl.h"
+#include "mgl_log.h"
 
 // Forward declarations for transform feedback functions from program.c
 TransformFeedback *newTransformFeedback(GLMContext ctx, GLuint name);
@@ -184,7 +185,7 @@ void mglColorP4uiv(GLMContext ctx, GLenum type, const GLuint *color)
 
 void mglCopyImageSubData(GLMContext ctx, GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth)
 {
-	fprintf(stderr, "MGL: glCopyImageSubData src=%u dst=%u %dx%dx%d\n",
+	MGL_INFO("MGL: glCopyImageSubData src=%u dst=%u %dx%dx%d\n",
 	        srcName, dstName, srcWidth, srcHeight, srcDepth);
 	
 	// Find source and destination textures
@@ -192,13 +193,13 @@ void mglCopyImageSubData(GLMContext ctx, GLuint srcName, GLenum srcTarget, GLint
 	Texture *dstTex = findTexture(ctx, dstName);
 	
 	if (!srcTex || !dstTex) {
-		fprintf(stderr, "MGL ERROR: CopyImageSubData - texture not found src=%p dst=%p\n",
+		MGL_ERR("MGL ERROR: CopyImageSubData - texture not found src=%p dst=%p\n",
 		        srcTex, dstTex);
 		return;
 	}
 	
 	if (!srcTex->mtl_data || !dstTex->mtl_data) {
-		fprintf(stderr, "MGL ERROR: CopyImageSubData - no Metal data src=%p dst=%p\n",
+		MGL_ERR("MGL ERROR: CopyImageSubData - no Metal data src=%p dst=%p\n",
 		        srcTex->mtl_data, dstTex->mtl_data);
 		return;
 	}
@@ -1355,12 +1356,12 @@ void mglTexStorage2DMultisample(GLMContext ctx, GLenum target, GLsizei samples, 
     // handles MSAA differently than traditional GL. For now, we create a 
     // regular texture and let the rendering pipeline handle any MSAA.
     
-    fprintf(stderr, "MGL: mglTexStorage2DMultisample called - target=0x%x, samples=%d, format=0x%x, %dx%d\n", 
+    MGL_INFO("MGL: mglTexStorage2DMultisample called - target=0x%x, samples=%d, format=0x%x, %dx%d\n", 
             target, samples, internalformat, width, height);
     
     // Validate target
     if (target != GL_TEXTURE_2D_MULTISAMPLE && target != GL_PROXY_TEXTURE_2D_MULTISAMPLE) {
-        fprintf(stderr, "MGL WARNING: mglTexStorage2DMultisample invalid target 0x%x\n", target);
+        MGL_ERR("MGL WARNING: mglTexStorage2DMultisample invalid target 0x%x\n", target);
         ctx->error_func(ctx, __FUNCTION__, GL_INVALID_ENUM);
         return;
     }

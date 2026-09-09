@@ -25,6 +25,7 @@
 
 #include "shaders.h"
 #include "glm_context.h"
+#include "mgl_log.h"
 
 const glslang_resource_t* glslang_default_resource(void);
 
@@ -50,7 +51,7 @@ GLuint glShaderTypeToGLMType(GLuint type)
         case GL_COMPUTE_SHADER: return _COMPUTE_SHADER;
         default:
             // CRITICAL FIX: Handle unknown shader types gracefully instead of crashing
-            fprintf(stderr, "MGL ERROR: Unknown shader type 0x%x, defaulting to vertex shader\n", type);
+            MGL_ERR("MGL ERROR: Unknown shader type 0x%x, defaulting to vertex shader\n", type);
             return _VERTEX_SHADER;
     }
 }
@@ -66,7 +67,7 @@ glslang_stage_t getGLSLStage(GLuint type)
         case GL_COMPUTE_SHADER: return GLSLANG_STAGE_COMPUTE;
         default:
             // CRITICAL FIX: Handle unknown shader types gracefully instead of crashing
-            fprintf(stderr, "MGL ERROR: Unknown GLSL shader type 0x%x, defaulting to vertex\n", type);
+            MGL_ERR("MGL ERROR: Unknown GLSL shader type 0x%x, defaulting to vertex\n", type);
             return GLSLANG_STAGE_VERTEX;
     }
 
@@ -125,7 +126,7 @@ void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t
     static size_t modified_src_size = 0;
 
     if (original_version < 330) {
-        fprintf(stderr, "[MGL] Upgrading GLSL shader from version %d to %d\n",
+        MGL_INFO("[MGL] Upgrading GLSL shader from version %d to %d\n",
                 original_version, glsl_version);
 
         size_t src_len = strlen(src);
@@ -141,12 +142,12 @@ void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t
             /* Find and replace #version line */
             char *version_line = strstr(modified_src, "#version");
             if (!version_line) {
-                fprintf(stderr, "[MGL] WARNING: #version not found in source\n");
+                MGL_INFO("[MGL] WARNING: #version not found in source\n");
                 input->code = src;
             } else {
                 char *newline = strchr(version_line, '\n');
                 if (!newline) {
-                    fprintf(stderr, "[MGL] WARNING: newline not found after #version\n");
+                    MGL_INFO("[MGL] WARNING: newline not found after #version\n");
                     input->code = src;
                 } else {
                     char version_buf[64];
@@ -154,27 +155,27 @@ void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t
                     size_t old_len = newline - version_line;
                     size_t new_len = strlen(version_buf);
 
-                    fprintf(stderr, "[MGL] Old version line length: %zu, new: %zu\n", old_len, new_len);
-                    fprintf(stderr, "[MGL] Old line: %.*s\n", (int)old_len, version_line);
+                    MGL_INFO("[MGL] Old version line length: %zu, new: %zu\n", old_len, new_len);
+                    MGL_INFO("[MGL] Old line: %.*s\n", (int)old_len, version_line);
 
                     if (new_len <= old_len) {
                         /* Simple in-place replacement with space padding */
                         memset(version_line, ' ', old_len);
                         memcpy(version_line, version_buf, new_len);
-                        fprintf(stderr, "[MGL] Replaced version line in source (in-place)\n");
+                        MGL_INFO("[MGL] Replaced version line in source (in-place)\n");
                     } else {
                         /* Need to shift the rest of the source */
                         size_t rest_of_src = strlen(newline);
                         memmove(version_line + new_len, newline, rest_of_src + 1); /* +1 for null terminator */
                         memcpy(version_line, version_buf, new_len);
-                        fprintf(stderr, "[MGL] Replaced version line with shift\n");
-                        fprintf(stderr, "[MGL] New line: %.*s\n", (int)new_len, version_line);
+                        MGL_INFO("[MGL] Replaced version line with shift\n");
+                        MGL_INFO("[MGL] New line: %.*s\n", (int)new_len, version_line);
                     }
                 }
             }
             input->code = modified_src;
         } else {
-            fprintf(stderr, "[MGL] ERROR: Failed to allocate modified_src\n");
+            MGL_INFO("[MGL] ERROR: Failed to allocate modified_src\n");
             input->code = src;
         }
     } else {
@@ -198,7 +199,7 @@ Shader *newShader(GLMContext ctx, GLenum type, GLuint shader)
     ptr = (Shader *)malloc(sizeof(Shader));
     // CRITICAL SECURITY FIX: Check malloc result instead of using assert()
     if (!ptr) {
-        fprintf(stderr, "MGL SECURITY ERROR: Failed to allocate memory for shader\n");
+        MGL_ERR("MGL SECURITY ERROR: Failed to allocate memory for shader\n");
         STATE(error) = GL_OUT_OF_MEMORY;
         return NULL;
     }
@@ -377,7 +378,7 @@ void mglShaderSource(GLMContext ctx, GLuint shader, GLsizei count, const GLchar 
                 // CRITICAL: Check if adding this string would exceed buffer bounds
                 if (cum_len + length[i] > (size_t)len) {
                     // SECURITY: Truncate safely instead of overflowing buffer
-                    fprintf(stderr, "MGL SECURITY ERROR: Shader source concatenation would overflow buffer, truncating safely\n");
+                    MGL_ERR("MGL SECURITY ERROR: Shader source concatenation would overflow buffer, truncating safely\n");
                     // Copy only what fits
                     size_t safe_copy_len = ((size_t)len > cum_len) ? ((size_t)len - cum_len) : 0;
                     if (safe_copy_len > 0) {
@@ -389,7 +390,7 @@ void mglShaderSource(GLMContext ctx, GLuint shader, GLsizei count, const GLchar 
 
                 // CRITICAL: Validate source pointer and length before copy
                 if (!string[i]) {
-                    fprintf(stderr, "MGL SECURITY ERROR: NULL string pointer in shader source concatenation\n");
+                    MGL_ERR("MGL SECURITY ERROR: NULL string pointer in shader source concatenation\n");
                     continue; // Skip this string
                 }
 
@@ -434,7 +435,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     if (glsl_shader == NULL)
     {
         // CRITICAL FIX: Handle shader creation failure gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Failed to create GLSL shader for type 0x%x\n", ptr->type);
+        MGL_ERR("MGL ERROR: Failed to create GLSL shader for type 0x%x\n", ptr->type);
 
         // Set error state for the shader - only set log message
         if (!ptr->log) {
@@ -462,7 +463,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     /* For GLSL < 330, auto-assign locations since old shaders don't have layout() qualifiers */
     if (shader_version < 330) {
         options |= GLSLANG_SHADER_AUTO_MAP_LOCATIONS;
-        fprintf(stderr, "[MGL] Enabling auto-map locations for legacy GLSL %d shader\n", shader_version);
+        MGL_INFO("[MGL] Enabling auto-map locations for legacy GLSL %d shader\n", shader_version);
     }
     glslang_shader_set_options(glsl_shader, options);
 
@@ -474,11 +475,11 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         const char *info_log = glslang_shader_get_info_log(glsl_shader);
         const char *debug_log = glslang_shader_get_info_debug_log(glsl_shader);
 
-        fprintf(stderr, "MGL SHADER ERROR: glslang_shader_preprocess failed with error: %d\n", err);
-        fprintf(stderr, "MGL SHADER ERROR: Shader type: %s\n", getShaderTypeStr(ptr->glm_type));
-        fprintf(stderr, "MGL SHADER ERROR: Preprocessed code:\n%s\n", preprocessed ? preprocessed : "(null)");
-        fprintf(stderr, "MGL SHADER ERROR: Info log:\n%s\n", info_log ? info_log : "(null)");
-        fprintf(stderr, "MGL SHADER ERROR: Debug log:\n%s\n", debug_log ? debug_log : "(null)");
+        MGL_INFO("MGL SHADER ERROR: glslang_shader_preprocess failed with error: %d\n", err);
+        MGL_INFO("MGL SHADER ERROR: Shader type: %s\n", getShaderTypeStr(ptr->glm_type));
+        MGL_INFO("MGL SHADER ERROR: Preprocessed code:\n%s\n", preprocessed ? preprocessed : "(null)");
+        MGL_INFO("MGL SHADER ERROR: Info log:\n%s\n", info_log ? info_log : "(null)");
+        MGL_INFO("MGL SHADER ERROR: Debug log:\n%s\n", debug_log ? debug_log : "(null)");
 
         size_t len;
 
@@ -512,11 +513,11 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         const char *info_log = glslang_shader_get_info_log(glsl_shader);
         const char *debug_log = glslang_shader_get_info_debug_log(glsl_shader);
 
-        fprintf(stderr, "MGL SHADER ERROR: glslang_shader_parse failed with error: %d\n", err);
-        fprintf(stderr, "MGL SHADER ERROR: Shader type: %s\n", getShaderTypeStr(ptr->glm_type));
-        fprintf(stderr, "MGL SHADER ERROR: Preprocessed code:\n%s\n", preprocessed ? preprocessed : "(null)");
-        fprintf(stderr, "MGL SHADER ERROR: Info log:\n%s\n", info_log ? info_log : "(null)");
-        fprintf(stderr, "MGL SHADER ERROR: Debug log:\n%s\n", debug_log ? debug_log : "(null)");
+        MGL_INFO("MGL SHADER ERROR: glslang_shader_parse failed with error: %d\n", err);
+        MGL_INFO("MGL SHADER ERROR: Shader type: %s\n", getShaderTypeStr(ptr->glm_type));
+        MGL_INFO("MGL SHADER ERROR: Preprocessed code:\n%s\n", preprocessed ? preprocessed : "(null)");
+        MGL_INFO("MGL SHADER ERROR: Info log:\n%s\n", info_log ? info_log : "(null)");
+        MGL_INFO("MGL SHADER ERROR: Debug log:\n%s\n", debug_log ? debug_log : "(null)");
 
         size_t len;
 
@@ -570,7 +571,7 @@ void mglGetShaderiv(GLMContext ctx, GLuint shader, GLenum pname, GLint *params)
                 case _TESS_EVALUATION_SHADER: *params = GL_TESS_EVALUATION_SHADER; break;
                 default:
                     // CRITICAL FIX: Handle unknown shader types gracefully instead of crashing
-                    fprintf(stderr, "MGL ERROR: Unknown internal shader type %d, defaulting to vertex\n", ptr->glm_type);
+                    MGL_ERR("MGL ERROR: Unknown internal shader type %d, defaulting to vertex\n", ptr->glm_type);
                     *params = GL_VERTEX_SHADER;
             }
             break;

@@ -24,6 +24,7 @@
 #include "glm_context.h"
 #include "pixel_utils.h"
 #include "utils.h"
+#include "mgl_log.h"
 
 #define RENDBUF_STATE(_val_)    ctx->state.renderbuffer->_val_
 
@@ -98,7 +99,7 @@ Framebuffer *currentFBOForType(GLMContext ctx, GLenum target)
             return ctx->state.readbuffer;
             break;
 
-        default: assert(0); break;
+        default: ERROR_RETURN_VALUE(GL_INVALID_ENUM, NULL);
     }
 }
 
@@ -162,8 +163,7 @@ GLboolean mglIsFramebuffer(GLMContext ctx, GLuint framebuffer)
 
 void mglGenFramebuffers(GLMContext ctx, GLsizei n, GLuint *framebuffers)
 {
-    // n is signed: a negative count used to run the loop billions of
-    // times straight past the caller's array
+    // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     assert(framebuffers);
@@ -181,12 +181,12 @@ void mglBindFramebuffer(GLMContext ctx, GLenum target, GLuint framebuffer)
     if(framebuffer)
     {
         ptr = getFramebuffer(ctx, framebuffer);
-        fprintf(stderr, "MGL: glBindFramebuffer target=%x fbo=%u ptr=%p\n", target, framebuffer, ptr);
+        MGL_INFO("MGL: glBindFramebuffer target=%x fbo=%u ptr=%p\n", target, framebuffer, ptr);
     }
     else
     {
         ptr = NULL;
-        fprintf(stderr, "MGL: glBindFramebuffer target=%x fbo=0 (default framebuffer)\n", target);
+        MGL_INFO("MGL: glBindFramebuffer target=%x fbo=0 (default framebuffer)\n", target);
     }
 
     switch(target) {
@@ -205,6 +205,12 @@ void mglBindFramebuffer(GLMContext ctx, GLenum target, GLuint framebuffer)
     }
     
     STATE(dirty_bits) |= DIRTY_FBO;
+
+    if (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER)
+        STATE(var.draw_framebuffer_binding) = framebuffer;
+
+    if (target == GL_FRAMEBUFFER || target == GL_READ_FRAMEBUFFER)
+        STATE(var.read_framebuffer_binding) = framebuffer;
 }
 
 void mglDeleteFramebuffers(GLMContext ctx, GLsizei n, const GLuint *framebuffers)
@@ -288,8 +294,7 @@ GLboolean mglIsRenderbuffer(GLMContext ctx, GLuint renderbuffer)
 
 void mglGenRenderbuffers(GLMContext ctx, GLsizei n, GLuint *renderbuffers)
 {
-    // n is signed: a negative count used to run the loop billions of
-    // times straight past the caller's array
+    // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     assert(renderbuffers);
@@ -327,7 +332,6 @@ void mglBindRenderbuffer(GLMContext ctx, GLenum target, GLuint renderbuffer)
     // no dirty state
 }
 
-// Detaches a renderbuffer from every attachment point of one framebuffer.
 static void detachRenderbuffer(Framebuffer *fbo, Renderbuffer *rbo)
 {
     FBOAttachment *points[MAX_COLOR_ATTACHMENTS + 2];
@@ -407,76 +411,135 @@ void mglDeleteRenderbuffers(GLMContext ctx, GLsizei n, const GLuint *renderbuffe
     STATE(dirty_bits) |= DIRTY_FBO;
 }
 
-void mglRenderbufferStorage(GLMContext ctx, GLenum target, GLenum internalformat, GLsizei width, GLsizei height)
+static void renderbufferStorage(GLMContext ctx, Renderbuffer *rbo, GLsizei samples,
+                                GLenum internalformat, GLsizei width, GLsizei height)
 {
     Texture *tex;
 
-    assert(target == GL_RENDERBUFFER);
+    ERROR_CHECK_RETURN(rbo, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(width >= 0 && height >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(samples >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(width <= (GLsizei)STATE(var.max_renderbuffer_size), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(height <= (GLsizei)STATE(var.max_renderbuffer_size), GL_INVALID_VALUE);
 
-    if(ctx->state.renderbuffer == NULL)
+    // re-specifying replaces the old image
+    if (rbo->tex)
     {
-        assert(0);
-        // no renderbuffer bound
+        if (rbo->tex->mtl_data)
+        {
+            ctx->mtl_funcs.mtlDeleteMTLObj(ctx, rbo->tex->mtl_data);
+            rbo->tex->mtl_data = NULL;
+        }
+
+        free(rbo->tex);
+        rbo->tex = NULL;
     }
 
-    tex = newTexObj(ctx, target);
-    assert(tex);
+    tex = newTexObj(ctx, GL_RENDERBUFFER);
 
-    //bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLboolean is_array, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, void *pixels, GLboolean proxy)
+    ERROR_CHECK_RETURN(tex, GL_OUT_OF_MEMORY);
+
     createTextureLevel(ctx, tex, 0, 0, false, internalformat, width, height, 1, 0, 0, NULL, false);
 
     tex->access = GL_READ_WRITE;
     tex->is_render_target = true;
-    
-    ctx->state.renderbuffer->tex = tex;
+    tex->samples = samples;
+
+    rbo->tex = tex;
+    rbo->dirty_bits |= DIRTY_FBO_BINDING;
+
+    STATE(dirty_bits) |= DIRTY_FBO;
 }
 
-void mglGetRenderbufferParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint *params)
+void mglRenderbufferStorage(GLMContext ctx, GLenum target, GLenum internalformat, GLsizei width, GLsizei height)
 {
-    assert(target == GL_RENDERBUFFER);
+    ERROR_CHECK_RETURN(target == GL_RENDERBUFFER, GL_INVALID_ENUM);
 
-    assert(params);
+    renderbufferStorage(ctx, ctx->state.renderbuffer, 0, internalformat, width, height);
+}
 
-    // cant get here without a storage call
-    assert(RENDBUF_STATE(tex));
+static void getRenderbufferParameter(GLMContext ctx, Renderbuffer *rbo, GLenum pname, GLint *params)
+{
+    Texture *tex;
+
+    ERROR_CHECK_RETURN(rbo, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    tex = rbo->tex;
+
+    // legal to query before storage is given; the image is just 0x0
+    if (!tex)
+    {
+        switch(pname)
+        {
+            case GL_RENDERBUFFER_WIDTH:
+            case GL_RENDERBUFFER_HEIGHT:
+            case GL_RENDERBUFFER_SAMPLES:
+                *params = 0;
+                return;
+
+            case GL_RENDERBUFFER_INTERNAL_FORMAT:
+                *params = GL_RGBA;
+                return;
+
+            case GL_RENDERBUFFER_RED_SIZE:
+            case GL_RENDERBUFFER_GREEN_SIZE:
+            case GL_RENDERBUFFER_BLUE_SIZE:
+            case GL_RENDERBUFFER_ALPHA_SIZE:
+            case GL_RENDERBUFFER_DEPTH_SIZE:
+            case GL_RENDERBUFFER_STENCIL_SIZE:
+                *params = 0;
+                return;
+
+            default:
+                ERROR_RETURN(GL_INVALID_ENUM);
+        }
+    }
 
     switch(pname)
     {
         case GL_RENDERBUFFER_WIDTH:
-            *params = RENDBUF_STATE(tex->width); break;
+            *params = tex->width; return;
 
         case GL_RENDERBUFFER_HEIGHT:
-            *params = RENDBUF_STATE(tex->height); break;
+            *params = tex->height; return;
 
         case GL_RENDERBUFFER_INTERNAL_FORMAT:
-            *params = RENDBUF_STATE(tex->internalformat); break;
-
-        // for now renderbuffers inherit the pixel format from the context..
-        case GL_RENDERBUFFER_RED_SIZE:
-            *params = bicountForFormatType(ctx->pixel_format.format, ctx->pixel_format.type, GL_RED); break;
-
-        case GL_RENDERBUFFER_GREEN_SIZE:
-            *params = bicountForFormatType(ctx->pixel_format.format, ctx->pixel_format.type, GL_GREEN); break;
-
-        case GL_RENDERBUFFER_BLUE_SIZE:
-            *params = bicountForFormatType(ctx->pixel_format.format, ctx->pixel_format.type, GL_BLUE); break;
-
-        case GL_RENDERBUFFER_ALPHA_SIZE:
-            *params = bicountForFormatType(ctx->pixel_format.format, ctx->pixel_format.type, GL_ALPHA); break;
-
-        case GL_RENDERBUFFER_DEPTH_SIZE:
-            assert(0); break;
-
-        case GL_RENDERBUFFER_STENCIL_SIZE:
-            assert(0); break;
+            *params = tex->internalformat; return;
 
         case GL_RENDERBUFFER_SAMPLES:
-            assert(0); break;
+            *params = tex->samples; return;
 
-        default: assert(0); break;
+        case GL_RENDERBUFFER_RED_SIZE:
+            *params = bitcountForInternalFormat(tex->internalformat, GL_RED); return;
+
+        case GL_RENDERBUFFER_GREEN_SIZE:
+            *params = bitcountForInternalFormat(tex->internalformat, GL_GREEN); return;
+
+        case GL_RENDERBUFFER_BLUE_SIZE:
+            *params = bitcountForInternalFormat(tex->internalformat, GL_BLUE); return;
+
+        case GL_RENDERBUFFER_ALPHA_SIZE:
+            *params = bitcountForInternalFormat(tex->internalformat, GL_ALPHA); return;
+
+        case GL_RENDERBUFFER_DEPTH_SIZE:
+            *params = bitcountForInternalFormat(tex->internalformat, GL_DEPTH_COMPONENT); return;
+
+        case GL_RENDERBUFFER_STENCIL_SIZE:
+            *params = bitcountForInternalFormat(tex->internalformat, GL_STENCIL_INDEX); return;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
     }
-
 }
+
+void mglGetRenderbufferParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint *params)
+{
+    ERROR_CHECK_RETURN(target == GL_RENDERBUFFER, GL_INVALID_ENUM);
+
+    getRenderbufferParameter(ctx, ctx->state.renderbuffer, pname, params);
+}
+
 
 #pragma mark Framebuffer Texture Bind calls
 FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum attachment)
@@ -523,7 +586,7 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
     if (texture != 0) {
         Texture *t = findTexture(ctx, texture);
         if (t && t->width >= 640 && t->height >= 400) {
-            fprintf(stderr, "MGL DEBUG: FBO attach tex %u (%dx%d) to FBO %u attachment 0x%x\n",
+            MGL_INFO("MGL DEBUG: FBO attach tex %u (%dx%d) to FBO %u attachment 0x%x\n",
                     texture, t->width, t->height, fbo ? fbo->name : 0, attachment);
         }
     }
@@ -552,13 +615,18 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
                 break;
             }
 
-            assert(attachment < STATE(max_color_attachments));
+            ERROR_RETURN(GL_INVALID_ENUM);
     }
 
     if (texture)
     {
         tex = findTexture(ctx, texture);
-        (assert(tex));
+
+        ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+
+        // glFramebufferTexture has no textarget, so take the texture's own
+        if (textarget == GL_NONE)
+            textarget = tex->target;
 
         switch(textarget)
         {
@@ -571,6 +639,8 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
             case GL_TEXTURE_2D_ARRAY:
             case GL_TEXTURE_2D_MULTISAMPLE:
             case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            case GL_TEXTURE_CUBE_MAP:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
                 break;
 
             default:
@@ -617,7 +687,7 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
                 case GL_TEXTURE_3D:
                     if (level >= ilog2(STATE_VAR(max_texture_size)))
                     {
-                        assert(0);
+                        ERROR_RETURN(GL_INVALID_VALUE);
                         return;
                     }
                     break;
@@ -634,7 +704,7 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
                                 break;
                             }
 
-                            assert(0);
+                            ERROR_RETURN(GL_INVALID_VALUE);
                             return;
                         }
                     }
@@ -643,7 +713,7 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
                         // For all other values of textarget, level must be greater than or equal to zero and less than or equal to $log_2$ of the value of GL_MAX_TEXTURE_SIZE.
 
 
-                        assert(0);
+                        ERROR_RETURN(GL_INVALID_VALUE);
                         return;
                     }
                     break;
@@ -725,9 +795,7 @@ void mglFramebufferTexture2D(GLMContext ctx, GLenum target, GLenum attachment, G
                 break;
             }
 
-            assert(0);
-
-            return;
+            ERROR_RETURN(GL_INVALID_ENUM);
     }
 
     framebufferTexture(ctx, target, GL_TEXTURE_2D, attachment, textarget, texture, level, 0);
@@ -778,13 +846,14 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
                 break;
             }
 
-            assert(attachment < STATE(max_color_attachments));
+            ERROR_RETURN(GL_INVALID_ENUM);
     }
 
     if (renderbuffer)
     {
         rbo = findRenderbuffer(ctx, renderbuffer);
-        (assert(rbo));
+
+        ERROR_CHECK_RETURN(rbo, GL_INVALID_OPERATION);
     }
     else
     {
@@ -797,7 +866,9 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
     fbo_attachment_ptr->texture = renderbuffer;
     fbo_attachment_ptr->level = 0;
     fbo_attachment_ptr->buf.rbo = rbo;
-    fbo_attachment_ptr->buf.rbo->is_draw_buffer = GL_FALSE;
+
+    if (rbo)
+        rbo->is_draw_buffer = GL_FALSE;
 
     if (attachment == GL_DEPTH_STENCIL_ATTACHMENT)
     {
@@ -826,9 +897,12 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
             break;
 
         default:
-            // target will be zero for mglGetNamedFramebufferAttachmentParameteriv
+            // target is zero for the Named variant, which passes a name instead
+            ERROR_CHECK_RETURN(target == 0, GL_INVALID_ENUM);
+
             fbo = findFrameBuffer(ctx, framebuffer);
-            assert(0);
+
+            ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
             break;
     }
 
@@ -901,13 +975,32 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
                 return;
 
             case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+                *params = GL_UNSIGNED_NORMALIZED;
+                return;
+
             case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+                *params = GL_LINEAR;
+                return;
+
             case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
-                assert(0);
-                // need to fill these in
+                *params = (fbo_attachment_ptr->textarget == GL_RENDERBUFFER)
+                        ? GL_RENDERBUFFER : GL_TEXTURE;
+                return;
+
+            case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+                *params = fbo_attachment_ptr->texture;
+                return;
+
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+                *params = fbo_attachment_ptr->level;
+                return;
+
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+                *params = fbo_attachment_ptr->layer;
+                return;
 
             default:
-                return;
+                ERROR_RETURN(GL_INVALID_ENUM);
         }
     }
     else
@@ -921,12 +1014,45 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
             case GL_BACK_RIGHT:
             case GL_DEPTH:
             case GL_STENCIL:
-                assert(0);
-                break;
+                switch(pname)
+                {
+                    case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+                        *params = GL_FRAMEBUFFER_DEFAULT;
+                        return;
+
+                    case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+                        *params = 0;
+                        return;
+
+                    case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+                        *params = GL_UNSIGNED_NORMALIZED;
+                        return;
+
+                    case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+                        *params = GL_LINEAR;
+                        return;
+
+                    case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+                    case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+                    case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+                    case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+                        *params = 8;
+                        return;
+
+                    case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+                        *params = (attachment == GL_DEPTH) ? 24 : 0;
+                        return;
+
+                    case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+                        *params = (attachment == GL_STENCIL) ? 8 : 0;
+                        return;
+
+                    default:
+                        ERROR_RETURN(GL_INVALID_ENUM);
+                }
 
             default:
-                assert(0);
-                return;
+                ERROR_RETURN(GL_INVALID_ENUM);
         }
     }
 }
@@ -944,39 +1070,23 @@ void mglGetNamedFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuf
 
 void mglBlitFramebuffer(GLMContext ctx, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)
 {
-    fprintf(stderr, "MGL: glBlitFramebuffer src(%d,%d)-(%d,%d) dst(%d,%d)-(%d,%d) mask=0x%x\n",
+    MGL_INFO("MGL: glBlitFramebuffer src(%d,%d)-(%d,%d) dst(%d,%d)-(%d,%d) mask=0x%x\n",
             srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask);
     ctx->mtl_funcs.mtlBlitFramebuffer(ctx, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
 }
 
 void mglRenderbufferStorageMultisample(GLMContext ctx, GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(target == GL_RENDERBUFFER, GL_INVALID_ENUM);
+
+    renderbufferStorage(ctx, ctx->state.renderbuffer, samples, internalformat, width, height);
 }
 
-void mglFramebufferParameteri(GLMContext ctx, GLenum target, GLenum pname, GLint param)
+static void framebufferParameter(GLMContext ctx, Framebuffer *fbo, GLenum pname, GLint param)
 {
-    Framebuffer *fbo;
-    
-    // Get the appropriate framebuffer based on target
-    switch(target) {
-        case GL_FRAMEBUFFER:
-        case GL_DRAW_FRAMEBUFFER:
-            fbo = STATE(framebuffer);
-            break;
-        case GL_READ_FRAMEBUFFER:
-            fbo = STATE(readbuffer);
-            break;
-        default:
-            ERROR_RETURN(GL_INVALID_ENUM);
-    }
-    
-    if (!fbo) {
-        // Default framebuffer - these parameters don't apply
-        ERROR_RETURN(GL_INVALID_OPERATION);
-    }
-    
+    // these do not apply to the default framebuffer
+    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
     switch(pname) {
         case GL_FRAMEBUFFER_DEFAULT_WIDTH:
             if (param < 0) {
@@ -1010,150 +1120,401 @@ void mglFramebufferParameteri(GLMContext ctx, GLenum target, GLenum pname, GLint
     }
 }
 
+static Framebuffer *fboForTarget(GLMContext ctx, GLenum target, bool *ok)
+{
+    *ok = true;
+
+    switch(target)
+    {
+        case GL_FRAMEBUFFER:
+        case GL_DRAW_FRAMEBUFFER:
+            return STATE(framebuffer);
+
+        case GL_READ_FRAMEBUFFER:
+            return STATE(readbuffer);
+    }
+
+    *ok = false;
+
+    return NULL;
+}
+
+void mglFramebufferParameteri(GLMContext ctx, GLenum target, GLenum pname, GLint param)
+{
+    bool ok;
+    Framebuffer *fbo = fboForTarget(ctx, target, &ok);
+
+    ERROR_CHECK_RETURN(ok, GL_INVALID_ENUM);
+
+    framebufferParameter(ctx, fbo, pname, param);
+}
+
+static void getFramebufferParameter(GLMContext ctx, Framebuffer *fbo, GLenum pname, GLint *params)
+{
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
+    switch(pname)
+    {
+        case GL_FRAMEBUFFER_DEFAULT_WIDTH:   *params = fbo->default_width;  return;
+        case GL_FRAMEBUFFER_DEFAULT_HEIGHT:  *params = fbo->default_height; return;
+        case GL_FRAMEBUFFER_DEFAULT_LAYERS:  *params = fbo->default_layers; return;
+        case GL_FRAMEBUFFER_DEFAULT_SAMPLES: *params = fbo->default_samples; return;
+
+        case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS:
+            *params = fbo->default_fixed_sample_locations;
+            return;
+
+        case GL_DOUBLEBUFFER:            *params = GL_FALSE; return;
+        case GL_STEREO:                  *params = GL_FALSE; return;
+        case GL_SAMPLES:                 *params = 0;        return;
+        case GL_SAMPLE_BUFFERS:          *params = 0;        return;
+        case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;          return;
+        case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+}
+
 void mglGetFramebufferParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint *params)
 {
-    // Unimplemented function
-    assert(0);
+    bool ok;
+    Framebuffer *fbo = fboForTarget(ctx, target, &ok);
+
+    ERROR_CHECK_RETURN(ok, GL_INVALID_ENUM);
+
+    getFramebufferParameter(ctx, fbo, pname, params);
 }
 
 void mglInvalidateFramebuffer(GLMContext ctx, GLenum target, GLsizei numAttachments, const GLenum *attachments)
 {
-    // Unimplemented function
-    assert(0);
+    bool ok;
+
+    fboForTarget(ctx, target, &ok);
+
+    ERROR_CHECK_RETURN(ok, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(numAttachments >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(numAttachments == 0 || attachments, GL_INVALID_VALUE);
 }
 
 void mglInvalidateSubFramebuffer(GLMContext ctx, GLenum target, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    // Unimplemented function
-    assert(0);
+    bool ok;
+
+    fboForTarget(ctx, target, &ok);
+
+    ERROR_CHECK_RETURN(ok, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(numAttachments >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(numAttachments == 0 || attachments, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(width >= 0 && height >= 0, GL_INVALID_VALUE);
+}
+
+// implemented in draw_buffers.c
+void mglDrawBuffer(GLMContext ctx, GLenum buf);
+void mglDrawBuffers(GLMContext ctx, GLsizei n, const GLenum *bufs);
+void mglReadBuffer(GLMContext ctx, GLenum src);
+void mglClearBufferiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLint *value);
+void mglClearBufferuiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLuint *value);
+void mglClearBufferfv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLfloat *value);
+void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil);
+void mglBlitFramebuffer(GLMContext ctx, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
+
+// The bound-state entry points below all work off STATE(framebuffer). The DSA
+// forms borrow them by binding, calling, and putting the old binding back.
+typedef struct {
+    Framebuffer *draw;
+    Framebuffer *read;
+    GLuint draw_name;
+    GLuint read_name;
+} SavedFBO;
+
+static bool pushFBO(GLMContext ctx, GLuint framebuffer, SavedFBO *saved)
+{
+    Framebuffer *fbo = NULL;
+
+    if (framebuffer)
+    {
+        fbo = findFrameBuffer(ctx, framebuffer);
+
+        if (!fbo)
+            return false;
+    }
+
+    saved->draw = STATE(framebuffer);
+    saved->read = STATE(readbuffer);
+    saved->draw_name = STATE(var.draw_framebuffer_binding);
+    saved->read_name = STATE(var.read_framebuffer_binding);
+
+    STATE(framebuffer) = fbo;
+    STATE(readbuffer)  = fbo;
+    STATE(var.draw_framebuffer_binding) = framebuffer;
+    STATE(var.read_framebuffer_binding) = framebuffer;
+
+    return true;
+}
+
+static void popFBO(GLMContext ctx, SavedFBO *saved)
+{
+    STATE(framebuffer) = saved->draw;
+    STATE(readbuffer)  = saved->read;
+    STATE(var.draw_framebuffer_binding) = saved->draw_name;
+    STATE(var.read_framebuffer_binding) = saved->read_name;
+
+    STATE(dirty_bits) |= DIRTY_FBO;
 }
 
 void mglCreateFramebuffers(GLMContext ctx, GLsizei n, GLuint *framebuffers)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
+    if (n == 0)
+        return;
+
+    ERROR_CHECK_RETURN(framebuffers, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < n; i++)
+    {
+        framebuffers[i] = getNewName(&STATE(framebuffer_table));
+
+        // DSA creates the object up front, unlike Gen
+        getFramebuffer(ctx, framebuffers[i]);
+    }
 }
 
 void mglNamedFramebufferRenderbuffer(GLMContext ctx, GLuint framebuffer, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglFramebufferRenderbuffer(ctx, GL_FRAMEBUFFER, attachment, renderbuffertarget, renderbuffer);
+
+    popFBO(ctx, &saved);
 }
 
 void mglNamedFramebufferParameteri(GLMContext ctx, GLuint framebuffer, GLenum pname, GLint param)
 {
-    // Unimplemented function
-    assert(0);
+    Framebuffer *fbo = findFrameBuffer(ctx, framebuffer);
+
+    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
+    framebufferParameter(ctx, fbo, pname, param);
 }
 
 void mglNamedFramebufferTexture(GLMContext ctx, GLuint framebuffer, GLenum attachment, GLuint texture, GLint level)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglFramebufferTexture(ctx, GL_FRAMEBUFFER, attachment, texture, level);
+
+    popFBO(ctx, &saved);
 }
 
 void mglNamedFramebufferTextureLayer(GLMContext ctx, GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglFramebufferTextureLayer(ctx, GL_FRAMEBUFFER, attachment, texture, level, layer);
+
+    popFBO(ctx, &saved);
 }
 
 void mglNamedFramebufferDrawBuffer(GLMContext ctx, GLuint framebuffer, GLenum buf)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglDrawBuffer(ctx, buf);
+
+    popFBO(ctx, &saved);
 }
 
 void mglNamedFramebufferDrawBuffers(GLMContext ctx, GLuint framebuffer, GLsizei n, const GLenum *bufs)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglDrawBuffers(ctx, n, bufs);
+
+    popFBO(ctx, &saved);
 }
 
 void mglNamedFramebufferReadBuffer(GLMContext ctx, GLuint framebuffer, GLenum src)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglReadBuffer(ctx, src);
+
+    popFBO(ctx, &saved);
 }
 
 void mglInvalidateNamedFramebufferData(GLMContext ctx, GLuint framebuffer, GLsizei numAttachments, const GLenum *attachments)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(numAttachments >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(numAttachments == 0 || attachments, GL_INVALID_VALUE);
+
+    if (framebuffer)
+        ERROR_CHECK_RETURN(findFrameBuffer(ctx, framebuffer), GL_INVALID_OPERATION);
 }
 
 void mglInvalidateNamedFramebufferSubData(GLMContext ctx, GLuint framebuffer, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(numAttachments >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(numAttachments == 0 || attachments, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(width >= 0 && height >= 0, GL_INVALID_VALUE);
+
+    if (framebuffer)
+        ERROR_CHECK_RETURN(findFrameBuffer(ctx, framebuffer), GL_INVALID_OPERATION);
 }
 
 void mglClearNamedFramebufferiv(GLMContext ctx, GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLint *value)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglClearBufferiv(ctx, buffer, drawbuffer, value);
+
+    popFBO(ctx, &saved);
 }
 
 void mglClearNamedFramebufferuiv(GLMContext ctx, GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLuint *value)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglClearBufferuiv(ctx, buffer, drawbuffer, value);
+
+    popFBO(ctx, &saved);
 }
 
 void mglClearNamedFramebufferfv(GLMContext ctx, GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLfloat *value)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglClearBufferfv(ctx, buffer, drawbuffer, value);
+
+    popFBO(ctx, &saved);
 }
 
 void mglClearNamedFramebufferfi(GLMContext ctx, GLuint framebuffer, GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil)
 {
-    // Unimplemented function
-    assert(0);
+    SavedFBO saved;
+
+    ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    mglClearBufferfi(ctx, buffer, drawbuffer, depth, stencil);
+
+    popFBO(ctx, &saved);
 }
 
 void mglBlitNamedFramebuffer(GLMContext ctx, GLuint readFramebuffer, GLuint drawFramebuffer, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)
 {
-    // Unimplemented function
-    assert(0);
+    Framebuffer *save_draw = STATE(framebuffer);
+    Framebuffer *save_read = STATE(readbuffer);
+    Framebuffer *rfbo = NULL, *dfbo = NULL;
+
+    if (readFramebuffer)
+    {
+        rfbo = findFrameBuffer(ctx, readFramebuffer);
+        ERROR_CHECK_RETURN(rfbo, GL_INVALID_OPERATION);
+    }
+
+    if (drawFramebuffer)
+    {
+        dfbo = findFrameBuffer(ctx, drawFramebuffer);
+        ERROR_CHECK_RETURN(dfbo, GL_INVALID_OPERATION);
+    }
+
+    STATE(readbuffer)  = rfbo;
+    STATE(framebuffer) = dfbo;
+
+    mglBlitFramebuffer(ctx, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+
+    STATE(framebuffer) = save_draw;
+    STATE(readbuffer)  = save_read;
+    STATE(dirty_bits) |= DIRTY_FBO;
 }
 
-GLenum  mglCheckNamedFramebufferStatus(GLMContext ctx, GLuint framebuffer, GLenum target)
+GLenum mglCheckNamedFramebufferStatus(GLMContext ctx, GLuint framebuffer, GLenum target)
 {
-    GLenum ret = (GLenum)0;
+    SavedFBO saved;
+    GLenum status;
 
-    // Unimplemented function
-    assert(0);
-    return ret;
+    if (framebuffer == 0)
+        return GL_FRAMEBUFFER_COMPLETE;
+
+    ERROR_CHECK_RETURN_VALUE(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION, 0);
+
+    status = mglCheckFramebufferStatus(ctx, target);
+
+    popFBO(ctx, &saved);
+
+    return status;
 }
 
-void mglGetNamedFramebufferParameteriv(GLMContext ctx, GLuint framebuffer, GLenum pname, GLint *param)
+void mglGetNamedFramebufferParameteriv(GLMContext ctx, GLuint framebuffer, GLenum pname, GLint *params)
 {
-    // Unimplemented function
-    assert(0);
+    Framebuffer *fbo = findFrameBuffer(ctx, framebuffer);
+
+    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
+    getFramebufferParameter(ctx, fbo, pname, params);
 }
 
 void mglCreateRenderbuffers(GLMContext ctx, GLsizei n, GLuint *renderbuffers)
 {
-    // Unimplemented function
-    assert(0);
+    ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
+    if (n == 0)
+        return;
+
+    ERROR_CHECK_RETURN(renderbuffers, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < n; i++)
+    {
+        renderbuffers[i] = getNewName(&STATE(renderbuffer_table));
+
+        getRenderbuffer(ctx, renderbuffers[i]);
+    }
 }
 
 void mglNamedRenderbufferStorage(GLMContext ctx, GLuint renderbuffer, GLenum internalformat, GLsizei width, GLsizei height)
 {
-    // Unimplemented function
-    assert(0);
+    Renderbuffer *rbo = findRenderbuffer(ctx, renderbuffer);
+
+    ERROR_CHECK_RETURN(rbo, GL_INVALID_OPERATION);
+
+    renderbufferStorage(ctx, rbo, 0, internalformat, width, height);
 }
 
 void mglNamedRenderbufferStorageMultisample(GLMContext ctx, GLuint renderbuffer, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height)
 {
-    // Unimplemented function
-    assert(0);
+    Renderbuffer *rbo = findRenderbuffer(ctx, renderbuffer);
+
+    ERROR_CHECK_RETURN(rbo, GL_INVALID_OPERATION);
+
+    renderbufferStorage(ctx, rbo, samples, internalformat, width, height);
 }
 
 void mglGetNamedRenderbufferParameteriv(GLMContext ctx, GLuint renderbuffer, GLenum pname, GLint *params)
 {
-    // Unimplemented function
-    assert(0);
+    Renderbuffer *rbo = findRenderbuffer(ctx, renderbuffer);
+
+    ERROR_CHECK_RETURN(rbo, GL_INVALID_OPERATION);
+
+    getRenderbufferParameter(ctx, rbo, pname, params);
 }
 

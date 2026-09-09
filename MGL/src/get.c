@@ -399,7 +399,7 @@ void mglGetIntegerv(GLMContext ctx, GLenum pname, GLint *data)
     mglGet(ctx, pname, kInt, (void *)data);
 }
 
-// what a 4.6 core context advertises; GetStringi walks this
+// what GetStringi walks
 static const char * const mgl_extensions[] = {
     "GL_ARB_multi_draw_indirect",
     "GL_ARB_base_instance",

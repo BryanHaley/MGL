@@ -29,6 +29,7 @@
 #include "pixel_utils.h"
 #include "utils.h"
 #include "glm_context.h"
+#include "mgl_log.h"
 
 extern void *getBufferData(GLMContext ctx, Buffer *ptr);
 
@@ -83,7 +84,7 @@ Texture *newTexObj(GLMContext ctx, GLenum target)
     ptr = (Texture *)malloc(sizeof(Texture));
     // CRITICAL SECURITY FIX: Check malloc result instead of using assert()
     if (!ptr) {
-        fprintf(stderr, "MGL SECURITY ERROR: Failed to allocate memory for texture\n");
+        MGL_ERR("MGL SECURITY ERROR: Failed to allocate memory for texture\n");
         STATE(error) = GL_OUT_OF_MEMORY;
         return NULL;
     }
@@ -192,7 +193,7 @@ Texture *getTex(GLMContext ctx, GLuint name, GLenum target)
             ptr = newTexObj(ctx, target);
             assert(ptr);
             STATE(texture_units[active_texture].textures[index]) = ptr;
-            fprintf(stderr, "MGL: Created default texture for target 0x%x\n", target);
+            MGL_INFO("MGL: Created default texture for target 0x%x\n", target);
         }
     }
     else
@@ -229,7 +230,7 @@ bool checkInternalFormatForMetal(GLMContext ctx, GLuint internalformat)
             // Only warn for standard GL format ranges (not internal Mesa/Gallium enums)
             // Skip 0x2xxx (GL get parameters), 0x8Dxx-0x9xxx (internal enums)
             if (internalformat >= 0x8040 && internalformat < 0x8D70) {
-                fprintf(stderr, "MGL: checkInternalFormatForMetal - internalformat 0x%x has no Metal equivalent\n", internalformat);
+                MGL_INFO("MGL: checkInternalFormatForMetal - internalformat 0x%x has no Metal equivalent\n", internalformat);
             }
         }
         return false;
@@ -242,8 +243,7 @@ bool checkInternalFormatForMetal(GLMContext ctx, GLuint internalformat)
 #pragma mark basic tex calls bind / delete / gen...
 void mglGenTextures(GLMContext ctx, GLsizei n, GLuint *textures)
 {
-    // n is signed: a negative count used to run the loop billions of
-    // times straight past the caller's array
+    // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     assert(textures);
@@ -260,8 +260,7 @@ void mglGenTextures(GLMContext ctx, GLsizei n, GLuint *textures)
 
 void mglCreateTextures(GLMContext ctx, GLenum target, GLsizei n, GLuint *textures)
 {
-    // n is signed: a negative count used to run the loop billions of
-    // times straight past the caller's array
+    // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     mglGenTextures(ctx, n, textures);
@@ -320,7 +319,7 @@ void mglBindImageTexture(GLMContext ctx, GLuint unit, GLuint texture, GLint leve
 
     // ERROR_CHECK_RETURN(unit < TEXTURE_UNITS, GL_INVALID_VALUE);
     if (unit >= TEXTURE_UNITS) {
-        fprintf(stderr, "MGL Error: mglBindImageTexture: unit >= TEXTURE_UNITS (%d)\n", unit);
+        MGL_ERR("MGL Error: mglBindImageTexture: unit >= TEXTURE_UNITS (%d)\n", unit);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -328,19 +327,19 @@ void mglBindImageTexture(GLMContext ctx, GLuint unit, GLuint texture, GLint leve
 
     // ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
     if (!ptr) {
-        fprintf(stderr, "MGL Error: mglBindImageTexture: texture %d not found\n", texture);
+        MGL_ERR("MGL Error: mglBindImageTexture: texture %d not found\n", texture);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     // ERROR_CHECK_RETURN(level >= 0, GL_INVALID_VALUE);
     if (level < 0) {
-        fprintf(stderr, "MGL Error: mglBindImageTexture: level < 0 (%d)\n", level);
+        MGL_ERR("MGL Error: mglBindImageTexture: level < 0 (%d)\n", level);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     // ERROR_CHECK_RETURN(layered >= 0, GL_INVALID_VALUE);
     if (layered < 0) {
-        fprintf(stderr, "MGL Error: mglBindImageTexture: layered < 0 (%d)\n", layered);
+        MGL_ERR("MGL Error: mglBindImageTexture: layered < 0 (%d)\n", layered);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -352,25 +351,25 @@ void mglBindImageTexture(GLMContext ctx, GLuint unit, GLuint texture, GLint leve
             break;
 
         default:
-            fprintf(stderr, "MGL Error: mglBindImageTexture: invalid access 0x%x\n", access);
+            MGL_ERR("MGL Error: mglBindImageTexture: invalid access 0x%x\n", access);
             ERROR_RETURN(GL_INVALID_ENUM);
     }
 
     // ERROR_CHECK_RETURN(checkInternalFormatForMetal(ctx, internalformat), GL_INVALID_ENUM);
     if (!checkInternalFormatForMetal(ctx, internalformat)) {
-        fprintf(stderr, "MGL Error: mglBindImageTexture: invalid internalformat 0x%x\n", internalformat);
+        MGL_ERR("MGL Error: mglBindImageTexture: invalid internalformat 0x%x\n", internalformat);
         ERROR_RETURN(GL_INVALID_ENUM);
     }
 
     // ERROR_CHECK_RETURN(ptr->internalformat == internalformat, GL_INVALID_VALUE);
     if (ptr->internalformat != internalformat) {
-        fprintf(stderr, "MGL Error: mglBindImageTexture: internalformat mismatch (tex=0x%x req=0x%x)\n", ptr->internalformat, internalformat);
+        MGL_ERR("MGL Error: mglBindImageTexture: internalformat mismatch (tex=0x%x req=0x%x)\n", ptr->internalformat, internalformat);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     // ERROR_CHECK_RETURN(level < ptr->num_levels, GL_INVALID_VALUE);
     if (level >= ptr->num_levels) {
-        fprintf(stderr, "MGL Error: mglBindImageTexture: level >= num_levels (%d >= %d)\n", level, ptr->num_levels);
+        MGL_ERR("MGL Error: mglBindImageTexture: level >= num_levels (%d >= %d)\n", level, ptr->num_levels);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -398,8 +397,7 @@ void mglBindImageTexture(GLMContext ctx, GLuint unit, GLuint texture, GLint leve
 
 void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
 {
-    // n is signed: a negative count used to run the loop billions of
-    // times straight past the caller's array
+    // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     while(n--)
@@ -450,18 +448,18 @@ GLboolean mglIsTexture(GLMContext ctx, GLuint texture)
 void mglInvalidateTexImage(GLMContext ctx, GLuint texture, GLint level)
 {
     // Stub - invalidation is just a hint, safe to ignore
-    fprintf(stderr, "MGL: glInvalidateTexImage called (stub) - texture=%u level=%d\n", texture, level);
+    MGL_INFO("MGL: glInvalidateTexImage called (stub) - texture=%u level=%d\n", texture, level);
 }
 
 void mglInvalidateTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth)
 {
     // Stub - invalidation is just a hint, safe to ignore
-    fprintf(stderr, "MGL: glInvalidateTexSubImage called (stub)\n");
+    MGL_INFO("MGL: glInvalidateTexSubImage called (stub)\n");
 }
 
 void mglBindImageTextures(GLMContext ctx, GLuint first, GLsizei count, const GLuint *textures)
 {
-    fprintf(stderr, "MGL: glBindImageTextures called first=%u count=%d\n", first, count);
+    MGL_INFO("MGL: glBindImageTextures called first=%u count=%d\n", first, count);
     // Bind multiple image textures
     for (GLsizei i = 0; i < count; i++) {
         GLuint tex_name = textures ? textures[i] : 0;
@@ -477,7 +475,7 @@ void mglBindImageTextures(GLMContext ctx, GLuint first, GLsizei count, const GLu
 void mglClientActiveTexture(GLMContext ctx, GLenum texture)
 {
     // Legacy function for fixed-function pipeline, safe to ignore in modern GL
-    fprintf(stderr, "MGL: glClientActiveTexture called (stub) - legacy function\n");
+    MGL_INFO("MGL: glClientActiveTexture called (stub) - legacy function\n");
 }
 
 void mglActiveTexture(GLMContext ctx, GLenum texture)
@@ -649,7 +647,7 @@ void initBaseTexLevel(GLMContext ctx, Texture *tex, GLint internalformat, GLsize
     {
         // CRITICAL SECURITY FIX: Prevent integer overflow in mipmap allocation
         if (tex->mipmap_levels > SIZE_MAX / sizeof(TextureLevel)) {
-            fprintf(stderr, "MGL SECURITY ERROR: Mipmap levels %d would cause allocation overflow\n", tex->mipmap_levels);
+            MGL_ERR("MGL SECURITY ERROR: Mipmap levels %d would cause allocation overflow\n", tex->mipmap_levels);
             // CRITICAL FIX: Handle gracefully instead of crashing
             STATE(error) = GL_OUT_OF_MEMORY;
             return;
@@ -657,7 +655,7 @@ void initBaseTexLevel(GLMContext ctx, Texture *tex, GLint internalformat, GLsize
 
         tex->faces[face].levels = (TextureLevel *)calloc(tex->mipmap_levels, sizeof(TextureLevel));
         if (!tex->faces[face].levels) {
-            fprintf(stderr, "MGL SECURITY ERROR: calloc failed for face %d with %d levels\n", face, tex->mipmap_levels);
+            MGL_ERR("MGL SECURITY ERROR: calloc failed for face %d with %d levels\n", face, tex->mipmap_levels);
             // CRITICAL FIX: Handle gracefully instead of crashing
             STATE(error) = GL_OUT_OF_MEMORY;
             return;
@@ -962,7 +960,7 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
 
         default:
             // Log warning but don't error - many formats work even if not explicitly listed
-            fprintf(stderr, "MGL WARNING: verifyInternalFormat unknown internalformat 0x%x\n", internalformat);
+            MGL_ERR("MGL WARNING: verifyInternalFormat unknown internalformat 0x%x\n", internalformat);
             break;
     }
 
@@ -995,7 +993,7 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
 
         default:
             // Allow unknown formats with warning - virglrenderer may use nonstandard values
-            fprintf(stderr, "MGL WARNING: verifyFormat unknown format 0x%x, allowing\n", format);
+            MGL_ERR("MGL WARNING: verifyFormat unknown format 0x%x, allowing\n", format);
             break;
     }
 
@@ -1046,7 +1044,7 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
             break;
             
         default:
-            fprintf(stderr, "MGL WARNING: verifyInternalFormat unknown type 0x%x\n", type);
+            MGL_ERR("MGL WARNING: verifyInternalFormat unknown type 0x%x\n", type);
             break;
     }
 
@@ -1392,7 +1390,7 @@ void mglTexImage2D(GLMContext ctx, GLenum target, GLint level, GLint internalfor
     GLboolean is_array;
     GLboolean proxy;
 
-    fprintf(stderr, "MGL: mglTexImage2D called - target=0x%x, level=%d, internalformat=0x%x, width=%d, height=%d, format=0x%x, type=0x%x\n",
+    MGL_INFO("MGL: mglTexImage2D called - target=0x%x, level=%d, internalformat=0x%x, width=%d, height=%d, format=0x%x, type=0x%x\n",
             target, level, internalformat, width, height, format, type);
 
     face = 0;
@@ -1460,7 +1458,7 @@ void mglTexImage2DMultisample(GLMContext ctx, GLenum target, GLsizei samples, GL
     // Multisample textures are used by virglrenderer for capability probing.
     // Apple Silicon handles MSAA differently - we silently succeed to allow
     // the rendering pipeline to proceed without MSAA.
-    fprintf(stderr, "MGL: mglTexImage2DMultisample (stub) - target=0x%x samples=%d internalformat=0x%x %dx%d\n",
+    MGL_INFO("MGL: mglTexImage2DMultisample (stub) - target=0x%x samples=%d internalformat=0x%x %dx%d\n",
             target, samples, internalformat, width, height);
     (void)ctx; (void)target; (void)samples; (void)internalformat;
     (void)width; (void)height; (void)fixedsamplelocations;
@@ -1517,7 +1515,7 @@ void mglTexImage3D(GLMContext ctx, GLenum target, GLint level, GLint internalfor
 void mglTexImage3DMultisample(GLMContext ctx, GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations)
 {
     // Multisample array textures - silently succeed like 2D multisample
-    fprintf(stderr, "MGL: mglTexImage3DMultisample (stub) - target=0x%x samples=%d internalformat=0x%x %dx%dx%d\n",
+    MGL_INFO("MGL: mglTexImage3DMultisample (stub) - target=0x%x samples=%d internalformat=0x%x %dx%dx%d\n",
             target, samples, internalformat, width, height, depth);
     (void)ctx; (void)target; (void)samples; (void)internalformat;
     (void)width; (void)height; (void)depth; (void)fixedsamplelocations;
@@ -1529,30 +1527,30 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
 {
     // Debug: Log large texture uploads (VM framebuffer size)
     if (width >= 640 && height >= 400) {
-        fprintf(stderr, "MGL DEBUG: texSubImage tex_id=%u %dx%d at (%d,%d) pixels=%p\n",
+        MGL_INFO("MGL DEBUG: texSubImage tex_id=%u %dx%d at (%d,%d) pixels=%p\n",
                 tex ? tex->name : 0, width, height, xoffset, yoffset, pixels);
     }
     
     // ERROR_CHECK_RETURN_VALUE(tex != NULL, GL_INVALID_OPERATION, false);
     if (tex == NULL) {
-        fprintf(stderr, "MGL Error: texSubImage: tex is NULL\n");
+        MGL_ERR("MGL Error: texSubImage: tex is NULL\n");
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
     }
 
     // ERROR_CHECK_RETURN_VALUE(level <= tex->num_levels, GL_INVALID_OPERATION, false);
     if (level > tex->num_levels) {
-        fprintf(stderr, "MGL Error: texSubImage: level %d > num_levels %d\n", level, tex->num_levels);
+        MGL_ERR("MGL Error: texSubImage: level %d > num_levels %d\n", level, tex->num_levels);
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
     }
     
     if (!tex->faces[face].levels) {
-        fprintf(stderr, "MGL Error: texSubImage: levels is NULL\n");
+        MGL_ERR("MGL Error: texSubImage: levels is NULL\n");
         ERROR_CHECK_RETURN_VALUE(false, GL_INVALID_OPERATION, false);
     }
     
     // ERROR_CHECK_RETURN_VALUE(tex->faces[face].levels[level].complete, GL_INVALID_OPERATION, false);
     if (!tex->faces[face].levels[level].complete) {
-        fprintf(stderr, "MGL Error: texSubImage: level %d not complete\n", level);
+        MGL_ERR("MGL Error: texSubImage: level %d not complete\n", level);
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
     }
 
@@ -1565,7 +1563,7 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
 
         // ERROR_CHECK_RETURN_VALUE(ptr->mapped == false, GL_INVALID_OPERATION, false);
         if (ptr->mapped) {
-            fprintf(stderr, "MGL Error: texSubImage: pixel unpack buffer is mapped\n");
+            MGL_ERR("MGL Error: texSubImage: pixel unpack buffer is mapped\n");
             ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
         }
 
@@ -1986,7 +1984,7 @@ void mglTexStorage2D(GLMContext ctx, GLenum target, GLsizei levels, GLenum inter
 
     tex = getTex(ctx, 0, target);
     
-    fprintf(stderr, "MGL: mglTexStorage2D target=0x%x levels=%d internalformat=0x%x %dx%d tex=%p\n",
+    MGL_INFO("MGL: mglTexStorage2D target=0x%x levels=%d internalformat=0x%x %dx%d tex=%p\n",
             target, levels, internalformat, width, height, tex);
     fflush(stderr);
 
@@ -2012,7 +2010,7 @@ void mglTextureStorage2D(GLMContext ctx, GLuint texture, GLsizei levels, GLenum 
 
 void mglTextureStorage2DMultisample(GLMContext ctx, GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations)
 {
-    fprintf(stderr, "MGL WARNING: glTextureStorage2DMultisample called (stub) - MSAA not fully supported\n");
+    MGL_ERR("MGL WARNING: glTextureStorage2DMultisample called (stub) - MSAA not fully supported\n");
     // Fall back to non-MSAA storage
     mglTextureStorage2D(ctx, texture, 1, internalformat, width, height);
 }
@@ -2085,7 +2083,7 @@ void mglTextureStorage3D(GLMContext ctx, GLuint texture, GLsizei levels, GLenum 
 
 void mglTextureStorage3DMultisample(GLMContext ctx, GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations)
 {
-    fprintf(stderr, "MGL WARNING: glTextureStorage3DMultisample called (stub) - MSAA not fully supported\n");
+    MGL_ERR("MGL WARNING: glTextureStorage3DMultisample called (stub) - MSAA not fully supported\n");
     // Fall back to non-MSAA storage
     mglTextureStorage3D(ctx, texture, 1, internalformat, width, height, depth);
 }
@@ -2094,7 +2092,7 @@ void mglTextureStorage3DMultisample(GLMContext ctx, GLuint texture, GLsizei samp
 #pragma mark clear tex image
 void mglClearTexImage(GLMContext ctx, GLuint texture, GLint level, GLenum format, GLenum type, const void *data)
 {
-    fprintf(stderr, "MGL: glClearTexImage called - texture=%u level=%d\n", texture, level);
+    MGL_INFO("MGL: glClearTexImage called - texture=%u level=%d\n", texture, level);
     
     Texture *tex = getTex(ctx, texture, 0);
     if (!tex) {
@@ -2113,7 +2111,7 @@ void mglClearTexImage(GLMContext ctx, GLuint texture, GLint level, GLenum format
 
         // CRITICAL SECURITY FIX: Prevent integer overflow in texture clear allocation
         if (width > SIZE_MAX / height / pixel_size) {
-            fprintf(stderr, "MGL SECURITY ERROR: Texture clear allocation would overflow: %dx%dx%zu\n", width, height, pixel_size);
+            MGL_ERR("MGL SECURITY ERROR: Texture clear allocation would overflow: %dx%dx%zu\n", width, height, pixel_size);
             STATE(error) = GL_OUT_OF_MEMORY;
             return;
         }
@@ -2130,7 +2128,7 @@ void mglClearTexImage(GLMContext ctx, GLuint texture, GLint level, GLenum format
 
         // CRITICAL SECURITY FIX: Prevent integer overflow in texture fill allocation
         if (width > SIZE_MAX / height / pixel_size) {
-            fprintf(stderr, "MGL SECURITY ERROR: Texture fill allocation would overflow: %dx%dx%zu\n", width, height, pixel_size);
+            MGL_ERR("MGL SECURITY ERROR: Texture fill allocation would overflow: %dx%dx%zu\n", width, height, pixel_size);
             STATE(error) = GL_OUT_OF_MEMORY;
             return;
         }
@@ -2150,7 +2148,7 @@ void mglClearTexImage(GLMContext ctx, GLuint texture, GLint level, GLenum format
 
 void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *data)
 {
-    fprintf(stderr, "MGL: glClearTexSubImage called - texture=%u %dx%dx%d at (%d,%d,%d)\n",
+    MGL_INFO("MGL: glClearTexSubImage called - texture=%u %dx%dx%d at (%d,%d,%d)\n",
             texture, width, height, depth, xoffset, yoffset, zoffset);
     
     Texture *tex = getTex(ctx, texture, 0);
@@ -2162,7 +2160,7 @@ void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoff
 
     // CRITICAL SECURITY FIX: Prevent integer overflow in texture subimage allocation
     if (width > SIZE_MAX / height / depth / pixel_size) {
-        fprintf(stderr, "MGL SECURITY ERROR: Texture subimage allocation would overflow: %dx%dx%dx%zu\n", width, height, depth, pixel_size);
+        MGL_ERR("MGL SECURITY ERROR: Texture subimage allocation would overflow: %dx%dx%dx%zu\n", width, height, depth, pixel_size);
         STATE(error) = GL_OUT_OF_MEMORY;
         return;
     }
@@ -2191,49 +2189,49 @@ void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoff
 void mglCompressedTexImage3D(GLMContext ctx, GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const void *data)
 {
     // Stub - compressed textures not fully supported yet
-    fprintf(stderr, "MGL WARNING: glCompressedTexImage3D called (stub) - compressed textures not supported\n");
+    MGL_ERR("MGL WARNING: glCompressedTexImage3D called (stub) - compressed textures not supported\n");
 }
 
 void mglCompressedTexImage2D(GLMContext ctx, GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data)
 {
     // Stub - compressed textures not fully supported yet
-    fprintf(stderr, "MGL WARNING: glCompressedTexImage2D called (stub) - compressed textures not supported\n");
+    MGL_ERR("MGL WARNING: glCompressedTexImage2D called (stub) - compressed textures not supported\n");
 }
 
 void mglCompressedTexImage1D(GLMContext ctx, GLenum target, GLint level, GLenum internalformat, GLsizei width, GLint border, GLsizei imageSize, const void *data)
 {
     // Stub - compressed textures not fully supported yet
-    fprintf(stderr, "MGL WARNING: glCompressedTexImage1D called (stub) - compressed textures not supported\n");
+    MGL_ERR("MGL WARNING: glCompressedTexImage1D called (stub) - compressed textures not supported\n");
 }
 
 void mglCompressedTexSubImage3D(GLMContext ctx, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data)
 {
     // Stub - compressed textures not fully supported yet
-    fprintf(stderr, "MGL WARNING: glCompressedTexSubImage3D called (stub) - compressed textures not supported\n");
+    MGL_ERR("MGL WARNING: glCompressedTexSubImage3D called (stub) - compressed textures not supported\n");
 }
 
 void mglCompressedTexSubImage2D(GLMContext ctx, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data)
 {
     // Stub - compressed textures not fully supported yet
-    fprintf(stderr, "MGL WARNING: glCompressedTexSubImage2D called (stub) - compressed textures not supported\n");
+    MGL_ERR("MGL WARNING: glCompressedTexSubImage2D called (stub) - compressed textures not supported\n");
 }
 
 void mglCompressedTexSubImage1D(GLMContext ctx, GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void *data)
 {
     // Stub - compressed textures not fully supported yet
-    fprintf(stderr, "MGL WARNING: glCompressedTexSubImage1D called (stub) - compressed textures not supported\n");
+    MGL_ERR("MGL WARNING: glCompressedTexSubImage1D called (stub) - compressed textures not supported\n");
 }
 
 #pragma mark copy tex
 void mglCopyTexImage1D(GLMContext ctx, GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border)
 {
     // Stub - not commonly used
-    fprintf(stderr, "MGL WARNING: glCopyTexImage1D called (stub)\n");
+    MGL_ERR("MGL WARNING: glCopyTexImage1D called (stub)\n");
 }
 
 void mglCopyTexImage2D(GLMContext ctx, GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border)
 {
-    fprintf(stderr, "MGL: glCopyTexImage2D called - target=0x%x level=%d %dx%d\n", target, level, width, height);
+    MGL_INFO("MGL: glCopyTexImage2D called - target=0x%x level=%d %dx%d\n", target, level, width, height);
     
     // Get or create texture
     Texture *tex = getTex(ctx, 0, target);
@@ -2252,19 +2250,19 @@ void mglCopyTexImage2D(GLMContext ctx, GLenum target, GLint level, GLenum intern
 
 void mglCopyTexSubImage1D(GLMContext ctx, GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width)
 {
-    fprintf(stderr, "MGL: glCopyTexSubImage1D called (stub)\n");
+    MGL_INFO("MGL: glCopyTexSubImage1D called (stub)\n");
     // Stub - 1D textures rarely used
 }
 
 void mglCopyTexSubImage2D(GLMContext ctx, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    fprintf(stderr, "MGL: glCopyTexSubImage2D called - target=0x%x %dx%d at (%d,%d) from (%d,%d)\n",
+    MGL_INFO("MGL: glCopyTexSubImage2D called - target=0x%x %dx%d at (%d,%d) from (%d,%d)\n",
             target, width, height, xoffset, yoffset, x, y);
     
     // Get the bound texture
     Texture *tex = getTex(ctx, 0, target);
     if (!tex) {
-        fprintf(stderr, "MGL ERROR: glCopyTexSubImage2D - no texture bound\n");
+        MGL_ERR("MGL ERROR: glCopyTexSubImage2D - no texture bound\n");
         return;
     }
     
@@ -2275,7 +2273,7 @@ void mglCopyTexSubImage2D(GLMContext ctx, GLenum target, GLint level, GLint xoff
 
 void mglCopyTexSubImage3D(GLMContext ctx, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    fprintf(stderr, "MGL: glCopyTexSubImage3D called - stub, only 2D copy supported\n");
+    MGL_INFO("MGL: glCopyTexSubImage3D called - stub, only 2D copy supported\n");
     // For now just do 2D copy, ignoring zoffset
     Texture *tex = getTex(ctx, 0, target);
     if (tex) {
@@ -2285,12 +2283,12 @@ void mglCopyTexSubImage3D(GLMContext ctx, GLenum target, GLint level, GLint xoff
 
 void mglCopyTextureSubImage1D(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width)
 {
-    fprintf(stderr, "MGL: glCopyTextureSubImage1D called (stub)\n");
+    MGL_INFO("MGL: glCopyTextureSubImage1D called (stub)\n");
 }
 
 void mglCopyTextureSubImage2D(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    fprintf(stderr, "MGL: glCopyTextureSubImage2D called - texture=%u %dx%d\n", texture, width, height);
+    MGL_INFO("MGL: glCopyTextureSubImage2D called - texture=%u %dx%d\n", texture, width, height);
     Texture *tex = getTex(ctx, texture, 0);
     if (tex) {
         ctx->mtl_funcs.mtlCopyTexSubImage(ctx, tex, level, xoffset, yoffset, x, y, width, height);
@@ -2299,7 +2297,7 @@ void mglCopyTextureSubImage2D(GLMContext ctx, GLuint texture, GLint level, GLint
 
 void mglCopyTextureSubImage3D(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    fprintf(stderr, "MGL: glCopyTextureSubImage3D called (stub)\n");
+    MGL_INFO("MGL: glCopyTextureSubImage3D called (stub)\n");
     Texture *tex = getTex(ctx, texture, 0);
     if (tex) {
         ctx->mtl_funcs.mtlCopyTexSubImage(ctx, tex, level, xoffset, yoffset, x, y, width, height);
@@ -2310,22 +2308,22 @@ void mglCopyTextureSubImage3D(GLMContext ctx, GLuint texture, GLint level, GLint
 
 void mglGetTexImage(GLMContext ctx, GLenum target, GLint level, GLenum format, GLenum type, void *pixels)
 {
-    fprintf(stderr, "MGL: glGetTexImage called - target=0x%x level=%d format=0x%x type=0x%x\n",
+    MGL_INFO("MGL: glGetTexImage called - target=0x%x level=%d format=0x%x type=0x%x\n",
             target, level, format, type);
     
     Texture *tex = getTex(ctx, 0, target);
     if (!tex) {
-        fprintf(stderr, "MGL ERROR: glGetTexImage - no texture bound\n");
+        MGL_ERR("MGL ERROR: glGetTexImage - no texture bound\n");
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
     
     if (!tex->mtl_data) {
-        fprintf(stderr, "MGL ERROR: glGetTexImage - texture has no Metal data\n");
+        MGL_ERR("MGL ERROR: glGetTexImage - texture has no Metal data\n");
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
     
     if (level >= tex->num_levels) {
-        fprintf(stderr, "MGL ERROR: glGetTexImage - invalid level %d (max %d)\n", level, tex->num_levels);
+        MGL_ERR("MGL ERROR: glGetTexImage - invalid level %d (max %d)\n", level, tex->num_levels);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
     
@@ -2340,7 +2338,7 @@ void mglGetTexImage(GLMContext ctx, GLenum target, GLint level, GLenum format, G
     GLuint bytesPerRow = width * pixel_size;
     GLuint bytesPerImage = bytesPerRow * height;
     
-    fprintf(stderr, "MGL: glGetTexImage - reading %dx%d, bytesPerRow=%u\n", width, height, bytesPerRow);
+    MGL_INFO("MGL: glGetTexImage - reading %dx%d, bytesPerRow=%u\n", width, height, bytesPerRow);
     
     // Use the Metal function to read the texture
     ctx->mtl_funcs.mtlGetTexImage(ctx, tex, pixels, bytesPerRow, format, type, 0, 0, width, height, level, 0);
@@ -2348,7 +2346,7 @@ void mglGetTexImage(GLMContext ctx, GLenum target, GLint level, GLenum format, G
 
 void mglGetTextureImage(GLMContext ctx, GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void *pixels)
 {
-    fprintf(stderr, "MGL: glGetTextureImage called - texture=%u level=%d\n", texture, level);
+    MGL_INFO("MGL: glGetTextureImage called - texture=%u level=%d\n", texture, level);
     
     Texture *tex = getTex(ctx, texture, 0);
     if (!tex) {
@@ -2377,7 +2375,7 @@ void mglGetTextureImage(GLMContext ctx, GLuint texture, GLint level, GLenum form
 
 void mglGetTextureSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, GLsizei bufSize, void *pixels)
 {
-    fprintf(stderr, "MGL: glGetTextureSubImage called - texture=%u\n", texture);
+    MGL_INFO("MGL: glGetTextureSubImage called - texture=%u\n", texture);
     
     Texture *tex = getTex(ctx, texture, 0);
     if (!tex || !tex->mtl_data) {
@@ -2393,52 +2391,52 @@ void mglGetTextureSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xo
 
 void mglGetCompressedTexImage(GLMContext ctx, GLenum target, GLint level, void *img)
 {
-    fprintf(stderr, "MGL WARNING: glGetCompressedTexImage called (stub) - compressed textures not supported\n");
+    MGL_ERR("MGL WARNING: glGetCompressedTexImage called (stub) - compressed textures not supported\n");
 }
 
 void mglGetnCompressedTexImage(GLMContext ctx, GLenum target, GLint lod, GLsizei bufSize, void *pixels)
 {
-    fprintf(stderr, "MGL WARNING: glGetnCompressedTexImage called (stub) - compressed textures not supported\n");
+    MGL_ERR("MGL WARNING: glGetnCompressedTexImage called (stub) - compressed textures not supported\n");
 }
 
 void mglGetCompressedTextureSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLsizei bufSize, void *pixels)
 {
-    fprintf(stderr, "MGL WARNING: glGetCompressedTextureSubImage called (stub) - compressed textures not supported\n");
+    MGL_ERR("MGL WARNING: glGetCompressedTextureSubImage called (stub) - compressed textures not supported\n");
 }
 
 void mglTextureView(GLMContext ctx, GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat, GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers)
 {
-    fprintf(stderr, "MGL WARNING: glTextureView called (stub) - texture views not supported\n");
+    MGL_ERR("MGL WARNING: glTextureView called (stub) - texture views not supported\n");
 }
 
 void mglTextureBuffer(GLMContext ctx, GLuint texture, GLenum internalformat, GLuint buffer)
 {
-    fprintf(stderr, "MGL WARNING: glTextureBuffer called (stub)\n");
+    MGL_ERR("MGL WARNING: glTextureBuffer called (stub)\n");
 }
 
 void mglTextureBufferRange(GLMContext ctx, GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size)
 {
-    fprintf(stderr, "MGL WARNING: glTextureBufferRange called (stub)\n");
+    MGL_ERR("MGL WARNING: glTextureBufferRange called (stub)\n");
 }
 
 void mglCompressedTextureSubImage1D(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void *data)
 {
-    fprintf(stderr, "MGL WARNING: glCompressedTextureSubImage1D called (stub)\n");
+    MGL_ERR("MGL WARNING: glCompressedTextureSubImage1D called (stub)\n");
 }
 
 void mglCompressedTextureSubImage2D(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data)
 {
-    fprintf(stderr, "MGL WARNING: glCompressedTextureSubImage2D called (stub)\n");
+    MGL_ERR("MGL WARNING: glCompressedTextureSubImage2D called (stub)\n");
 }
 
 void mglCompressedTextureSubImage3D(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data)
 {
-    fprintf(stderr, "MGL WARNING: glCompressedTextureSubImage3D called (stub)\n");
+    MGL_ERR("MGL WARNING: glCompressedTextureSubImage3D called (stub)\n");
 }
 
 void mglGetCompressedTextureImage(GLMContext ctx, GLuint texture, GLint level, GLsizei bufSize, void *pixels)
 {
-    fprintf(stderr, "MGL WARNING: glGetCompressedTextureImage called (stub)\n");
+    MGL_ERR("MGL WARNING: glGetCompressedTextureImage called (stub)\n");
 }
 
 void mglGetTextureLevelParameteriv(GLMContext ctx, GLuint texture, GLint level, GLenum pname, GLint *params)
@@ -2469,7 +2467,7 @@ void mglGetTextureLevelParameteriv(GLMContext ctx, GLuint texture, GLint level, 
             *params = tex->internalformat;
             break;
         default:
-            fprintf(stderr, "MGL: glGetTextureLevelParameteriv pname=0x%x not implemented\n", pname);
+            MGL_INFO("MGL: glGetTextureLevelParameteriv pname=0x%x not implemented\n", pname);
             *params = 0;
             break;
     }
@@ -2484,43 +2482,43 @@ void mglGetTextureLevelParameterfv(GLMContext ctx, GLuint texture, GLint level, 
 
 void mglGetTextureParameterfv(GLMContext ctx, GLuint texture, GLenum pname, GLfloat *params)
 {
-    fprintf(stderr, "MGL: glGetTextureParameterfv called (stub) pname=0x%x\n", pname);
+    MGL_INFO("MGL: glGetTextureParameterfv called (stub) pname=0x%x\n", pname);
     *params = 0.0f;
 }
 
 void mglGetTextureParameterIiv(GLMContext ctx, GLuint texture, GLenum pname, GLint *params)
 {
-    fprintf(stderr, "MGL: glGetTextureParameterIiv called (stub) pname=0x%x\n", pname);
+    MGL_INFO("MGL: glGetTextureParameterIiv called (stub) pname=0x%x\n", pname);
     *params = 0;
 }
 
 void mglGetTextureParameterIuiv(GLMContext ctx, GLuint texture, GLenum pname, GLuint *params)
 {
-    fprintf(stderr, "MGL: glGetTextureParameterIuiv called (stub) pname=0x%x\n", pname);
+    MGL_INFO("MGL: glGetTextureParameterIuiv called (stub) pname=0x%x\n", pname);
     *params = 0;
 }
 
 void mglGetTextureParameteriv(GLMContext ctx, GLuint texture, GLenum pname, GLint *params)
 {
-    fprintf(stderr, "MGL: glGetTextureParameteriv called (stub) pname=0x%x\n", pname);
+    MGL_INFO("MGL: glGetTextureParameteriv called (stub) pname=0x%x\n", pname);
     *params = 0;
 }
 
 void mglGetTexParameterIiv(GLMContext ctx, GLenum target, GLenum pname, GLint *params)
 {
-    fprintf(stderr, "MGL: glGetTexParameterIiv called (stub) pname=0x%x\n", pname);
+    MGL_INFO("MGL: glGetTexParameterIiv called (stub) pname=0x%x\n", pname);
     *params = 0;
 }
 
 void mglGetTexParameterIuiv(GLMContext ctx, GLenum target, GLenum pname, GLuint *params)
 {
-    fprintf(stderr, "MGL: glGetTexParameterIuiv called (stub) pname=0x%x\n", pname);
+    MGL_INFO("MGL: glGetTexParameterIuiv called (stub) pname=0x%x\n", pname);
     *params = 0;
 }
 
 void mglSampleCoverage(GLMContext ctx, GLfloat value, GLboolean invert)
 {
     // Stub - sample coverage is a hint for multisampling
-    fprintf(stderr, "MGL: glSampleCoverage called (stub) value=%f invert=%d\n", value, invert);
+    MGL_INFO("MGL: glSampleCoverage called (stub) value=%f invert=%d\n", value, invert);
 }
 

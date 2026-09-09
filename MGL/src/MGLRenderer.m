@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #import "MGLRenderer.h"
 #import "glm_context.h"
+#import "mgl_log.h"
 #import "pixel_convert.h"
 
 #define TRACE_FUNCTION()    DEBUG_PRINT("%s\n", __FUNCTION__);
@@ -74,18 +75,18 @@ enum {
 // CRITICAL SECURITY: Safe Metal object validation helper
 static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const char *objectName) {
     if (!ptr) {
-        NSLog(@"MGL SECURITY ERROR: NULL pointer for %s", objectName);
+        MGL_NSERR(@"MGL SECURITY ERROR: NULL pointer for %s", objectName);
         return nil;
     }
 
     id<NSObject> obj = (__bridge id<NSObject>)(ptr);
     if (!obj) {
-        NSLog(@"MGL SECURITY ERROR: Metal bridge cast returned nil for %s", objectName);
+        MGL_NSERR(@"MGL SECURITY ERROR: Metal bridge cast returned nil for %s", objectName);
         return nil;
     }
 
     if (expectedClass && [obj isKindOfClass:expectedClass] == NO) {
-        NSLog(@"MGL SECURITY ERROR: Metal object is not valid %s (got %@)", objectName, NSStringFromClass([obj class]));
+        MGL_NSERR(@"MGL SECURITY ERROR: Metal object is not valid %s (got %@)", objectName, NSStringFromClass([obj class]));
         return nil;
     }
 
@@ -146,9 +147,7 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     GLsizei _currentSyncName;
 }
 
-// aligned_alloc on macOS wants an alignment of at least sizeof(void*) and a size
-// that is a whole number of alignments; the format alignments here are often 4,
-// which silently fails. Wrap it so callers get memory instead of NULL.
+// aligned_alloc needs alignment >= sizeof(void*) and a size that's a multiple of it
 static void *mgl_aligned_alloc(size_t alignment, size_t size)
 {
     size_t a = alignment < sizeof(void *) ? sizeof(void *) : alignment;
@@ -479,10 +478,7 @@ void logDirtyBits(GLMContext ctx)
                 GLuint spirv_binding;
                 Buffer *buf;
 
-                // Plain uniforms carry a layout location, not a binding, and
-                // SPIRV-Cross numbers them per stage in declaration order. The
-                // slot they end up in here is the array position, so only the
-                // GL-side lookup needs the location.
+                // plain uniforms are keyed by layout location, not binding
                 if (spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT)
                     spirv_binding = [self getProgramLocation:stage type:spvc_type index: i];
                 else
@@ -526,7 +522,7 @@ void logDirtyBits(GLMContext ctx)
         vao_buffer_start = buffer_map->count;
         // CRITICAL SECURITY FIX: Check array bounds instead of using assert()
         if (buffer_map->count >= ctx->state.max_vertex_attribs) {
-            NSLog(@"MGL SECURITY ERROR: buffer_map count %d exceeds max_vertex_attribs %d",
+            MGL_NSERR(@"MGL SECURITY ERROR: buffer_map count %d exceeds max_vertex_attribs %d",
                   buffer_map->count, ctx->state.max_vertex_attribs);
             return false;
         }
@@ -542,7 +538,7 @@ void logDirtyBits(GLMContext ctx)
             {
                 // CRITICAL SECURITY FIX: Check buffer instead of using assert()
                 if (!VAO_ATTRIB_STATE(att).buffer) {
-                    NSLog(@"MGL SECURITY ERROR: NULL buffer for enabled vertex attribute %d", att);
+                    MGL_NSERR(@"MGL SECURITY ERROR: NULL buffer for enabled vertex attribute %d", att);
                     return false;
                 }
 
@@ -663,7 +659,7 @@ void logDirtyBits(GLMContext ctx)
         // CRITICAL SECURITY FIX: Safe Metal buffer validation
         id<MTLBuffer> buffer = (id<MTLBuffer>)SafeMetalBridge(ptr->data.mtl_data, objc_getClass("MTLBuffer"), "MTLBuffer");
         if (!buffer) {
-            NSLog(@"MGL SECURITY ERROR: Failed to validate Metal buffer (buffer %u)", ptr->name);
+            MGL_NSERR(@"MGL SECURITY ERROR: Failed to validate Metal buffer (buffer %u)", ptr->name);
             return false;
         }
 
@@ -686,7 +682,7 @@ void logDirtyBits(GLMContext ctx)
     else
     {
         // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
     }
 
@@ -825,7 +821,7 @@ void logDirtyBits(GLMContext ctx)
     }
 
     // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return 0;
 }
 
@@ -844,7 +840,7 @@ void logDirtyBits(GLMContext ctx)
         case GL_BLUE: channel_r = MTLTextureSwizzleBlue; break;
         case GL_ALPHA: channel_r = MTLTextureSwizzleAlpha; break;
         default: // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
             channel_r = MTLTextureSwizzleRed; // Safe default
             break;
     }
@@ -856,7 +852,7 @@ void logDirtyBits(GLMContext ctx)
         case GL_BLUE: channel_g = MTLTextureSwizzleBlue; break;
         case GL_ALPHA: channel_g = MTLTextureSwizzleAlpha; break;
         default: // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
             channel_g = MTLTextureSwizzleGreen; // Safe default
             break;
     }
@@ -868,7 +864,7 @@ void logDirtyBits(GLMContext ctx)
         case GL_BLUE: channel_b = MTLTextureSwizzleBlue; break;
         case GL_ALPHA: channel_b = MTLTextureSwizzleAlpha; break;
         default: // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
             channel_b = MTLTextureSwizzleBlue; // Safe default
             break;
     }
@@ -880,7 +876,7 @@ void logDirtyBits(GLMContext ctx)
         case GL_BLUE: channel_a = MTLTextureSwizzleBlue; break;
         case GL_ALPHA: channel_a = MTLTextureSwizzleAlpha; break;
         default: // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
             channel_a = MTLTextureSwizzleAlpha; // Safe default
             break;
     }
@@ -892,13 +888,13 @@ void logDirtyBits(GLMContext ctx)
 {
     // PROPER FIX: Enhanced pre-creation validation to prevent AGX driver issues
     if (!_device || !_commandQueue) {
-        NSLog(@"MGL ERROR: Metal device or command queue not available for texture creation");
+        MGL_NSERR(@"MGL ERROR: Metal device or command queue not available for texture creation");
         return nil;
     }
 
     // Check if we're in a recovery state that would make texture creation futile
     if ([self shouldSkipGPUOperations]) {
-        NSLog(@"MGL AGX: GPU operations temporarily suspended during recovery");
+        MGL_NSINFO(@"MGL AGX: GPU operations temporarily suspended during recovery");
         return nil;
     }
 
@@ -940,7 +936,7 @@ void logDirtyBits(GLMContext ctx)
 
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
             break;
     }
@@ -980,7 +976,7 @@ void logDirtyBits(GLMContext ctx)
     {
         // not sure how we got here
         // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
         return NULL;
     }
@@ -989,7 +985,7 @@ void logDirtyBits(GLMContext ctx)
     // PROPER FIX: Get original texture format and validate for AGX compatibility
     pixelFormat = mtlPixelFormatForGLTex(tex);
 
-    NSLog(@"MGL INFO: PROPER FIX - Original texture format: internal=0x%x, mtl=0x%lx", tex->internalformat, (unsigned long)pixelFormat);
+    MGL_NSINFO(@"MGL INFO: PROPER FIX - Original texture format: internal=0x%x, mtl=0x%lx", tex->internalformat, (unsigned long)pixelFormat);
 
     // Validate format compatibility with AGX, but preserve original intent
     BOOL needsFormatConversion = NO;
@@ -1027,10 +1023,10 @@ void logDirtyBits(GLMContext ctx)
     }
 
     if (needsFormatConversion) {
-        NSLog(@"MGL INFO: PROPER FIX - Converting AGX-incompatible format 0x%lx to RGBA8", (unsigned long)originalFormat);
+        MGL_NSINFO(@"MGL INFO: PROPER FIX - Converting AGX-incompatible format 0x%lx to RGBA8", (unsigned long)originalFormat);
         tex->internalformat = GL_RGBA8;
     } else {
-        NSLog(@"MGL INFO: PROPER FIX - Using original format 0x%lx (AGX compatible)", (unsigned long)pixelFormat);
+        MGL_NSINFO(@"MGL INFO: PROPER FIX - Using original format 0x%lx (AGX compatible)", (unsigned long)pixelFormat);
     }
 
     width = tex->width;
@@ -1075,7 +1071,7 @@ void logDirtyBits(GLMContext ctx)
             tex_desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite; break;
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
             break;
     }
@@ -1087,7 +1083,7 @@ void logDirtyBits(GLMContext ctx)
 
     // CRITICAL FIX: Proper validation instead of assertions
     if (!tex_desc) {
-        NSLog(@"MGL ERROR: Failed to create texture descriptor");
+        MGL_NSERR(@"MGL ERROR: Failed to create texture descriptor");
         return NULL;
     }
 
@@ -1102,21 +1098,21 @@ void logDirtyBits(GLMContext ctx)
     @try {
         texture = [_device newTextureWithDescriptor:tex_desc];
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: Exception creating texture: %@", exception);
+        MGL_NSERR(@"MGL ERROR: Exception creating texture: %@", exception);
         [self recordGPUError];
         return NULL;
     }
 
     // CRITICAL FIX: Validate texture creation result instead of asserting
     if (!texture) {
-        NSLog(@"MGL ERROR: Failed to create Metal texture with descriptor");
+        MGL_NSERR(@"MGL ERROR: Failed to create Metal texture with descriptor");
         return NULL;
     }
 
     if (tex->dirty_bits & DIRTY_TEXTURE_DATA)
     {
-        NSLog(@"MGL DEBUG: DIRTY_TEXTURE_DATA detected - attempting texture filling");
-        NSLog(@"MGL DEBUG: Texture details: target=0x%x, internalformat=0x%x, levels=%d",
+        MGL_NSDEBUG(@"MGL DEBUG: DIRTY_TEXTURE_DATA detected - attempting texture filling");
+        MGL_NSDEBUG(@"MGL DEBUG: Texture details: target=0x%x, internalformat=0x%x, levels=%d",
               tex->target, tex->internalformat, tex->num_levels);
 
         MTLRegion region;
@@ -1149,7 +1145,7 @@ void logDirtyBits(GLMContext ctx)
 
                     // NUCLEAR OPTION: Disable all texture uploads temporarily to isolate the crash source
                     if (tex->faces[face].levels[level].data && bytesPerRow > 0 && bytesPerImage > 0) {
-                        NSLog(@"MGL INFO: PROPER FIX - Processing 3D texture upload (tex=%d, face=%d, level=%d, size=%lu)", tex->name, face, level, (unsigned long)bytesPerImage);
+                        MGL_NSINFO(@"MGL INFO: PROPER FIX - Processing 3D texture upload (tex=%d, face=%d, level=%d, size=%lu)", tex->name, face, level, (unsigned long)bytesPerImage);
 
                         // PROPER FIX: Enable texture uploads but with safety checks
                         // continue; // Remove the continue to re-enable uploads
@@ -1188,49 +1184,49 @@ void logDirtyBits(GLMContext ctx)
 
                                 // CRITICAL SECURITY FIX: Validate alignedData before passing to Metal API
                                 if (!alignedData) {
-                                    NSLog(@"MGL SECURITY ERROR: NULL alignedData passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
+                                    MGL_NSERR(@"MGL SECURITY ERROR: NULL alignedData passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
                                     continue;
                                 }
                                 if (alignedBytesPerRow == 0) {
-                                    NSLog(@"MGL SECURITY ERROR: Invalid alignedBytesPerRow (0) passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
+                                    MGL_NSERR(@"MGL SECURITY ERROR: Invalid alignedBytesPerRow (0) passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
                                     continue;
                                 }
                                 @try {
                                     // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                    NSLog(@"MGL CRITICAL: Disabled replaceRegion call (level %d) - prevents AGX driver crash", level);
+                                    MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d) - prevents AGX driver crash", level);
                                     // [texture replaceRegion:region mipmapLevel:level slice:0 withBytes:alignedData bytesPerRow:alignedBytesPerRow bytesPerImage:bytesPerImage];
                                 } @catch (NSException *exception) {
-                                    NSLog(@"MGL ERROR: Failed to upload aligned 3D texture data (level %d, face %d): %@", level, face, exception);
+                                    MGL_NSERR(@"MGL ERROR: Failed to upload aligned 3D texture data (level %d, face %d): %@", level, face, exception);
                                 }
                                 free(alignedData);
                             } else {
-                                NSLog(@"MGL ERROR: Failed to allocate aligned memory for 3D texture upload");
+                                MGL_NSERR(@"MGL ERROR: Failed to allocate aligned memory for 3D texture upload");
                             }
                         } else {
                             // Data and bytesPerRow are already aligned
                             // CRITICAL SECURITY FIX: Validate srcData and parameters before passing to Metal API
                             if (!srcData) {
-                                NSLog(@"MGL SECURITY ERROR: NULL srcData passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
+                                MGL_NSERR(@"MGL SECURITY ERROR: NULL srcData passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
                                 continue;
                             }
                             if (bytesPerRow == 0) {
-                                NSLog(@"MGL SECURITY ERROR: Invalid bytesPerRow (0) passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
+                                MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerRow (0) passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
                                 continue;
                             }
                             if (bytesPerImage == 0) {
-                                NSLog(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
+                                MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d) - SKIPPING to prevent crash", level);
                                 continue;
                             }
                             @try {
                                 // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                NSLog(@"MGL CRITICAL: Disabled replaceRegion call (level %d) - prevents AGX driver crash", level);
+                                MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d) - prevents AGX driver crash", level);
                                 // [texture replaceRegion:region mipmapLevel:level slice:0 withBytes:srcData bytesPerRow:bytesPerRow bytesPerImage:bytesPerImage];
                             } @catch (NSException *exception) {
-                                NSLog(@"MGL ERROR: Failed to upload 3D texture data (level %d, face %d): %@", level, face, exception);
+                                MGL_NSERR(@"MGL ERROR: Failed to upload 3D texture data (level %d, face %d): %@", level, face, exception);
                             }
                         }
                     } else {
-                        NSLog(@"MGL WARNING: Skipping 3D texture upload due to invalid data or parameters");
+                        MGL_NSERR(@"MGL WARNING: Skipping 3D texture upload due to invalid data or parameters");
                     }
                 }
                 else
@@ -1258,7 +1254,7 @@ void logDirtyBits(GLMContext ctx)
                             region = MTLRegionMake2D(0,0,width,1);
                         else // ?
                             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
 
                         for(int layer=0; layer<num_layers; layer++)
@@ -1270,7 +1266,7 @@ void logDirtyBits(GLMContext ctx)
 
                             // NUCLEAR OPTION: Disable all texture uploads temporarily to isolate the crash source
                             if (tex_data && bytesPerRow > 0 && bytesPerImage > 0) {
-                                NSLog(@"MGL INFO: PROPER FIX - Processing array texture upload (tex=%d, face=%d, level=%d, layer=%d, size=%lu)", tex->name, face, level, layer, (unsigned long)bytesPerImage);
+                                MGL_NSINFO(@"MGL INFO: PROPER FIX - Processing array texture upload (tex=%d, face=%d, level=%d, layer=%d, size=%lu)", tex->name, face, level, layer, (unsigned long)bytesPerImage);
 
                                 // PROPER FIX: Enable texture uploads but with safety checks
                                 // continue; // Remove the continue to re-enable uploads
@@ -1309,53 +1305,53 @@ void logDirtyBits(GLMContext ctx)
 
                                         // CRITICAL SECURITY FIX: Validate alignedData before passing to Metal API
                                         if (!alignedData) {
-                                            NSLog(@"MGL SECURITY ERROR: NULL alignedData passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
+                                            MGL_NSERR(@"MGL SECURITY ERROR: NULL alignedData passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
                                             continue;
                                         }
                                         if (alignedBytesPerRow == 0) {
-                                            NSLog(@"MGL SECURITY ERROR: Invalid alignedBytesPerRow (0) passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
+                                            MGL_NSERR(@"MGL SECURITY ERROR: Invalid alignedBytesPerRow (0) passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
                                             continue;
                                         }
                                         if (bytesPerImage == 0) {
-                                            NSLog(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
+                                            MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
                                             continue;
                                         }
                                         @try {
                                             // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                            NSLog(@"MGL CRITICAL: Disabled replaceRegion call (level %d, layer %d) - prevents AGX driver crash", level, layer);
+                                            MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d, layer %d) - prevents AGX driver crash", level, layer);
                                             // [texture replaceRegion:region mipmapLevel:level slice:layer withBytes:alignedData bytesPerRow:alignedBytesPerRow bytesPerImage:(NSUInteger)bytesPerImage];
                                         } @catch (NSException *exception) {
-                                            NSLog(@"MGL ERROR: Failed to upload aligned array texture data (level %d, layer %d): %@", level, layer, exception);
+                                            MGL_NSERR(@"MGL ERROR: Failed to upload aligned array texture data (level %d, layer %d): %@", level, layer, exception);
                                         }
                                         free(alignedData);
                                     } else {
-                                        NSLog(@"MGL ERROR: Failed to allocate aligned memory for array texture upload (level %d, layer %d)", level, layer);
+                                        MGL_NSERR(@"MGL ERROR: Failed to allocate aligned memory for array texture upload (level %d, layer %d)", level, layer);
                                     }
                                 } else {
                                     // Data and bytesPerRow are already aligned
                                     // CRITICAL SECURITY FIX: Validate srcData before passing to Metal API
                                     if (!srcData) {
-                                        NSLog(@"MGL SECURITY ERROR: NULL srcData passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
+                                        MGL_NSERR(@"MGL SECURITY ERROR: NULL srcData passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
                                         continue;
                                     }
                                     if (bytesPerRow == 0) {
-                                        NSLog(@"MGL SECURITY ERROR: Invalid bytesPerRow (0) passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
+                                        MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerRow (0) passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
                                         continue;
                                     }
                                     if (bytesPerImage == 0) {
-                                        NSLog(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
+                                        MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
                                         continue;
                                     }
                                     // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                        NSLog(@"MGL CRITICAL: Disabled replaceRegion call (level %d, layer %d) - prevents AGX driver crash", level, layer);
+                                        MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d, layer %d) - prevents AGX driver crash", level, layer);
                                         // @try {
                                         //     [texture replaceRegion:region mipmapLevel:level slice:layer withBytes:srcData bytesPerRow:bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage];
                                         // } @catch (NSException *exception) {
-                                        //     NSLog(@"MGL ERROR: Failed to upload array texture data (level %d, layer %d): %@", level, layer, exception);
+                                        //     MGL_NSERR(@"MGL ERROR: Failed to upload array texture data (level %d, layer %d): %@", level, layer, exception);
                                         // }
                                 }
                             } else {
-                                NSLog(@"MGL WARNING: Skipping array texture upload due to invalid data or parameters");
+                                MGL_NSERR(@"MGL WARNING: Skipping array texture upload due to invalid data or parameters");
                             }
                         }
                     }
@@ -1365,7 +1361,7 @@ void logDirtyBits(GLMContext ctx)
 
                         // PROPER FIX: Enable 2D texture uploads with AGX safety and alignment
                         if (tex->faces[face].levels[level].data && bytesPerRow > 0 && bytesPerImage > 0) {
-                            NSLog(@"MGL INFO: PROPER FIX - Processing 2D texture upload (tex=%d, face=%d, level=%d, size=%lu)", tex->name, face, level, (unsigned long)bytesPerImage);
+                            MGL_NSINFO(@"MGL INFO: PROPER FIX - Processing 2D texture upload (tex=%d, face=%d, level=%d, size=%lu)", tex->name, face, level, (unsigned long)bytesPerImage);
 
                             // Ensure memory is aligned for AGX compression (256-byte requirement)
                             void *srcData = (void *)tex->faces[face].levels[level].data;
@@ -1402,56 +1398,56 @@ void logDirtyBits(GLMContext ctx)
 
                                     // CRITICAL SECURITY FIX: Validate alignedData and parameters before passing to Metal API
                                     if (!alignedData) {
-                                        NSLog(@"MGL SECURITY ERROR: NULL alignedData passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
+                                        MGL_NSERR(@"MGL SECURITY ERROR: NULL alignedData passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
                                         free(alignedData);
                                         continue;
                                     }
                                     if (alignedBytesPerRow == 0) {
-                                        NSLog(@"MGL SECURITY ERROR: Invalid alignedBytesPerRow (0) passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
+                                        MGL_NSERR(@"MGL SECURITY ERROR: Invalid alignedBytesPerRow (0) passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
                                         free(alignedData);
                                         continue;
                                     }
                                     if (bytesPerImage == 0) {
-                                        NSLog(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
+                                        MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
                                         free(alignedData);
                                         continue;
                                     }
                                     // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                    NSLog(@"MGL CRITICAL: Disabled replaceRegion call (level %d, face %d) - prevents AGX driver crash", level, face);
+                                    MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d, face %d) - prevents AGX driver crash", level, face);
                                     // @try {
                                     //     [texture replaceRegion:region mipmapLevel:level slice:face withBytes:alignedData bytesPerRow:alignedBytesPerRow bytesPerImage:(NSUInteger)bytesPerImage];
                                     // } @catch (NSException *exception) {
-                                    //     NSLog(@"MGL ERROR: Failed to upload aligned 2D texture data (level %d, face %d): %@", level, face, exception);
+                                    //     MGL_NSERR(@"MGL ERROR: Failed to upload aligned 2D texture data (level %d, face %d): %@", level, face, exception);
                                     // }
                                     free(alignedData);
                                 } else {
-                                    NSLog(@"MGL ERROR: Failed to allocate aligned memory for 2D texture upload (level %d, face %d)", level, face);
+                                    MGL_NSERR(@"MGL ERROR: Failed to allocate aligned memory for 2D texture upload (level %d, face %d)", level, face);
                                 }
                             } else {
                                 // Data and bytesPerRow are already aligned
                                 // CRITICAL SECURITY FIX: Validate srcData before passing to Metal API
                                 if (!srcData) {
-                                    NSLog(@"MGL SECURITY ERROR: NULL srcData passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
+                                    MGL_NSERR(@"MGL SECURITY ERROR: NULL srcData passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
                                     continue;
                                 }
                                 if (bytesPerRow == 0) {
-                                    NSLog(@"MGL SECURITY ERROR: Invalid bytesPerRow (0) passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
+                                    MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerRow (0) passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
                                     continue;
                                 }
                                 if (bytesPerImage == 0) {
-                                    NSLog(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
+                                    MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
                                     continue;
                                 }
                                 // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                NSLog(@"MGL CRITICAL: Disabled replaceRegion call (level %d, face %d) - prevents AGX driver crash", level, face);
+                                MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d, face %d) - prevents AGX driver crash", level, face);
                                 // @try {
                                 //     [texture replaceRegion:region mipmapLevel:level slice:face withBytes:srcData bytesPerRow:bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage];
                                 // } @catch (NSException *exception) {
-                                //     NSLog(@"MGL ERROR: Failed to upload 2D texture data (level %d, face %d): %@", level, face, exception);
+                                //     MGL_NSERR(@"MGL ERROR: Failed to upload 2D texture data (level %d, face %d): %@", level, face, exception);
                                 // }
                             }
                         } else {
-                            NSLog(@"MGL WARNING: Skipping 2D texture upload due to invalid data or parameters");
+                            MGL_NSERR(@"MGL WARNING: Skipping 2D texture upload due to invalid data or parameters");
                         }
                     }
                 }
@@ -1463,10 +1459,10 @@ void logDirtyBits(GLMContext ctx)
         // PROPER FIX: Enable texture filling with AGX safety and proper memory alignment
         MTLRegion region = MTLRegionMake2D(0, 0, texture.width, texture.height);
 
-        NSLog(@"MGL INFO: PROPER FIX - Processing texture fill (tex=%d, dims=%lux%lu)", tex->name, (unsigned long)texture.width, (unsigned long)texture.height);
+        MGL_NSINFO(@"MGL INFO: PROPER FIX - Processing texture fill (tex=%d, dims=%lux%lu)", tex->name, (unsigned long)texture.width, (unsigned long)texture.height);
 
         if (texture.width == 0 || texture.height == 0 || texture.width > 16384 || texture.height > 16384) {
-            NSLog(@"MGL WARNING: Skipping texture fill due to invalid dimensions: %lux%lu", (unsigned long)texture.width, (unsigned long)texture.height);
+            MGL_NSERR(@"MGL WARNING: Skipping texture fill due to invalid dimensions: %lux%lu", (unsigned long)texture.width, (unsigned long)texture.height);
         } else {
             // Determine pixel format size to create appropriate black data
             NSUInteger bytesPerPixel = 4; // Default to RGBA
@@ -1502,7 +1498,7 @@ void logDirtyBits(GLMContext ctx)
 
             // Validate that dataSize is reasonable (not too large)
             if (dataSize > 64 * 1024 * 1024) { // 64MB limit per texture level
-                NSLog(@"MGL WARNING: Skipping texture fill due to excessive size: %lu bytes", (unsigned long)dataSize);
+                MGL_NSERR(@"MGL WARNING: Skipping texture fill due to excessive size: %lu bytes", (unsigned long)dataSize);
             } else {
                 // Allocate aligned black data and clear the texture
                 void *blackData = mgl_aligned_alloc(alignment, dataSize);
@@ -1512,26 +1508,26 @@ void logDirtyBits(GLMContext ctx)
 
                     // Multi-layer validation for all parameters
                     if (!blackData) {
-                        NSLog(@"MGL SECURITY ERROR: blackData is NULL after memset - CORRUPTION DETECTED");
+                        MGL_NSERR(@"MGL SECURITY ERROR: blackData is NULL after memset - CORRUPTION DETECTED");
                         return texture;
                     }
                     if (bytesPerRow == 0) {
-                        NSLog(@"MGL SECURITY ERROR: Invalid bytesPerRow (0) for texture fill");
+                        MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerRow (0) for texture fill");
                         free(blackData);
                         return texture;
                     }
                     if (dataSize == 0) {
-                        NSLog(@"MGL SECURITY ERROR: Invalid dataSize (0) for texture fill");
+                        MGL_NSERR(@"MGL SECURITY ERROR: Invalid dataSize (0) for texture fill");
                         free(blackData);
                         return texture;
                     }
                     if (!texture) {
-                        NSLog(@"MGL SECURITY ERROR: Metal texture is NULL");
+                        MGL_NSERR(@"MGL SECURITY ERROR: Metal texture is NULL");
                         free(blackData);
                         return texture;
                     }
                     if (texture.width == 0 || texture.height == 0) {
-                        NSLog(@"MGL SECURITY ERROR: Invalid texture dimensions %lux%lu", (unsigned long)texture.width, (unsigned long)texture.height);
+                        MGL_NSERR(@"MGL SECURITY ERROR: Invalid texture dimensions %lux%lu", (unsigned long)texture.width, (unsigned long)texture.height);
                         free(blackData);
                         return texture;
                     }
@@ -1546,34 +1542,34 @@ void logDirtyBits(GLMContext ctx)
                         }
                     }
                     if (dataCorrupted) {
-                        NSLog(@"MGL SECURITY ERROR: blackData corruption detected - memory safety issue");
+                        MGL_NSERR(@"MGL SECURITY ERROR: blackData corruption detected - memory safety issue");
                         free(blackData);
                         return texture;
                     }
 
-                    NSLog(@"MGL INFO: All validations passed for texture fill (size=%lu, bytesPerRow=%lu)", (unsigned long)dataSize, (unsigned long)bytesPerRow);
+                    MGL_NSINFO(@"MGL INFO: All validations passed for texture fill (size=%lu, bytesPerRow=%lu)", (unsigned long)dataSize, (unsigned long)bytesPerRow);
 
                     // ULTRA-DEFENSIVE: Final validation immediately before Metal API call
                     // This prevents race conditions and memory corruption between validation and use
                     if (!blackData) {
-                        NSLog(@"MGL CRITICAL ERROR: blackData became NULL before Metal call - RACE CONDITION DETECTED");
+                        MGL_NSERR(@"MGL CRITICAL ERROR: blackData became NULL before Metal call - RACE CONDITION DETECTED");
                         free(blackData);
                         return texture;
                     }
                     if (!texture) {
-                        NSLog(@"MGL CRITICAL ERROR: Metal texture became NULL before Metal call - RACE CONDITION DETECTED");
+                        MGL_NSERR(@"MGL CRITICAL ERROR: Metal texture became NULL before Metal call - RACE CONDITION DETECTED");
                         free(blackData);
                         return texture;
                     }
                     if (bytesPerRow == 0 || dataSize == 0) {
-                        NSLog(@"MGL CRITICAL ERROR: Parameters became invalid before Metal call - RACE CONDITION DETECTED");
+                        MGL_NSERR(@"MGL CRITICAL ERROR: Parameters became invalid before Metal call - RACE CONDITION DETECTED");
                         free(blackData);
                         return texture;
                     }
 
                     // Additional verification: Check if Metal texture is still valid
                     if (texture.width == 0 || texture.height == 0) {
-                        NSLog(@"MGL CRITICAL ERROR: Metal texture dimensions became invalid before Metal call");
+                        MGL_NSERR(@"MGL CRITICAL ERROR: Metal texture dimensions became invalid before Metal call");
                         free(blackData);
                         return texture;
                     }
@@ -1588,16 +1584,16 @@ void logDirtyBits(GLMContext ctx)
                         }
                     }
                     if (finalCorruption) {
-                        NSLog(@"MGL CRITICAL ERROR: Memory corruption detected immediately before Metal call");
+                        MGL_NSERR(@"MGL CRITICAL ERROR: Memory corruption detected immediately before Metal call");
                         free(blackData);
                         return texture;
                     }
 
-                    NSLog(@"MGL INFO: FIXING: Implementing proper texture filling for Apple Metal compatibility");
+                    MGL_NSINFO(@"MGL INFO: FIXING: Implementing proper texture filling for Apple Metal compatibility");
 
                     // PROPER FIX: Use Apple Metal-compatible texture filling approach
                     // The issue was using incorrect bytesPerRow and region parameters
-                    NSLog(@"MGL INFO: Implementing Metal-compliant texture fill operations");
+                    MGL_NSINFO(@"MGL INFO: Implementing Metal-compliant texture fill operations");
 
                     // Use Metal's standard pattern for texture filling
                     NSUInteger pixelSize = 4;  // RGBA = 4 bytes per pixel
@@ -1629,18 +1625,18 @@ void logDirtyBits(GLMContext ctx)
                         }
 
                         @try {
-                            NSLog(@"MGL INFO: Performing Metal-compliant texture fill:");
-                            NSLog(@"  - Region: %dx%d", (int)properRegion.size.width, (int)properRegion.size.height);
-                            NSLog(@"  - bytesPerRow: %lu", (unsigned long)properBytesPerRow);
-                            NSLog(@"  - dataSize: %lu", (unsigned long)fillSize);
+                            MGL_NSINFO(@"MGL INFO: Performing Metal-compliant texture fill:");
+                            MGL_NSDEBUG(@"  - Region: %dx%d", (int)properRegion.size.width, (int)properRegion.size.height);
+                            MGL_NSDEBUG(@"  - bytesPerRow: %lu", (unsigned long)properBytesPerRow);
+                            MGL_NSDEBUG(@"  - dataSize: %lu", (unsigned long)fillSize);
 
                             // ALTERNATIVE APPROACH: Safe texture filling without replaceRegion
-                            NSLog(@"MGL INFO: Using alternative texture filling methods (AGX-safe)");
+                            MGL_NSINFO(@"MGL INFO: Using alternative texture filling methods (AGX-safe)");
 
                             @try {
                                 // ALTERNATIVE 1: Try MTLBuffer-to-texture copy approach
                                 if (properData && dataSize > 0) {
-                                    NSLog(@"MGL INFO: Attempting buffer-based texture fill");
+                                    MGL_NSINFO(@"MGL INFO: Attempting buffer-based texture fill");
 
                                     // Create a temporary MTLBuffer with the texture data
                                     id<MTLBuffer> tempBuffer = [_device newBufferWithBytes:properData
@@ -1648,15 +1644,15 @@ void logDirtyBits(GLMContext ctx)
                                                                                    options:MTLResourceStorageModeShared];
 
                                     if (tempBuffer) {
-                                        NSLog(@"MGL INFO: Created temporary MTLBuffer for texture data");
+                                        MGL_NSINFO(@"MGL INFO: Created temporary MTLBuffer for texture data");
 
                                         // IMMEDIATE APPROACH: Use immediate command buffer for texture filling
                                     @try {
-                                        NSLog(@"MGL INFO: Creating immediate command buffer for texture fill");
+                                        MGL_NSINFO(@"MGL INFO: Creating immediate command buffer for texture fill");
 
                                         // PROPER FIX: Skip expensive texture operations during AGX recovery
                                         if ([self shouldSkipGPUOperations]) {
-                                            NSLog(@"MGL AGX: Skipping texture fill during recovery - texture will be empty");
+                                            MGL_NSINFO(@"MGL AGX: Skipping texture fill during recovery - texture will be empty");
                                             // Texture will remain empty but won't cause AGX errors
                                             goto skip_texture_fill;
                                         }
@@ -1666,7 +1662,7 @@ void logDirtyBits(GLMContext ctx)
                                             // Use the main command buffer instead of creating separate ones
                                             // This prevents command buffer proliferation that triggers AGX rejections
                                             if (!_currentCommandBuffer) {
-                                                NSLog(@"MGL AGX: No command buffer available for texture fill");
+                                                MGL_NSINFO(@"MGL AGX: No command buffer available for texture fill");
                                                 goto skip_texture_fill;
                                             }
 
@@ -1674,7 +1670,7 @@ void logDirtyBits(GLMContext ctx)
                                             // Metal API forbids multiple encoders on same command buffer
                                             BOOL hadRenderEncoder = (_currentRenderEncoder != nil);
                                             if (hadRenderEncoder) {
-                                                NSLog(@"MGL INFO: Ending render encoder temporarily for texture blit operation");
+                                                MGL_NSINFO(@"MGL INFO: Ending render encoder temporarily for texture blit operation");
                                                 [_currentRenderEncoder endEncoding];
                                                 _currentRenderEncoder = nil;
                                             }
@@ -1682,23 +1678,23 @@ void logDirtyBits(GLMContext ctx)
                                             // CRITICAL FIX: Enhanced command buffer validation before blit encoder creation
                                             // Prevents MTLReleaseAssertionFailure in AGX driver
                                             if (!_currentCommandBuffer) {
-                                                NSLog(@"MGL AGX: Command buffer invalid during texture fill - skipping");
+                                                MGL_NSINFO(@"MGL AGX: Command buffer invalid during texture fill - skipping");
                                                 goto skip_texture_fill;
                                             }
 
                                             MTLCommandBufferStatus cmdStatus = _currentCommandBuffer.status;
                                             if (cmdStatus >= MTLCommandBufferStatusCommitted) {
-                                                NSLog(@"MGL AGX: Command buffer already committed (status: %ld) - creating new buffer", (long)cmdStatus);
+                                                MGL_NSINFO(@"MGL AGX: Command buffer already committed (status: %ld) - creating new buffer", (long)cmdStatus);
                                                 _currentCommandBuffer = [_commandQueue commandBuffer];
                                                 if (!_currentCommandBuffer) {
-                                                    NSLog(@"MGL AGX: Failed to create new command buffer - skipping texture fill");
+                                                    MGL_NSINFO(@"MGL AGX: Failed to create new command buffer - skipping texture fill");
                                                     goto skip_texture_fill;
                                                 }
                                             }
 
                                             // CRITICAL FIX: Ensure no active encoders before creating blit encoder
                                             if (_currentRenderEncoder) {
-                                                NSLog(@"MGL WARNING: Active render encoder still detected during texture fill - ending encoder");
+                                                MGL_NSERR(@"MGL WARNING: Active render encoder still detected during texture fill - ending encoder");
                                                 [_currentRenderEncoder endEncoding];
                                                 _currentRenderEncoder = nil;
                                             }
@@ -1716,34 +1712,34 @@ void logDirtyBits(GLMContext ctx)
                                                   destinationOrigin:MTLOriginMake(0, 0, 0)];
                                                 [blitEncoder endEncoding];
 
-                                                NSLog(@"MGL SUCCESS: Texture data copied using main command buffer");
+                                                MGL_NSINFO(@"MGL SUCCESS: Texture data copied using main command buffer");
 
                                                 // CRITICAL FIX: Restore render encoder if it was active before
                                                 if (hadRenderEncoder) {
-                                                    NSLog(@"MGL INFO: Restoring render encoder after texture blit operation");
+                                                    MGL_NSINFO(@"MGL INFO: Restoring render encoder after texture blit operation");
                                                     // Note: We need to recreate the render encoder with proper state
                                                     // This will be handled by the next render pass that needs it
                                                 }
                                             } else {
-                                                NSLog(@"MGL WARNING: Failed to create blit encoder - texture will be empty");
+                                                MGL_NSERR(@"MGL WARNING: Failed to create blit encoder - texture will be empty");
                                             }
                                         } @catch (NSException *exception) {
-                                            NSLog(@"MGL WARNING: Texture fill failed - continuing with empty texture: %@", exception);
+                                            MGL_NSERR(@"MGL WARNING: Texture fill failed - continuing with empty texture: %@", exception);
                                         }
 
                                         skip_texture_fill:; // Label for early exit
                                     } @catch (NSException *exception) {
-                                        NSLog(@"MGL ERROR: Immediate texture fill failed: %@", exception.reason);
+                                        MGL_NSERR(@"MGL ERROR: Immediate texture fill failed: %@", exception.reason);
 
                                         // FALLBACK: Try using existing command buffer without immediate execution
                                         if (_currentCommandBuffer) {
                                             // CRITICAL FIX: Enhanced command buffer validation for fallback texture creation
                                             MTLCommandBufferStatus cmdStatus = _currentCommandBuffer.status;
                                             if (cmdStatus >= MTLCommandBufferStatusCommitted) {
-                                                NSLog(@"MGL AGX: Fallback command buffer already committed (status: %ld) - creating new", (long)cmdStatus);
+                                                MGL_NSINFO(@"MGL AGX: Fallback command buffer already committed (status: %ld) - creating new", (long)cmdStatus);
                                                 _currentCommandBuffer = [_commandQueue commandBuffer];
                                                 if (!_currentCommandBuffer) {
-                                                    NSLog(@"MGL AGX: Failed to create fallback command buffer");
+                                                    MGL_NSINFO(@"MGL AGX: Failed to create fallback command buffer");
                                                     goto cleanup_temp_buffer;
                                                 }
                                             }
@@ -1751,7 +1747,7 @@ void logDirtyBits(GLMContext ctx)
                                             // CRITICAL FIX: End active render encoder before creating blit encoder
                                             BOOL hadRenderEncoder = (_currentRenderEncoder != nil);
                                             if (hadRenderEncoder) {
-                                                NSLog(@"MGL INFO: Ending render encoder temporarily for fallback texture blit");
+                                                MGL_NSINFO(@"MGL INFO: Ending render encoder temporarily for fallback texture blit");
                                                 [_currentRenderEncoder endEncoding];
                                                 _currentRenderEncoder = nil;
                                             }
@@ -1769,7 +1765,7 @@ void logDirtyBits(GLMContext ctx)
                                                   destinationOrigin:MTLOriginMake(0, 0, 0)];
                                                 [blitEncoder endEncoding];
 
-                                                NSLog(@"MGL WARNING: Fallback texture fill enqueued on existing command buffer");
+                                                MGL_NSERR(@"MGL WARNING: Fallback texture fill enqueued on existing command buffer");
                                             }
                                         }
                                     }
@@ -1780,11 +1776,11 @@ void logDirtyBits(GLMContext ctx)
                                     }
                                 }
                             } @catch (NSException *exception) {
-                                NSLog(@"MGL WARNING: Buffer-based texture fill failed - trying alternative");
+                                MGL_NSERR(@"MGL WARNING: Buffer-based texture fill failed - trying alternative");
 
                                 // ALTERNATIVE 2: Simple direct color filling for basic cases
                                 if (width <= 512 && height <= 512 && tex->internalformat == GL_RGBA8) {
-                                    NSLog(@"MGL INFO: Attempting simple direct color fill for small RGBA8 texture");
+                                    MGL_NSINFO(@"MGL INFO: Attempting simple direct color fill for small RGBA8 texture");
 
                                     @try {
                                         // Create a simple pattern that's not magenta
@@ -1816,29 +1812,29 @@ void logDirtyBits(GLMContext ctx)
                                                     bytesPerRow:width * sizeof(uint32_t)
                                                   bytesPerImage:width * height * sizeof(uint32_t)];
 
-                                            NSLog(@"MGL SUCCESS: Simple direct color fill completed");
+                                            MGL_NSINFO(@"MGL SUCCESS: Simple direct color fill completed");
                                             free(simpleData);
                                         }
                                     } @catch (NSException *exception) {
-                                        NSLog(@"MGL WARNING: Simple direct fill also failed: %@", exception.reason);
+                                        MGL_NSERR(@"MGL WARNING: Simple direct fill also failed: %@", exception.reason);
                                     }
                                 } else {
-                                    NSLog(@"MGL INFO: Skipping complex texture - would use deferred initialization");
+                                    MGL_NSINFO(@"MGL INFO: Skipping complex texture - would use deferred initialization");
                                 }
                             }
                         } @catch (NSException *exception) {
-                            NSLog(@"MGL ERROR: Metal texture fill failed - investigating root cause");
-                            NSLog(@"MGL ERROR: Exception: %@ (Reason: %@)", exception.name, exception.reason);
-                            NSLog(@"MGL INFO: This indicates our parameters are still incompatible with AGX driver");
+                            MGL_NSERR(@"MGL ERROR: Metal texture fill failed - investigating root cause");
+                            MGL_NSERR(@"MGL ERROR: Exception: %@ (Reason: %@)", exception.name, exception.reason);
+                            MGL_NSINFO(@"MGL INFO: This indicates our parameters are still incompatible with AGX driver");
                         }
 
                         free(properData);
                         skip_fill_operation:;
                     } else {
-                        NSLog(@"MGL ERROR: Failed to allocate properly aligned texture data");
+                        MGL_NSERR(@"MGL ERROR: Failed to allocate properly aligned texture data");
                     }
                 } else {
-                    NSLog(@"MGL ERROR: Failed to allocate aligned memory for texture fill (%lu bytes)", (unsigned long)dataSize);
+                    MGL_NSERR(@"MGL ERROR: Failed to allocate aligned memory for texture fill (%lu bytes)", (unsigned long)dataSize);
                 }
             }
         }
@@ -1846,8 +1842,7 @@ void logDirtyBits(GLMContext ctx)
 
     tex->dirty_bits = 0;
 
-    // Debug aid only. GL says new texture storage is undefined, so writing a
-    // pattern here corrupts render targets and anything the app uploads itself.
+    // debug aid only; this corrupts render targets
     static int emergency_fill = -1;
     if (emergency_fill < 0)
         emergency_fill = getenv("MGL_DEBUG_TEXTURE_FILL") ? 1 : 0;
@@ -1855,7 +1850,7 @@ void logDirtyBits(GLMContext ctx)
     if (emergency_fill && tex->target == GL_TEXTURE_2D && tex->num_levels == 1 &&
         (texture.width <= 512 && texture.height <= 512)) {
 
-        NSLog(@"MGL EMERGENCY: Applying emergency texture fill to prevent magenta screen");
+        MGL_NSINFO(@"MGL EMERGENCY: Applying emergency texture fill to prevent magenta screen");
 
         @try {
             NSUInteger pixelCount = texture.width * texture.height;
@@ -1884,7 +1879,7 @@ void logDirtyBits(GLMContext ctx)
 
                 // Apply the emergency pattern using SAFE MTLBuffer blit (no replaceRegion)
                 @try {
-                    NSLog(@"MGL EMERGENCY: Attempting safe MTLBuffer-to-texture blit for checkerboard");
+                    MGL_NSINFO(@"MGL EMERGENCY: Attempting safe MTLBuffer-to-texture blit for checkerboard");
 
                     // Create a temporary MTLBuffer with our checkerboard pattern
                     id<MTLBuffer> emergencyBuffer = [_device newBufferWithBytes:emergencyData
@@ -1894,7 +1889,7 @@ void logDirtyBits(GLMContext ctx)
                     if (emergencyBuffer) {
                         // Use DEDICATED command buffer to avoid interfering with main rendering pipeline
                         @try {
-                            NSLog(@"MGL EMERGENCY: Creating dedicated command buffer for texture blit");
+                            MGL_NSINFO(@"MGL EMERGENCY: Creating dedicated command buffer for texture blit");
 
                             // Create a separate command buffer just for this emergency blit
                             id<MTLCommandBuffer> emergencyCommandBuffer = [_commandQueue commandBuffer];
@@ -1916,26 +1911,26 @@ void logDirtyBits(GLMContext ctx)
                                     [emergencyCommandBuffer commit];
                                     [emergencyCommandBuffer waitUntilCompleted];
 
-                                    NSLog(@"MGL EMERGENCY SUCCESS: Checkerboard pattern blitted with dedicated buffer");
+                                    MGL_NSINFO(@"MGL EMERGENCY SUCCESS: Checkerboard pattern blitted with dedicated buffer");
                                 } else {
-                                    NSLog(@"MGL EMERGENCY WARNING: Could not create blit encoder in dedicated buffer");
+                                    MGL_NSINFO(@"MGL EMERGENCY WARNING: Could not create blit encoder in dedicated buffer");
                                 }
                             } else {
-                                NSLog(@"MGL EMERGENCY WARNING: Could not create dedicated command buffer");
+                                MGL_NSINFO(@"MGL EMERGENCY WARNING: Could not create dedicated command buffer");
                             }
                         } @catch (NSException *exception) {
-                            NSLog(@"MGL EMERGENCY WARNING: Dedicated blit failed: %@ (continuing anyway)", exception.reason);
+                            MGL_NSINFO(@"MGL EMERGENCY WARNING: Dedicated blit failed: %@ (continuing anyway)", exception.reason);
                         }
                     } else {
-                        NSLog(@"MGL EMERGENCY WARNING: Could not create emergency MTLBuffer");
+                        MGL_NSINFO(@"MGL EMERGENCY WARNING: Could not create emergency MTLBuffer");
                     }
                 } @catch (NSException *exception) {
-                    NSLog(@"MGL EMERGENCY WARNING: Safe blit failed: %@ (fallback to memory-only)", exception.reason);
+                    MGL_NSINFO(@"MGL EMERGENCY WARNING: Safe blit failed: %@ (fallback to memory-only)", exception.reason);
                 }
                 free(emergencyData);
             }
         } @catch (NSException *exception) {
-            NSLog(@"MGL EMERGENCY FAILED: Could not apply emergency texture fill: %@", exception.reason);
+            MGL_NSINFO(@"MGL EMERGENCY FAILED: Could not apply emergency texture fill: %@", exception.reason);
             [self recordGPUError];
         }
     }
@@ -1949,7 +1944,7 @@ void logDirtyBits(GLMContext ctx)
 // AGX-SAFE Fallback texture creation for GPU error recovery scenarios
 - (id<MTLTexture>) createFallbackMTLTexture:(Texture *) tex
 {
-    NSLog(@"MGL AGX: Creating emergency fallback texture (size: %dx%dx%d)", tex->width, tex->height, tex->depth);
+    MGL_NSINFO(@"MGL AGX: Creating emergency fallback texture (size: %dx%dx%d)", tex->width, tex->height, tex->depth);
 
     @try {
         MTLTextureDescriptor *fallbackDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -1986,7 +1981,7 @@ void logDirtyBits(GLMContext ctx)
                                bytesPerRow:width * sizeof(uint32_t)];
 
                     free(gradientData);
-                    NSLog(@"MGL AGX: Fallback texture created with gradient pattern");
+                    MGL_NSINFO(@"MGL AGX: Fallback texture created with gradient pattern");
                 }
             }
         }
@@ -1994,7 +1989,7 @@ void logDirtyBits(GLMContext ctx)
         return fallbackTexture;
 
     } @catch (NSException *exception) {
-        NSLog(@"MGL AGX: Even fallback texture creation failed: %@", exception.reason);
+        MGL_NSINFO(@"MGL AGX: Even fallback texture creation failed: %@", exception.reason);
         return nil;
     }
 }
@@ -2060,7 +2055,7 @@ void logDirtyBits(GLMContext ctx)
 
         default:
             // Default to 4 bytes for unknown formats
-            NSLog(@"MGL WARNING: Unknown internal format 0x%x, defaulting to 4 bytes per pixel", internalformat);
+            MGL_NSERR(@"MGL WARNING: Unknown internal format 0x%x, defaulting to 4 bytes per pixel", internalformat);
             return 4;
     }
 }
@@ -2104,7 +2099,7 @@ void logDirtyBits(GLMContext ctx)
 
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
             break;
     }
@@ -2121,7 +2116,7 @@ void logDirtyBits(GLMContext ctx)
 
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
             break;
     }
@@ -2175,7 +2170,7 @@ void logDirtyBits(GLMContext ctx)
 
             default:
                 // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
                 break;
         }
@@ -2211,7 +2206,7 @@ void logDirtyBits(GLMContext ctx)
     else
     {
         // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
     }
 
@@ -2269,7 +2264,7 @@ void logDirtyBits(GLMContext ctx)
 
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
             break;
     }
@@ -2477,29 +2472,29 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     if (tex->mtl_data == NULL)
     {
-        NSLog(@"MGL INFO: Creating MTL texture for texture (size: %dx%dx%d)", tex->width, tex->height, tex->depth);
+        MGL_NSINFO(@"MGL INFO: Creating MTL texture for texture (size: %dx%dx%d)", tex->width, tex->height, tex->depth);
 
         tex->mtl_data = (void *)CFBridgingRetain([self createMTLTextureFromGLTexture: tex]);
 
         // AGX-SAFE: Handle NULL texture gracefully when in GPU recovery mode
         if (!tex->mtl_data) {
-            NSLog(@"MGL AGX: Primary texture creation returned NULL, attempting fallback texture creation");
+            MGL_NSINFO(@"MGL AGX: Primary texture creation returned NULL, attempting fallback texture creation");
             // Create a simple fallback texture to prevent crashes
             tex->mtl_data = (void *)CFBridgingRetain([self createFallbackMTLTexture: tex]);
 
             if (tex->mtl_data) {
-                NSLog(@"MGL SUCCESS: Fallback texture created successfully");
+                MGL_NSINFO(@"MGL SUCCESS: Fallback texture created successfully");
             } else {
-                NSLog(@"MGL ERROR: Even fallback texture creation failed - this texture will remain NULL");
+                MGL_NSERR(@"MGL ERROR: Even fallback texture creation failed - this texture will remain NULL");
             }
         } else {
-            NSLog(@"MGL SUCCESS: Primary texture created successfully");
+            MGL_NSINFO(@"MGL SUCCESS: Primary texture created successfully");
         }
 
         tex->params.mtl_data = (void *)CFBridgingRetain([self createMTLSamplerForTexParam:&tex->params target:tex->target]);
         // Sampler creation should not fail even in recovery mode
         if (!tex->params.mtl_data) {
-            NSLog(@"MGL WARNING: Sampler creation failed, using default");
+            MGL_NSERR(@"MGL WARNING: Sampler creation failed, using default");
             tex->params.mtl_data = (void *)CFBridgingRetain([_device newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]]);
         }
     }
@@ -2573,7 +2568,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         default:
            // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Unknown stage %d in getProgramBindingCount", stage);
+            MGL_NSERR(@"MGL ERROR: Unknown stage %d in getProgramBindingCount", stage);
             return 0;
     }
 
@@ -2602,7 +2597,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
        default:
           // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return 0;
     }
 
@@ -2632,7 +2627,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
        default:
           // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return 0;
     }
 
@@ -2651,8 +2646,8 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     library = [_device newLibraryWithSource: [NSString stringWithUTF8String: str] options: nil error: &error];
     if(!library) {
-        NSLog(@"MGL ERROR: Failed to compile shader: %@ ", [error localizedDescription] );
-        NSLog(@"MGL ERROR: Shader source: %s", str);
+        MGL_NSERR(@"MGL ERROR: Failed to compile shader: %@ ", [error localizedDescription] );
+        MGL_NSERR(@"MGL ERROR: Shader source: %s", str);
         // Return nil instead of asserting - caller must handle this gracefully
         return nil;
     }
@@ -2662,9 +2657,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
 -(bool)bindMTLProgram:(Program *)ptr
 {
-    // The compiled library and function belong to the program, not the shader
-    // objects. GL lets an app detach and delete its shaders straight after
-    // linking, and the program has to keep working.
+    // the program owns these, so it survives deleting its shaders
     if (ptr->dirty_bits & DIRTY_PROGRAM)
     {
         for(int i=_VERTEX_SHADER; i<_MAX_SHADER_TYPES; i++)
@@ -2697,7 +2690,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         if (!library)
         {
-            NSLog(@"MGL ERROR: failed to compile MSL for stage %d", i);
+            MGL_NSERR(@"MGL ERROR: failed to compile MSL for stage %d", i);
             return false;
         }
 
@@ -2706,7 +2699,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         if (!function)
         {
-            NSLog(@"MGL ERROR: entry point '%s' missing from stage %d", ptr->spirv[i].entry_point, i);
+            MGL_NSERR(@"MGL ERROR: entry point '%s' missing from stage %d", ptr->spirv[i].entry_point, i);
             return false;
         }
 
@@ -2802,7 +2795,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         case GL_INVERT: stencil_op = MTLStencilOperationDecrementWrap; break;
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Unknown stencil operation 0x%x", op);
+            MGL_NSERR(@"MGL ERROR: Unknown stencil operation 0x%x", op);
             return MTLStencilOperationKeep;
     }
 
@@ -2921,13 +2914,13 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     // AGX ERROR THROTTLING: Check if we should skip render encoder creation
     // BUT allow limited render encoder creation for essential functionality
     if ([self shouldSkipGPUOperations]) {
-        NSLog(@"MGL AGX: Render encoder creation requested during GPU recovery - attempting essential creation");
+        MGL_NSINFO(@"MGL AGX: Render encoder creation requested during GPU recovery - attempting essential creation");
         // Continue with essential render encoder creation even during recovery
     }
 
     // CRITICAL SAFETY: Check command buffer before creating render encoder
     if (!_currentCommandBuffer) {
-        NSLog(@"MGL ERROR: Cannot create render encoder - no command buffer available");
+        MGL_NSERR(@"MGL ERROR: Cannot create render encoder - no command buffer available");
         [self recordGPUError];
         return false;
     }
@@ -2939,7 +2932,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     if (_drawable == NULL)
     {
         if (!_layer) {
-            NSLog(@"MGL ERROR: Cannot get drawable - no CAMetalLayer available");
+            MGL_NSERR(@"MGL ERROR: Cannot get drawable - no CAMetalLayer available");
             return false;
         }
 
@@ -2970,20 +2963,25 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                 Texture *tex;
 
                 tex = [self framebufferAttachmentTexture: &fbo->color_attachments[i]];
-                assert(tex);
 
-                assert(tex->mtl_data);
+                if (!tex || ![self bindMTLTexture: tex] || !tex->mtl_data)
+                {
+                    MGL_NSERR(@"MGL ERROR: colour attachment %d has no metal texture", i);
+                    ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
+                    return false;
+                }
+
                 _renderPassDescriptor.colorAttachments[i].texture = (__bridge id<MTLTexture> _Nullable)(tex->mtl_data);
 
-                if (fbo->color_attachments[i].buf.rbo->is_draw_buffer)
+                // buf is a union, so only read rbo when this really is one
+                bool is_draw = (fbo->color_attachments[i].textarget == GL_RENDERBUFFER)
+                             ? fbo->color_attachments[i].buf.rbo->is_draw_buffer
+                             : true;
+
+                if (is_draw)
                 {
-                    GLuint width, height;
-
-                    width = tex->width;
-                    height = tex->height;
-
-                    _renderPassDescriptor.renderTargetWidth = width;
-                    _renderPassDescriptor.renderTargetHeight = height;
+                    _renderPassDescriptor.renderTargetWidth = tex->width;
+                    _renderPassDescriptor.renderTargetHeight = tex->height;
                 }
             }
 
@@ -3036,7 +3034,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                 DEBUG_PRINT("MGL: Unknown draw_buffer value: 0x%x, falling back to FRONT\n", ctx->state.draw_buffer);
                 mgl_drawbuffer = _FRONT; // fallback to front instead of crashing
                 // // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return nil; // Don't crash, handle gracefully
         }
 
@@ -3052,7 +3050,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         {
             // SAFETY: Ensure we have a valid drawable with texture
             if (!_drawable) {
-                NSLog(@"MGL ERROR: No drawable available for front buffer");
+                MGL_NSERR(@"MGL ERROR: No drawable available for front buffer");
                 return false;
             }
 
@@ -3060,16 +3058,16 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
             // sleep mode will return a null texture - handle gracefully without crashing
             if (!texture) {
-                NSLog(@"MGL WARNING: Drawable texture is NULL (sleep mode or window not visible), attempting to get new drawable");
+                MGL_NSERR(@"MGL WARNING: Drawable texture is NULL (sleep mode or window not visible), attempting to get new drawable");
 
                 // Try to get a new drawable
                 [self syncLayerSize];
             _drawable = [_layer nextDrawable];
                 if (_drawable) {
                     texture = _drawable.texture;
-                    NSLog(@"MGL INFO: Successfully obtained new drawable with texture");
+                    MGL_NSINFO(@"MGL INFO: Successfully obtained new drawable with texture");
                 } else {
-                    NSLog(@"MGL ERROR: Still no drawable texture available");
+                    MGL_NSERR(@"MGL ERROR: Still no drawable texture available");
                     return false;
                 }
             }
@@ -3151,8 +3149,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                 if (_renderPassDescriptor.colorAttachments[i].texture == nil)
                     continue;
 
-                // glClearBuffer* sets a per-attachment colour; a plain glClear
-                // uses the context clear colour for every attachment.
+                // glClearBuffer* is per attachment, plain glClear is all of them
                 if (fboa->clear_bitmask & GL_COLOR_BUFFER_BIT) {
                     _renderPassDescriptor.colorAttachments[i].clearColor =
                         MTLClearColorMake(fboa->clear_color[0],
@@ -3214,25 +3211,25 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     // create a render encoder from the renderpass descriptor
     // CRITICAL SAFETY: Validate inputs before creating render encoder
     if (!_renderPassDescriptor) {
-        NSLog(@"MGL ERROR: Cannot create render encoder - render pass descriptor is NULL");
+        MGL_NSERR(@"MGL ERROR: Cannot create render encoder - render pass descriptor is NULL");
         [self recordGPUError];
         return false;
     }
 
     // CRITICAL FIX: Validate command buffer state before creating render encoder
     if (!_currentCommandBuffer) {
-        NSLog(@"MGL ERROR: Cannot create render encoder - command buffer is NULL");
+        MGL_NSERR(@"MGL ERROR: Cannot create render encoder - command buffer is NULL");
         [self recordGPUError];
         return false;
     }
 
     // Check if command buffer already has an active encoder (Metal API violation)
     if (_currentRenderEncoder) {
-        NSLog(@"MGL WARNING: Active render encoder detected - ending it before creating new one");
+        MGL_NSERR(@"MGL WARNING: Active render encoder detected - ending it before creating new one");
         @try {
             [_currentRenderEncoder endEncoding];
         } @catch (NSException *exception) {
-            NSLog(@"MGL WARNING: Exception ending existing encoder: %@", exception);
+            MGL_NSERR(@"MGL WARNING: Exception ending existing encoder: %@", exception);
         }
         _currentRenderEncoder = nil;
     }
@@ -3240,25 +3237,25 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     // Validate command buffer status - cannot create encoders on committed/buffer
     MTLCommandBufferStatus bufferStatus = _currentCommandBuffer.status;
     if (bufferStatus >= MTLCommandBufferStatusCommitted) {
-        NSLog(@"MGL ERROR: Cannot create render encoder on committed command buffer (status: %ld)", (long)bufferStatus);
+        MGL_NSERR(@"MGL ERROR: Cannot create render encoder on committed command buffer (status: %ld)", (long)bufferStatus);
         [self recordGPUError];
         return false;
     }
 
-    NSLog(@"MGL DEBUG: About to create render encoder with descriptor and command buffer");
+    MGL_NSDEBUG(@"MGL DEBUG: About to create render encoder with descriptor and command buffer");
     @try {
         _currentRenderEncoder = [_currentCommandBuffer renderCommandEncoderWithDescriptor: _renderPassDescriptor];
         if (!_currentRenderEncoder) {
-            NSLog(@"MGL ERROR: Failed to create render encoder - invalid render pass descriptor or command buffer");
-            NSLog(@"MGL DEBUG: Command buffer: %@, Render pass descriptor: %@", _currentCommandBuffer, _renderPassDescriptor);
+            MGL_NSERR(@"MGL ERROR: Failed to create render encoder - invalid render pass descriptor or command buffer");
+            MGL_NSDEBUG(@"MGL DEBUG: Command buffer: %@, Render pass descriptor: %@", _currentCommandBuffer, _renderPassDescriptor);
             [self recordGPUError];
             return false;
         }
-        NSLog(@"MGL INFO: Successfully created Metal render encoder");
+        MGL_NSINFO(@"MGL INFO: Successfully created Metal render encoder");
         [self recordGPUSuccess];
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: Exception creating render encoder: %@ - continuing with degraded functionality", exception);
-        NSLog(@"MGL DEBUG: Exception details - name: %@, reason: %@", exception.name, exception.reason);
+        MGL_NSERR(@"MGL ERROR: Exception creating render encoder: %@ - continuing with degraded functionality", exception);
+        MGL_NSDEBUG(@"MGL DEBUG: Exception details - name: %@, reason: %@", exception.name, exception.reason);
         [self recordGPUError];
         _currentRenderEncoder = NULL;
         return false;
@@ -3307,12 +3304,12 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     // STEP 0: End any existing render encoder to prevent MTLReleaseAssertionFailure
     if (_currentRenderEncoder) {
-        NSLog(@"MGL INFO: Ending existing render encoder before creating new command buffer");
+        MGL_NSINFO(@"MGL INFO: Ending existing render encoder before creating new command buffer");
         @try {
             [_currentRenderEncoder endEncoding];
             _currentRenderEncoder = nil;
         } @catch (NSException *exception) {
-            NSLog(@"MGL WARNING: Exception ending render encoder: %@", exception);
+            MGL_NSERR(@"MGL WARNING: Exception ending render encoder: %@", exception);
             _currentRenderEncoder = nil; // Force clear even on exception
         }
     }
@@ -3335,14 +3332,14 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
             // CRITICAL FIX: Validate sync pointer itself before dereferencing
             if (!sync) {
-                NSLog(@"MGL WARNING: sync pointer is NULL at index %u - skipping", i);
+                MGL_NSERR(@"MGL WARNING: sync pointer is NULL at index %u - skipping", i);
                 continue;
             }
 
             // Validate sync pointer is within valid memory range
             uintptr_t sync_addr = (uintptr_t)sync;
             if (sync_addr < 0x1000 || sync_addr > 0x100000000000ULL) {
-                NSLog(@"MGL ERROR: Invalid sync pointer 0x%lx at index %u - skipping", sync_addr, i);
+                MGL_NSERR(@"MGL ERROR: Invalid sync pointer 0x%lx at index %u - skipping", sync_addr, i);
                 continue;
             }
 
@@ -3351,7 +3348,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                 // Validate the mtl_event pointer is within valid memory range
                 uintptr_t event_addr = (uintptr_t)sync->mtl_event;
                 if (event_addr < 0x1000 || event_addr > 0x100000000000ULL) {
-                    NSLog(@"MGL ERROR: Invalid mtl_event pointer 0x%lx - skipping release", event_addr);
+                    MGL_NSERR(@"MGL ERROR: Invalid mtl_event pointer 0x%lx - skipping release", event_addr);
                     sync->mtl_event = NULL; // Clear invalid pointer
                     continue; // Skip this corrupted entry
                 }
@@ -3364,7 +3361,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                     // Test if the object is still valid by checking its class
                     Class eventClass = [eventObj class];
                     if (!eventClass) {
-                        NSLog(@"MGL WARNING: mtl_event object has no valid class - skipping release");
+                        MGL_NSERR(@"MGL WARNING: mtl_event object has no valid class - skipping release");
                         sync->mtl_event = NULL;
                         continue;
                     }
@@ -3372,7 +3369,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                     // Safe release with exception handling
                     CFBridgingRelease(sync->mtl_event);
                 } @catch (NSException *exception) {
-                    NSLog(@"MGL WARNING: Exception releasing mtl_event: %@ - skipping", exception);
+                    MGL_NSERR(@"MGL WARNING: Exception releasing mtl_event: %@ - skipping", exception);
                     // Continue without crashing - just clear the pointer
                 }
 
@@ -3389,7 +3386,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     // CRITICAL SAFETY: Validate command queue before creating buffer
     if (!_commandQueue) {
-        NSLog(@"MGL ERROR: Cannot create command buffer - command queue is NULL");
+        MGL_NSERR(@"MGL ERROR: Cannot create command buffer - command queue is NULL");
         _currentCommandBuffer = NULL;
         return false;
     }
@@ -3398,17 +3395,17 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     @try {
         // AGX DRIVER COMPATIBILITY: Validate command queue health before creating buffer
         if (!_commandQueue) {
-            NSLog(@"MGL AGX ERROR: Command queue is NULL - recreating");
+            MGL_NSINFO(@"MGL AGX ERROR: Command queue is NULL - recreating");
             [self resetMetalState];
             if (!_commandQueue) {
-                NSLog(@"MGL AGX CRITICAL: Cannot recreate command queue");
+                MGL_NSINFO(@"MGL AGX CRITICAL: Cannot recreate command queue");
                 return false;
             }
         }
 
         // CRITICAL FIX: Validate _commandQueue before dereferencing to prevent NULL pointer crashes
         if (!_commandQueue) {
-            NSLog(@"MGL AGX CRITICAL: _commandQueue is NULL - cannot create command buffer");
+            MGL_NSINFO(@"MGL AGX CRITICAL: _commandQueue is NULL - cannot create command buffer");
             [self recordGPUError];
             return false;
         }
@@ -3418,20 +3415,20 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             // Test if _commandQueue is valid by checking its class
             Class queueClass = [_commandQueue class];
             if (!queueClass) {
-                NSLog(@"MGL AGX CRITICAL: _commandQueue is invalid (no class) - recreating");
+                MGL_NSINFO(@"MGL AGX CRITICAL: _commandQueue is invalid (no class) - recreating");
                 _commandQueue = [_device newCommandQueue];
                 if (!_commandQueue) {
-                    NSLog(@"MGL AGX CRITICAL: Failed to recreate command queue");
+                    MGL_NSINFO(@"MGL AGX CRITICAL: Failed to recreate command queue");
                     [self recordGPUError];
                     return false;
                 }
             }
         } @catch (NSException *exception) {
-            NSLog(@"MGL AGX CRITICAL: _commandQueue validation exception: %@ - recreating", exception);
+            MGL_NSINFO(@"MGL AGX CRITICAL: _commandQueue validation exception: %@ - recreating", exception);
             [self recordGPUError];
             _commandQueue = [_device newCommandQueue];
             if (!_commandQueue) {
-                NSLog(@"MGL AGX CRITICAL: Failed to recreate command queue after exception");
+                MGL_NSINFO(@"MGL AGX CRITICAL: Failed to recreate command queue after exception");
                 [self recordGPUError];
                 return false;
             }
@@ -3439,7 +3436,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         _currentCommandBuffer = [_commandQueue commandBuffer];
         if (!_currentCommandBuffer) {
-            NSLog(@"MGL AGX ERROR: Failed to create Metal command buffer - command queue may be in error state");
+            MGL_NSINFO(@"MGL AGX ERROR: Failed to create Metal command buffer - command queue may be in error state");
             [self recordGPUError];
             // Force command queue recreation
             [self resetMetalState];
@@ -3448,14 +3445,14 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         // AGX Driver Validation: Check if the command buffer is immediately invalid
         if (_currentCommandBuffer.error) {
-            NSLog(@"MGL AGX WARNING: New command buffer has immediate error: %@", _currentCommandBuffer.error);
+            MGL_NSINFO(@"MGL AGX WARNING: New command buffer has immediate error: %@", _currentCommandBuffer.error);
             [self recordGPUError];
             // Don't return false immediately - AGX sometimes creates error-state buffers that recover
         }
 
         // AGX DRIVER COMPATIBILITY: Enhanced validation to prevent rejections
         if (_currentCommandBuffer.status == MTLCommandBufferStatusError) {
-            NSLog(@"MGL AGX CRITICAL: Command buffer immediately in error state");
+            MGL_NSINFO(@"MGL AGX CRITICAL: Command buffer immediately in error state");
             [self recordGPUError];
             _currentCommandBuffer = nil; // Clear the problematic buffer
             [self resetMetalState]; // Force full reset
@@ -3464,7 +3461,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         // Additional AGX validation: Check for buffer properties that cause rejections
         if (_currentCommandBuffer.error) {
-            NSLog(@"MGL AGX WARNING: Command buffer has immediate error: %@", _currentCommandBuffer.error);
+            MGL_NSINFO(@"MGL AGX WARNING: Command buffer has immediate error: %@", _currentCommandBuffer.error);
             [self recordGPUError];
             _currentCommandBuffer = nil;
             [self resetMetalState];
@@ -3473,14 +3470,14 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         // Validate command queue health
         if (!_commandQueue) {
-            NSLog(@"MGL AGX CRITICAL: Command queue became NULL");
+            MGL_NSINFO(@"MGL AGX CRITICAL: Command queue became NULL");
             [self resetMetalState];
             return false;
         }
 
-        NSLog(@"MGL INFO: Successfully created new Metal command buffer (AGX validated)");
+        MGL_NSINFO(@"MGL INFO: Successfully created new Metal command buffer (AGX validated)");
     } @catch (NSException *exception) {
-        NSLog(@"MGL AGX ERROR: Exception creating command buffer: %@", exception);
+        MGL_NSINFO(@"MGL AGX ERROR: Exception creating command buffer: %@", exception);
         [self recordGPUError];
         _currentCommandBuffer = NULL;
 
@@ -3495,7 +3492,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         assert(_currentSyncName);
 
         // SAFELY ENCODE: Event wait functionality on the new command buffer
-        NSLog(@"MGL INFO: Encoding event wait on fresh command buffer");
+        MGL_NSINFO(@"MGL INFO: Encoding event wait on fresh command buffer");
 
         // CRITICAL SAFETY: Cache event and sync values to prevent race conditions
         id<MTLEvent> cachedEvent = _currentEvent;
@@ -3503,7 +3500,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         // COMPREHENSIVE EVENT VALIDATION: Validate Metal event pointer
         if (!cachedEvent) {
-            NSLog(@"MGL ERROR: Cannot encode event wait - cached event is NULL");
+            MGL_NSERR(@"MGL ERROR: Cannot encode event wait - cached event is NULL");
             _currentEvent = NULL;
             _currentSyncName = 0;
             return false;
@@ -3512,16 +3509,16 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         // Validate event pointer looks like a valid object address
         uintptr_t eventPtr = (uintptr_t)cachedEvent;
         if (eventPtr == 0x10 || eventPtr == 0x30 || eventPtr == 0x1000) {
-            NSLog(@"MGL CRITICAL ERROR: Known corrupted event pointer pattern detected: 0x%lx", eventPtr);
-            NSLog(@"MGL CRITICAL ERROR: Skipping event wait to prevent crash");
+            MGL_NSERR(@"MGL CRITICAL ERROR: Known corrupted event pointer pattern detected: 0x%lx", eventPtr);
+            MGL_NSERR(@"MGL CRITICAL ERROR: Skipping event wait to prevent crash");
             _currentEvent = NULL;
             _currentSyncName = 0;
             return false;
         }
 
         if (eventPtr < 0x1000 || (eventPtr & 0x7) != 0) {
-            NSLog(@"MGL ERROR: Suspicious event pointer value: %p", cachedEvent);
-            NSLog(@"MGL INFO: Skipping event wait for safety");
+            MGL_NSERR(@"MGL ERROR: Suspicious event pointer value: %p", cachedEvent);
+            MGL_NSINFO(@"MGL INFO: Skipping event wait for safety");
             _currentEvent = NULL;
             _currentSyncName = 0;
             return false;
@@ -3529,22 +3526,22 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         // ADDITIONAL SAFETY: Validate command buffer is still valid before encoding
         if (!_currentCommandBuffer) {
-            NSLog(@"MGL ERROR: Command buffer became NULL before event wait encoding");
+            MGL_NSERR(@"MGL ERROR: Command buffer became NULL before event wait encoding");
             _currentEvent = NULL;
             _currentSyncName = 0;
             return false;
         }
 
         @try {
-            NSLog(@"MGL INFO: Encoding safe event wait: event=%p, syncName=%u, cmdbuf=%p", cachedEvent, cachedSyncName, _currentCommandBuffer);
+            MGL_NSINFO(@"MGL INFO: Encoding safe event wait: event=%p, syncName=%u, cmdbuf=%p", cachedEvent, cachedSyncName, _currentCommandBuffer);
 
             // Use conservative approach: only encode if everything looks perfect
             [_currentCommandBuffer encodeWaitForEvent:cachedEvent value:cachedSyncName];
 
-            NSLog(@"MGL SUCCESS: Event wait encoded successfully on fresh command buffer");
+            MGL_NSINFO(@"MGL SUCCESS: Event wait encoded successfully on fresh command buffer");
         } @catch (NSException *exception) {
-            NSLog(@"MGL ERROR: Event wait failed - %@: %@", exception.name, exception.reason);
-            NSLog(@"MGL INFO: Continuing without event wait to maintain stability");
+            MGL_NSERR(@"MGL ERROR: Event wait failed - %@: %@", exception.name, exception.reason);
+            MGL_NSINFO(@"MGL INFO: Continuing without event wait to maintain stability");
             // Continue without event wait - system remains stable
         }
 
@@ -3559,34 +3556,34 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 {
     // AGGRESSIVE MEMORY SAFETY: Validate fundamental Metal objects before use
     if (!_device) {
-        NSLog(@"MGL ERROR: newCommandBufferAndRenderEncoder - No device available");
+        MGL_NSERR(@"MGL ERROR: newCommandBufferAndRenderEncoder - No device available");
         return false;
     }
 
     if (!_commandQueue) {
-        NSLog(@"MGL ERROR: newCommandBufferAndRenderEncoder - No command queue available");
+        MGL_NSERR(@"MGL ERROR: newCommandBufferAndRenderEncoder - No command queue available");
         return false;
     }
 
     // Validate device pointer bounds (more realistic bounds for 64-bit systems)
     uintptr_t device_addr = (uintptr_t)_device;
     if (device_addr < 0x1000 || device_addr > 0x100000000000ULL) {
-        NSLog(@"MGL ERROR: newCommandBufferAndRenderEncoder - Invalid device pointer: 0x%lx", device_addr);
+        MGL_NSERR(@"MGL ERROR: newCommandBufferAndRenderEncoder - Invalid device pointer: 0x%lx", device_addr);
         return false;
     }
 
     @try {
         if ([self newCommandBuffer] == false) {
-            NSLog(@"MGL ERROR: newCommandBufferAndRenderEncoder - newCommandBuffer failed");
+            MGL_NSERR(@"MGL ERROR: newCommandBufferAndRenderEncoder - newCommandBuffer failed");
             return false;
         }
 
         if ([self newRenderEncoder] == false) {
-            NSLog(@"MGL ERROR: newCommandBufferAndRenderEncoder - newRenderEncoder failed");
+            MGL_NSERR(@"MGL ERROR: newCommandBufferAndRenderEncoder - newRenderEncoder failed");
             return false;
         }
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: newCommandBufferAndRenderEncoder - Metal operation failed: %@", exception);
+        MGL_NSERR(@"MGL ERROR: newCommandBufferAndRenderEncoder - Metal operation failed: %@", exception);
         return false;
     }
 
@@ -3624,7 +3621,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     if (!vertexFunction || !fragmentFunction)
     {
-        NSLog(@"MGL ERROR: program %u has no linked %s stage", program->name,
+        MGL_NSERR(@"MGL ERROR: program %u has no linked %s stage", program->name,
               vertexFunction ? "fragment" : "vertex");
         ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
         return NULL;
@@ -3678,7 +3675,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
             MTLPixelFormat depthFormat = mtlPixelFormatForGLTex(tex);
             if (depthFormat == MTLPixelFormatInvalid) {
-                NSLog(@"MGL ERROR: Invalid depth texture format, falling back to Depth32Float");
+                MGL_NSERR(@"MGL ERROR: Invalid depth texture format, falling back to Depth32Float");
                 depthFormat = MTLPixelFormatDepth32Float;
             }
             pipelineStateDescriptor.depthAttachmentPixelFormat = depthFormat;
@@ -3699,7 +3696,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
             MTLPixelFormat stencilFormat = mtlPixelFormatForGLTex(tex);
             if (stencilFormat == MTLPixelFormatInvalid) {
-                NSLog(@"MGL ERROR: Invalid stencil texture format, falling back to Stencil8");
+                MGL_NSERR(@"MGL ERROR: Invalid stencil texture format, falling back to Stencil8");
                 stencilFormat = MTLPixelFormatStencil8;
             }
             pipelineStateDescriptor.stencilAttachmentPixelFormat = stencilFormat;
@@ -3738,7 +3735,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
             if (VAO_ATTRIB_STATE(i).buffer == NULL)
             {
-                NSLog(@"Error: Invalid VAO defined enabled but no buffer bound\n");
+                MGL_NSERR(@"Error: Invalid VAO defined enabled but no buffer bound\n");
                 return NULL;
             }
 
@@ -3748,7 +3745,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
             if (format == MTLVertexFormatInvalid)
             {
-                NSLog(@"Error: unable to map gl type / size / normalize to format\n");
+                MGL_NSERR(@"Error: unable to map gl type / size / normalize to format\n");
                 return false;
             }
 
@@ -3818,7 +3815,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Unknown blend factor 0x%x", gl_blend);
+            MGL_NSERR(@"MGL ERROR: Unknown blend factor 0x%x", gl_blend);
             return MTLBlendFactorZero;
     }
 
@@ -3839,7 +3836,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Unknown blend operation 0x%x", gl_blend_op);
+            MGL_NSERR(@"MGL ERROR: Unknown blend operation 0x%x", gl_blend_op);
             return MTLBlendOperationAdd;
     }
 
@@ -3909,14 +3906,14 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     // MEMORY SAFETY: Validate context and framebuffer
     if (!ctx) {
-        NSLog(@"MGL ERROR: NULL context detected in bindFramebufferAttachmentTextures");
+        MGL_NSERR(@"MGL ERROR: NULL context detected in bindFramebufferAttachmentTextures");
         return false;
     }
 
     // Validate context pointer is within reasonable bounds (more realistic for 64-bit systems)
     uintptr_t ctx_addr = (uintptr_t)ctx;
     if (ctx_addr < 0x1000 || ctx_addr > 0x100000000000ULL) {
-        NSLog(@"MGL ERROR: Invalid context pointer detected in bindFramebufferAttachmentTextures: 0x%lx", ctx_addr);
+        MGL_NSERR(@"MGL ERROR: Invalid context pointer detected in bindFramebufferAttachmentTextures: 0x%lx", ctx_addr);
         return false;
     }
 
@@ -3924,14 +3921,14 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     // MEMORY SAFETY: Validate framebuffer pointer
     if (!fbo) {
-        NSLog(@"MGL ERROR: NULL framebuffer detected in bindFramebufferAttachmentTextures");
+        MGL_NSERR(@"MGL ERROR: NULL framebuffer detected in bindFramebufferAttachmentTextures");
         return false;
     }
 
     // Validate framebuffer pointer is within reasonable bounds (more realistic for 64-bit systems)
     uintptr_t fbo_addr = (uintptr_t)fbo;
     if (fbo_addr < 0x1000 || fbo_addr > 0x100000000000ULL) {
-        NSLog(@"MGL ERROR: Invalid framebuffer pointer detected in bindFramebufferAttachmentTextures: 0x%lx", fbo_addr);
+        MGL_NSERR(@"MGL ERROR: Invalid framebuffer pointer detected in bindFramebufferAttachmentTextures: 0x%lx", fbo_addr);
         return false;
     }
 
@@ -3979,12 +3976,12 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     if (_currentRenderEncoder)
     {
         @try {
-            NSLog(@"MGL DEBUG: Ending render encoder");
+            MGL_NSDEBUG(@"MGL DEBUG: Ending render encoder");
             [_currentRenderEncoder endEncoding];
             _currentRenderEncoder = NULL;
-            NSLog(@"MGL DEBUG: Render encoder ended successfully");
+            MGL_NSDEBUG(@"MGL DEBUG: Render encoder ended successfully");
         } @catch (NSException *exception) {
-            NSLog(@"MGL ERROR: Exception ending render encoder: %@ - ignoring", exception.reason);
+            MGL_NSERR(@"MGL ERROR: Exception ending render encoder: %@ - ignoring", exception.reason);
             // Force clear the encoder even if ending failed
             _currentRenderEncoder = NULL;
         }
@@ -3994,7 +3991,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 // ULTIMATE FAILSAFE: Emergency Metal state reset to recover from corruption
 - (void) emergencyResetMetalState
 {
-    NSLog(@"MGL CRITICAL: Performing emergency Metal state reset");
+    MGL_NSERR(@"MGL CRITICAL: Performing emergency Metal state reset");
 
     @try {
         // Force cleanup of all Metal objects
@@ -4006,15 +4003,15 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
         // Re-initialize basic Metal objects
         if (_device && _commandQueue) {
-            NSLog(@"MGL CRITICAL: Re-creating Metal command buffer");
+            MGL_NSERR(@"MGL CRITICAL: Re-creating Metal command buffer");
             _currentCommandBuffer = [_commandQueue commandBuffer];
 
             if (!_currentCommandBuffer) {
-                NSLog(@"MGL CRITICAL: Failed to create new command buffer during recovery");
+                MGL_NSERR(@"MGL CRITICAL: Failed to create new command buffer during recovery");
             }
         }
     } @catch (NSException *exception) {
-        NSLog(@"MGL CRITICAL: Emergency Metal reset failed: %@", exception);
+        MGL_NSERR(@"MGL CRITICAL: Emergency Metal reset failed: %@", exception);
     }
 }
 
@@ -4033,11 +4030,11 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     // Check for corrupted Metal objects that might cause crashes (more realistic bounds)
     if (!_device || !_commandQueue || (_device && _commandQueue && ((uintptr_t)_device < 0x1000 || (uintptr_t)_device > 0x100000000000ULL || (uintptr_t)_commandQueue < 0x1000 || (uintptr_t)_commandQueue > 0x100000000000ULL))) {
-        NSLog(@"MGL CRITICAL: Metal state corruption detected in processGLState!");
-        NSLog(@"MGL CRITICAL: device=0x%lx, queue=0x%lx", (uintptr_t)_device, (uintptr_t)_commandQueue);
+        MGL_NSERR(@"MGL CRITICAL: Metal state corruption detected in processGLState!");
+        MGL_NSERR(@"MGL CRITICAL: device=0x%lx, queue=0x%lx", (uintptr_t)_device, (uintptr_t)_commandQueue);
 
         if (corruption_recovery_count < max_recovery_attempts) {
-            NSLog(@"MGL CRITICAL: Attempting Metal state recovery (%d/%d)", corruption_recovery_count + 1, max_recovery_attempts);
+            MGL_NSERR(@"MGL CRITICAL: Attempting Metal state recovery (%d/%d)", corruption_recovery_count + 1, max_recovery_attempts);
 
             // Force a complete Metal state reset
             @try {
@@ -4046,15 +4043,15 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
                 // Re-check after recovery
                 if (!_device || !_commandQueue) {
-                    NSLog(@"MGL CRITICAL: Metal recovery failed, aborting operation");
+                    MGL_NSERR(@"MGL CRITICAL: Metal recovery failed, aborting operation");
                     return false;
                 }
             } @catch (NSException *exception) {
-                NSLog(@"MGL CRITICAL: Metal recovery failed: %@", exception);
+                MGL_NSERR(@"MGL CRITICAL: Metal recovery failed: %@", exception);
                 return false;
             }
         } else {
-            NSLog(@"MGL CRITICAL: Maximum recovery attempts exceeded, permanently disabling Metal operations");
+            MGL_NSERR(@"MGL CRITICAL: Maximum recovery attempts exceeded, permanently disabling Metal operations");
             return false;
         }
     }
@@ -4066,7 +4063,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     {
         if (draw_command)
         {
-            NSLog(@"Error: No VAO defined for ctx\n");
+            MGL_NSERR(@"Error: No VAO defined for ctx\n");
 
             // quietly return if we are not in a draw command with no vao defined
             // like a clear or init call
@@ -4077,28 +4074,28 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         if (ctx->state.dirty_bits & DIRTY_STATE)
         {
             // RESTORED: Attempt render encoder creation with improved error handling
-            NSLog(@"MGL INFO: RESTORED - Attempting newRenderEncoder with GPU throttling protection");
+            MGL_NSINFO(@"MGL INFO: RESTORED - Attempting newRenderEncoder with GPU throttling protection");
 
             // end encoding on current render encoder
             [self endRenderEncoding];
 
             // Use GPU throttling to prevent crashes when creating new render encoder
             if (![self validateMetalObjects]) {
-                NSLog(@"MGL WARNING: GPU throttling active - deferring render encoder creation");
+                MGL_NSERR(@"MGL WARNING: GPU throttling active - deferring render encoder creation");
                 ctx->state.dirty_bits &= ~DIRTY_STATE;
                 return true;
             }
 
             @try {
-                NSLog(@"MGL INFO: Attempting to create new render encoder with safety protection");
+                MGL_NSINFO(@"MGL INFO: Attempting to create new render encoder with safety protection");
                 if ([self newRenderEncoder]) {
-                    NSLog(@"MGL SUCCESS: New render encoder created successfully");
+                    MGL_NSINFO(@"MGL SUCCESS: New render encoder created successfully");
                 } else {
-                    NSLog(@"MGL WARNING: Failed to create render encoder - continuing with degraded functionality");
+                    MGL_NSERR(@"MGL WARNING: Failed to create render encoder - continuing with degraded functionality");
                 }
             } @catch (NSException *exception) {
-                NSLog(@"MGL ERROR: Render encoder creation failed: %@", exception);
-                NSLog(@"MGL INFO: Continuing without render encoder for stability");
+                MGL_NSERR(@"MGL ERROR: Render encoder creation failed: %@", exception);
+                MGL_NSINFO(@"MGL INFO: Continuing without render encoder for stability");
             }
 
             // Clear the dirty bit to prevent repeated attempts
@@ -4120,21 +4117,20 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     // MEMORY SAFETY: Validate context before use
     if (!ctx) {
-        NSLog(@"MGL ERROR: NULL context detected in processGLState");
+        MGL_NSERR(@"MGL ERROR: NULL context detected in processGLState");
         return false;
     }
 
     // Validate context pointer is within reasonable bounds (more realistic for 64-bit systems)
     uintptr_t ctx_addr = (uintptr_t)ctx;
     if (ctx_addr < 0x1000 || ctx_addr > 0x100000000000ULL) {
-        NSLog(@"MGL ERROR: Invalid context pointer detected: 0x%lx", ctx_addr);
+        MGL_NSERR(@"MGL ERROR: Invalid context pointer detected: 0x%lx", ctx_addr);
         return false;
     }
 
     if (ctx->state.dirty_bits)
     {
-        // The branches below clear bits as they handle them, so remember what
-        // was dirty on entry - the pipeline rebuild check further down needs it.
+        // branches below clear bits, so remember what was dirty
         GLuint dirty_on_entry = ctx->state.dirty_bits;
 
         // dirty state covers all rendering attachments and general state
@@ -4148,7 +4144,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                     // Validate framebuffer pointer is within reasonable bounds
                     uintptr_t fb_addr = (uintptr_t)ctx->state.framebuffer;
                     if (fb_addr < 0x1000 || fb_addr > 0x100000000000ULL) {
-                        NSLog(@"MGL ERROR: Invalid framebuffer pointer detected: 0x%lx", fb_addr);
+                        MGL_NSERR(@"MGL ERROR: Invalid framebuffer pointer detected: 0x%lx", fb_addr);
                         return false;
                     }
 
@@ -4238,8 +4234,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             ctx->state.dirty_bits &= ~DIRTY_RENDER_STATE;
         }
 
-        // blend factors and colour write masks live in the pipeline descriptor,
-        // so DIRTY_STATE has to rebuild it too
+        // blend and write masks live in the pipeline descriptor
         if (dirty_on_entry & (DIRTY_PROGRAM | DIRTY_VAO | DIRTY_FBO | DIRTY_ALPHA_STATE | DIRTY_RENDER_STATE | DIRTY_STATE))
         {
             // create pipeline descriptor
@@ -4254,8 +4249,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             vertexDescriptor = [self generateVertexDescriptor];
             RETURN_FALSE_ON_NULL(vertexDescriptor);
 
-            // colour write masks apply whether or not blending is on, so this
-            // runs unconditionally; the binder decides about blendingEnabled.
+            // write masks apply even with blending off
             if (ctx->state.dirty_bits & DIRTY_ALPHA_STATE)
             {
                 [self updateBlendStateCache];
@@ -4271,28 +4265,28 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             NSError *error;
 
             @try {
-                NSLog(@"MGL INFO: Creating Metal pipeline state with AGX virtualization compatibility...");
+                MGL_NSINFO(@"MGL INFO: Creating Metal pipeline state with AGX virtualization compatibility...");
 
                 // ROOT CAUSE FIX: The issue is with async shader compilation in virtualized environments
                 // Force synchronous pipeline creation to avoid completion queue crashes
-                NSLog(@"MGL INFO: Using synchronous pipeline creation to prevent virtualization crashes");
+                MGL_NSINFO(@"MGL INFO: Using synchronous pipeline creation to prevent virtualization crashes");
 
                 // PROPER FIX: Disable async compilation that causes completion queue crashes
                 if ([_device name] && ([[_device name] containsString:@"AGX"])) {
-                    NSLog(@"MGL INFO: AGX virtualization detected - using safe synchronous compilation");
+                    MGL_NSINFO(@"MGL INFO: AGX virtualization detected - using safe synchronous compilation");
                 }
 
                 _pipelineState = [_device newRenderPipelineStateWithDescriptor:pipelineStateDescriptor error:&error];
 
                 if (!_pipelineState) {
-                    NSLog(@"MGL ERROR: Pipeline creation failed: %@", error);
+                    MGL_NSERR(@"MGL ERROR: Pipeline creation failed: %@", error);
 
                     // Use intelligent error recovery
                     [self recoverFromMetalError:error operation:@"pipeline_creation"];
 
                     // AGX VIRTUALIZATION FALLBACK: Try with minimal descriptor
                     @try {
-                        NSLog(@"MGL INFO: VIRTUALIZED AGX - Trying simplified compilation fallback...");
+                        MGL_NSINFO(@"MGL INFO: VIRTUALIZED AGX - Trying simplified compilation fallback...");
 
                         // Simplify the descriptor to avoid complex shader compilation issues
                         MTLRenderPipelineDescriptor *simpleDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
@@ -4303,17 +4297,17 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
                         _pipelineState = [_device newRenderPipelineStateWithDescriptor:simpleDescriptor error:&error];
                     } @catch (NSException *innerException) {
-                        NSLog(@"MGL ERROR: VIRTUALIZED AGX - Simplified compilation also failed: %@", innerException);
+                        MGL_NSERR(@"MGL ERROR: VIRTUALIZED AGX - Simplified compilation also failed: %@", innerException);
                     }
                 }
 
             } @catch (NSException *exception) {
-                NSLog(@"MGL CRITICAL: VIRTUALIZED AGX - Metal pipeline creation crashed: %@", exception);
-                NSLog(@"MGL CRITICAL: Exception name: %@", [exception name]);
-                NSLog(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
+                MGL_NSERR(@"MGL CRITICAL: VIRTUALIZED AGX - Metal pipeline creation crashed: %@", exception);
+                MGL_NSERR(@"MGL CRITICAL: Exception name: %@", [exception name]);
+                MGL_NSERR(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
 
                 // VIRTUALIZED AGX ULTIMATE FALLBACK: Create minimal safe pipeline
-                NSLog(@"MGL INFO: VIRTUALIZED AGX - Creating ultimate fallback pipeline for virtualization safety");
+                MGL_NSINFO(@"MGL INFO: VIRTUALIZED AGX - Creating ultimate fallback pipeline for virtualization safety");
 
                 @try {
                     MTLRenderPipelineDescriptor *safeDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
@@ -4334,15 +4328,15 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
                         _pipelineState = [_device newRenderPipelineStateWithDescriptor:safeDescriptor error:&error];
                         if (_pipelineState) {
-                            NSLog(@"MGL INFO: VIRTUALIZED AGX - Safe fallback pipeline created successfully");
+                            MGL_NSINFO(@"MGL INFO: VIRTUALIZED AGX - Safe fallback pipeline created successfully");
                         }
                     }
                 } @catch (NSException *fallbackException) {
-                    NSLog(@"MGL CRITICAL: VIRTUALIZED AGX - Even fallback pipeline failed: %@", fallbackException);
+                    MGL_NSERR(@"MGL CRITICAL: VIRTUALIZED AGX - Even fallback pipeline failed: %@", fallbackException);
                 }
 
                 if (!_pipelineState) {
-                    NSLog(@"MGL CRITICAL: VIRTUALIZED AGX - All pipeline creation attempts failed, disabling rendering");
+                    MGL_NSERR(@"MGL CRITICAL: VIRTUALIZED AGX - All pipeline creation attempts failed, disabling rendering");
                     _pipelineState = nil;
                     return false;
                 }
@@ -4353,12 +4347,12 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             //  went wrong.  (Metal API validation is enabled by default when a debug build is run
             //  from Xcode.)
             if (!_pipelineState) {
-                NSLog(@"MGL ERROR: Failed to create pipeline state: %@", error);
-                NSLog(@"MGL ERROR: This is usually caused by shader compilation failures or invalid texture formats");
-                NSLog(@"MGL ERROR: Skipping pipeline creation to prevent crashes");
+                MGL_NSERR(@"MGL ERROR: Failed to create pipeline state: %@", error);
+                MGL_NSERR(@"MGL ERROR: This is usually caused by shader compilation failures or invalid texture formats");
+                MGL_NSERR(@"MGL ERROR: Skipping pipeline creation to prevent crashes");
                 return false;
             } else {
-                NSLog(@"MGL INFO: Pipeline state created successfully");
+                MGL_NSINFO(@"MGL INFO: Pipeline state created successfully");
             }
 
             ctx->state.dirty_bits &= ~(DIRTY_PROGRAM | DIRTY_VAO | DIRTY_FBO);
@@ -4376,10 +4370,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         //assert(ctx->state.dirty_bits == 0);
     }
 
-    // A uniform or glBufferSubData changes the data behind a binding that is
-    // already in place. This has to run whatever else was dirty, otherwise an
-    // unrelated dirty bit makes the draw miss the new value. Only meaningful
-    // while an encoder is open; a readback may have just closed one.
+    // a uniform write changes data behind a binding that's already set
     if (_currentRenderEncoder != nil)
     {
         if( [self checkForDirtyBufferData: &ctx->state.vertex_buffer_map_list])
@@ -4488,7 +4479,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                     default:
                         ptr = NULL;
                         // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return NULL;
                 }
 
@@ -4580,7 +4571,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     if (!func)
     {
-        NSLog(@"MGL ERROR: program %u has no linked compute stage", program->name);
+        MGL_NSERR(@"MGL ERROR: program %u has no linked compute stage", program->name);
         ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
         return false;
     }
@@ -4697,7 +4688,7 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
 {
     if (ptr == NULL)
     {
-        NSLog(@"Error: processBuffer failed\n");
+        MGL_NSERR(@"Error: processBuffer failed\n");
 
         return false;
     }
@@ -4720,12 +4711,12 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
 {
     // SAFETY: Check Metal objects before processing
     if (!_device || !_commandQueue) {
-        NSLog(@"MGL ERROR: Metal device or queue is NULL in flushCommandBuffer");
+        MGL_NSERR(@"MGL ERROR: Metal device or queue is NULL in flushCommandBuffer");
         return;
     }
 
     if (![self processGLState: false]) {
-        NSLog(@"MGL WARNING: processGLState failed in flushCommandBuffer, continuing with cleanup");
+        MGL_NSERR(@"MGL WARNING: processGLState failed in flushCommandBuffer, continuing with cleanup");
         // Don't return - continue with cleanup to prevent resource leaks
     }
 
@@ -4734,14 +4725,14 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
 
     // SAFETY: Check command buffer before using
     if (!_currentCommandBuffer) {
-        NSLog(@"MGL WARNING: No current command buffer in flushCommandBuffer");
+        MGL_NSERR(@"MGL WARNING: No current command buffer in flushCommandBuffer");
         [self newCommandBuffer];
         return;
     }
 
     // CRITICAL FIX: Proper command buffer validation and state management
     if (!_currentCommandBuffer) {
-        NSLog(@"MGL ERROR: No command buffer available for commit");
+        MGL_NSERR(@"MGL ERROR: No command buffer available for commit");
         return;
     }
 
@@ -4749,20 +4740,20 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
     MTLCommandBufferStatus currentStatus = _currentCommandBuffer.status;
 
     if (currentStatus >= MTLCommandBufferStatusCommitted) {
-        NSLog(@"MGL WARNING: Command buffer already committed");
+        MGL_NSERR(@"MGL WARNING: Command buffer already committed");
         return;
     }
 
     // Validate command buffer before committing
     if (_currentCommandBuffer.error) {
-        NSLog(@"MGL ERROR: Command buffer has error before commit: %@", _currentCommandBuffer.error);
+        MGL_NSERR(@"MGL ERROR: Command buffer has error before commit: %@", _currentCommandBuffer.error);
         [self cleanupCommandBuffer];
         return;
     }
 
     // GPU ERROR THROTTLING: Check for excessive recent failures
     if (![self validateMetalObjects]) {
-        NSLog(@"MGL WARNING: GPU throttling active - skipping command buffer commit");
+        MGL_NSERR(@"MGL WARNING: GPU throttling active - skipping command buffer commit");
         [self cleanupCommandBuffer];
         return;
     }
@@ -4772,24 +4763,24 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
         // Final validation before commit
         currentStatus = _currentCommandBuffer.status;
         if (currentStatus != 0) { // 0 = MTLCommandBufferStatusNotCommitted
-            NSLog(@"MGL WARNING: Command buffer in unexpected state %ld - cleaning up", (long)currentStatus);
+            MGL_NSERR(@"MGL WARNING: Command buffer in unexpected state %ld - cleaning up", (long)currentStatus);
             [self cleanupCommandBuffer];
             return;
         }
 
         [self commitCommandBufferWithAGXRecovery:_currentCommandBuffer];
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: Command buffer commit failed: %@", exception);
+        MGL_NSERR(@"MGL ERROR: Command buffer commit failed: %@", exception);
 
             // CRITICAL FIX: Ensure proper cleanup in all exception paths
             [self recordGPUError];
 
             // Intelligent recovery based on exception type
             if ([[exception name] containsString:@"NoDevice"] || [[exception name] containsString:@"Invalid"]) {
-                NSLog(@"MGL INFO: Device-related exception detected - performing full reset");
+                MGL_NSINFO(@"MGL INFO: Device-related exception detected - performing full reset");
                 [self resetMetalState];
             } else if ([[exception name] containsString:@"Exceeded"] || [[exception name] containsString:@"Throttled"]) {
-                NSLog(@"MGL INFO: GPU throttling exception detected - pausing operations");
+                MGL_NSINFO(@"MGL INFO: GPU throttling exception detected - pausing operations");
                 // Brief pause to allow GPU to recover
                 [NSThread sleepForTimeInterval:0.1];
             }
@@ -4805,14 +4796,14 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
         @try {
             commitError = _currentCommandBuffer.error;
         } @catch (NSException *e) {
-            NSLog(@"MGL WARNING: Exception accessing command buffer error: %@", e);
+            MGL_NSERR(@"MGL WARNING: Exception accessing command buffer error: %@", e);
             [self recordGPUError];
             [self cleanupCommandBuffer];
             return;
         }
 
         if (commitError) {
-            NSLog(@"MGL ERROR: Command buffer failed after commit: %@", commitError);
+            MGL_NSERR(@"MGL ERROR: Command buffer failed after commit: %@", commitError);
 
             // CRITICAL FIX: Record error before any cleanup operations
             [self recordGPUError];
@@ -4821,7 +4812,7 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
             if (([commitError.domain containsString:@"IOGPUCommandQueueErrorDomain"] ||
                  [commitError.domain containsString:@"MTLCommandBufferErrorDomain"]) && commitError.code == 4) {
 
-                NSLog(@"MGL CRITICAL: GPU ignoring submissions due to excessive errors (%@) - implementing AGX recovery", commitError.domain);
+                MGL_NSERR(@"MGL CRITICAL: GPU ignoring submissions due to excessive errors (%@) - implementing AGX recovery", commitError.domain);
 
                 // CRITICAL: AGX driver requires complete command queue recreation
                 [NSThread sleepForTimeInterval:1.0];  // Longer pause for AGX driver
@@ -4832,13 +4823,13 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
                 // Create fresh command buffer after AGX recovery
                 [self newCommandBuffer];
 
-                NSLog(@"MGL RECOVERY: AGX driver error state cleared, continuing operations");
+                MGL_NSINFO(@"MGL RECOVERY: AGX driver error state cleared, continuing operations");
             } else {
                 // Record other GPU errors for throttling (already done above)
             }
         }
         } @catch (NSException *exception) {
-            NSLog(@"MGL ERROR: Error checking command buffer status: %@", exception);
+            MGL_NSERR(@"MGL ERROR: Error checking command buffer status: %@", exception);
             [self recordGPUError];
         }
     }
@@ -4885,12 +4876,12 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
 {
     // SAFETY: Check Metal objects before processing
     if (!_device || !_commandQueue) {
-        NSLog(@"MGL ERROR: Metal device or queue is NULL in mtlGetSync");
+        MGL_NSERR(@"MGL ERROR: Metal device or queue is NULL in mtlGetSync");
         return;
     }
 
     if (![self processGLState: false]) {
-        NSLog(@"MGL WARNING: processGLState failed in mtlGetSync");
+        MGL_NSERR(@"MGL WARNING: processGLState failed in mtlGetSync");
         return;
     }
 
@@ -4899,11 +4890,11 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
         @try {
             _currentEvent = [_device newEvent];
             if (!_currentEvent) {
-                NSLog(@"MGL ERROR: Failed to create Metal event");
+                MGL_NSERR(@"MGL ERROR: Failed to create Metal event");
                 return;
             }
         } @catch (NSException *exception) {
-            NSLog(@"MGL ERROR: Exception creating Metal event: %@", exception);
+            MGL_NSERR(@"MGL ERROR: Exception creating Metal event: %@", exception);
             return;
         }
     }
@@ -4917,14 +4908,14 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
         // CRITICAL SECURITY FIX: Check malloc results instead of using assert()
         _currentCommandBufferSyncList = (SyncList *)malloc(sizeof(SyncList));
         if (!_currentCommandBufferSyncList) {
-            NSLog(@"MGL SECURITY ERROR: Failed to allocate SyncList");
+            MGL_NSERR(@"MGL SECURITY ERROR: Failed to allocate SyncList");
             return;
         }
 
         _currentCommandBufferSyncList->size = 8;
         _currentCommandBufferSyncList->list = (Sync **)malloc(sizeof(Sync *) * 8);
         if (!_currentCommandBufferSyncList->list) {
-            NSLog(@"MGL SECURITY ERROR: Failed to allocate SyncList array");
+            MGL_NSERR(@"MGL SECURITY ERROR: Failed to allocate SyncList array");
             free(_currentCommandBufferSyncList);
             _currentCommandBufferSyncList = NULL;
             return;
@@ -4940,7 +4931,7 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
     {
         // CRITICAL SECURITY FIX: Check for integer overflow before multiplication
         if (_currentCommandBufferSyncList->size > SIZE_MAX / 2 / sizeof(Sync *)) {
-            NSLog(@"MGL SECURITY ERROR: SyncList size would overflow, preventing expansion");
+            MGL_NSERR(@"MGL SECURITY ERROR: SyncList size would overflow, preventing expansion");
             return;
         }
 
@@ -4948,7 +4939,7 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
         Sync **new_list = (Sync **)realloc(_currentCommandBufferSyncList->list,
                                            sizeof(Sync *) * new_size);
         if (!new_list) {
-            NSLog(@"MGL SECURITY ERROR: Failed to reallocate SyncList array");
+            MGL_NSERR(@"MGL SECURITY ERROR: Failed to reallocate SyncList array");
             return;
         }
 
@@ -4968,28 +4959,28 @@ void mtlGetSync (GLMContext glm_ctx, Sync *sync)
 {
     // CRITICAL SAFETY: Validate sync object before processing
     if (!sync) {
-        NSLog(@"MGL ERROR: mtlWaitForSync - sync object is NULL");
+        MGL_NSERR(@"MGL ERROR: mtlWaitForSync - sync object is NULL");
         return;
     }
 
     // SAFETY: Check processGLState result before continuing
     if (![self processGLState: false]) {
-        NSLog(@"MGL WARNING: mtlWaitForSync - processGLState failed, skipping sync wait");
+        MGL_NSERR(@"MGL WARNING: mtlWaitForSync - processGLState failed, skipping sync wait");
         return;  // Don't try to release potentially corrupted sync object
     }
 
     // SAFETY: Validate mtl_event before releasing - prevent objc_release crash
     if (!sync->mtl_event) {
-        NSLog(@"MGL WARNING: mtlWaitForSync - sync->mtl_event is NULL");
+        MGL_NSERR(@"MGL WARNING: mtlWaitForSync - sync->mtl_event is NULL");
         return;
     }
 
     @try {
-        NSLog(@"MGL INFO: Releasing Metal sync event");
+        MGL_NSINFO(@"MGL INFO: Releasing Metal sync event");
         CFBridgingRelease(sync->mtl_event);
         sync->mtl_event = NULL;
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: Exception releasing sync event: %@", exception);
+        MGL_NSERR(@"MGL ERROR: Exception releasing sync event: %@", exception);
         // Don't crash - set to NULL to prevent double release
         sync->mtl_event = NULL;
     }
@@ -5032,21 +5023,21 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
 
         // CRITICAL FIX: Enhanced command buffer validation for AGX compatibility
         if (!_currentCommandBuffer) {
-            NSLog(@"MGL AGX: Command buffer is NULL in mtlSwapBuffers, creating new buffer");
+            MGL_NSINFO(@"MGL AGX: Command buffer is NULL in mtlSwapBuffers, creating new buffer");
             _currentCommandBuffer = [_commandQueue commandBuffer];
             if (!_currentCommandBuffer) {
-                NSLog(@"MGL AGX ERROR: Failed to create command buffer in mtlSwapBuffers");
+                MGL_NSINFO(@"MGL AGX ERROR: Failed to create command buffer in mtlSwapBuffers");
                 return;
             }
         }
 
         // CRITICAL FIX: Comprehensive drawable validation for AGX compatibility
         if (_drawable == NULL) {
-            NSLog(@"MGL WARNING: Drawable is NULL in mtlSwapBuffers, getting new drawable");
+            MGL_NSERR(@"MGL WARNING: Drawable is NULL in mtlSwapBuffers, getting new drawable");
             [self syncLayerSize];
             _drawable = [_layer nextDrawable];
             if (_drawable == NULL) {
-                NSLog(@"MGL ERROR: Failed to obtain any drawable from Metal layer");
+                MGL_NSERR(@"MGL ERROR: Failed to obtain any drawable from Metal layer");
                 [_currentCommandBuffer commit];
                 return;
             }
@@ -5054,23 +5045,23 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
 
         // Validate drawable and layer compatibility for AGX driver
         if (_layer == NULL) {
-            NSLog(@"MGL ERROR: Metal layer is NULL, cannot present drawable");
+            MGL_NSERR(@"MGL ERROR: Metal layer is NULL, cannot present drawable");
             [_currentCommandBuffer commit];
             return;
         }
 
         // CRITICAL FIX: Validate command buffer state before presentation
         if (!_currentCommandBuffer) {
-            NSLog(@"MGL ERROR: No command buffer available for presentation");
+            MGL_NSERR(@"MGL ERROR: No command buffer available for presentation");
             return;
         }
 
         MTLCommandBufferStatus bufferStatus = _currentCommandBuffer.status;
         if (bufferStatus >= MTLCommandBufferStatusCommitted) {
-            NSLog(@"MGL WARNING: Command buffer already committed (status: %ld), creating new buffer", (long)bufferStatus);
+            MGL_NSERR(@"MGL WARNING: Command buffer already committed (status: %ld), creating new buffer", (long)bufferStatus);
             [self newCommandBuffer];
             if (!_currentCommandBuffer) {
-                NSLog(@"MGL ERROR: Failed to create new command buffer for presentation");
+                MGL_NSERR(@"MGL ERROR: Failed to create new command buffer for presentation");
                 return;
             }
         }
@@ -5079,18 +5070,18 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
         @try {
             // Final validation of drawable texture
             if (_drawable.texture == NULL) {
-                NSLog(@"MGL ERROR: Drawable texture is NULL, cannot present");
+                MGL_NSERR(@"MGL ERROR: Drawable texture is NULL, cannot present");
                 return;
             }
 
             // Check drawable texture dimensions are valid
             if (_drawable.texture.width == 0 || _drawable.texture.height == 0) {
-                NSLog(@"MGL ERROR: Drawable has invalid dimensions: %dx%d",
+                MGL_NSERR(@"MGL ERROR: Drawable has invalid dimensions: %dx%d",
                       (int)_drawable.texture.width, (int)_drawable.texture.height);
                 return;
             }
 
-            NSLog(@"MGL INFO: Presenting drawable with texture: %dx%d, format: %lu",
+            MGL_NSINFO(@"MGL INFO: Presenting drawable with texture: %dx%d, format: %lu",
                   (int)_drawable.texture.width, (int)_drawable.texture.height,
                   (unsigned long)_drawable.texture.pixelFormat);
 
@@ -5098,8 +5089,8 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
             [_currentCommandBuffer presentDrawable: _drawable];
 
         } @catch (NSException *exception) {
-            NSLog(@"MGL ERROR: Critical drawable presentation failure: %@", exception);
-            NSLog(@"MGL ERROR: Exception name: %@, reason: %@", [exception name], [exception reason]);
+            MGL_NSERR(@"MGL ERROR: Critical drawable presentation failure: %@", exception);
+            MGL_NSERR(@"MGL ERROR: Exception name: %@, reason: %@", [exception name], [exception reason]);
 
             // Force cleanup on presentation failure
             [self cleanupCommandBuffer];
@@ -5108,7 +5099,7 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
             @try {
                 [_currentCommandBuffer commit];
             } @catch (NSException *commitException) {
-                NSLog(@"MGL ERROR: Command buffer commit also failed: %@", commitException);
+                MGL_NSERR(@"MGL ERROR: Command buffer commit also failed: %@", commitException);
             }
             return;
         }
@@ -5117,14 +5108,14 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
             // AGX Driver Compatibility: Use specialized commit method for AGX
             [self commitCommandBufferWithAGXRecovery:_currentCommandBuffer];
         } @catch (NSException *exception) {
-            NSLog(@"MGL ERROR: Failed to commit command buffer: %@", exception);
+            MGL_NSERR(@"MGL ERROR: Failed to commit command buffer: %@", exception);
             [self recordGPUError];
         }
 
         [self syncLayerSize];
             _drawable = [_layer nextDrawable];
         if (_drawable == NULL) {
-            NSLog(@"MGL WARNING: Failed to get next drawable in mtlSwapBuffers");
+            MGL_NSERR(@"MGL WARNING: Failed to get next drawable in mtlSwapBuffers");
             // Don't assert - just continue without creating new command buffer
             return;
         }
@@ -5138,14 +5129,14 @@ void mtlSwapBuffers (GLMContext glm_ctx)
     // CRITICAL FIX: Validate context and Metal object pointer before dereferencing
     // This prevents pointer authentication failures from corrupted pointers
     if (!glm_ctx) {
-        NSLog(@"MGL CRITICAL: mtlSwapBuffers - GLM context is NULL");
+        MGL_NSERR(@"MGL CRITICAL: mtlSwapBuffers - GLM context is NULL");
         return;
     }
 
     // Validate the Metal object pointer (realistic bounds for 64-bit systems)
     if (!glm_ctx->mtl_funcs.mtlObj || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj < 0x1000) || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj > 0x100000000000ULL)) {
-        NSLog(@"MGL CRITICAL: mtlSwapBuffers - Invalid Metal object pointer: %p", glm_ctx->mtl_funcs.mtlObj);
-        NSLog(@"MGL CRITICAL: This indicates memory corruption or context destruction");
+        MGL_NSERR(@"MGL CRITICAL: mtlSwapBuffers - Invalid Metal object pointer: %p", glm_ctx->mtl_funcs.mtlObj);
+        MGL_NSERR(@"MGL CRITICAL: This indicates memory corruption or context destruction");
         return;
     }
 
@@ -5154,8 +5145,8 @@ void mtlSwapBuffers (GLMContext glm_ctx)
         @try {
             [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlSwapBuffers: glm_ctx];
         } @catch (NSException *exception) {
-            NSLog(@"MGL CRITICAL: mtlSwapBuffers - Exception caught: %@", exception);
-            NSLog(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
+            MGL_NSERR(@"MGL CRITICAL: mtlSwapBuffers - Exception caught: %@", exception);
+            MGL_NSERR(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
         }
     }
 }
@@ -5428,8 +5419,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
     if (!pixelBytes || region.size.width == 0 || region.size.height == 0)
         return;
 
-    // glClear only records a bitmask; it lands as a load action when the render
-    // pass is built, so force that pass through before reading anything back.
+    // glClear only sets a bitmask, so force the pass through first
     if (glm_ctx->state.clear_bitmask)
         [self processGLState: false];
 
@@ -5444,7 +5434,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
 
     if (nf == MGL_NF_UNKNOWN)
     {
-        NSLog(@"MGL: cannot read back MTLPixelFormat %lu", (unsigned long)src.pixelFormat);
+        MGL_NSINFO(@"MGL: cannot read back MTLPixelFormat %lu", (unsigned long)src.pixelFormat);
         ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
         return;
     }
@@ -5699,7 +5689,7 @@ MTLPrimitiveType getMTLPrimitiveType(GLenum mode)
         case GL_TRIANGLE_STRIP_ADJACENCY:
         case GL_PATCHES:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            NSLog(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return (MTLPrimitiveType)0xFFFFFFFF;
             break;
     }
@@ -5744,18 +5734,18 @@ Buffer *getIndirectBuffer(GLMContext ctx)
 
     // AGGRESSIVE MEMORY SAFETY: Immediate validation before any Metal operations (realistic bounds)
     if (!ctx || ((uintptr_t)ctx < 0x1000) || ((uintptr_t)ctx > 0x100000000000ULL)) {
-        NSLog(@"MGL ERROR: mtlDrawArrays - Invalid context detected, aborting");
+        MGL_NSERR(@"MGL ERROR: mtlDrawArrays - Invalid context detected, aborting");
         return; // Early return to prevent crash
     }
 
     if ([self processGLState: true] == false) {
-        NSLog(@"MGL ERROR: mtlDrawArrays - processGLState failed, aborting");
+        MGL_NSERR(@"MGL ERROR: mtlDrawArrays - processGLState failed, aborting");
         return; // Early return instead of continuing with invalid state
     }
 
     // Additional safety check after processGLState
     if (!_currentRenderEncoder) {
-        NSLog(@"MGL ERROR: mtlDrawArrays - No current render encoder, aborting");
+        MGL_NSERR(@"MGL ERROR: mtlDrawArrays - No current render encoder, aborting");
         return;
     }
 
@@ -5767,7 +5757,7 @@ Buffer *getIndirectBuffer(GLMContext ctx)
                                  vertexStart: first
                                  vertexCount: count];
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: mtlDrawArrays - drawPrimitives failed: %@", exception);
+        MGL_NSERR(@"MGL ERROR: mtlDrawArrays - drawPrimitives failed: %@", exception);
         // Don't crash, just return gracefully
     }
 }
@@ -5778,24 +5768,24 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
     @try {
         // Validate context before bridging (realistic bounds for 64-bit systems)
         if (!glm_ctx || ((uintptr_t)glm_ctx < 0x1000) || ((uintptr_t)glm_ctx > 0x100000000000ULL)) {
-            NSLog(@"MGL CRITICAL: mtlDrawArrays - Invalid GLM context, aborting operation");
+            MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Invalid GLM context, aborting operation");
             return;
         }
 
         // Validate the Metal object pointer (realistic bounds for 64-bit systems)
         if (!glm_ctx->mtl_funcs.mtlObj || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj < 0x1000) || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj > 0x100000000000ULL)) {
-            NSLog(@"MGL CRITICAL: mtlDrawArrays - Invalid Metal object, aborting operation");
+            MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Invalid Metal object, aborting operation");
             return;
         }
 
         [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawArrays: glm_ctx mode: mode first: first count: count];
     } @catch (NSException *exception) {
-        NSLog(@"MGL CRITICAL: mtlDrawArrays - Unhandled exception caught: %@", exception);
-        NSLog(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
-        NSLog(@"MGL CRITICAL: This is a failsafe to prevent QEMU crashes");
+        MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Unhandled exception caught: %@", exception);
+        MGL_NSERR(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
+        MGL_NSERR(@"MGL CRITICAL: This is a failsafe to prevent QEMU crashes");
         // Don't crash, just return gracefully
     } @catch (id exception) {
-        NSLog(@"MGL CRITICAL: mtlDrawArrays - Unknown exception caught: %@", exception);
+        MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Unknown exception caught: %@", exception);
         // Final safety net
     }
 }
@@ -6547,8 +6537,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     return  (__bridge void *)(renderer);
 }
 
-// Keeps the drawable the same size as the view. Setting drawableSize by hand
-// stops CAMetalLayer updating it on its own, so a resize has to come through here.
+// setting drawableSize by hand stops CAMetalLayer tracking the view, so do it here
 - (void) syncLayerSize
 {
     if (_layer == nil || _view == nil)
@@ -6581,30 +6570,30 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     // CRITICAL FIX: Initialize thread synchronization lock
     _metalStateLock = [[NSLock alloc] init];
     if (!_metalStateLock) {
-        NSLog(@"MGL ERROR: Failed to create metal state lock");
+        MGL_NSERR(@"MGL ERROR: Failed to create metal state lock");
     } else {
-        NSLog(@"MGL INFO: Metal state lock created successfully");
+        MGL_NSINFO(@"MGL INFO: Metal state lock created successfully");
     }
 
     // Initialize AGX GPU error tracking
     _consecutiveGPUErrors = 0;
     _lastGPUErrorTime = 0;
     _gpuErrorRecoveryMode = NO;
-    NSLog(@"MGL INFO: AGX GPU error tracking initialized");
+    MGL_NSINFO(@"MGL INFO: AGX GPU error tracking initialized");
 
     [self bindObjFuncsToGLMContext: glm_ctx];
 
     // VIRTUALIZED AGX DETECTION: Create Metal device with virtualization safety
-    NSLog(@"MGL INFO: VIRTUALIZED AGX - Creating Metal device with virtualization detection");
+    MGL_NSINFO(@"MGL INFO: VIRTUALIZED AGX - Creating Metal device with virtualization detection");
 
     // Create the Metal device
     _device = MTLCreateSystemDefaultDevice();
     if (!_device) {
-        NSLog(@"MGL ERROR: Metal device not found - this is required for Apple Silicon");
+        MGL_NSERR(@"MGL ERROR: Metal device not found - this is required for Apple Silicon");
         return; // Exit early rather than continuing with nil device
     }
 
-    NSLog(@"MGL INFO: Metal device created: %@", _device);
+    MGL_NSINFO(@"MGL INFO: Metal device created: %@", _device);
 
     // PROPER AGX VIRTUALIZATION DETECTION: Maintain Metal functionality with virtualization compatibility
     BOOL isVirtualized = NO;
@@ -6613,33 +6602,33 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     // DETECTION: Check if running in QEMU virtualization but keep Metal enabled
     if ([deviceName containsString:@"AGX"]) {
         isVirtualized = YES;
-        NSLog(@"MGL INFO: AGX device detected - enabling virtualization compatibility mode: %@", deviceName);
-        NSLog(@"MGL INFO: Metal functionality will be maintained with AGX virtualization safety measures");
+        MGL_NSINFO(@"MGL INFO: AGX device detected - enabling virtualization compatibility mode: %@", deviceName);
+        MGL_NSINFO(@"MGL INFO: Metal functionality will be maintained with AGX virtualization safety measures");
     }
 
     // Create command queue with virtualization-safe settings
     MTLCommandQueueDescriptor *queueDescriptor = [[MTLCommandQueueDescriptor alloc] init];
     if (isVirtualized) {
-        NSLog(@"MGL INFO: VIRTUALIZED AGX - Enabling virtualization-safe command queue settings");
+        MGL_NSINFO(@"MGL INFO: VIRTUALIZED AGX - Enabling virtualization-safe command queue settings");
         queueDescriptor.maxCommandBufferCount = 16;  // Limit concurrent buffers for virtualization safety
     }
 
     _commandQueue = [_device newCommandQueueWithDescriptor:queueDescriptor];
     if (!_commandQueue) {
-        NSLog(@"MGL ERROR: Failed to create Metal command queue");
+        MGL_NSERR(@"MGL ERROR: Failed to create Metal command queue");
         return;
     }
 
-    NSLog(@"MGL INFO: Metal command queue created successfully");
+    MGL_NSINFO(@"MGL INFO: Metal command queue created successfully");
 
     _view = view;
 
     // PROPER FIX: Create Metal layer with AGX-safe settings
-    NSLog(@"MGL INFO: PROPER FIX - Creating Metal layer with AGX-safe settings");
+    MGL_NSINFO(@"MGL INFO: PROPER FIX - Creating Metal layer with AGX-safe settings");
 
     _layer = [[CAMetalLayer alloc] init];
     if (!_layer) {
-        NSLog(@"MGL ERROR: Failed to create Metal layer");
+        MGL_NSERR(@"MGL ERROR: Failed to create Metal layer");
         return;
     }
 
@@ -6649,8 +6638,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     _layer.magnificationFilter = kCAFilterNearest;
     _layer.presentsWithTransaction = NO;
 
-    // Size from the view itself. view.layer is nil until the view is
-    // layer backed, so reading view.layer.frame gave a zero sized layer.
+    // view.layer is nil until the view is layer backed
     CGRect bounds = [view bounds];
 
     if (bounds.size.width < 1.0 || bounds.size.height < 1.0)
@@ -6671,7 +6659,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     [_view setWantsLayer: YES];
     [_view setLayerContentsRedrawPolicy: NSViewLayerContentsRedrawDuringViewResize];
 
-    NSLog(@"MGL INFO: metal layer %.0fx%.0f scale %.0f drawable %.0fx%.0f",
+    MGL_NSINFO(@"MGL INFO: metal layer %.0fx%.0f scale %.0f drawable %.0fx%.0f",
           bounds.size.width, bounds.size.height, scaleFactor,
           _layer.drawableSize.width, _layer.drawableSize.height);
 
@@ -6681,16 +6669,16 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     @try {
         _currentCommandBuffer = [_commandQueue commandBuffer];
         if (!_currentCommandBuffer) {
-            NSLog(@"MGL ERROR: Failed to create initial Metal command buffer");
+            MGL_NSERR(@"MGL ERROR: Failed to create initial Metal command buffer");
         }
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: Exception creating initial Metal command buffer: %@", exception);
+        MGL_NSERR(@"MGL ERROR: Exception creating initial Metal command buffer: %@", exception);
     }
     
     glm_ctx->mtl_funcs.mtlView = (void *)CFBridgingRetain(view);
 
     // PROACTIVE TEXTURE CREATION: Create essential textures to break sync loop
-    NSLog(@"MGL INFO: PROACTIVE - Creating essential textures to prevent magenta screen");
+    MGL_NSINFO(@"MGL INFO: PROACTIVE - Creating essential textures to prevent magenta screen");
     [self createProactiveTextures];
 
     // capture Metal commands in MGL.gputrace
@@ -6702,7 +6690,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 // PROACTIVE TEXTURE CREATION: Create essential textures during initialization to break sync loop
 - (void)createProactiveTextures
 {
-    NSLog(@"MGL PROACTIVE: Starting essential texture creation");
+    MGL_NSINFO(@"MGL PROACTIVE: Starting essential texture creation");
 
     @try {
         // Create a simple 2D texture with gradient pattern to prevent magenta screens
@@ -6737,9 +6725,9 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
                                      bytesPerRow:256 * sizeof(uint32_t)];
 
                 free(gradientData);
-                NSLog(@"MGL PROACTIVE SUCCESS: Created 256x256 gradient texture (prevents magenta screen)");
+                MGL_NSINFO(@"MGL PROACTIVE SUCCESS: Created 256x256 gradient texture (prevents magenta screen)");
             } else {
-                NSLog(@"MGL PROACTIVE WARNING: Could not allocate gradient data");
+                MGL_NSINFO(@"MGL PROACTIVE WARNING: Could not allocate gradient data");
             }
 
             // Store the proactive texture for future use
@@ -6749,14 +6737,14 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
             [_proactiveTextures addObject:proactiveTexture];
 
         } else {
-            NSLog(@"MGL PROACTIVE ERROR: Could not create proactive texture");
+            MGL_NSINFO(@"MGL PROACTIVE ERROR: Could not create proactive texture");
         }
 
     } @catch (NSException *exception) {
-        NSLog(@"MGL PROACTIVE ERROR: Exception creating proactive textures: %@", exception.reason);
+        MGL_NSINFO(@"MGL PROACTIVE ERROR: Exception creating proactive textures: %@", exception.reason);
     }
 
-    NSLog(@"MGL PROACTIVE: Essential texture creation completed");
+    MGL_NSINFO(@"MGL PROACTIVE: Essential texture creation completed");
 }
 
 - (MTLCaptureDescriptor *)setupCaptureToFile: (id<MTLDevice>)device//(nonnull MTLDevice* )device // (nonnull MTKView *)view
@@ -6775,7 +6763,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     BOOL success = [MTLCaptureManager.sharedCaptureManager startCaptureWithDescriptor:descriptor
                                                                                 error:&error];
     if (!success) {
-        NSLog(@" error capturing mtl => %@ ", [error localizedDescription] );
+        MGL_NSERR(@" error capturing mtl => %@ ", [error localizedDescription] );
     }
 }
 
@@ -6788,7 +6776,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 // CRITICAL FIX: Proper resource cleanup to prevent memory leaks and crashes
 - (void)dealloc
 {
-    NSLog(@"MGL INFO: MGLRenderer dealloc - cleaning up Metal resources");
+    MGL_NSINFO(@"MGL INFO: MGLRenderer dealloc - cleaning up Metal resources");
 
     @try {
         // Stop any ongoing capture
@@ -6799,61 +6787,61 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 
         // Cleanup command buffer and encoder
         if (_currentCommandBuffer) {
-            NSLog(@"MGL INFO: Releasing current command buffer");
+            MGL_NSINFO(@"MGL INFO: Releasing current command buffer");
             _currentCommandBuffer = nil;
         }
 
         if (_currentRenderEncoder) {
-            NSLog(@"MGL INFO: Releasing current render encoder");
+            MGL_NSINFO(@"MGL INFO: Releasing current render encoder");
             _currentRenderEncoder = nil;
         }
 
         // Cleanup sync objects
         if (_currentEvent) {
-            NSLog(@"MGL INFO: Releasing current sync event");
+            MGL_NSINFO(@"MGL INFO: Releasing current sync event");
             _currentEvent = nil;
         }
 
         // Cleanup pipeline state
         if (_pipelineState) {
-            NSLog(@"MGL INFO: Releasing pipeline state");
+            MGL_NSINFO(@"MGL INFO: Releasing pipeline state");
             _pipelineState = nil;
         }
 
         // Cleanup drawable and layer
         if (_drawable) {
-            NSLog(@"MGL INFO: Releasing drawable");
+            MGL_NSINFO(@"MGL INFO: Releasing drawable");
             _drawable = nil;
         }
 
         if (_layer) {
-            NSLog(@"MGL INFO: Removing and releasing layer");
+            MGL_NSINFO(@"MGL INFO: Removing and releasing layer");
             [_layer removeFromSuperlayer];
             _layer = nil;
         }
 
         // Cleanup command queue and device
         if (_commandQueue) {
-            NSLog(@"MGL INFO: Releasing command queue");
+            MGL_NSINFO(@"MGL INFO: Releasing command queue");
             _commandQueue = nil;
         }
 
         if (_device) {
-            NSLog(@"MGL INFO: Releasing Metal device");
+            MGL_NSINFO(@"MGL INFO: Releasing Metal device");
             _device = nil;
         }
 
         // Cleanup thread lock
         if (_metalStateLock) {
-            NSLog(@"MGL INFO: Releasing metal state lock");
+            MGL_NSINFO(@"MGL INFO: Releasing metal state lock");
             _metalStateLock = nil;
         }
 
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: Exception during dealloc cleanup: %@", exception);
+        MGL_NSERR(@"MGL ERROR: Exception during dealloc cleanup: %@", exception);
     }
 
-    NSLog(@"MGL INFO: MGLRenderer dealloc completed");
+    MGL_NSINFO(@"MGL INFO: MGLRenderer dealloc completed");
 }
 
 #pragma mark - Metal State Validation and Recovery
@@ -6864,13 +6852,13 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     @try {
         // Check Metal device validity
         if (!_device) {
-            NSLog(@"MGL ERROR: Metal device is nil during validation");
+            MGL_NSERR(@"MGL ERROR: Metal device is nil during validation");
             return NO;
         }
 
         // Check command queue validity
         if (!_commandQueue) {
-            NSLog(@"MGL ERROR: Metal command queue is nil during validation");
+            MGL_NSERR(@"MGL ERROR: Metal command queue is nil during validation");
             return NO;
         }
 
@@ -6887,11 +6875,11 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
             // Check if this is within the throttle window
             if (currentTime - lastErrorTime < throttleWindow) {
                 consecutiveGpuErrors++;
-                NSLog(@"MGL GPU THROTTLING: %lu consecutive GPU errors detected", (unsigned long)consecutiveGpuErrors);
+                MGL_NSINFO(@"MGL GPU THROTTLING: %lu consecutive GPU errors detected", (unsigned long)consecutiveGpuErrors);
 
                 // If we've exceeded the error threshold, temporarily disable operations
                 if (consecutiveGpuErrors > maxErrorsPerWindow) {
-                    NSLog(@"MGL CRITICAL: GPU error threshold exceeded - throttling operations for %.1f seconds", throttleWindow);
+                    MGL_NSERR(@"MGL CRITICAL: GPU error threshold exceeded - throttling operations for %.1f seconds", throttleWindow);
 
                     // Force a reset and temporary pause
                     [self resetMetalState];
@@ -6914,14 +6902,14 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
         if (@available(macOS 11.0, *)) {
             // Device registry ID changes indicate virtualization issues
             if (_device.registryID == 0) {
-                NSLog(@"MGL WARNING: Detected virtualized Metal environment - enabling safety mode");
+                MGL_NSERR(@"MGL WARNING: Detected virtualized Metal environment - enabling safety mode");
                 // Note: _isVirtualized would be an instance variable to track virtualization state
             }
         }
 
         return YES;
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: Metal object validation failed: %@", exception);
+        MGL_NSERR(@"MGL ERROR: Metal object validation failed: %@", exception);
         return NO;
     }
 }
@@ -6929,26 +6917,26 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 - (BOOL)recoverFromMetalError:(NSError *)error operation:(NSString *)operation
 {
     // PROPER FIX: Intelligent Metal error recovery
-    NSLog(@"MGL ERROR: Metal operation '%@' failed: %@", operation, error);
+    MGL_NSERR(@"MGL ERROR: Metal operation '%@' failed: %@", operation, error);
 
     // Analyze error code for specific recovery strategies
     switch (error.code) {
         case MTLCommandBufferStatusError:
-            NSLog(@"MGL INFO: Command buffer execution failed - recreating command buffer");
+            MGL_NSINFO(@"MGL INFO: Command buffer execution failed - recreating command buffer");
             [self cleanupCommandBuffer];
             return YES;
 
         default:
-            NSLog(@"MGL ERROR: Unknown Metal error code %ld - attempting recovery", (long)error.code);
+            MGL_NSERR(@"MGL ERROR: Unknown Metal error code %ld - attempting recovery", (long)error.code);
 
             // Handle common error scenarios based on error code
             if (error.code >= 1000 && error.code < 2000) {
-                NSLog(@"MGL INFO: Detected feature compatibility issue - using safer settings");
+                MGL_NSINFO(@"MGL INFO: Detected feature compatibility issue - using safer settings");
             } else if (error.code >= 2000 && error.code < 3000) {
-                NSLog(@"MGL INFO: Detected memory issue - clearing resources");
+                MGL_NSINFO(@"MGL INFO: Detected memory issue - clearing resources");
                 [self clearTextureCache];
             } else {
-                NSLog(@"MGL ERROR: Unknown Metal error - attempting full recovery");
+                MGL_NSERR(@"MGL ERROR: Unknown Metal error - attempting full recovery");
                 [self resetMetalState];
             }
             return YES;
@@ -6958,7 +6946,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 - (void)clearTextureCache
 {
     // PROPER FIX: Intelligent texture cache cleanup
-    NSLog(@"MGL INFO: Clearing texture cache to free memory");
+    MGL_NSINFO(@"MGL INFO: Clearing texture cache to free memory");
 
     // Note: Texture binding cache cleanup would require instance variables
     // For now, we focus on basic resource cleanup
@@ -6987,25 +6975,25 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
             _currentRenderEncoder = nil;
         }
     } @catch (NSException *exception) {
-        NSLog(@"MGL ERROR: Exception during command buffer cleanup: %@", exception);
+        MGL_NSERR(@"MGL ERROR: Exception during command buffer cleanup: %@", exception);
     }
 }
 
 - (void)resetMetalState
 {
     // PROPER FIX: Full Metal state reset for AGX driver recovery
-    NSLog(@"MGL INFO: Performing full Metal state reset for AGX recovery");
+    MGL_NSINFO(@"MGL INFO: Performing full Metal state reset for AGX recovery");
 
     [self cleanupCommandBuffer];
 
     // CRITICAL: Recreate command queue to clear AGX driver error state
-    NSLog(@"MGL AGX RECOVERY: Recreating command queue to clear GPU error state");
+    MGL_NSINFO(@"MGL AGX RECOVERY: Recreating command queue to clear GPU error state");
     _commandQueue = nil;
     _commandQueue = [_device newCommandQueue];
     if (!_commandQueue) {
-        NSLog(@"MGL CRITICAL: Failed to recreate command queue during AGX recovery");
+        MGL_NSERR(@"MGL CRITICAL: Failed to recreate command queue during AGX recovery");
     } else {
-        NSLog(@"MGL AGX RECOVERY: Command queue successfully recreated");
+        MGL_NSINFO(@"MGL AGX RECOVERY: Command queue successfully recreated");
     }
 
     // Reset pipeline state
@@ -7015,20 +7003,20 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     // Clear all cached objects
     [self clearTextureCache];
 
-    NSLog(@"MGL INFO: AGX Metal state reset completed");
+    MGL_NSINFO(@"MGL INFO: AGX Metal state reset completed");
 }
 
 // AGX Driver Compatibility: Specialized command buffer commit with recovery
 - (void)commitCommandBufferWithAGXRecovery:(id<MTLCommandBuffer>)commandBuffer
 {
     if (!commandBuffer) {
-        NSLog(@"MGL ERROR: Cannot commit NULL command buffer");
+        MGL_NSERR(@"MGL ERROR: Cannot commit NULL command buffer");
         return;
     }
 
     // Pre-commit validation for AGX driver
     if (commandBuffer.error) {
-        NSLog(@"MGL AGX WARNING: Command buffer has pre-commit error: %@", commandBuffer.error);
+        MGL_NSINFO(@"MGL AGX WARNING: Command buffer has pre-commit error: %@", commandBuffer.error);
         [self recordGPUError];
     }
 
@@ -7036,13 +7024,13 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     __block typeof(self) blockSelf = self;
     [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
         if (buffer.error) {
-            NSLog(@"MGL AGX ERROR: Command buffer completed with error: %@", buffer.error);
+            MGL_NSINFO(@"MGL AGX ERROR: Command buffer completed with error: %@", buffer.error);
             [blockSelf recordGPUError];
 
             // Specific handling for AGX driver rejection
             if ([buffer.error.domain isEqualToString:@"MTLCommandBufferErrorDomain"] &&
                 buffer.error.code == 4) { // "Ignored (for causing prior/excessive GPU errors)"
-                NSLog(@"MGL AGX RECOVERY: Triggering reset due to driver rejection");
+                MGL_NSINFO(@"MGL AGX RECOVERY: Triggering reset due to driver rejection");
 
                 // Force more aggressive recovery for AGX driver
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -7055,7 +7043,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 
             // AGX Recovery: Clear recovery mode on success
             if (blockSelf->_gpuErrorRecoveryMode) {
-                NSLog(@"MGL AGX RECOVERY: Exiting GPU recovery mode after successful completion");
+                MGL_NSINFO(@"MGL AGX RECOVERY: Exiting GPU recovery mode after successful completion");
                 blockSelf->_gpuErrorRecoveryMode = NO;
             }
         }
@@ -7064,37 +7052,37 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     // CRITICAL FIX: Enhanced command buffer validation before commit
     // Prevents MTLReleaseAssertionFailure in AGX driver
     if (!commandBuffer) {
-        NSLog(@"MGL AGX ERROR: Cannot commit nil command buffer");
+        MGL_NSINFO(@"MGL AGX ERROR: Cannot commit nil command buffer");
         return;
     }
 
     // Check command buffer status before commit
     MTLCommandBufferStatus status = [commandBuffer status];
     if (status >= MTLCommandBufferStatusCommitted) {
-        NSLog(@"MGL AGX WARNING: Command buffer already committed (status: %ld) - skipping commit", (long)status);
+        MGL_NSINFO(@"MGL AGX WARNING: Command buffer already committed (status: %ld) - skipping commit", (long)status);
         return;
     }
 
     // Validate command buffer is in a valid state for commit
     if (status == MTLCommandBufferStatusError) {
-        NSLog(@"MGL AGX ERROR: Command buffer in error state - skipping commit");
+        MGL_NSINFO(@"MGL AGX ERROR: Command buffer in error state - skipping commit");
         [self recordGPUError];
         return;
     }
 
     // Commit with exception handling
     @try {
-        NSLog(@"MGL AGX: Committing command buffer (status: %ld)", (long)status);
+        MGL_NSINFO(@"MGL AGX: Committing command buffer (status: %ld)", (long)status);
         [commandBuffer commit];
-        NSLog(@"MGL AGX: Command buffer committed successfully");
+        MGL_NSINFO(@"MGL AGX: Command buffer committed successfully");
     } @catch (NSException *exception) {
-        NSLog(@"MGL AGX ERROR: Command buffer commit exception: %@", exception);
+        MGL_NSINFO(@"MGL AGX ERROR: Command buffer commit exception: %@", exception);
         [self recordGPUError];
 
         // AGX-specific recovery for commit failures
         if ([[exception name] containsString:@"CommandBuffer"] ||
             [[exception name] containsString:@"GPU"]) {
-            NSLog(@"MGL AGX RECOVERY: Immediate reset due to commit exception");
+            MGL_NSINFO(@"MGL AGX RECOVERY: Immediate reset due to commit exception");
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self resetMetalState];
             });
@@ -7110,7 +7098,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     // PROPER FIX: More realistic recovery window based on actual AGX behavior
     if (currentTime - _lastGPUErrorTime > 15.0) {
         if (_consecutiveGPUErrors > 0) {
-            NSLog(@"MGL AGX: Recovery timeout - attempting GPU operations (had %lu errors)", (unsigned long)_consecutiveGPUErrors);
+            MGL_NSINFO(@"MGL AGX: Recovery timeout - attempting GPU operations (had %lu errors)", (unsigned long)_consecutiveGPUErrors);
         }
         _consecutiveGPUErrors = 0;
         _gpuErrorRecoveryMode = NO;
@@ -7121,7 +7109,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     // AGX driver starts rejecting after just a few errors in virtualization
     if (_consecutiveGPUErrors >= 3 || _gpuErrorRecoveryMode) {
         if (!_gpuErrorRecoveryMode) {
-            NSLog(@"MGL AGX: Entering recovery mode after %lu consecutive errors", (unsigned long)_consecutiveGPUErrors);
+            MGL_NSINFO(@"MGL AGX: Entering recovery mode after %lu consecutive errors", (unsigned long)_consecutiveGPUErrors);
             _gpuErrorRecoveryMode = YES;
 
             // PROPER FIX: Clear problematic state but don't give up completely
@@ -7136,7 +7124,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 // PROPER FIX: Clear problematic state without giving up on GPU operations entirely
 - (void)clearProblematicGPUState
 {
-    NSLog(@"MGL AGX: Clearing problematic GPU state for recovery");
+    MGL_NSINFO(@"MGL AGX: Clearing problematic GPU state for recovery");
 
     // Clear current problematic resources
     if (_currentCommandBuffer) {
@@ -7150,7 +7138,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 // AGX DRIVER COMPATIBILITY: Accept virtualization limitations and provide minimal functionality
 - (void)enableMinimalFunctionalityMode
 {
-    NSLog(@"MGL AGX: Enabling minimal functionality mode for AGX virtualization compatibility");
+    MGL_NSINFO(@"MGL AGX: Enabling minimal functionality mode for AGX virtualization compatibility");
 
     // Stop fighting the AGX driver - accept virtualization limitations
     // Don't recreate command queues - they will continue to fail
@@ -7164,13 +7152,13 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 {
     _consecutiveGPUErrors++;
     _lastGPUErrorTime = [[NSDate date] timeIntervalSince1970];
-    NSLog(@"MGL AGX: Recorded GPU error (%lu consecutive)", (unsigned long)_consecutiveGPUErrors);
+    MGL_NSINFO(@"MGL AGX: Recorded GPU error (%lu consecutive)", (unsigned long)_consecutiveGPUErrors);
 }
 
 - (void)recordGPUSuccess
 {
     if (_consecutiveGPUErrors > 0) {
-        NSLog(@"MGL AGX: GPU operation succeeded, resetting error count (was %lu)", (unsigned long)_consecutiveGPUErrors);
+        MGL_NSINFO(@"MGL AGX: GPU operation succeeded, resetting error count (was %lu)", (unsigned long)_consecutiveGPUErrors);
         _consecutiveGPUErrors = 0;
         _gpuErrorRecoveryMode = NO;
     }

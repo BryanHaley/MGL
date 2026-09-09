@@ -23,7 +23,7 @@
 
 #include "glcorearb.h"
 
-// smallest table we hand out, and the floor when growing an empty one
+// smallest table we hand out
 #define HASH_TABLE_MIN_SIZE 32
 
 typedef struct {

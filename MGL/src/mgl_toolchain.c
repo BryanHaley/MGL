@@ -1,4 +1,5 @@
 #include "mgl_toolchain.h"
+#include "mgl_log.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -65,7 +66,7 @@ static glslang_stage_t mgl_stage_to_glslang(mgl_toolchain_stage stage) {
 static void mgl_init_input(glslang_input_t *input,
                            mgl_toolchain_stage stage,
                            const char *src) {
-    fprintf(stderr, "[MGL DEBUG] mgl_init_input called, src first 50 chars: %.50s\n", src);
+    MGL_INFO("[MGL DEBUG] mgl_init_input called, src first 50 chars: %.50s\n", src);
     memset(input, 0, sizeof(*input));
     input->language = GLSLANG_SOURCE_GLSL;
     input->stage = mgl_stage_to_glslang(stage);
@@ -94,7 +95,7 @@ static void mgl_init_input(glslang_input_t *input,
 
     /* Log version upgrade for debugging */
     if (original_version < 330) {
-        fprintf(stderr, "[MGL] Upgrading GLSL shader from version %d to %d\n",
+        MGL_INFO("[MGL] Upgrading GLSL shader from version %d to %d\n",
                 original_version, glsl_version);
     }
 
@@ -131,16 +132,16 @@ static void mgl_init_input(glslang_input_t *input,
                     /* Simple replacement - pad with spaces */
                     memset(version_line, ' ', old_len);
                     memcpy(version_line, version_buf, new_len);
-                    fprintf(stderr, "[MGL] Replaced version line, first 100 chars: %.100s\n", modified_src);
+                    MGL_INFO("[MGL] Replaced version line, first 100 chars: %.100s\n", modified_src);
                 } else {
-                    fprintf(stderr, "[MGL] WARNING: New version line too long, skipping replacement\n");
+                    MGL_INFO("[MGL] WARNING: New version line too long, skipping replacement\n");
                 }
             }
         }
         input->code = modified_src;
     } else {
         /* Fallback: use original source */
-        fprintf(stderr, "[MGL] WARNING: Failed to allocate modified_src, using original\n");
+        MGL_INFO("[MGL] WARNING: Failed to allocate modified_src, using original\n");
         input->code = src;
     }
 

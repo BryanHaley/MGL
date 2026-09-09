@@ -23,6 +23,7 @@
 #include <assert.h>
 
 #include "error.h"
+#include "mgl_log.h"
 
 
 GLenum  mglGetError(GLMContext ctx)
@@ -32,7 +33,7 @@ GLenum  mglGetError(GLMContext ctx)
     err = ctx->state.error;
 
     if (err != GL_NO_ERROR)
-        fprintf(stderr, "MGL DEBUG: mglGetError returning 0x%x (%d)\n", err, err);
+        MGL_DEBUG("MGL: glGetError returning 0x%x\n", err);
 
     ctx->state.error = GL_NO_ERROR;
 
@@ -42,12 +43,14 @@ GLenum  mglGetError(GLMContext ctx)
 
 void error_func(GLMContext ctx, const char *func, GLenum error)
 {
-    fprintf(stderr, "MGL GL Error in %s: 0x%x (%d)\n", func, error, error);
-
+    // GL keeps only the first error until glGetError clears it, so only report
+    // that one; otherwise a bad call in a loop floods the log
     if (ctx->state.error)
         return;
 
     ctx->state.error = error;
+
+    MGL_ERR("MGL GL Error in %s: 0x%x\n", func, error);
 
     /* Temporarily disabled to allow QEMU to continue despite errors */
     // if (ctx->assert_on_error)

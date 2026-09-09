@@ -21,6 +21,7 @@
 #include <strings.h>
 
 #include "glm_context.h"
+#include "mgl_log.h"
 
 Sync *newSync(GLMContext ctx)
 {
@@ -29,7 +30,7 @@ Sync *newSync(GLMContext ctx)
     ptr = (Sync *)malloc(sizeof(Sync));
     // CRITICAL SECURITY FIX: Check malloc result instead of using assert()
     if (!ptr) {
-        fprintf(stderr, "MGL SECURITY ERROR: Failed to allocate memory for Sync\n");
+        MGL_ERR("MGL SECURITY ERROR: Failed to allocate memory for Sync\n");
         return NULL;
     }
 
@@ -59,7 +60,7 @@ GLsync mglFenceSync(GLMContext ctx, GLenum condition, GLbitfield flags)
 
         default:
             // CRITICAL FIX: Handle unknown fence conditions gracefully instead of crashing
-            fprintf(stderr, "MGL ERROR: Unknown fence sync condition 0x%x, defaulting to GPU_COMMANDS_COMPLETE\n", condition);
+            MGL_ERR("MGL ERROR: Unknown fence sync condition 0x%x, defaulting to GPU_COMMANDS_COMPLETE\n", condition);
             condition = GL_SYNC_GPU_COMMANDS_COMPLETE;
             break;
     }
@@ -67,7 +68,7 @@ GLsync mglFenceSync(GLMContext ctx, GLenum condition, GLbitfield flags)
     // must be zero
     if (flags != 0) {
         // CRITICAL FIX: Handle invalid flags gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Fence sync flags must be zero, got 0x%x, continuing with zero\n", flags);
+        MGL_ERR("MGL ERROR: Fence sync flags must be zero, got 0x%x, continuing with zero\n", flags);
         flags = 0;
     }
 
@@ -94,7 +95,7 @@ void mglDeleteSync(GLMContext ctx, GLsync sync)
     if (isSync(ctx, sync) == GL_FALSE)
     {
         // CRITICAL FIX: Handle invalid sync gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Attempting to delete invalid sync object %p\n", sync);
+        MGL_ERR("MGL ERROR: Attempting to delete invalid sync object %p\n", sync);
         return;
     }
 
@@ -104,7 +105,7 @@ void mglDeleteSync(GLMContext ctx, GLsync sync)
 
         // should be null - but handle gracefully if not
         if (sync->mtl_event != NULL) {
-            fprintf(stderr, "MGL WARNING: sync->mtl_event should be NULL after wait, but is %p\n", sync->mtl_event);
+            MGL_ERR("MGL WARNING: sync->mtl_event should be NULL after wait, but is %p\n", sync->mtl_event);
         }
     }
 
@@ -116,14 +117,14 @@ GLenum  mglClientWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint6
     if (flags & ~GL_SYNC_FLUSH_COMMANDS_BIT)
     {
         // CRITICAL FIX: Handle invalid flags gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Invalid sync flags 0x%x, only GL_SYNC_FLUSH_COMMANDS_BIT allowed\n", flags);
+        MGL_ERR("MGL ERROR: Invalid sync flags 0x%x, only GL_SYNC_FLUSH_COMMANDS_BIT allowed\n", flags);
         return GL_INVALID_VALUE;
     }
 
     if (isSync(ctx, sync) == GL_FALSE)
     {
         // CRITICAL FIX: Handle invalid sync gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Invalid sync object %p passed to client wait sync\n", sync);
+        MGL_ERR("MGL ERROR: Invalid sync object %p passed to client wait sync\n", sync);
         return GL_INVALID_VALUE;
     }
 
@@ -144,13 +145,13 @@ void mglWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint64 timeout
     if (isSync(ctx, sync) == GL_FALSE)
     {
         // CRITICAL FIX: Handle invalid sync gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Invalid sync object %p passed to wait sync\n", sync);
+        MGL_ERR("MGL ERROR: Invalid sync object %p passed to wait sync\n", sync);
         return;
     }
 
     if (timeout != GL_TIMEOUT_IGNORED) {
         // CRITICAL FIX: Handle invalid timeout gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Server wait sync timeout must be GL_TIMEOUT_IGNORED, got 0x%llx\n", timeout);
+        MGL_ERR("MGL ERROR: Server wait sync timeout must be GL_TIMEOUT_IGNORED, got 0x%llx\n", timeout);
         // Continue with GL_TIMEOUT_IGNORED behavior
     }
 
@@ -158,7 +159,7 @@ void mglWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint64 timeout
 
     // Handle gracefully if event is not null after wait
     if (sync->mtl_event != NULL) {
-        fprintf(stderr, "MGL WARNING: sync->mtl_event should be NULL after server wait, but is %p\n", sync->mtl_event);
+        MGL_ERR("MGL WARNING: sync->mtl_event should be NULL after server wait, but is %p\n", sync->mtl_event);
     }
 }
 
@@ -167,28 +168,28 @@ void mglGetSynciv(GLMContext ctx, GLsync sync, GLenum pname, GLsizei count, GLsi
     if (isSync(ctx, sync) == GL_FALSE)
     {
         // CRITICAL FIX: Handle invalid sync gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Invalid sync object %p passed to get sync iv\n", sync);
+        MGL_ERR("MGL ERROR: Invalid sync object %p passed to get sync iv\n", sync);
         return;
     }
 
     // CRITICAL FIX: Add parameter validation with graceful handling
     if (!count || count < 0) {
-        fprintf(stderr, "MGL ERROR: Invalid count %d in get sync iv\n", count);
+        MGL_ERR("MGL ERROR: Invalid count %d in get sync iv\n", count);
         return;
     }
     if (!length) {
-        fprintf(stderr, "MGL ERROR: NULL length pointer in get sync iv\n");
+        MGL_ERR("MGL ERROR: NULL length pointer in get sync iv\n");
         return;
     }
     if (!values) {
-        fprintf(stderr, "MGL ERROR: NULL values pointer in get sync iv\n");
+        MGL_ERR("MGL ERROR: NULL values pointer in get sync iv\n");
         return;
     }
 
     if (*length < count * sizeof(GLuint))
     {
         // CRITICAL FIX: Handle insufficient buffer size gracefully
-        fprintf(stderr, "MGL ERROR: Insufficient buffer size %d for %d values in get sync iv\n", *length, count);
+        MGL_ERR("MGL ERROR: Insufficient buffer size %d for %d values in get sync iv\n", *length, count);
         *length = count * sizeof(GLuint);
         return;
     }
@@ -219,7 +220,7 @@ void mglGetSynciv(GLMContext ctx, GLsync sync, GLenum pname, GLsizei count, GLsi
 
             default:
                 // CRITICAL FIX: Handle unknown sync parameters gracefully instead of crashing
-                fprintf(stderr, "MGL ERROR: Unknown sync parameter 0x%x in get sync iv\n", pname);
+                MGL_ERR("MGL ERROR: Unknown sync parameter 0x%x in get sync iv\n", pname);
                 *values = 0; // Return safe default value
                 break;
         }
@@ -231,7 +232,7 @@ void mglGetSynciv(GLMContext ctx, GLsync sync, GLenum pname, GLsizei count, GLsi
 void mglTextureBarrier(GLMContext ctx)
 {
     // CRITICAL FIX: Handle unimplemented function gracefully instead of crashing
-    fprintf(stderr, "MGL WARNING: mglTextureBarrier is not yet implemented in MGL\n");
+    MGL_ERR("MGL WARNING: mglTextureBarrier is not yet implemented in MGL\n");
     // No-op implementation - this is optional functionality
 }
 

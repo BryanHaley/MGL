@@ -20,6 +20,7 @@
 
 #include "mgl.h"
 #include "glm_context.h"
+#include "mgl_log.h"
 
 static bool validBlendFactor(GLenum f);
 static bool validBlendEquation(GLenum mode);
@@ -64,7 +65,7 @@ void mglDisable(GLMContext ctx, GLenum cap)
             // Legacy texture enable/disable - no-op in core profile
             break;
         default:
-            fprintf(stderr, "MGL WARNING: mglDisable unsupported cap 0x%x\n", cap);
+            MGL_ERR("MGL WARNING: mglDisable unsupported cap 0x%x\n", cap);
             // Don't error - just ignore unsupported caps
             break;
     }
@@ -110,7 +111,7 @@ void mglEnable(GLMContext ctx, GLenum cap)
             // virglrenderer may call these for compatibility
             break;
         default:
-            fprintf(stderr, "MGL WARNING: mglEnable unsupported cap 0x%x\n", cap);
+            MGL_ERR("MGL WARNING: mglEnable unsupported cap 0x%x\n", cap);
             // Don't error - just ignore unsupported caps
             break;
     }

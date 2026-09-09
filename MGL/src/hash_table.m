@@ -96,8 +96,7 @@ void insertHashElement(HashTable *table, GLuint name, void *data)
     {
         size_t old_size = table->size;
 
-        // Doubling cannot grow an empty table, so an uninitialised one used to
-        // spin here forever. Start from a real size instead.
+        // doubling can't grow from zero
         if (old_size == 0)
         {
             table->size = (name < HASH_TABLE_MIN_SIZE) ? HASH_TABLE_MIN_SIZE : (size_t)name + 1;

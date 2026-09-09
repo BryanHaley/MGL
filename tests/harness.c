@@ -20,6 +20,10 @@ int mgl_harness_init(void)
     if (g_ready)
         return 1;
 
+    // tests trigger errors on purpose; set MGL_LOG_LEVEL to see them
+    if (!getenv("MGL_LOG_LEVEL"))
+        setenv("MGL_LOG_LEVEL", "0", 1);
+
     g_ctx = createGLMContext(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
                              GL_DEPTH_COMPONENT, GL_FLOAT,
                              GL_STENCIL_INDEX8, GL_UNSIGNED_BYTE);

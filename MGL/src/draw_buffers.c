@@ -23,6 +23,7 @@
 #include <mach/vm_map.h>
 
 #include "glm_context.h"
+#include "mgl_log.h"
 
 bool check_draw_modes(GLenum mode)
 {
@@ -96,7 +97,7 @@ bool processVAO(GLMContext ctx)
 bool validate_vao(GLMContext ctx, bool uses_elements)
 {
     if (!VAO()) {
-        fprintf(stderr, "MGL Error: validate_vao: VAO is NULL\n");
+        MGL_ERR("MGL Error: validate_vao: VAO is NULL\n");
         return false;
     }
 
@@ -107,7 +108,7 @@ bool validate_vao(GLMContext ctx, bool uses_elements)
     if (ctx->state.vao->dirty_bits)
     {
         if (!processVAO(ctx)) {
-            fprintf(stderr, "MGL Error: validate_vao: processVAO failed\n");
+            MGL_ERR("MGL Error: validate_vao: processVAO failed\n");
             return false;
         }
     }
@@ -123,7 +124,7 @@ bool validate_vao(GLMContext ctx, bool uses_elements)
         {
             // mapped buffers cannot be used during draw calls
             if (VAO_ATTRIB_STATE(i).buffer->mapped) {
-                fprintf(stderr, "MGL Error: validate_vao: attrib %d buffer mapped\n", i);
+                MGL_ERR("MGL Error: validate_vao: attrib %d buffer mapped\n", i);
                 return false;
             }
         }
@@ -135,7 +136,7 @@ bool validate_vao(GLMContext ctx, bool uses_elements)
     if (uses_elements)
     {
         if (!ctx->state.vao->element_array.buffer) {
-            fprintf(stderr, "MGL Error: validate_vao: element buffer missing\n");
+            MGL_ERR("MGL Error: validate_vao: element buffer missing\n");
             return false;
         }
     }
@@ -148,7 +149,7 @@ bool validate_program(GLMContext ctx)
     if (ctx->state.program) {
         if (ctx->state.program->shader_slots[_GEOMETRY_SHADER])
         {
-            fprintf(stderr, "MGL Error: validate_program: geometry shader present (unsupported)\n");
+            MGL_ERR("MGL Error: validate_program: geometry shader present (unsupported)\n");
             return false;
         }
     }
@@ -175,19 +176,19 @@ GLsizei getTypeSize(GLenum type)
 
 void mglDrawArrays(GLMContext ctx, GLenum mode, GLint first, GLsizei count)
 {
-    // fprintf(stderr, "DEBUG: mglDrawArrays ctx=%p prog=%p dirty=%x\n", ctx, ctx->state.program, ctx->state.dirty_bits);
+    // MGL_INFO("DEBUG: mglDrawArrays ctx=%p prog=%p dirty=%x\n", ctx, ctx->state.program, ctx->state.dirty_bits);
 
     if (!check_draw_modes(mode)) { ERROR_RETURN(GL_INVALID_ENUM); return; }
 
     // ERROR_CHECK_RETURN(first >= 0, GL_INVALID_VALUE);
     if (first < 0) {
-        fprintf(stderr, "MGL Error: mglDrawArrays: first < 0 (%d)\n", first);
+        MGL_ERR("MGL Error: mglDrawArrays: first < 0 (%d)\n", first);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     // ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
     if (count < 0) {
-        fprintf(stderr, "MGL Error: mglDrawArrays: count < 0 (%d)\n", count);
+        MGL_ERR("MGL Error: mglDrawArrays: count < 0 (%d)\n", count);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -195,13 +196,13 @@ void mglDrawArrays(GLMContext ctx, GLenum mode, GLint first, GLsizei count)
 
     if(validate_vao(ctx, false) == false)
     {
-        fprintf(stderr, "MGL Error: mglDrawArrays: validate_vao failed\n");
+        MGL_ERR("MGL Error: mglDrawArrays: validate_vao failed\n");
         ERROR_RETURN(GL_INVALID_OPERATION);
         return;
     }
 
     if (!validate_program(ctx)) {
-        fprintf(stderr, "MGL Error: mglDrawArrays: validate_program failed\n");
+        MGL_ERR("MGL Error: mglDrawArrays: validate_program failed\n");
         ERROR_RETURN(GL_INVALID_OPERATION);
         return;
     }
@@ -215,7 +216,7 @@ void mglDrawElements(GLMContext ctx, GLenum mode, GLsizei count, GLenum type, co
 
     // ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
     if (count < 0) {
-        fprintf(stderr, "MGL Error: mglDrawElements: count < 0 (%d)\n", count);
+        MGL_ERR("MGL Error: mglDrawElements: count < 0 (%d)\n", count);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -262,13 +263,13 @@ void mglDrawArraysInstanced(GLMContext ctx, GLenum mode, GLint first, GLsizei co
 
     // ERROR_CHECK_RETURN(first >= 0, GL_INVALID_VALUE);
     if (first < 0) {
-        fprintf(stderr, "MGL Error: mglDrawArraysInstanced: first < 0 (%d)\n", first);
+        MGL_ERR("MGL Error: mglDrawArraysInstanced: first < 0 (%d)\n", first);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     // ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
     if (count < 0) {
-        fprintf(stderr, "MGL Error: mglDrawArraysInstanced: count < 0 (%d)\n", count);
+        MGL_ERR("MGL Error: mglDrawArraysInstanced: count < 0 (%d)\n", count);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 

@@ -29,12 +29,13 @@
 
 #include "pixel_utils.h"
 #include "glm_context.h"
+#include "mgl_log.h"
 
 void mglClear(GLMContext ctx, GLbitfield mask)
 {
     if (mask & ~(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT))
     {
-        fprintf(stderr, "MGL Error: mglClear: invalid mask 0x%x\n", mask);
+        MGL_ERR("MGL Error: mglClear: invalid mask 0x%x\n", mask);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -90,7 +91,7 @@ void mglClearBufferfv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLf
             fboa->clear_color[0] = value[0];
             break;
         default:
-            fprintf(stderr, "MGL Error: mglClearBufferfv: invalid buffer 0x%x\n", buffer);
+            MGL_ERR("MGL Error: mglClearBufferfv: invalid buffer 0x%x\n", buffer);
             ERROR_RETURN(GL_INVALID_ENUM);
             break;
     }
@@ -112,7 +113,7 @@ void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat d
             fboa->clear_color[0] = stencil;
             break;
         default:
-            fprintf(stderr, "MGL Error: mglClearBufferfi: invalid buffer 0x%x\n", buffer);
+            MGL_ERR("MGL Error: mglClearBufferfi: invalid buffer 0x%x\n", buffer);
             ERROR_RETURN(GL_INVALID_ENUM);
             break;
     }
@@ -120,7 +121,7 @@ void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat d
 
 void mglFinish(GLMContext ctx)
 {
-    fprintf(stderr, "MGL: mglFinish called - flushing and waiting for GPU\n");
+    MGL_INFO("MGL: mglFinish called - flushing and waiting for GPU\n");
     ctx->mtl_funcs.mtlFlush(ctx, true);
 }
 
@@ -158,11 +159,11 @@ void mglDrawBuffer(GLMContext ctx, GLenum buf)
         case GL_RIGHT:
         case GL_FRONT_AND_BACK:
             // TODO: Implement these buffer modes properly
-            fprintf(stderr, "MGL: mglDrawBuffer called with unimplemented mode 0x%x\n", buf);
+            MGL_INFO("MGL: mglDrawBuffer called with unimplemented mode 0x%x\n", buf);
             break;
 
         default:
-            fprintf(stderr, "MGL Error: mglDrawBuffer: invalid enum 0x%x\n", buf);
+            MGL_ERR("MGL Error: mglDrawBuffer: invalid enum 0x%x\n", buf);
             ERROR_RETURN(GL_INVALID_ENUM);
     }
 
@@ -173,7 +174,7 @@ void mglDrawBuffer(GLMContext ctx, GLenum buf)
         Framebuffer * fbo = ctx->state.framebuffer;
         if (!fbo || !fbo->color_attachments[buf-GL_COLOR_ATTACHMENT0].buf.rbo)
         {
-            fprintf(stderr, "MGL Error: mglDrawBuffer: missing color attachment %u\n", (unsigned)(buf - GL_COLOR_ATTACHMENT0));
+            MGL_ERR("MGL Error: mglDrawBuffer: missing color attachment %u\n", (unsigned)(buf - GL_COLOR_ATTACHMENT0));
             ERROR_RETURN(GL_INVALID_OPERATION);
             return;
         }
@@ -208,7 +209,7 @@ void mglReadBuffer(GLMContext ctx, GLenum buf)
             break;
 
         default:
-            fprintf(stderr, "MGL Error: mglReadBuffer: invalid enum 0x%x\n", buf);
+            MGL_ERR("MGL Error: mglReadBuffer: invalid enum 0x%x\n", buf);
             ERROR_RETURN(GL_INVALID_ENUM);
     }
 
@@ -226,7 +227,7 @@ void mglPixelStorei(GLMContext ctx, GLenum pname, GLint param)
 {
     // ERROR_CHECK_RETURN(param >= 0, GL_INVALID_VALUE);
     if (param < 0) {
-        fprintf(stderr, "MGL Error: mglPixelStorei: param < 0 (%d) for pname 0x%x\n", param, pname);
+        MGL_ERR("MGL Error: mglPixelStorei: param < 0 (%d) for pname 0x%x\n", param, pname);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -271,7 +272,7 @@ void mglPixelStorei(GLMContext ctx, GLenum pname, GLint param)
                     break;
 
                 default:
-                    fprintf(stderr, "MGL Error: mglPixelStorei: invalid PACK_ALIGNMENT %d\n", param);
+                    MGL_ERR("MGL Error: mglPixelStorei: invalid PACK_ALIGNMENT %d\n", param);
                     ERROR_RETURN(GL_INVALID_VALUE);
                     break;
             }
@@ -315,7 +316,7 @@ void mglPixelStorei(GLMContext ctx, GLenum pname, GLint param)
                     break;
 
                 default:
-                    fprintf(stderr, "MGL Error: mglPixelStorei: invalid UNPACK_ALIGNMENT %d\n", param);
+                    MGL_ERR("MGL Error: mglPixelStorei: invalid UNPACK_ALIGNMENT %d\n", param);
                     ERROR_RETURN(GL_INVALID_VALUE);
                     break;
             }
@@ -335,19 +336,19 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
     pixel_size = sizeForFormatType(format, type);
     // ERROR_CHECK_RETURN(pixel_size != 0, GL_INVALID_ENUM);
     if (pixel_size == 0) {
-        fprintf(stderr, "MGL Error: mglReadPixels: invalid format/type combination (format=0x%x type=0x%x)\n", format, type);
+        MGL_ERR("MGL Error: mglReadPixels: invalid format/type combination (format=0x%x type=0x%x)\n", format, type);
         ERROR_RETURN(GL_INVALID_ENUM);
     }
 
     // ERROR_CHECK_RETURN(width > 0, GL_INVALID_ENUM);
     if (width < 0) {
-        fprintf(stderr, "MGL Error: mglReadPixels: width < 0 (%d)\n", width);
+        MGL_ERR("MGL Error: mglReadPixels: width < 0 (%d)\n", width);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     // ERROR_CHECK_RETURN(height > 0, GL_INVALID_ENUM);
     if (height < 0) {
-        fprintf(stderr, "MGL Error: mglReadPixels: height < 0 (%d)\n", height);
+        MGL_ERR("MGL Error: mglReadPixels: height < 0 (%d)\n", height);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -365,20 +366,20 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
     pitch_size = row_length * (size_t)pixel_size;
     if (pitch_size > UINT_MAX)
     {
-        fprintf(stderr, "MGL Error: mglReadPixels: pitch overflow (row_length=%zu pixel_size=%u)\n", row_length, pixel_size);
+        MGL_ERR("MGL Error: mglReadPixels: pitch overflow (row_length=%zu pixel_size=%u)\n", row_length, pixel_size);
         ERROR_RETURN(GL_OUT_OF_MEMORY);
     }
     pitch = (GLuint)pitch_size;
 
     if (pitch_size > 0 && (size_t)height > (SIZE_MAX / pitch_size))
     {
-        fprintf(stderr, "MGL Error: mglReadPixels: buffer_size overflow (pitch=%zu height=%d)\n", pitch_size, height);
+        MGL_ERR("MGL Error: mglReadPixels: buffer_size overflow (pitch=%zu height=%d)\n", pitch_size, height);
         ERROR_RETURN(GL_OUT_OF_MEMORY);
     }
     buffer_size = pitch_size * (size_t)height;
     if (buffer_size > UINT_MAX)
     {
-        fprintf(stderr, "MGL Error: mglReadPixels: buffer_size exceeds API limit (%zu)\n", buffer_size);
+        MGL_ERR("MGL Error: mglReadPixels: buffer_size exceeds API limit (%zu)\n", buffer_size);
         ERROR_RETURN(GL_OUT_OF_MEMORY);
     }
 
@@ -419,7 +420,7 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
         case GL_UNSIGNED_SHORT_5_6_5_REV:
             // ERROR_CHECK_RETURN(format == GL_RGB || format == GL_BGR, GL_INVALID_OPERATION);
             if (!(format == GL_RGB || format == GL_BGR)) {
-                fprintf(stderr, "MGL Error: mglReadPixels: invalid format for type (format=0x%x type=0x%x)\n", format, type);
+                MGL_ERR("MGL Error: mglReadPixels: invalid format for type (format=0x%x type=0x%x)\n", format, type);
                 ERROR_RETURN(GL_INVALID_OPERATION);
             }
             break;
@@ -434,7 +435,7 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
         case GL_UNSIGNED_INT_2_10_10_10_REV:
             // ERROR_CHECK_RETURN(format == GL_RGBA || format == GL_BGRA, GL_INVALID_OPERATION);
             if (!(format == GL_RGBA || format == GL_BGRA)) {
-                fprintf(stderr, "MGL Error: mglReadPixels: invalid format for type (format=0x%x type=0x%x)\n", format, type);
+                MGL_ERR("MGL Error: mglReadPixels: invalid format for type (format=0x%x type=0x%x)\n", format, type);
                 ERROR_RETURN(GL_INVALID_OPERATION);
             }
             break;
@@ -450,26 +451,26 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
 
         // ERROR_CHECK_RETURN(ptr->mapped == false, GL_INVALID_OPERATION);
         if (ptr->mapped) {
-            fprintf(stderr, "MGL Error: mglReadPixels: pixel pack buffer is mapped\n");
+            MGL_ERR("MGL Error: mglReadPixels: pixel pack buffer is mapped\n");
             ERROR_RETURN(GL_INVALID_OPERATION);
         }
 
         if (ptr->size < 0)
         {
-            fprintf(stderr, "MGL Error: mglReadPixels: pixel pack buffer has negative size (%ld)\n", (long)ptr->size);
+            MGL_ERR("MGL Error: mglReadPixels: pixel pack buffer has negative size (%ld)\n", (long)ptr->size);
             ERROR_RETURN(GL_INVALID_OPERATION);
         }
 
         offset = (uintptr_t)pixels;
         if (pixel_size && (offset % (uintptr_t)pixel_size) != 0)
         {
-            fprintf(stderr, "MGL Error: mglReadPixels: pixel pack buffer offset not aligned (offset=%lu pixel_size=%u)\n", (unsigned long)offset, pixel_size);
+            MGL_ERR("MGL Error: mglReadPixels: pixel pack buffer offset not aligned (offset=%lu pixel_size=%u)\n", (unsigned long)offset, pixel_size);
             ERROR_RETURN(GL_INVALID_OPERATION);
         }
 
         if ((size_t)ptr->size < offset || (size_t)ptr->size - offset < buffer_size)
         {
-            fprintf(stderr, "MGL Error: mglReadPixels: pixel pack buffer too small (size=%ld offset=%lu req=%zu)\n",
+            MGL_ERR("MGL Error: mglReadPixels: pixel pack buffer too small (size=%ld offset=%lu req=%zu)\n",
                     (long)ptr->size, (unsigned long)offset, buffer_size);
             ERROR_RETURN(GL_INVALID_OPERATION);
         }
@@ -477,7 +478,7 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
         base = (uint8_t *)(uintptr_t)ptr->data.buffer_data;
         if (!base)
         {
-            fprintf(stderr, "MGL Error: mglReadPixels: pixel pack buffer has no CPU storage\n");
+            MGL_ERR("MGL Error: mglReadPixels: pixel pack buffer has no CPU storage\n");
             ERROR_RETURN(GL_INVALID_OPERATION);
         }
 
@@ -486,7 +487,7 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
 
     if (!STATE(buffers[_PIXEL_PACK_BUFFER]) && pixels == NULL)
     {
-        fprintf(stderr, "MGL Error: mglReadPixels: pixels is NULL with no pixel pack buffer bound\n");
+        MGL_ERR("MGL Error: mglReadPixels: pixels is NULL with no pixel pack buffer bound\n");
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 

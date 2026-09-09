@@ -31,6 +31,7 @@
 #include "glm_context.h"
 #include "shaders.h"
 #include "buffers.h"
+#include "mgl_log.h"
 
 // Program Pipeline management
 ProgramPipeline *newProgramPipeline(GLMContext ctx, GLuint pipeline)
@@ -231,7 +232,7 @@ void mglDeleteProgram(GLMContext ctx, GLuint program)
     if (!ptr)
     {
         // // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION; // Silent ignore if not found? OpenGL says GL_INVALID_VALUE usually, but delete is often silent for 0.
         // But if program != 0 and not found, it's GL_INVALID_VALUE.
         return;
@@ -266,7 +267,7 @@ void mglAttachShader(GLMContext ctx, GLuint program, GLuint shader)
     if (!sptr)
     {
         // CRITICAL FIX: Handle missing shader gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Shader %u not found in attach shader\n", shader);
+        MGL_ERR("MGL ERROR: Shader %u not found in attach shader\n", shader);
         STATE(error) = GL_INVALID_VALUE;
         return;
     }
@@ -276,7 +277,7 @@ void mglAttachShader(GLMContext ctx, GLuint program, GLuint shader)
     if (!pptr)
     {
         // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
 
         return;
@@ -299,7 +300,7 @@ void mglDetachShader(GLMContext ctx, GLuint program, GLuint shader)
     if (!pptr)
     {
         // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
         return;
     }
@@ -320,7 +321,7 @@ void mglDetachShader(GLMContext ctx, GLuint program, GLuint shader)
     if (!sptr)
     {
         // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
         return;
     }
@@ -414,33 +415,33 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     assert(compiler_msl);
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) != SPVC_SUCCESS) {
-        fprintf(stderr, "MGL Error: spvc_compiler_msl_add_discrete_descriptor_set failed\n");
+        MGL_ERR("MGL Error: spvc_compiler_msl_add_discrete_descriptor_set failed\n");
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
     // Modify options.
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_create_compiler_options(compiler_msl, &options) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_create_compiler_options(compiler_msl, &options) != SPVC_SUCCESS) {
-        fprintf(stderr, "MGL Error: spvc_compiler_create_compiler_options failed\n");
+        MGL_ERR("MGL Error: spvc_compiler_create_compiler_options failed\n");
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS, SPVC_FALSE) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS, SPVC_FALSE) != SPVC_SUCCESS) {
-        fprintf(stderr, "MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS) failed\n");
+        MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS) failed\n");
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(3,1,0)) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(3,1,0)) != SPVC_SUCCESS) {
-        fprintf(stderr, "MGL Error: spvc_compiler_options_set_uint(SPVC_COMPILER_OPTION_MSL_VERSION) failed\n");
+        MGL_ERR("MGL Error: spvc_compiler_options_set_uint(SPVC_COMPILER_OPTION_MSL_VERSION) failed\n");
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
     //ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_GLSL_VERSION, 4.5) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_install_compiler_options(compiler_msl, options) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_install_compiler_options(compiler_msl, options) != SPVC_SUCCESS) {
-        fprintf(stderr, "MGL Error: spvc_compiler_install_compiler_options failed\n");
+        MGL_ERR("MGL Error: spvc_compiler_install_compiler_options failed\n");
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
@@ -460,7 +461,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         case _FRAGMENT_SHADER: model = SpvExecutionModelFragment; break;
         case _COMPUTE_SHADER: model = SpvExecutionModelGLCompute; break;
         default: // CRITICAL FIX: Handle error gracefully instead of crashing
-            fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+            MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
             STATE(error) = GL_INVALID_OPERATION;
             return NULL;
     }
@@ -474,7 +475,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         case _FRAGMENT_SHADER: snprintf(entry_point, sizeof(entry_point), "fragment_%d",name); break;
         case _COMPUTE_SHADER: snprintf(entry_point, sizeof(entry_point), "compute_%d",name); break;
         default: // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
     }
 
@@ -526,14 +527,14 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         // CRITICAL SECURITY FIX: Prevent integer overflow in resource allocation
         // Check if count * sizeof(SpirvResource) would overflow size_t
         if (count > SIZE_MAX / sizeof(SpirvResource)) {
-            fprintf(stderr, "MGL SECURITY ERROR: Resource count %zu would cause allocation overflow\n", count);
+            MGL_ERR("MGL SECURITY ERROR: Resource count %zu would cause allocation overflow\n", count);
             ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
         }
 
         size_t alloc_size = count * sizeof(SpirvResource);
         ptr->spirv_resources_list[stage][res_type].list = (SpirvResource *)malloc(alloc_size);
         if (!ptr->spirv_resources_list[stage][res_type].list) {
-            fprintf(stderr, "MGL SECURITY ERROR: Failed to allocate %zu bytes for resource list\n", alloc_size);
+            MGL_ERR("MGL SECURITY ERROR: Failed to allocate %zu bytes for resource list\n", alloc_size);
             ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
         }
 
@@ -591,7 +592,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
             ptr->spirv_resources_list[stage][res_type].list[i].binding = spvc_compiler_get_decoration(compiler_msl, list[i].id, SpvDecorationBinding);
             ptr->spirv_resources_list[stage][res_type].list[i].location = spvc_compiler_get_decoration(compiler_msl, list[i].id, SpvDecorationLocation);
             if (getenv("MGL_DEBUG_RESOURCES"))
-                fprintf(stderr, "MGLRES stage=%d type=%d name=%s id=%u basetype=%u set=%u binding=%u location=%u\n",
+                MGL_INFO("MGLRES stage=%d type=%d name=%s id=%u basetype=%u set=%u binding=%u location=%u\n",
                         stage, res_type, list[i].name, list[i].id, list[i].base_type_id,
                         ptr->spirv_resources_list[stage][res_type].list[i].set,
                         ptr->spirv_resources_list[stage][res_type].list[i].binding,
@@ -603,7 +604,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     DEBUG_PRINT("\n%s\n", result);
 
     if (getenv("MGL_DEBUG_MSL"))
-        fprintf(stderr, "---- MSL stage %d ----\n%s\n", stage, result);
+        MGL_INFO("---- MSL stage %d ----\n%s\n", stage, result);
 
     str_ret = strdup(result);
 
@@ -645,35 +646,35 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage)
         pptr->spirv[stage].mtl_library = NULL;
     }
 
-    fprintf(stderr, "MGL DEBUG: Creating glslang program for stage %d\n", stage);
+    MGL_INFO("MGL DEBUG: Creating glslang program for stage %d\n", stage);
     glsl_program = glslang_program_create();
     assert(glsl_program);
-    fprintf(stderr, "MGL DEBUG: Created glslang program %p\n", (void*)glsl_program);
+    MGL_INFO("MGL DEBUG: Created glslang program %p\n", (void*)glsl_program);
 
     // shaders to glsl program
-    fprintf(stderr, "MGL DEBUG: Adding shaders to program\n");
+    MGL_INFO("MGL DEBUG: Adding shaders to program\n");
     addShadersToProgram(ctx, pptr, glsl_program);
-    fprintf(stderr, "MGL DEBUG: Shaders added\n");
+    MGL_INFO("MGL DEBUG: Shaders added\n");
 
     // link
-    fprintf(stderr, "MGL DEBUG: About to link program\n");
+    MGL_INFO("MGL DEBUG: About to link program\n");
     err = glslang_program_link(glsl_program, GLSLANG_MSG_DEFAULT_BIT);
-    fprintf(stderr, "MGL DEBUG: Program link returned %d\n", err);
+    MGL_INFO("MGL DEBUG: Program link returned %d\n", err);
     if (!err)
     {
         // this is useful.. but information after this failure isn't that interesting
-        fprintf(stderr, "MGL Error: glslang_program_link failed err: %d\n", err);
-        fprintf(stderr, "MGL Error: glslang_program_SPIRV_get_messages:\n%s\n", glslang_program_SPIRV_get_messages(glsl_program));
-        fprintf(stderr, "MGL Error: glslang_program_get_info_log:\n%s\n", glslang_program_get_info_log(glsl_program));
-        fprintf(stderr, "MGL Error: glslang_program_get_info_debug_log:\n%s\n", glslang_program_get_info_debug_log(glsl_program));
+        MGL_ERR("MGL Error: glslang_program_link failed err: %d\n", err);
+        MGL_ERR("MGL Error: glslang_program_SPIRV_get_messages:\n%s\n", glslang_program_SPIRV_get_messages(glsl_program));
+        MGL_ERR("MGL Error: glslang_program_get_info_log:\n%s\n", glslang_program_get_info_log(glsl_program));
+        MGL_ERR("MGL Error: glslang_program_get_info_debug_log:\n%s\n", glslang_program_get_info_debug_log(glsl_program));
 
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
     }
 
     // generate SPIVR
-    fprintf(stderr, "MGL DEBUG: Generating SPIRV for stage %d\n", stage);
+    MGL_INFO("MGL DEBUG: Generating SPIRV for stage %d\n", stage);
     glslang_program_SPIRV_generate(glsl_program, stage);
-    fprintf(stderr, "MGL DEBUG: SPIRV generated\n");
+    MGL_INFO("MGL DEBUG: SPIRV generated\n");
 
     if (glslang_program_SPIRV_get_messages(glsl_program))
     {
@@ -683,34 +684,34 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage)
     }
 
     // save SPIRV code
-    fprintf(stderr, "MGL DEBUG: Getting SPIRV size\n");
+    MGL_INFO("MGL DEBUG: Getting SPIRV size\n");
     pptr->spirv[stage].size = glslang_program_SPIRV_get_size(glsl_program);
-    fprintf(stderr, "MGL DEBUG: SPIRV size: %zu\n", pptr->spirv[stage].size);
+    MGL_INFO("MGL DEBUG: SPIRV size: %zu\n", pptr->spirv[stage].size);
 
     // CRITICAL SECURITY FIX: Prevent integer overflow in SPIRV allocation
     // Check if size * sizeof(unsigned) would overflow size_t
     if (pptr->spirv[stage].size > SIZE_MAX / sizeof(unsigned)) {
-        fprintf(stderr, "MGL SECURITY ERROR: SPIRV size %zu would cause allocation overflow\n", pptr->spirv[stage].size);
+        MGL_ERR("MGL SECURITY ERROR: SPIRV size %zu would cause allocation overflow\n", pptr->spirv[stage].size);
         ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, false);
     }
 
     size_t alloc_size = pptr->spirv[stage].size * sizeof(unsigned);
     pptr->spirv[stage].ir = (unsigned int *)malloc(alloc_size);
     if (!pptr->spirv[stage].ir) {
-        fprintf(stderr, "MGL SECURITY ERROR: Failed to allocate %zu bytes for SPIRV\n", alloc_size);
+        MGL_ERR("MGL SECURITY ERROR: Failed to allocate %zu bytes for SPIRV\n", alloc_size);
         ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, false);
     }
-    fprintf(stderr, "MGL DEBUG: Getting SPIRV IR\n");
+    MGL_INFO("MGL DEBUG: Getting SPIRV IR\n");
     glslang_program_SPIRV_get(glsl_program, pptr->spirv[stage].ir);
-    fprintf(stderr, "MGL DEBUG: SPIRV IR obtained\n");
+    MGL_INFO("MGL DEBUG: SPIRV IR obtained\n");
 
     // compile SPIRV to Metal
-    fprintf(stderr, "MGL DEBUG: About to parse SPIRV to Metal\n");
+    MGL_INFO("MGL DEBUG: About to parse SPIRV to Metal\n");
     pptr->spirv[stage].msl_str = parseSPIRVShaderToMetal(ctx, pptr, stage);
-    fprintf(stderr, "MGL DEBUG: SPIRV parsed to Metal\n");
+    MGL_INFO("MGL DEBUG: SPIRV parsed to Metal\n");
     // ERROR_CHECK_RETURN_VALUE(pptr->spirv[stage].msl_str, GL_INVALID_OPERATION, false);
     if (pptr->spirv[stage].msl_str == NULL) {
-        fprintf(stderr, "MGL Error: parseSPIRVShaderToMetal failed for stage %d\n", stage);
+        MGL_ERR("MGL Error: parseSPIRVShaderToMetal failed for stage %d\n", stage);
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
     }
 
@@ -731,7 +732,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     if (!pptr)
     {
         // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
 
         return;
@@ -751,7 +752,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     if (ctx->mtl_funcs.mtlBindProgram) {
         ctx->mtl_funcs.mtlBindProgram(ctx, pptr);
     } else {
-        fprintf(stderr, "WARNING: Metal functions not initialized, skipping mtlBindProgram\n");
+        MGL_INFO("WARNING: Metal functions not initialized, skipping mtlBindProgram\n");
     }
 
     //ERROR_CHECK_RETURN(pptr->mtl_data, GL_INVALID_OPERATION);
@@ -767,9 +768,9 @@ void mglUseProgram(GLMContext ctx, GLuint program)
 
         if (!pptr)
         {
-            fprintf(stderr, "MGL Error: mglUseProgram program %u not found\n", program);
+            MGL_ERR("MGL Error: mglUseProgram program %u not found\n", program);
             // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
 
             return;
@@ -810,7 +811,7 @@ void mglBindAttribLocation(GLMContext ctx, GLuint program, GLuint index, const G
 {
     // Unimplemented function
     // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
 }
 
@@ -818,7 +819,7 @@ void mglGetActiveAttrib(GLMContext ctx, GLuint program, GLuint index, GLsizei bu
 {
     // Unimplemented function
     // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
 }
 
@@ -826,7 +827,7 @@ void mglGetActiveUniform(GLMContext ctx, GLuint program, GLuint index, GLsizei b
 {
     // Unimplemented function
     // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
 }
 
@@ -834,7 +835,7 @@ void mglGetAttachedShaders(GLMContext ctx, GLuint program, GLsizei maxCount, GLs
 {
     // Unimplemented function
     // CRITICAL FIX: Handle error gracefully instead of crashing
-        fprintf(stderr, "MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
         STATE(error) = GL_INVALID_OPERATION;
 }
 
@@ -929,7 +930,7 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
             }
             break;
         default:
-            fprintf(stderr, "mglGetProgramiv: unhandled pname 0x%x\n", pname);
+            MGL_INFO("mglGetProgramiv: unhandled pname 0x%x\n", pname);
             *params = 0;
             break;
     }

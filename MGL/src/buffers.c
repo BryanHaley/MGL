@@ -28,6 +28,7 @@
 #include "buffers.h"
 #include "pixel_utils.h"
 #include "mgl_safety.h"
+#include "mgl_log.h"
 
 // Used to recover from a corrupted context pointer (e.g. small non-NULL values like 0x2f)
 extern void mgl_lazy_init(void);
@@ -204,14 +205,14 @@ static inline GLMContext mgl_sanitize_ctx(GLMContext ctx, const char *func)
     if (ctx != NULL && (uintptr_t)ctx >= 0x10000u)
         return ctx;
 
-    fprintf(stderr, "MGL ERROR: %s received invalid ctx=%p; attempting to recover\n", func, (void *)ctx);
+    MGL_ERR("MGL ERROR: %s received invalid ctx=%p; attempting to recover\n", func, (void *)ctx);
 
     mgl_lazy_init();
 
     if (_ctx != NULL && (uintptr_t)_ctx >= 0x10000u)
         return _ctx;
 
-    fprintf(stderr, "MGL ERROR: %s recovery failed; dropping call\n", func);
+    MGL_ERR("MGL ERROR: %s recovery failed; dropping call\n", func);
     return NULL;
 }
 
@@ -383,8 +384,7 @@ bool clearBufferData(GLMContext ctx, Buffer *ptr, GLenum internalformat, GLintpt
 #pragma mark GL Buffer Functions
 void mglGenBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 {
-    // n is signed: a negative count used to run the loop billions of
-    // times straight past the caller's array
+    // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     while(n--)
@@ -395,8 +395,7 @@ void mglGenBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 
 void mglCreateBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 {
-    // n is signed: a negative count used to run the loop billions of
-    // times straight past the caller's array
+    // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     GLuint name;
@@ -414,8 +413,7 @@ void mglCreateBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 
 void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
 {
-    // n is signed: a negative count used to run the loop billions of
-    // times straight past the caller's array
+    // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     GLuint buffer;
@@ -630,13 +628,13 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
 
     // ERROR_CHECK_RETURN(offset >= 0, GL_INVALID_VALUE);
     if (offset < 0) {
-        fprintf(stderr, "MGL Error: mglBindBufferRange: offset < 0 (%ld)\n", offset);
+        MGL_ERR("MGL Error: mglBindBufferRange: offset < 0 (%ld)\n", offset);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     // ERROR_CHECK_RETURN(size > 0, GL_INVALID_VALUE);
     if (size <= 0) {
-        fprintf(stderr, "MGL Error: mglBindBufferRange: size <= 0 (%ld)\n", size);
+        MGL_ERR("MGL Error: mglBindBufferRange: size <= 0 (%ld)\n", size);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -649,12 +647,12 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
 
         // ERROR_CHECK_RETURN(ptr->data.buffer_data, GL_INVALID_VALUE);
         if (!ptr->data.buffer_data) {
-             fprintf(stderr, "MGL Error: mglBindBufferRange: buffer_data is NULL\n");
+             MGL_ERR("MGL Error: mglBindBufferRange: buffer_data is NULL\n");
              ERROR_RETURN(GL_INVALID_VALUE);
         }
 
         if (!mgl_range_ok_size_t(offset, size, ptr->data.buffer_size)) {
-            fprintf(stderr, "MGL Error: mglBindBufferRange: range overflow (offset=%ld size=%ld buffer_size=%ld)\n", offset, size, (long)ptr->data.buffer_size);
+            MGL_ERR("MGL Error: mglBindBufferRange: range overflow (offset=%ld size=%ld buffer_size=%ld)\n", offset, size, (long)ptr->data.buffer_size);
             ERROR_RETURN(GL_INVALID_VALUE);
         }
 
@@ -686,10 +684,7 @@ kern_return_t initBufferData(GLMContext ctx, Buffer *ptr, GLsizeiptr size, const
             // check the old size.. then if it can fit new size then reuse.
             if (size <= ptr->data.buffer_size)
             {
-                // buffer_size is page aligned, so a small uniform leaves a lot
-                // of room. size still has to track what the caller just wrote:
-                // the renderer binds ptr->size bytes, and a stale value silently
-                // hands the shader a short read.
+                // the renderer binds ptr->size bytes, so keep it current
                 ptr->size = size;
 
                 if (data)
@@ -782,7 +777,7 @@ void mglBufferData(GLMContext ctx, GLenum target, GLsizeiptr size, const void *d
 
     if (size < 0)
     {
-        fprintf(stderr, "MGL Error: mglBufferData: size < 0 (%ld)\n", size);
+        MGL_ERR("MGL Error: mglBufferData: size < 0 (%ld)\n", size);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -802,7 +797,7 @@ void mglBufferData(GLMContext ctx, GLenum target, GLsizeiptr size, const void *d
         // ERROR_RETURN(GL_INVALID_OPERATION);
         // return;
         // Workaround: Allow re-allocation even if immutable, to support guests that violate spec
-        // fprintf(stderr, "MGL WARNING: glBufferData called on immutable buffer %d\n", ptr->name);
+        // MGL_ERR("MGL WARNING: glBufferData called on immutable buffer %d\n", ptr->name);
     }
 
     initBufferData(ctx, ptr, size, data, false);
@@ -869,19 +864,19 @@ void mglBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr
     // Validate data pointer for non-zero size
     if (data == NULL)
     {
-        // fprintf(stderr, "MGL WARNING: mglBufferSubData: data is NULL\n");
+        // MGL_ERR("MGL WARNING: mglBufferSubData: data is NULL\n");
         return;  // Silent return for NULL data
     }
 
     if (offset < 0 || size < 0)
     {
-        fprintf(stderr, "MGL Error: mglBufferSubData: offset (%ld) or size (%ld) < 0\n", offset, size);
+        MGL_ERR("MGL Error: mglBufferSubData: offset (%ld) or size (%ld) < 0\n", offset, size);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     index = bufferIndexFromTarget(ctx, target);
     if (index >= _MAX_BUFFER_TYPES) {
-        fprintf(stderr, "MGL Error: mglBufferSubData: invalid target index %d\n", index);
+        MGL_ERR("MGL Error: mglBufferSubData: invalid target index %d\n", index);
         ERROR_RETURN(GL_INVALID_ENUM);
     }
     
@@ -892,13 +887,13 @@ void mglBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr
     MGL_GET_BUFFER_SIZE_SAFE_VOID(ptr, buffer_size, "mglBufferSubData");
 
     if (!mgl_range_ok_glsize(offset, size, buffer_size)) {
-        fprintf(stderr, "MGL Error: mglBufferSubData out of bounds: offset %ld size %ld buffer size %ld\n", offset, size, buffer_size);
+        MGL_ERR("MGL Error: mglBufferSubData out of bounds: offset %ld size %ld buffer size %ld\n", offset, size, buffer_size);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     if (ptr->mapped && !(ptr->access & GL_MAP_PERSISTENT_BIT))
     {
-        fprintf(stderr, "MGL Error: mglBufferSubData: buffer is mapped\n");
+        MGL_ERR("MGL Error: mglBufferSubData: buffer is mapped\n");
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
@@ -906,7 +901,7 @@ void mglBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr
     if ((ptr->immutable_storage & BUFFER_IMMUTABLE_STORAGE_FLAG) &&
         !(ptr->storage_flags & GL_DYNAMIC_STORAGE_BIT))
     {
-        fprintf(stderr, "MGL Error: mglBufferSubData: immutable storage without dynamic bit\n");
+        MGL_ERR("MGL Error: mglBufferSubData: immutable storage without dynamic bit\n");
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
@@ -916,13 +911,13 @@ void mglBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr
         // buffer_data is vm_address_t (unsigned long), not void*
         if (ptr->data.buffer_data == 0)  // Compare to 0 for vm_address_t
         {
-            fprintf(stderr, "MGL Error: mglBufferSubData: buffer_data is NULL (buffer %u, target 0x%x)\n", ptr->name, target);
+            MGL_ERR("MGL Error: mglBufferSubData: buffer_data is NULL (buffer %u, target 0x%x)\n", ptr->name, target);
             ERROR_RETURN(GL_INVALID_OPERATION);
         }
 
         if (!mgl_range_ok_size_t(offset, size, ptr->data.buffer_size))
         {
-            fprintf(stderr, "MGL Error: mglBufferSubData out of backing store bounds: offset %ld size %ld backing %ld\n",
+            MGL_ERR("MGL Error: mglBufferSubData out of backing store bounds: offset %ld size %ld backing %ld\n",
                     offset, size, (long)ptr->data.buffer_size);
             ERROR_RETURN(GL_INVALID_VALUE);
         }
@@ -981,13 +976,13 @@ void mglNamedBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GLsiz
         // buffer_data is vm_address_t (unsigned long), not void*
         if (ptr->data.buffer_data == 0)
         {
-            fprintf(stderr, "MGL WARNING: mglNamedBufferSubData - buffer %u has NULL buffer_data\n", ptr->name);
+            MGL_ERR("MGL WARNING: mglNamedBufferSubData - buffer %u has NULL buffer_data\n", ptr->name);
             ERROR_RETURN(GL_INVALID_OPERATION);
         }
 
         if (!mgl_range_ok_size_t(offset, size, ptr->data.buffer_size))
         {
-            fprintf(stderr, "MGL Error: mglNamedBufferSubData out of backing store bounds: offset %ld size %ld backing %ld\n",
+            MGL_ERR("MGL Error: mglNamedBufferSubData out of backing store bounds: offset %ld size %ld backing %ld\n",
                     offset, size, (long)ptr->data.buffer_size);
             ERROR_RETURN(GL_INVALID_VALUE);
         }
@@ -1026,13 +1021,13 @@ void copyBufferSubData(GLMContext ctx, Buffer *src_buf, Buffer *dst_buf, GLintpt
 
     if (!mgl_range_ok_glsize(readOffset, size, src_buf->size))
     {
-        fprintf(stderr, "MGL Error: copyBufferSubData: read overflow (readOffset=%ld size=%ld src_size=%ld)\n", readOffset, size, src_buf->size);
+        MGL_ERR("MGL Error: copyBufferSubData: read overflow (readOffset=%ld size=%ld src_size=%ld)\n", readOffset, size, src_buf->size);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     if (!mgl_range_ok_glsize(writeOffset, size, dst_buf->size))
     {
-        fprintf(stderr, "MGL Error: copyBufferSubData: write overflow (writeOffset=%ld size=%ld dst_size=%ld)\n", writeOffset, size, dst_buf->size);
+        MGL_ERR("MGL Error: copyBufferSubData: write overflow (writeOffset=%ld size=%ld dst_size=%ld)\n", writeOffset, size, dst_buf->size);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -1325,13 +1320,13 @@ void *mglMapBufferRange(GLMContext ctx, GLenum target, GLintptr offset, GLsizeip
 
     if (offset < 0)
     {
-        fprintf(stderr, "MGL Error: mglMapBufferRange: offset < 0 (%ld)\n", offset);
+        MGL_ERR("MGL Error: mglMapBufferRange: offset < 0 (%ld)\n", offset);
         ERROR_RETURN_VALUE(GL_INVALID_VALUE, NULL);
     }
 
     if (length < 0)
     {
-        fprintf(stderr, "MGL Error: mglMapBufferRange: length < 0 (%ld)\n", length);
+        MGL_ERR("MGL Error: mglMapBufferRange: length < 0 (%ld)\n", length);
         ERROR_RETURN_VALUE(GL_INVALID_VALUE, NULL);
     }
 
@@ -1342,7 +1337,7 @@ void *mglMapBufferRange(GLMContext ctx, GLenum target, GLintptr offset, GLsizeip
 
     if (offset + length > ptr->size)
     {
-        fprintf(stderr, "MGL Error: mglMapBufferRange: range overflow (offset=%ld length=%ld buffer_size=%ld)\n", offset, length, ptr->size);
+        MGL_ERR("MGL Error: mglMapBufferRange: range overflow (offset=%ld length=%ld buffer_size=%ld)\n", offset, length, ptr->size);
         ERROR_RETURN_VALUE(GL_INVALID_VALUE, NULL);
     }
 
@@ -1407,13 +1402,13 @@ void mglFlushMappedBufferRange(GLMContext ctx, GLenum target, GLintptr offset, G
 
     if (offset < 0)
     {
-        fprintf(stderr, "MGL Error: mglFlushMappedBufferRange: offset < 0 (%ld)\n", offset);
+        MGL_ERR("MGL Error: mglFlushMappedBufferRange: offset < 0 (%ld)\n", offset);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     if (length < 0)
     {
-        fprintf(stderr, "MGL Error: mglFlushMappedBufferRange: length < 0 (%ld)\n", length);
+        MGL_ERR("MGL Error: mglFlushMappedBufferRange: length < 0 (%ld)\n", length);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
@@ -1427,19 +1422,19 @@ void mglFlushMappedBufferRange(GLMContext ctx, GLenum target, GLintptr offset, G
     if ((ptr->mapped == false) && (isCoherent == false))
     {
         // not mapped by map buffer range
-        fprintf(stderr, "MGL Error: mglFlushMappedBufferRange: buffer not mapped\n");
+        MGL_ERR("MGL Error: mglFlushMappedBufferRange: buffer not mapped\n");
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
     if (offset < ptr->mapped_offset)
     {
-        fprintf(stderr, "MGL Error: mglFlushMappedBufferRange: offset (%ld) < mapped_offset (%ld)\n", offset, ptr->mapped_offset);
+        MGL_ERR("MGL Error: mglFlushMappedBufferRange: offset (%ld) < mapped_offset (%ld)\n", offset, ptr->mapped_offset);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     if (offset + length > ptr->mapped_length)
     {
-        fprintf(stderr, "MGL Error: mglFlushMappedBufferRange: range overflow (offset=%ld length=%ld mapped_length=%ld)\n", offset, length, ptr->mapped_length);
+        MGL_ERR("MGL Error: mglFlushMappedBufferRange: range overflow (offset=%ld length=%ld mapped_length=%ld)\n", offset, length, ptr->mapped_length);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 

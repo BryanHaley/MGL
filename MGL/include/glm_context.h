@@ -302,6 +302,7 @@ typedef struct Texture_t {
     GLuint mipmap_levels;
     TextureFace faces[6];
     void    *mtl_data;
+    GLsizei samples;
 } Texture;
 
 typedef struct TextureUnit_t {

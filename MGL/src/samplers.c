@@ -188,8 +188,7 @@ void mglDeleteSamplers(GLMContext ctx, GLsizei count, const GLuint *samplers)
 
 void mglCreateSamplers(GLMContext ctx, GLsizei n, GLuint *samplers)
 {
-    // n is signed: a negative count used to run the loop billions of
-    // times straight past the caller's array
+    // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     mglGenSamplers(ctx, n, samplers);

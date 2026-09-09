@@ -22,6 +22,7 @@
 
 #include "pixel_utils.h"
 #include "glm_context.h"
+#include "mgl_log.h"
 
 // Legacy format defines not in core profile headers
 #ifndef GL_ALPHA
@@ -205,7 +206,7 @@ GLuint numComponentsForFormat(GLenum format)
 
         default:
             // Unknown format - return 4 as safe fallback instead of crashing
-            fprintf(stderr, "MGL WARNING: numComponentsForFormat unknown format 0x%x, assuming 4 components\n", format);
+            MGL_ERR("MGL WARNING: numComponentsForFormat unknown format 0x%x, assuming 4 components\n", format);
             return 4;
     }
 
@@ -250,7 +251,7 @@ GLuint sizeForType(GLenum type)
             return sizeof(uint32_t);
 
         default:
-            fprintf(stderr, "MGL WARNING: sizeForType unknown type 0x%x, assuming 4 bytes\n", type);
+            MGL_ERR("MGL WARNING: sizeForType unknown type 0x%x, assuming 4 bytes\n", type);
             return sizeof(uint32_t);
     }
 
@@ -346,7 +347,7 @@ GLuint sizeForFormatType(GLenum format, GLenum type)
             return sizeof(uint16_t) * numComponentsForFormat(format);
 
         default:
-            fprintf(stderr, "MGL WARNING: sizeForFormatType unknown type 0x%x, format 0x%x\n", type, format);
+            MGL_ERR("MGL WARNING: sizeForFormatType unknown type 0x%x, format 0x%x\n", type, format);
             return sizeof(uint32_t) * numComponentsForFormat(format);
     }
 
@@ -2336,7 +2337,7 @@ MTLPixelFormat mtlFormatForGLInternalFormat(GLenum internal_format)
                 }
                 if (!already_warned && warned_count < 64) {
                     warned_formats[warned_count++] = internal_format;
-                    fprintf(stderr, "MGL WARNING: mtlFormatForGLInternalFormat unknown format 0x%x\n", internal_format);
+                    MGL_ERR("MGL WARNING: mtlFormatForGLInternalFormat unknown format 0x%x\n", internal_format);
                 }
             }
             // For 0x8Dxx and 0x90xx ranges - these are often internal/capability probes

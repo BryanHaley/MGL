@@ -31,6 +31,7 @@
 #include "vertex_arrays.h"
 #include "MGLRenderer.h"
 #include "error.h"
+#include "mgl_log.h"
 
 extern void getMacOSDefaults(GLMContext glm_ctx);
 extern void init_dispatch(GLMContext ctx);
@@ -50,7 +51,7 @@ static void mgl_auto_init(void) {
                                GL_DEPTH_COMPONENT24, GL_UNSIGNED_INT,
                                GL_STENCIL_INDEX8, GL_UNSIGNED_BYTE);
         CppCreateMGLRendererHeadless(_ctx);
-        fprintf(stderr, "MGL: Initialized headless Metal renderer\n");
+        MGL_INFO("MGL: Initialized headless Metal renderer\n");
     }
 }
 
@@ -59,7 +60,7 @@ void mgl_lazy_init(void) {
     // If `_ctx` ever gets corrupted (e.g. memory stomp), it can become a small
     // non-NULL value and crash immediately on dereference. Detect and recover.
     if (_ctx != NULL && (uintptr_t)_ctx < 0x10000u) {
-        fprintf(stderr, "MGL ERROR: current context pointer looks corrupted (%p); reinitializing\n", (void *)_ctx);
+        MGL_ERR("MGL ERROR: current context pointer looks corrupted (%p); reinitializing\n", (void *)_ctx);
         _ctx = NULL;
     }
 
@@ -336,7 +337,7 @@ void destroyGLMContext(GLMContext ctx)
     if (ctx == NULL)
         return;
 
-    fprintf(stderr, "MGL INFO: Destroying GLMContext\n");
+    MGL_INFO("MGL INFO: Destroying GLMContext\n");
 
     // CRITICAL FIX: Implement basic cleanup of context resources to prevent major memory leaks
     // Clean up critical hash tables to prevent memory corruption
@@ -400,13 +401,13 @@ __attribute__((destructor))
 static void mgl_auto_cleanup(void)
 {
     if (_ctx != NULL) {
-        fprintf(stderr, "MGL INFO: Auto-cleanup - destroying GLMContext\n");
+        MGL_INFO("MGL INFO: Auto-cleanup - destroying GLMContext\n");
 
         // Signal cleanup to any in-flight operations
         // The MGLRenderer dealloc will handle Metal resource cleanup
 
         _ctx = NULL;
-        fprintf(stderr, "MGL INFO: Auto-cleanup completed\n");
+        MGL_INFO("MGL INFO: Auto-cleanup completed\n");
     }
 }
 
