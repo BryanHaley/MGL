@@ -231,10 +231,10 @@ void mglDeleteProgram(GLMContext ctx, GLuint program)
 
     if (!ptr)
     {
-        // // CRITICAL FIX: Handle error gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
-        STATE(error) = GL_INVALID_OPERATION; // Silent ignore if not found? OpenGL says GL_INVALID_VALUE usually, but delete is often silent for 0.
-        // But if program != 0 and not found, it's GL_INVALID_VALUE.
+        // 0 is silently ignored, any other unknown name is an error
+        if (program != 0)
+            ERROR_RETURN(GL_INVALID_VALUE);
+
         return;
     }
 
@@ -738,15 +738,38 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         return;
     }
 
+    if (pptr->log)
+    {
+        free(pptr->log);
+        pptr->log = NULL;
+    }
+
+    pptr->link_status = GL_TRUE;
+    pptr->validate_status = GL_FALSE;
+
+    int stages_linked = 0;
+
     for (int stage=0; stage<_MAX_SHADER_TYPES; stage++)
     {
         pptr->spirv[stage].msl_str = 0;
-        
+
         if (pptr->shader_slots[stage])
         {
-            linkAndCompileProgramToMetal(ctx, pptr, stage);
+            if (linkAndCompileProgramToMetal(ctx, pptr, stage) == false)
+                pptr->link_status = GL_FALSE;
+            else
+                stages_linked++;
         }
     }
+
+    // a program with no stage, or one whose stage failed, did not link
+    if (stages_linked == 0)
+        pptr->link_status = GL_FALSE;
+
+    if (pptr->link_status == GL_FALSE && pptr->log == NULL)
+        pptr->log = strdup("link failed: no usable shader stage");
+
+    pptr->validate_status = pptr->link_status;
 
     /* Only call mtlBindProgram if Metal functions are initialized */
     if (ctx->mtl_funcs.mtlBindProgram) {
@@ -884,6 +907,40 @@ GLint  mglGetAttribLocation(GLMContext ctx, GLuint program, const GLchar *name)
 	return -1;
 }
 
+static int programResourceCount(Program *ptr, int res_type)
+{
+    int n = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        n += ptr->spirv_resources_list[stage][res_type].count;
+
+    return n;
+}
+
+static int programUniformCount(Program *ptr)
+{
+    return programResourceCount(ptr, SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT);
+}
+
+static int programLongestName(Program *ptr, int res_type)
+{
+    int longest = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][res_type];
+
+        for (GLuint i = 0; i < list->count; i++)
+        {
+            int len = (int)strlen(list->list[i].name) + 1;
+
+            if (len > longest) longest = len;
+        }
+    }
+
+    return longest;
+}
+
 void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params)
 {
     Program *pptr = findProgram(ctx, program);
@@ -891,17 +948,16 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
     
     switch (pname) {
         case GL_LINK_STATUS:
-            /* If we got here after mglLinkProgram, linking succeeded */
-            *params = GL_TRUE;
+            *params = pptr->link_status;
             break;
         case GL_DELETE_STATUS:
-            *params = GL_FALSE;  /* Programs are not deleted by default */
+            *params = pptr->delete_status;
             break;
         case GL_VALIDATE_STATUS:
-            *params = GL_TRUE;  /* Assume valid */
+            *params = pptr->validate_status;
             break;
         case GL_INFO_LOG_LENGTH:
-            *params = 0;  /* No info log for now */
+            *params = pptr->log ? (GLint)strlen(pptr->log) + 1 : 0;
             break;
         case GL_ATTACHED_SHADERS:
             {
@@ -912,12 +968,28 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
                 *params = count;
             }
             break;
-        case GL_ACTIVE_ATTRIBUTES:
-        case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH:
         case GL_ACTIVE_UNIFORMS:
+            *params = programUniformCount(pptr);
+            break;
+
         case GL_ACTIVE_UNIFORM_MAX_LENGTH:
-            /* These require SPIRV resource reflection - return 0 for now */
-            *params = 0;
+            *params = programLongestName(pptr, SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT);
+            break;
+
+        case GL_ACTIVE_ATTRIBUTES:
+            *params = programResourceCount(pptr, SPVC_RESOURCE_TYPE_STAGE_INPUT);
+            break;
+
+        case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH:
+            *params = programLongestName(pptr, SPVC_RESOURCE_TYPE_STAGE_INPUT);
+            break;
+
+        case GL_ACTIVE_UNIFORM_BLOCKS:
+            *params = programResourceCount(pptr, SPVC_RESOURCE_TYPE_UNIFORM_BUFFER);
+            break;
+
+        case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
+            *params = programLongestName(pptr, SPVC_RESOURCE_TYPE_UNIFORM_BUFFER);
             break;
         case GL_COMPUTE_WORK_GROUP_SIZE:
             if (pptr->shader_slots[_COMPUTE_SHADER]) {
@@ -941,13 +1013,24 @@ void mglGetProgramInfoLog(GLMContext ctx, GLuint program, GLsizei bufSize, GLsiz
     Program *pptr = findProgram(ctx, program);
     ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
     
-    /* For now, always return an empty info log */
-    if (bufSize > 0 && infoLog) {
-        infoLog[0] = '\0';
-        if (length) {
-            *length = 0;
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+
+    const char *src = pptr->log ? pptr->log : "";
+    GLsizei n = 0;
+
+    if (infoLog && bufSize > 0)
+    {
+        while (n < bufSize - 1 && src[n])
+        {
+            infoLog[n] = src[n];
+            n++;
         }
+
+        infoLog[n] = 0;
     }
+
+    if (length)
+        *length = n;
 }
 
 

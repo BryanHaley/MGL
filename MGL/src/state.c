@@ -65,9 +65,7 @@ void mglDisable(GLMContext ctx, GLenum cap)
             // Legacy texture enable/disable - no-op in core profile
             break;
         default:
-            MGL_ERR("MGL WARNING: mglDisable unsupported cap 0x%x\n", cap);
-            // Don't error - just ignore unsupported caps
-            break;
+            ERROR_RETURN(GL_INVALID_ENUM);
     }
 
     ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
@@ -111,9 +109,9 @@ void mglEnable(GLMContext ctx, GLenum cap)
             // virglrenderer may call these for compatibility
             break;
         default:
-            MGL_ERR("MGL WARNING: mglEnable unsupported cap 0x%x\n", cap);
-            // Don't error - just ignore unsupported caps
-            break;
+            // the legacy texture enables above are deliberately ignored; anything
+            // else really is a bad enum
+            ERROR_RETURN(GL_INVALID_ENUM);
     }
 
     ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;

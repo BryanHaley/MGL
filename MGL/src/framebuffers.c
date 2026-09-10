@@ -249,6 +249,10 @@ GLenum  mglCheckFramebufferStatus(GLMContext ctx, GLenum target)
 
     fbo = currentFBOForType(ctx, target);
 
+    // the default framebuffer is always complete; a bad target returns 0
+    if (!fbo)
+        return (ctx->state.error == GL_INVALID_ENUM) ? 0 : GL_FRAMEBUFFER_COMPLETE;
+
     if (fbo->color_attachments[0].textarget == GL_RENDERBUFFER)
     {
         tex = fbo->color_attachments[0].buf.rbo->tex;
@@ -581,6 +585,9 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
     FBOAttachment *fbo_attachment_ptr;
 
     fbo = currentFBOForType(ctx, target);
+
+    // NULL means a bad target, or the default framebuffer, which has no attachments
+    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
     
     // Log FBO texture attachments for large textures (framebuffer size)
     if (texture != 0) {
@@ -821,6 +828,9 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
     FBOAttachment *fbo_attachment_ptr;
 
     fbo = currentFBOForType(ctx, target);
+
+    // NULL means a bad target, or the default framebuffer, which has no attachments
+    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
 
     switch(attachment)
     {
@@ -1070,6 +1080,10 @@ void mglGetNamedFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuf
 
 void mglBlitFramebuffer(GLMContext ctx, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)
 {
+    ERROR_CHECK_RETURN((mask & ~(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) == 0,
+                      GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(filter == GL_NEAREST || filter == GL_LINEAR, GL_INVALID_ENUM);
+
     MGL_INFO("MGL: glBlitFramebuffer src(%d,%d)-(%d,%d) dst(%d,%d)-(%d,%d) mask=0x%x\n",
             srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask);
     ctx->mtl_funcs.mtlBlitFramebuffer(ctx, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);

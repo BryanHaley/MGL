@@ -423,6 +423,9 @@ typedef struct Program_t {
         unsigned x, y, z;
     } local_workgroup_size;
     void *mtl_data;
+    GLboolean link_status;
+    GLboolean validate_status;
+    char *log;
 } Program;
 
 typedef struct ProgramPipeline_t {

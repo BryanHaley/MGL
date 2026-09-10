@@ -577,7 +577,7 @@ void mglGetShaderiv(GLMContext ctx, GLuint shader, GLenum pname, GLint *params)
             break;
 
         case GL_DELETE_STATUS:
-            *params = GL_FALSE;
+            *params = ptr->delete_status;
             break;
 
         case GL_COMPILE_STATUS:
@@ -592,7 +592,7 @@ void mglGetShaderiv(GLMContext ctx, GLuint shader, GLenum pname, GLint *params)
             break;
 
         case GL_INFO_LOG_LENGTH:
-            *params = (GLint)strlen(ptr->log);
+            *params = ptr->log ? (GLint)strlen(ptr->log) + 1 : 0;
             break;
 
         case GL_SHADER_SOURCE_LENGTH:

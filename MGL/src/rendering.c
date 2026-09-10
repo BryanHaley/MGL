@@ -40,6 +40,12 @@ void mglClear(GLMContext ctx, GLbitfield mask)
     }
 
     ctx->state.clear_bitmask = mask;
+
+    // Do it now. Deferring means a second glClear overwrites the first, and the
+    // clear colour and scissor get sampled whenever the pass happens to be built
+    // rather than at the point of the call.
+    if (ctx->mtl_funcs.mtlClearBuffer)
+        ctx->mtl_funcs.mtlClearBuffer(ctx, 0, mask);
 }
 
 void mglClearColor(GLMContext ctx, GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)

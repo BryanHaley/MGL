@@ -145,6 +145,12 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
 
     id<MTLEvent> _currentEvent;
     GLsizei _currentSyncName;
+
+    // scissored glClear is done with a draw, since a load action ignores scissor
+    id<MTLRenderPipelineState> _clearPipeline;
+    id<MTLDepthStencilState>   _clearDepthState;
+    MTLPixelFormat             _clearPipelineFormat;
+    GLbitfield                 _pendingScissorClear;
 }
 
 // aligned_alloc needs alignment >= sizeof(void*) and a size that's a multiple of it
@@ -418,9 +424,15 @@ void logDirtyBits(GLMContext ctx)
         }
         else
         {
-            buffer = [_device newBufferWithLength: ptr->size // allocate by size
+            buffer = [_device newBufferWithLength: ptr->size ? ptr->size : 1
                                                         options: options];
-            assert(buffer);
+
+            if (!buffer)
+            {
+                MGL_NSERR(@"MGL ERROR: could not allocate a %ld byte metal buffer", (long)ptr->size);
+                ctx->error_func(ctx, __FUNCTION__, GL_OUT_OF_MEMORY);
+                return;
+            }
 
             ptr->data.buffer_data = (vm_address_t)NULL;
         }
@@ -2366,54 +2378,54 @@ extern FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum 
     //int readtex, drawtex;
 
     readfbo = ctx->state.readbuffer;
-    assert(readfbo);
 
-    id<MTLTexture> readtexid;
+    id<MTLTexture> readtexid = nil;
 
-    if (readfbo==NULL) {
-        assert(_drawable);
-        readtexid = _drawable.texture;
+    if (readfbo == NULL) {
+        readtexid = _drawable ? _drawable.texture : nil;
     } else {
-        assert(readfbo);
-        FBOAttachment * fboa = getFBOAttachment(ctx, readfbo, STATE(read_buffer));
-        assert(fboa);
-        Texture * readtexobj;
-        if (fboa->textarget == GL_RENDERBUFFER)
-        {
-            readtexobj = fboa->buf.rbo->tex;
-        }
-        else
-        {
-            readtexobj = fboa->buf.tex;
-        }
-        assert(readtexobj);
-        readtexid = (__bridge id<MTLTexture>)(readtexobj->mtl_data);
-        assert(readtexid);
+        FBOAttachment *fboa = getFBOAttachment(ctx, readfbo, STATE(read_buffer));
+        Texture *readtexobj = NULL;
+
+        if (fboa)
+            readtexobj = (fboa->textarget == GL_RENDERBUFFER)
+                       ? (fboa->buf.rbo ? fboa->buf.rbo->tex : NULL)
+                       : fboa->buf.tex;
+
+        if (readtexobj && [self bindMTLTexture: readtexobj])
+            readtexid = (__bridge id<MTLTexture>)(readtexobj->mtl_data);
+    }
+
+    if (readtexid == nil)
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
     }
 
 
     drawfbo = ctx->state.framebuffer;
 
-    id<MTLTexture> drawtexid;
-    if (drawfbo==NULL) {
-        assert(_drawable);
-        drawtexid = _drawable.texture;
+    id<MTLTexture> drawtexid = nil;
+
+    if (drawfbo == NULL) {
+        drawtexid = _drawable ? _drawable.texture : nil;
     } else {
-        assert(drawfbo);
-        FBOAttachment * fboa = getFBOAttachment(ctx, drawfbo, STATE(draw_buffer));
-        assert(fboa);
-        Texture * drawtexobj;
-        if (fboa->textarget == GL_RENDERBUFFER)
-        {
-            drawtexobj = fboa->buf.rbo->tex;
-        }
-        else
-        {
-            drawtexobj = fboa->buf.tex;
-        }
-        assert(drawtexobj);
-        drawtexid = (__bridge id<MTLTexture>)(drawtexobj->mtl_data);
-        assert(drawtexid);
+        FBOAttachment *fboa = getFBOAttachment(ctx, drawfbo, STATE(draw_buffer));
+        Texture *drawtexobj = NULL;
+
+        if (fboa)
+            drawtexobj = (fboa->textarget == GL_RENDERBUFFER)
+                       ? (fboa->buf.rbo ? fboa->buf.rbo->tex : NULL)
+                       : fboa->buf.tex;
+
+        if (drawtexobj && [self bindMTLTexture: drawtexobj])
+            drawtexid = (__bridge id<MTLTexture>)(drawtexobj->mtl_data);
+    }
+
+    if (drawtexid == nil)
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
     }
 
 
@@ -2861,13 +2873,35 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     if (ctx->state.caps.scissor_test)
     {
         MTLScissorRect rect;
+        GLint x = ctx->state.var.scissor_box[0];
+        GLint y = ctx->state.var.scissor_box[1];
+        GLint w = ctx->state.var.scissor_box[2];
+        GLint h = ctx->state.var.scissor_box[3];
 
-        rect.x = ctx->state.var.scissor_box[0];
-        rect.y = ctx->state.var.scissor_box[1];
-        rect.width = ctx->state.var.scissor_box[2];
-        rect.height = ctx->state.var.scissor_box[3];
+        NSUInteger tw = _renderPassDescriptor.renderTargetWidth;
+        NSUInteger th = _renderPassDescriptor.renderTargetHeight;
 
-        [_currentRenderEncoder setScissorRect:rect];
+        if (w < 0) w = 0;
+        if (h < 0) h = 0;
+
+        // GL counts scissor rows from the bottom, Metal from the top
+        GLint flipped_y = (th > 0) ? (GLint)th - (y + h) : y;
+
+        if (x < 0) { w += x; x = 0; }
+        if (flipped_y < 0) { h += flipped_y; flipped_y = 0; }
+        if (w < 0) w = 0;
+        if (h < 0) h = 0;
+
+        if (tw > 0 && (NSUInteger)(x + w) > tw) w = (GLint)tw - x;
+        if (th > 0 && (NSUInteger)(flipped_y + h) > th) h = (GLint)th - flipped_y;
+
+        rect.x = (NSUInteger)(x < 0 ? 0 : x);
+        rect.y = (NSUInteger)(flipped_y < 0 ? 0 : flipped_y);
+        rect.width = (NSUInteger)(w < 0 ? 0 : w);
+        rect.height = (NSUInteger)(h < 0 ? 0 : h);
+
+        if (rect.width && rect.height)
+            [_currentRenderEncoder setScissorRect:rect];
     }
 
     [_currentRenderEncoder setViewport:(MTLViewport){ctx->state.viewport[0], ctx->state.viewport[1],
@@ -3120,8 +3154,13 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         _renderPassDescriptor.renderTargetHeight = texture.height;
     }
 
-    // in case one of the framebuffers should be cleared
-    if (ctx->state.clear_bitmask)
+    // A load action always covers the whole attachment, so a clipped scissor
+    // has to be done with a draw after the encoder exists.
+    bool scissored_clear = ctx->state.clear_bitmask && [self scissorClipsTarget];
+
+    _pendingScissorClear = scissored_clear ? ctx->state.clear_bitmask : 0;
+
+    if (ctx->state.clear_bitmask && !scissored_clear)
     {
         if (ctx->state.clear_bitmask & GL_COLOR_BUFFER_BIT)
         {
@@ -3204,6 +3243,15 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         _renderPassDescriptor.colorAttachments[0].loadAction = MTLLoadActionLoad;
         _renderPassDescriptor.depthAttachment.loadAction = MTLLoadActionLoad;
         _renderPassDescriptor.stencilAttachment.loadAction = MTLLoadActionLoad;
+
+        if (scissored_clear)
+        {
+            for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+                if (_renderPassDescriptor.colorAttachments[i].texture)
+                    _renderPassDescriptor.colorAttachments[i].loadAction = MTLLoadActionLoad;
+
+            ctx->state.clear_bitmask = 0;
+        }
     }
 
     _renderPassDescriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -3265,6 +3313,12 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     // apply all state that isn't included in a renderPassDescriptor into the render encoder
     [self updateCurrentRenderEncoder];
 
+    if (_pendingScissorClear)
+    {
+        [self drawScissoredClear: _pendingScissorClear];
+        _pendingScissorClear = 0;
+    }
+
     // only bind all this if there is a VAO
     if (VAO())
     {
@@ -3309,6 +3363,130 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     }
 
     return _currentCommandBuffer;
+}
+
+static const char *MGL_CLEAR_SHADER =
+"#include <metal_stdlib>\n"
+"using namespace metal;\n"
+"struct ClearIn { float4 color; float depth; };\n"
+"vertex float4 mgl_clear_vs(uint vid [[vertex_id]], constant ClearIn &c [[buffer(0)]])\n"
+"{\n"
+"    float2 p = float2(float((vid << 1) & 2), float(vid & 2)) * 2.0 - 1.0;\n"
+"    return float4(p, c.depth, 1.0);\n"
+"}\n"
+"fragment float4 mgl_clear_fs(constant ClearIn &c [[buffer(0)]])\n"
+"{\n"
+"    return c.color;\n"
+"}\n";
+
+typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
+
+// True when the scissor box does not cover the whole render target, which is the
+// only case a load action cannot express.
+- (bool) scissorClipsTarget
+{
+    if (!ctx->state.caps.scissor_test)
+        return false;
+
+    GLint x = ctx->state.var.scissor_box[0];
+    GLint y = ctx->state.var.scissor_box[1];
+    GLint w = ctx->state.var.scissor_box[2];
+    GLint h = ctx->state.var.scissor_box[3];
+
+    NSUInteger tw = _renderPassDescriptor.renderTargetWidth;
+    NSUInteger th = _renderPassDescriptor.renderTargetHeight;
+
+    if (tw == 0 || th == 0)
+        return false;
+
+    return !(x <= 0 && y <= 0 && (NSUInteger)(x + w) >= tw && (NSUInteger)(y + h) >= th);
+}
+
+- (bool) buildClearPipelineFor: (MTLPixelFormat) fmt
+{
+    if (_clearPipeline && _clearPipelineFormat == fmt)
+        return true;
+
+    id<MTLLibrary> lib = [self compileShader: MGL_CLEAR_SHADER];
+
+    if (!lib)
+        return false;
+
+    MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
+
+    desc.label = @"MGL scissored clear";
+    desc.vertexFunction = [lib newFunctionWithName: @"mgl_clear_vs"];
+    desc.fragmentFunction = [lib newFunctionWithName: @"mgl_clear_fs"];
+    desc.colorAttachments[0].pixelFormat = fmt;
+
+    if (_renderPassDescriptor.depthAttachment.texture)
+        desc.depthAttachmentPixelFormat = _renderPassDescriptor.depthAttachment.texture.pixelFormat;
+
+    if (_renderPassDescriptor.stencilAttachment.texture)
+        desc.stencilAttachmentPixelFormat = _renderPassDescriptor.stencilAttachment.texture.pixelFormat;
+
+    NSError *err = nil;
+    id<MTLRenderPipelineState> ps = [_device newRenderPipelineStateWithDescriptor: desc error: &err];
+
+    if (!ps)
+    {
+        MGL_NSERR(@"MGL ERROR: clear pipeline failed: %@", [err localizedDescription]);
+        return false;
+    }
+
+    _clearPipeline = ps;
+    _clearPipelineFormat = fmt;
+
+    return true;
+}
+
+// Draws the clear colour/depth through the scissor rect.
+- (void) drawScissoredClear: (GLbitfield) mask
+{
+    if (_currentRenderEncoder == nil || mask == 0)
+        return;
+
+    id<MTLTexture> color = _renderPassDescriptor.colorAttachments[0].texture;
+
+    if (!color || ![self buildClearPipelineFor: color.pixelFormat])
+        return;
+
+    MGLClearIn in;
+
+    in.color[0] = ctx->state.color_clear_value[0];
+    in.color[1] = ctx->state.color_clear_value[1];
+    in.color[2] = ctx->state.color_clear_value[2];
+    in.color[3] = ctx->state.color_clear_value[3];
+    in.depth    = ctx->state.var.depth_clear_value;
+
+    MTLDepthStencilDescriptor *dsd = [[MTLDepthStencilDescriptor alloc] init];
+
+    dsd.depthCompareFunction = MTLCompareFunctionAlways;
+    dsd.depthWriteEnabled = (mask & GL_DEPTH_BUFFER_BIT) ? YES : NO;
+
+    if (mask & GL_STENCIL_BUFFER_BIT)
+    {
+        MTLStencilDescriptor *sd = [[MTLStencilDescriptor alloc] init];
+
+        sd.stencilCompareFunction = MTLCompareFunctionAlways;
+        sd.depthStencilPassOperation = MTLStencilOperationReplace;
+        sd.writeMask = 0xFF;
+
+        dsd.frontFaceStencil = sd;
+        dsd.backFaceStencil = sd;
+    }
+
+    [_currentRenderEncoder setRenderPipelineState: _clearPipeline];
+    [_currentRenderEncoder setDepthStencilState: [_device newDepthStencilStateWithDescriptor: dsd]];
+    [_currentRenderEncoder setStencilReferenceValue: (uint32_t)ctx->state.var.stencil_clear_value];
+    [_currentRenderEncoder setCullMode: MTLCullModeNone];
+    [_currentRenderEncoder setVertexBytes: &in length: sizeof in atIndex: 0];
+    [_currentRenderEncoder setFragmentBytes: &in length: sizeof in atIndex: 0];
+
+    [_currentRenderEncoder drawPrimitives: MTLPrimitiveTypeTriangle vertexStart: 0 vertexCount: 3];
+
+    // whatever the app had set has been trampled
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
 }
 
 - (bool) newCommandBuffer
