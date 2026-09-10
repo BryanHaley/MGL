@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "spirv_cross_c.h"
 
 #include "shaders.h"
@@ -178,7 +179,7 @@ void mglGetUniformfv(GLMContext ctx, GLuint program, GLint location, GLfloat *pa
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(location >= 0 && location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
 
-    buf = ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf;
+    buf = ptr->uniform_constants.buffers[location].buf;
 
     ERROR_CHECK_RETURN(buf && buf->data.buffer_data, GL_INVALID_OPERATION);
 
@@ -194,7 +195,7 @@ void mglGetUniformiv(GLMContext ctx, GLuint program, GLint location, GLint *para
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(location >= 0 && location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
 
-    buf = ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf;
+    buf = ptr->uniform_constants.buffers[location].buf;
 
     ERROR_CHECK_RETURN(buf && buf->data.buffer_data, GL_INVALID_OPERATION);
 
@@ -395,23 +396,49 @@ bool checkUniformParams(GLMContext ctx, GLint location)
     return true;
 }
 
-void mglUniform(GLMContext ctx, GLint location, void *ptr, GLsizei size)
+// uniform values live on the program. They used to live on the context keyed
+// by location, so two programs that both used location 0 overwrote each other.
+Program *programForUniform(GLMContext ctx, GLuint program)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_VALUE, NULL);
+    ERROR_CHECK_RETURN_VALUE(pptr->linked_glsl_program, GL_INVALID_OPERATION, NULL);
+
+    return pptr;
+}
+
+void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size)
 {
     Buffer *buf;
 
-    // not inside assert(): that would drop the checks in an NDEBUG build
-    if (checkUniformParams(ctx, location) == false)
+    // GL says an unknown uniform is silently ignored
+    if (location == -1)
         return;
 
-    buf = ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf;
+    ERROR_CHECK_RETURN(location >= 0, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(size > 0, GL_INVALID_VALUE);
 
-    if(buf == NULL)
+    buf = pptr->uniform_constants.buffers[location].buf;
+
+    if (buf == NULL)
     {
-        ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf = newBuffer(ctx, GL_UNIFORM_BUFFER, location);
-        buf = ctx->state.buffer_base[_UNIFORM_CONSTANT].buffers[location].buf;
+        buf = newBuffer(ctx, GL_UNIFORM_BUFFER, location);
+        ERROR_CHECK_RETURN(buf, GL_OUT_OF_MEMORY);
+        pptr->uniform_constants.buffers[location].buf = buf;
     }
 
-    initBufferData(ctx, buf, size, ptr, true);
+    initBufferData(ctx, buf, size, (void *)ptr, true);
+}
+
+void mglUniform(GLMContext ctx, GLint location, void *ptr, GLsizei size)
+{
+    Program *pptr = ctx->state.program;
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
+
+    programUniformWrite(ctx, pptr, location, ptr, size);
 }
 
 void mglUniform1d(GLMContext ctx, GLint location, GLdouble x)
@@ -893,3 +920,445 @@ void mglUniformMatrix4x3fv(GLMContext ctx, GLint location, GLsizei count, GLbool
         );
 }
 
+
+/* ---------- glProgramUniform* (DSA) ---------- */
+
+static void puWrite(GLMContext ctx, GLuint program, GLint location, const void *ptr, GLsizei size)
+{
+    Program *pptr = programForUniform(ctx, program);
+
+    if (pptr == NULL)
+        return;
+
+    programUniformWrite(ctx, pptr, location, ptr, size);
+}
+
+static void puV(GLMContext ctx, GLuint program, GLint location, GLsizei count, const void *value, int comps, size_t type_size)
+{
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+
+    if (count == 0)
+        return;
+
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    puWrite(ctx, program, location, value, (GLsizei)(count * comps * type_size));
+}
+
+static void puVf(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLfloat *value, int comps)
+{
+    puV(ctx, program, location, count, value, comps, sizeof(GLfloat));
+}
+
+// Metal has no double, so the d forms narrow to float on the way in
+static void puVd(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value, int comps)
+{
+    GLsizei n;
+    GLfloat stack[64];
+    GLfloat *buf;
+
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+
+    if (count == 0)
+        return;
+
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    n = count * comps;
+
+    if (n <= 64)
+    {
+        buf = stack;
+    }
+    else
+    {
+        buf = (GLfloat *)malloc((size_t)n * sizeof(GLfloat));
+        ERROR_CHECK_RETURN(buf, GL_OUT_OF_MEMORY);
+    }
+
+    for (GLsizei i = 0; i < n; i++)
+        buf[i] = (GLfloat)value[i];
+
+    puWrite(ctx, program, location, buf, n * (GLsizei)sizeof(GLfloat));
+
+    if (buf != stack)
+        free(buf);
+}
+
+// R columns of C rows, column major. Each matrix in the array transposes on
+// its own; treating the whole array as one matrix mixes them together.
+static void puTranspose(GLfloat *dst, const GLfloat *src, GLsizei count, int R, int C)
+{
+    for (GLsizei m = 0; m < count; m++)
+    {
+        const GLfloat *s = src + (size_t)m * R * C;
+        GLfloat *d = dst + (size_t)m * R * C;
+
+        for (int i = 0; i < R * C; i++)
+            d[i] = s[(i % R) * C + (i / R)];
+    }
+}
+
+static void puMatrixfv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value, int R, int C)
+{
+    GLsizei n;
+    GLfloat stack[64];
+    GLfloat *buf;
+
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+
+    if (count == 0)
+        return;
+
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    n = count * R * C;
+
+    if (transpose == GL_FALSE)
+    {
+        puWrite(ctx, program, location, value, n * (GLsizei)sizeof(GLfloat));
+        return;
+    }
+
+    if (n <= 64)
+    {
+        buf = stack;
+    }
+    else
+    {
+        buf = (GLfloat *)malloc((size_t)n * sizeof(GLfloat));
+        ERROR_CHECK_RETURN(buf, GL_OUT_OF_MEMORY);
+    }
+
+    puTranspose(buf, value, count, R, C);
+
+    puWrite(ctx, program, location, buf, n * (GLsizei)sizeof(GLfloat));
+
+    if (buf != stack)
+        free(buf);
+}
+
+static void puMatrixdv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value, int R, int C)
+{
+    GLsizei n;
+    GLfloat stack[64], tmp[64];
+    GLfloat *buf, *narrowed;
+
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+
+    if (count == 0)
+        return;
+
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    n = count * R * C;
+
+    if (n <= 64)
+    {
+        narrowed = tmp;
+        buf = stack;
+    }
+    else
+    {
+        narrowed = (GLfloat *)malloc((size_t)n * sizeof(GLfloat));
+        ERROR_CHECK_RETURN(narrowed, GL_OUT_OF_MEMORY);
+
+        buf = (GLfloat *)malloc((size_t)n * sizeof(GLfloat));
+
+        if (buf == NULL)
+        {
+            free(narrowed);
+            ERROR_RETURN(GL_OUT_OF_MEMORY);
+        }
+    }
+
+    for (GLsizei i = 0; i < n; i++)
+        narrowed[i] = (GLfloat)value[i];
+
+    if (transpose)
+        puTranspose(buf, narrowed, count, R, C);
+    else
+        memcpy(buf, narrowed, (size_t)n * sizeof(GLfloat));
+
+    puWrite(ctx, program, location, buf, n * (GLsizei)sizeof(GLfloat));
+
+    if (buf != stack)
+    {
+        free(buf);
+        free(narrowed);
+    }
+}
+
+void mglProgramUniform1f(GLMContext ctx, GLuint program, GLint location, GLfloat v0)
+{
+    puWrite(ctx, program, location, &v0, sizeof(GLfloat));
+}
+
+void mglProgramUniform2f(GLMContext ctx, GLuint program, GLint location, GLfloat v0, GLfloat v1)
+{
+    GLfloat data[] = {v0, v1};
+
+    puWrite(ctx, program, location, data, 2 * sizeof(GLfloat));
+}
+
+void mglProgramUniform3f(GLMContext ctx, GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2)
+{
+    GLfloat data[] = {v0, v1, v2};
+
+    puWrite(ctx, program, location, data, 3 * sizeof(GLfloat));
+}
+
+void mglProgramUniform4f(GLMContext ctx, GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3)
+{
+    GLfloat data[] = {v0, v1, v2, v3};
+
+    puWrite(ctx, program, location, data, 4 * sizeof(GLfloat));
+}
+
+void mglProgramUniform1fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLfloat *value)
+{
+    puVf(ctx, program, location, count, value, 1);
+}
+
+void mglProgramUniform2fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLfloat *value)
+{
+    puVf(ctx, program, location, count, value, 2);
+}
+
+void mglProgramUniform3fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLfloat *value)
+{
+    puVf(ctx, program, location, count, value, 3);
+}
+
+void mglProgramUniform4fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLfloat *value)
+{
+    puVf(ctx, program, location, count, value, 4);
+}
+
+void mglProgramUniform1i(GLMContext ctx, GLuint program, GLint location, GLint v0)
+{
+    puWrite(ctx, program, location, &v0, sizeof(GLint));
+}
+
+void mglProgramUniform2i(GLMContext ctx, GLuint program, GLint location, GLint v0, GLint v1)
+{
+    GLint data[] = {v0, v1};
+
+    puWrite(ctx, program, location, data, 2 * sizeof(GLint));
+}
+
+void mglProgramUniform3i(GLMContext ctx, GLuint program, GLint location, GLint v0, GLint v1, GLint v2)
+{
+    GLint data[] = {v0, v1, v2};
+
+    puWrite(ctx, program, location, data, 3 * sizeof(GLint));
+}
+
+void mglProgramUniform4i(GLMContext ctx, GLuint program, GLint location, GLint v0, GLint v1, GLint v2, GLint v3)
+{
+    GLint data[] = {v0, v1, v2, v3};
+
+    puWrite(ctx, program, location, data, 4 * sizeof(GLint));
+}
+
+void mglProgramUniform1iv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLint *value)
+{
+    puV(ctx, program, location, count, value, 1, sizeof(GLint));
+}
+
+void mglProgramUniform2iv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLint *value)
+{
+    puV(ctx, program, location, count, value, 2, sizeof(GLint));
+}
+
+void mglProgramUniform3iv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLint *value)
+{
+    puV(ctx, program, location, count, value, 3, sizeof(GLint));
+}
+
+void mglProgramUniform4iv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLint *value)
+{
+    puV(ctx, program, location, count, value, 4, sizeof(GLint));
+}
+
+void mglProgramUniform1ui(GLMContext ctx, GLuint program, GLint location, GLuint v0)
+{
+    puWrite(ctx, program, location, &v0, sizeof(GLuint));
+}
+
+void mglProgramUniform2ui(GLMContext ctx, GLuint program, GLint location, GLuint v0, GLuint v1)
+{
+    GLuint data[] = {v0, v1};
+
+    puWrite(ctx, program, location, data, 2 * sizeof(GLuint));
+}
+
+void mglProgramUniform3ui(GLMContext ctx, GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2)
+{
+    GLuint data[] = {v0, v1, v2};
+
+    puWrite(ctx, program, location, data, 3 * sizeof(GLuint));
+}
+
+void mglProgramUniform4ui(GLMContext ctx, GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3)
+{
+    GLuint data[] = {v0, v1, v2, v3};
+
+    puWrite(ctx, program, location, data, 4 * sizeof(GLuint));
+}
+
+void mglProgramUniform1uiv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLuint *value)
+{
+    puV(ctx, program, location, count, value, 1, sizeof(GLuint));
+}
+
+void mglProgramUniform2uiv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLuint *value)
+{
+    puV(ctx, program, location, count, value, 2, sizeof(GLuint));
+}
+
+void mglProgramUniform3uiv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLuint *value)
+{
+    puV(ctx, program, location, count, value, 3, sizeof(GLuint));
+}
+
+void mglProgramUniform4uiv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLuint *value)
+{
+    puV(ctx, program, location, count, value, 4, sizeof(GLuint));
+}
+
+void mglProgramUniform1d(GLMContext ctx, GLuint program, GLint location, GLdouble v0)
+{
+    puVd(ctx, program, location, 1, &v0, 1);
+}
+
+void mglProgramUniform2d(GLMContext ctx, GLuint program, GLint location, GLdouble v0, GLdouble v1)
+{
+    GLdouble data[] = {v0, v1};
+
+    puVd(ctx, program, location, 1, data, 2);
+}
+
+void mglProgramUniform3d(GLMContext ctx, GLuint program, GLint location, GLdouble v0, GLdouble v1, GLdouble v2)
+{
+    GLdouble data[] = {v0, v1, v2};
+
+    puVd(ctx, program, location, 1, data, 3);
+}
+
+void mglProgramUniform4d(GLMContext ctx, GLuint program, GLint location, GLdouble v0, GLdouble v1, GLdouble v2, GLdouble v3)
+{
+    GLdouble data[] = {v0, v1, v2, v3};
+
+    puVd(ctx, program, location, 1, data, 4);
+}
+
+void mglProgramUniform1dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value)
+{
+    puVd(ctx, program, location, count, value, 1);
+}
+
+void mglProgramUniform2dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value)
+{
+    puVd(ctx, program, location, count, value, 2);
+}
+
+void mglProgramUniform3dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value)
+{
+    puVd(ctx, program, location, count, value, 3);
+}
+
+void mglProgramUniform4dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value)
+{
+    puVd(ctx, program, location, count, value, 4);
+}
+
+void mglProgramUniformMatrix2fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    puMatrixfv(ctx, program, location, count, transpose, value, 2, 2);
+}
+
+void mglProgramUniformMatrix3fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    puMatrixfv(ctx, program, location, count, transpose, value, 3, 3);
+}
+
+void mglProgramUniformMatrix4fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    puMatrixfv(ctx, program, location, count, transpose, value, 4, 4);
+}
+
+void mglProgramUniformMatrix2x3fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    puMatrixfv(ctx, program, location, count, transpose, value, 2, 3);
+}
+
+void mglProgramUniformMatrix3x2fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    puMatrixfv(ctx, program, location, count, transpose, value, 3, 2);
+}
+
+void mglProgramUniformMatrix2x4fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    puMatrixfv(ctx, program, location, count, transpose, value, 2, 4);
+}
+
+void mglProgramUniformMatrix4x2fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    puMatrixfv(ctx, program, location, count, transpose, value, 4, 2);
+}
+
+void mglProgramUniformMatrix3x4fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    puMatrixfv(ctx, program, location, count, transpose, value, 3, 4);
+}
+
+void mglProgramUniformMatrix4x3fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    puMatrixfv(ctx, program, location, count, transpose, value, 4, 3);
+}
+
+void mglProgramUniformMatrix2dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
+{
+    puMatrixdv(ctx, program, location, count, transpose, value, 2, 2);
+}
+
+void mglProgramUniformMatrix3dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
+{
+    puMatrixdv(ctx, program, location, count, transpose, value, 3, 3);
+}
+
+void mglProgramUniformMatrix4dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
+{
+    puMatrixdv(ctx, program, location, count, transpose, value, 4, 4);
+}
+
+void mglProgramUniformMatrix2x3dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
+{
+    puMatrixdv(ctx, program, location, count, transpose, value, 2, 3);
+}
+
+void mglProgramUniformMatrix3x2dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
+{
+    puMatrixdv(ctx, program, location, count, transpose, value, 3, 2);
+}
+
+void mglProgramUniformMatrix2x4dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
+{
+    puMatrixdv(ctx, program, location, count, transpose, value, 2, 4);
+}
+
+void mglProgramUniformMatrix4x2dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
+{
+    puMatrixdv(ctx, program, location, count, transpose, value, 4, 2);
+}
+
+void mglProgramUniformMatrix3x4dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
+{
+    puMatrixdv(ctx, program, location, count, transpose, value, 3, 4);
+}
+
+void mglProgramUniformMatrix4x3dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
+{
+    puMatrixdv(ctx, program, location, count, transpose, value, 4, 3);
+}

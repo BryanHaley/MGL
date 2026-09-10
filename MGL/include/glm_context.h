@@ -345,6 +345,33 @@ typedef struct VertexElementArray_t {
     const void *ptr;
 } VertexElementArray;
 
+#define MAX_VIEWPORTS 16
+
+typedef struct ViewportRect_t {
+    GLfloat x, y, w, h;
+} ViewportRect;
+
+typedef struct ScissorRect_t {
+    GLint   x, y;
+    GLsizei width, height;
+} ScissorRect;
+
+typedef struct DepthRangeVal_t {
+    GLdouble znear, zfar;
+} DepthRangeVal;
+
+typedef enum {
+    _ATTRIB_CONST_FLOAT = 0,
+    _ATTRIB_CONST_INT   = 1,
+    _ATTRIB_CONST_UINT  = 2
+} AttribConstType;
+
+// value a disabled vertex array feeds the shader
+typedef struct AttribConstant_t {
+    union { GLfloat f[4]; GLint i[4]; GLuint u[4]; } v;
+    AttribConstType type;
+} AttribConstant;
+
 typedef struct VertexArray_t {
     GLuint dirty_bits;
     unsigned name;
@@ -426,6 +453,8 @@ typedef struct Program_t {
     GLboolean link_status;
     GLboolean validate_status;
     char *log;
+    // uniform values belong to the program, not the context
+    BufferBase uniform_constants;
 } Program;
 
 typedef struct ProgramPipeline_t {
@@ -568,7 +597,11 @@ typedef struct {
     GLuint read_buffer; // GL_READ_BUFFER
     GLuint max_color_attachments; // GL_MAX_COLOR_ATTACHMENTS
     GLuint max_vertex_attribs; // GL_MAX_VERTEX_ATTRIBS
-    GLuint viewport[4]; // GL_VIEWPORT
+    ViewportRect  viewport[MAX_VIEWPORTS];      // GL_VIEWPORT
+    ScissorRect   scissor[MAX_VIEWPORTS];       // GL_SCISSOR_BOX
+    DepthRangeVal depth_range[MAX_VIEWPORTS];   // GL_DEPTH_RANGE
+    AttribConstant attrib_constant[MAX_ATTRIBS];
+    GLuint         attrib_constant_dirty;
     GLfloat color_clear_value[4]; // GL_COLOR_CLEAR_VALUE
 
     Buffer *buffers[MAX_BINDABLE_BUFFERS];

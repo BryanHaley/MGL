@@ -210,10 +210,10 @@ void mglScissor(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height)
     ERROR_CHECK_RETURN(width >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(height >= 0, GL_INVALID_VALUE);
 
-    ctx->state.var.scissor_box[0] = x;
-    ctx->state.var.scissor_box[1] = y;
-    ctx->state.var.scissor_box[2] = width;
-    ctx->state.var.scissor_box[3] = height;
+    ctx->state.scissor[0].x = x;
+    ctx->state.scissor[0].y = y;
+    ctx->state.scissor[0].width = width;
+    ctx->state.scissor[0].height = height;
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
 }
@@ -491,8 +491,8 @@ void mglDepthRange(GLMContext ctx, GLdouble n, GLdouble f)
     n = _clamp(n);
     f = _clamp(f);
 
-    ctx->state.var.depth_range[0] = n;
-    ctx->state.var.depth_range[1] = f;
+    ctx->state.depth_range[0].znear = n;
+    ctx->state.depth_range[0].zfar = f;
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
 }
@@ -502,10 +502,10 @@ void mglViewport(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height
     ERROR_CHECK_RETURN(width > 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(height > 0, GL_INVALID_VALUE);
 
-    ctx->state.viewport[0] = x;
-    ctx->state.viewport[1] = y;
-    ctx->state.viewport[2] = width;
-    ctx->state.viewport[3] = height;
+    ctx->state.viewport[0].x = (GLfloat)x;
+    ctx->state.viewport[0].y = (GLfloat)y;
+    ctx->state.viewport[0].w = (GLfloat)width;
+    ctx->state.viewport[0].h = (GLfloat)height;
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
 }
@@ -923,3 +923,140 @@ void mglPointParameteriv(GLMContext ctx, GLenum pname, const GLint *params)
 }
 
 
+
+/* ---------- indexed viewport / scissor / depth range ---------- */
+
+// first + count can wrap if first is large, so check them apart
+static bool viewportRangeOK(GLMContext ctx, GLuint first, GLsizei count)
+{
+    ERROR_CHECK_RETURN_VALUE(count >= 0, GL_INVALID_VALUE, false);
+    ERROR_CHECK_RETURN_VALUE(first < MAX_VIEWPORTS, GL_INVALID_VALUE, false);
+    ERROR_CHECK_RETURN_VALUE((GLuint)count <= MAX_VIEWPORTS - first, GL_INVALID_VALUE, false);
+
+    return true;
+}
+
+static GLdouble clampDepth(GLdouble d)
+{
+    if (d < 0.0) return 0.0;
+    if (d > 1.0) return 1.0;
+    return d;
+}
+
+void mglViewportArrayv(GLMContext ctx, GLuint first, GLsizei count, const GLfloat *v)
+{
+    if (viewportRangeOK(ctx, first, count) == false)
+        return;
+
+    if (count == 0)
+        return;
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    // check the whole set before writing any of it
+    for (GLsizei i = 0; i < count; i++)
+        ERROR_CHECK_RETURN(v[i * 4 + 2] >= 0.0f && v[i * 4 + 3] >= 0.0f, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < count; i++)
+    {
+        ctx->state.viewport[first + i].x = v[i * 4 + 0];
+        ctx->state.viewport[first + i].y = v[i * 4 + 1];
+        ctx->state.viewport[first + i].w = v[i * 4 + 2];
+        ctx->state.viewport[first + i].h = v[i * 4 + 3];
+    }
+
+    ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+}
+
+void mglViewportIndexedf(GLMContext ctx, GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h)
+{
+    ERROR_CHECK_RETURN(index < MAX_VIEWPORTS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(w >= 0.0f && h >= 0.0f, GL_INVALID_VALUE);
+
+    ctx->state.viewport[index].x = x;
+    ctx->state.viewport[index].y = y;
+    ctx->state.viewport[index].w = w;
+    ctx->state.viewport[index].h = h;
+
+    ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+}
+
+void mglViewportIndexedfv(GLMContext ctx, GLuint index, const GLfloat *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    mglViewportIndexedf(ctx, index, v[0], v[1], v[2], v[3]);
+}
+
+void mglScissorArrayv(GLMContext ctx, GLuint first, GLsizei count, const GLint *v)
+{
+    if (viewportRangeOK(ctx, first, count) == false)
+        return;
+
+    if (count == 0)
+        return;
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < count; i++)
+        ERROR_CHECK_RETURN(v[i * 4 + 2] >= 0 && v[i * 4 + 3] >= 0, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < count; i++)
+    {
+        ctx->state.scissor[first + i].x = v[i * 4 + 0];
+        ctx->state.scissor[first + i].y = v[i * 4 + 1];
+        ctx->state.scissor[first + i].width = v[i * 4 + 2];
+        ctx->state.scissor[first + i].height = v[i * 4 + 3];
+    }
+
+    ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+}
+
+void mglScissorIndexed(GLMContext ctx, GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height)
+{
+    ERROR_CHECK_RETURN(index < MAX_VIEWPORTS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(width >= 0 && height >= 0, GL_INVALID_VALUE);
+
+    ctx->state.scissor[index].x = left;
+    ctx->state.scissor[index].y = bottom;
+    ctx->state.scissor[index].width = width;
+    ctx->state.scissor[index].height = height;
+
+    ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+}
+
+void mglScissorIndexedv(GLMContext ctx, GLuint index, const GLint *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    mglScissorIndexed(ctx, index, v[0], v[1], v[2], v[3]);
+}
+
+void mglDepthRangeArrayv(GLMContext ctx, GLuint first, GLsizei count, const GLdouble *v)
+{
+    if (viewportRangeOK(ctx, first, count) == false)
+        return;
+
+    if (count == 0)
+        return;
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < count; i++)
+    {
+        ctx->state.depth_range[first + i].znear = clampDepth(v[i * 2 + 0]);
+        ctx->state.depth_range[first + i].zfar  = clampDepth(v[i * 2 + 1]);
+    }
+
+    ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+}
+
+void mglDepthRangeIndexed(GLMContext ctx, GLuint index, GLdouble n, GLdouble f)
+{
+    ERROR_CHECK_RETURN(index < MAX_VIEWPORTS, GL_INVALID_VALUE);
+
+    ctx->state.depth_range[index].znear = clampDepth(n);
+    ctx->state.depth_range[index].zfar  = clampDepth(f);
+
+    ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+}

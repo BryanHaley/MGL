@@ -601,3 +601,15 @@ TEST(convert, multi_pixel_block)
     CHECK_EQ_UINT(dst[8], 0x0B); CHECK_EQ_UINT(dst[10], 0x09);
     CHECK_EQ_UINT(dst[12], 0x0F); CHECK_EQ_UINT(dst[14], 0x0D);
 }
+
+TEST(half, exact_tie_rounds_to_even)
+{
+    // mantissa 0x1000 is a dead tie with an even low bit, so it must round down
+    union { GLfloat f; GLuint u; } a, b;
+
+    a.u = (127u << 23) | 0x001000u;   // 1.0 + tie, low bit of the half is 0
+    b.u = (127u << 23) | 0x003000u;   // 1.0 + tie, low bit of the half is 1
+
+    CHECK_EQ_UINT(mglFloatToHalf(a.f), 0x3C00u);
+    CHECK_EQ_UINT(mglFloatToHalf(b.f), 0x3C02u);
+}

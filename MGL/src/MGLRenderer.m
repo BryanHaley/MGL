@@ -46,6 +46,13 @@ extern void mglDrawBuffer(GLMContext ctx, GLenum buf);
 // for resource types SPVC_RESOURCE_TYPE_UNIFORM_BUFFER..
 #import "spirv_cross_c.h"
 
+// Metal has no constant vertex attribute, so all 16 GL constants live in one
+// small block bound here; a disabled attribute reads its own 16-byte slice and
+// never steps.
+#define MGL_CONSTANT_ATTRIB_BUFFER_INDEX 30
+#define MGL_CONSTANT_ATTRIB_STRIDE       (MAX_ATTRIBS * 16)
+
+
 typedef struct SyncList_t {
     GLuint count;
     GLuint  size;
@@ -484,6 +491,10 @@ void logDirtyBits(GLMContext ctx)
             int buffers_to_be_mapped = count;
 
             buffers = ctx->state.buffer_base[gl_buffer_type].buffers;
+
+            // plain uniform values belong to the program
+            if (gl_buffer_type == _UNIFORM_CONSTANT && ctx->state.program)
+                buffers = ctx->state.program->uniform_constants.buffers;
             
             for (int i=0; buffers_to_be_mapped; i++)
             {
@@ -613,7 +624,9 @@ void logDirtyBits(GLMContext ctx)
                 break;
         }
 
-        assert(mapped_buffers == count);
+        // an attribute with no array bound feeds a constant, and a program may
+        // ignore attributes that are enabled, so these two need not agree
+        (void)count;
     }
     else if (stage == _COMPUTE_SHADER)
     {
@@ -750,6 +763,17 @@ void logDirtyBits(GLMContext ctx)
     GLintptr offset;
     
     assert(_currentRenderEncoder);
+
+    {
+        GLfloat constants[MAX_ATTRIBS * 4];
+
+        for(int i=0; i<MAX_ATTRIBS; i++)
+            memcpy(&constants[i * 4], ctx->state.attrib_constant[i].v.f, 16);
+
+        [_currentRenderEncoder setVertexBytes:constants
+                                       length:MGL_CONSTANT_ATTRIB_STRIDE
+                                      atIndex:MGL_CONSTANT_ATTRIB_BUFFER_INDEX];
+    }
 
     for(int i=0; i<ctx->state.vertex_buffer_map_list.count; i++)
     {
@@ -2873,10 +2897,10 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     if (ctx->state.caps.scissor_test)
     {
         MTLScissorRect rect;
-        GLint x = ctx->state.var.scissor_box[0];
-        GLint y = ctx->state.var.scissor_box[1];
-        GLint w = ctx->state.var.scissor_box[2];
-        GLint h = ctx->state.var.scissor_box[3];
+        GLint x = ctx->state.scissor[0].x;
+        GLint y = ctx->state.scissor[0].y;
+        GLint w = ctx->state.scissor[0].width;
+        GLint h = ctx->state.scissor[0].height;
 
         NSUInteger tw = _renderPassDescriptor.renderTargetWidth;
         NSUInteger th = _renderPassDescriptor.renderTargetHeight;
@@ -2904,8 +2928,8 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             [_currentRenderEncoder setScissorRect:rect];
     }
 
-    [_currentRenderEncoder setViewport:(MTLViewport){ctx->state.viewport[0], ctx->state.viewport[1],
-                                        ctx->state.viewport[2], ctx->state.viewport[3],
+    [_currentRenderEncoder setViewport:(MTLViewport){ctx->state.viewport[0].x, ctx->state.viewport[0].y,
+                                        ctx->state.viewport[0].w, ctx->state.viewport[0].h,
                                         ctx->state.var.depth_range[0], ctx->state.var.depth_range[1]}];
 
     if (ctx->state.caps.cull_face)
@@ -2977,8 +3001,8 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         NSRect frame;
         frame = [_layer frame];
 
-        ctx->state.var.scissor_box[2] = frame.size.width;
-        ctx->state.var.scissor_box[3] = frame.size.height;
+        ctx->state.scissor[0].width = frame.size.width;
+        ctx->state.scissor[0].height = frame.size.height;
     }
 
     _renderPassDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -3388,10 +3412,10 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     if (!ctx->state.caps.scissor_test)
         return false;
 
-    GLint x = ctx->state.var.scissor_box[0];
-    GLint y = ctx->state.var.scissor_box[1];
-    GLint w = ctx->state.var.scissor_box[2];
-    GLint h = ctx->state.var.scissor_box[3];
+    GLint x = ctx->state.scissor[0].x;
+    GLint y = ctx->state.scissor[0].y;
+    GLint w = ctx->state.scissor[0].width;
+    GLint h = ctx->state.scissor[0].height;
 
     NSUInteger tw = _renderPassDescriptor.renderTargetWidth;
     NSUInteger th = _renderPassDescriptor.renderTargetHeight;
@@ -3963,9 +3987,25 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
             }
         }
 
-        // early out
-        if ((VAO_STATE(enabled_attribs) >> (i+1)) == 0)
-            break;
+        else
+        {
+            MTLVertexFormat format;
+
+            switch(ctx->state.attrib_constant[i].type)
+            {
+                case _ATTRIB_CONST_INT:  format = MTLVertexFormatInt4;   break;
+                case _ATTRIB_CONST_UINT: format = MTLVertexFormatUInt4;  break;
+                default:                 format = MTLVertexFormatFloat4; break;
+            }
+
+            vertexDescriptor.attributes[i].bufferIndex = MGL_CONSTANT_ATTRIB_BUFFER_INDEX;
+            vertexDescriptor.attributes[i].offset = i * 16;
+            vertexDescriptor.attributes[i].format = format;
+
+            vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stride = MGL_CONSTANT_ATTRIB_STRIDE;
+            vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stepRate = 0;
+            vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stepFunction = MTLVertexStepFunctionConstant;
+        }
     }
 
     // clear all dirty bits as they have been translated into a vertex descriptor

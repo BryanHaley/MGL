@@ -82,6 +82,25 @@ void mgl_harness_reset(void)
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 
+    // constant attribute values are context state and persist across tests
+    {
+        GLint n = 0;
+
+        glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &n);
+
+        if (n <= 0 || n > 64) n = 16;
+
+        for (GLint i = 0; i < n; i++)
+        {
+            glDisableVertexAttribArray((GLuint)i);
+            glVertexAttrib4f((GLuint)i, 0.0f, 0.0f, 0.0f, 1.0f);
+        }
+    }
+
+    glViewport(0, 0, 1, 1);
+    glScissor(0, 0, 0, 0);
+    glDepthRange(0.0, 1.0);
+
     mgl_drain_errors();
 }
 

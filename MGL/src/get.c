@@ -72,6 +72,67 @@ for(int i=0, counts[]={1,4,4,8};i<__COUNT__; data+=counts[__TYPE__], i++) \
         case kDouble: RET_DOUBLE(ctx->state.__VALUE__[i])    \
 }
 
+
+// viewport, scissor and depth range are per-index state. Index 0 is what the
+// plain glViewport / glScissor / glDepthRange calls write, so the indexed and
+// non-indexed getters can share one lookup.
+int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *out)
+{
+    switch(pname)
+    {
+        case GL_VIEWPORT:
+            if (index >= MAX_VIEWPORTS) return -1;
+            out[0] = ctx->state.viewport[index].x;
+            out[1] = ctx->state.viewport[index].y;
+            out[2] = ctx->state.viewport[index].w;
+            out[3] = ctx->state.viewport[index].h;
+            return 4;
+
+        case GL_SCISSOR_BOX:
+            if (index >= MAX_VIEWPORTS) return -1;
+            out[0] = ctx->state.scissor[index].x;
+            out[1] = ctx->state.scissor[index].y;
+            out[2] = ctx->state.scissor[index].width;
+            out[3] = ctx->state.scissor[index].height;
+            return 4;
+
+        case GL_DEPTH_RANGE:
+            if (index >= MAX_VIEWPORTS) return -1;
+            out[0] = ctx->state.depth_range[index].znear;
+            out[1] = ctx->state.depth_range[index].zfar;
+            return 2;
+
+        case GL_CURRENT_VERTEX_ATTRIB:
+            if (index >= ctx->state.max_vertex_attribs) return -1;
+            for(int i=0; i<4; i++)
+            {
+                switch(ctx->state.attrib_constant[index].type)
+                {
+                    case _ATTRIB_CONST_INT:  out[i] = ctx->state.attrib_constant[index].v.i[i]; break;
+                    case _ATTRIB_CONST_UINT: out[i] = ctx->state.attrib_constant[index].v.u[i]; break;
+                    default:                 out[i] = ctx->state.attrib_constant[index].v.f[i]; break;
+                }
+            }
+            return 4;
+    }
+
+    return 0;
+}
+
+void mglWriteTypedValues(void *data, GLuint type, const GLdouble *v, int count)
+{
+    for(int i=0; i<count; i++)
+    {
+        switch(type)
+        {
+            case kBool:   ((GLboolean *)data)[i] = (v[i] != 0.0); break;
+            case kInt:    ((GLint *)data)[i]     = (GLint)v[i];   break;
+            case kFloat:  ((GLfloat *)data)[i]   = (GLfloat)v[i]; break;
+            case kDouble: ((GLdouble *)data)[i]  = v[i];          break;
+        }
+    }
+}
+
 static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
 {
     switch(pname)
@@ -86,7 +147,7 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x0B45: RET_TYPE_VAR(type, cull_face_mode); break; // GL_CULL_FACE_MODE
         case 0x0B46: RET_TYPE_VAR(type, front_face); break; // GL_FRONT_FACE
 
-        case 0x0B70: RET_TYPE_VAR_COUNT(type, depth_range, 2); break; // GL_DEPTH_RANGE
+        case 0x0B70: { GLdouble v[4]; int n = mglIndexedStateValues(ctx, GL_DEPTH_RANGE, 0, v); mglWriteTypedValues(data, type, v, n); } break; // GL_DEPTH_RANGE
 
         case 0x0B72: RET_TYPE_VAR(type, depth_writemask); break; // GL_DEPTH_WRITEMASK
         case 0x0B73: RET_TYPE_VAR(type, depth_clear_value); break; // GL_DEPTH_CLEAR_VALUE
@@ -100,7 +161,7 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x0B97: RET_TYPE_VAR(type, stencil_ref); break; // GL_STENCIL_REF
         case 0x0B98: RET_TYPE_VAR(type, stencil_writemask); break; // GL_STENCIL_WRITEMASK
 
-        case 0x0BA2: RET_TYPE_COUNT(type, viewport, 4); break; // GL_VIEWPORT
+        case 0x0BA2: { GLdouble v[4]; int n = mglIndexedStateValues(ctx, GL_VIEWPORT, 0, v); mglWriteTypedValues(data, type, v, n); } break; // GL_VIEWPORT
 
         case 0x0BE0: RET_TYPE_VAR(type, blend_dst_rgb[0]); break; // GL_BLEND_DST
         case 0x0BE1: RET_TYPE_VAR(type, blend_src_rgb[0]); break; // GL_BLEND_SRC
@@ -109,7 +170,7 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x0C01: RET_TYPE(type, draw_buffer); break; // GL_DRAW_BUFFER
         case 0x0C02: RET_TYPE(type, read_buffer); break; // GL_READ_BUFFER
 
-        case 0x0C10: RET_TYPE_VAR_COUNT(type, scissor_box, 4); break; // GL_SCISSOR_BOX
+        case 0x0C10: { GLdouble v[4]; int n = mglIndexedStateValues(ctx, GL_SCISSOR_BOX, 0, v); mglWriteTypedValues(data, type, v, n); } break; // GL_SCISSOR_BOX
 
         case 0x0C22: RET_TYPE_COUNT(type, color_clear_value, 4); break; // GL_COLOR_CLEAR_VALUE
 
@@ -549,17 +610,49 @@ void mglGetInteger64v(GLMContext ctx, GLenum pname, GLint64 *data)
 
 void mglGetInteger64i_v(GLMContext ctx, GLenum target, GLuint index, GLint64 *data)
 {
+    GLdouble v[4];
+    int count;
     GLint tmp = 0;
 
-    ERROR_CHECK_RETURN(data, GL_INVALID_VALUE);
+    if (data == NULL)
+        return;
+
+    count = mglIndexedStateValues(ctx, target, index, v);
+
+    if (count != 0)
+    {
+        ERROR_CHECK_RETURN(count > 0, GL_INVALID_VALUE);
+
+        for (int i = 0; i < count; i++)
+            data[i] = (GLint64)v[i];
+
+        return;
+    }
 
     mglGetIntegeri_v(ctx, target, index, &tmp);
 
-    *data = (GLint64)tmp;
+    *data = tmp;
 }
 
 void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data)
 {
+    GLdouble v[4];
+    int count;
+
+    if (data == NULL)
+        return;
+
+    count = mglIndexedStateValues(ctx, target, index, v);
+
+    if (count != 0)
+    {
+        ERROR_CHECK_RETURN(count > 0, GL_INVALID_VALUE);
+
+        mglWriteTypedValues(data, kInt, v, count);
+
+        return;
+    }
+
     switch(target)
     {
         case GL_MAX_COMPUTE_WORK_GROUP_COUNT:
@@ -715,4 +808,37 @@ void mglGetInternalformati64v(GLMContext ctx, GLenum target, GLenum internalform
 
     for(GLsizei i=1; i<count; i++)
         params[i] = 0;
+}
+
+/* ---------- indexed getters ---------- */
+
+static void getIndexed(GLMContext ctx, GLenum target, GLuint index, GLuint type, void *data)
+{
+    GLdouble v[4];
+    int count;
+
+    if (data == NULL)
+        return;
+
+    count = mglIndexedStateValues(ctx, target, index, v);
+
+    ERROR_CHECK_RETURN(count != 0, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(count > 0, GL_INVALID_VALUE);
+
+    mglWriteTypedValues(data, type, v, count);
+}
+
+void mglGetBooleani_v(GLMContext ctx, GLenum target, GLuint index, GLboolean *data)
+{
+    getIndexed(ctx, target, index, kBool, data);
+}
+
+void mglGetFloati_v(GLMContext ctx, GLenum target, GLuint index, GLfloat *data)
+{
+    getIndexed(ctx, target, index, kFloat, data);
+}
+
+void mglGetDoublei_v(GLMContext ctx, GLenum target, GLuint index, GLdouble *data)
+{
+    getIndexed(ctx, target, index, kDouble, data);
 }

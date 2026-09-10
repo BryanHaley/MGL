@@ -18,6 +18,8 @@
  *
  */
 
+#include "pixel_convert.h"
+#include <math.h>
 #include <strings.h>
 
 #include "glm_context.h"
@@ -196,12 +198,33 @@ GLboolean mglIsVertexArray(GLMContext ctx, GLuint array)
 void mglGetVertexAttribdv(GLMContext ctx, GLuint index, GLenum pname, GLdouble *params)
 {
     VertexArray *vao;
-
-    vao = ctx->state.vao;
-
     Buffer *buf;
 
-    buf = ctx->state.vao->attrib[index].buffer;
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(index < ctx->state.max_vertex_attribs, GL_INVALID_VALUE);
+
+    // the current value is context state and readable with no VAO bound
+    if (pname == GL_CURRENT_VERTEX_ATTRIB)
+    {
+        AttribConstant *c = &ctx->state.attrib_constant[index];
+
+        for(int i=0; i<4; i++)
+        {
+            switch(c->type)
+            {
+                case _ATTRIB_CONST_INT:  params[i] = c->v.i[i]; break;
+                case _ATTRIB_CONST_UINT: params[i] = c->v.u[i]; break;
+                default:                 params[i] = c->v.f[i]; break;
+            }
+        }
+
+        return;
+    }
+
+    ERROR_CHECK_RETURN(ctx->state.vao, GL_INVALID_OPERATION);
+
+    vao = ctx->state.vao;
+    buf = vao->attrib[index].buffer;
 
     switch(pname)
     {
@@ -246,11 +269,6 @@ void mglGetVertexAttribdv(GLMContext ctx, GLuint index, GLenum pname, GLdouble *
         case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
         case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
             ERROR_RETURN(GL_INVALID_ENUM); // unsupported for now
-            *params = 0;
-            break;
-
-        case GL_CURRENT_VERTEX_ATTRIB:
-            ERROR_RETURN(GL_INVALID_ENUM); // unsupported for now, probably never
             *params = 0;
             break;
 
@@ -878,3 +896,860 @@ void mglGetVertexArrayIndexed64iv(GLMContext ctx, GLuint vaobj, GLuint index, GL
         *param = value;
 }
 
+
+/* ---------- constant vertex attribute values ---------- */
+
+// GL feeds these to the shader when an attribute array is disabled. Missing
+// components default to 0, except the fourth which defaults to 1.
+static void setAttribConstant(GLMContext ctx, GLuint index, AttribConstType type, const void *src, int comps)
+{
+    AttribConstant *ac;
+
+    ERROR_CHECK_RETURN(index < ctx->state.max_vertex_attribs, GL_INVALID_VALUE);
+
+    ac = &ctx->state.attrib_constant[index];
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLfloat fdef = (i == 3) ? 1.0f : 0.0f;
+        GLuint  idef = (i == 3) ? 1u : 0u;
+
+        switch (type)
+        {
+            case _ATTRIB_CONST_INT:
+                ac->v.i[i] = (i < comps) ? ((const GLint *)src)[i] : (GLint)idef;
+                break;
+
+            case _ATTRIB_CONST_UINT:
+                ac->v.u[i] = (i < comps) ? ((const GLuint *)src)[i] : idef;
+                break;
+
+            default:
+                ac->v.f[i] = (i < comps) ? ((const GLfloat *)src)[i] : fdef;
+                break;
+        }
+    }
+
+    ac->type = type;
+
+    ctx->state.attrib_constant_dirty |= (1 << index);
+    ctx->state.dirty_bits |= DIRTY_STATE;
+}
+
+static void setAttribFloats(GLMContext ctx, GLuint index, const GLfloat *v, int comps)
+{
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, v, comps);
+}
+
+void mglVertexAttrib1f(GLMContext ctx, GLuint index, GLfloat x)
+{
+    GLfloat f[4] = { (GLfloat)x };
+
+    setAttribFloats(ctx, index, f, 1);
+}
+
+void mglVertexAttrib2f(GLMContext ctx, GLuint index, GLfloat x, GLfloat y)
+{
+    GLfloat f[4] = { (GLfloat)x, (GLfloat)y };
+
+    setAttribFloats(ctx, index, f, 2);
+}
+
+void mglVertexAttrib3f(GLMContext ctx, GLuint index, GLfloat x, GLfloat y, GLfloat z)
+{
+    GLfloat f[4] = { (GLfloat)x, (GLfloat)y, (GLfloat)z };
+
+    setAttribFloats(ctx, index, f, 3);
+}
+
+void mglVertexAttrib4f(GLMContext ctx, GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
+{
+    GLfloat f[4] = { (GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w };
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib1d(GLMContext ctx, GLuint index, GLdouble x)
+{
+    GLfloat f[4] = { (GLfloat)x };
+
+    setAttribFloats(ctx, index, f, 1);
+}
+
+void mglVertexAttrib2d(GLMContext ctx, GLuint index, GLdouble x, GLdouble y)
+{
+    GLfloat f[4] = { (GLfloat)x, (GLfloat)y };
+
+    setAttribFloats(ctx, index, f, 2);
+}
+
+void mglVertexAttrib3d(GLMContext ctx, GLuint index, GLdouble x, GLdouble y, GLdouble z)
+{
+    GLfloat f[4] = { (GLfloat)x, (GLfloat)y, (GLfloat)z };
+
+    setAttribFloats(ctx, index, f, 3);
+}
+
+void mglVertexAttrib4d(GLMContext ctx, GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w)
+{
+    GLfloat f[4] = { (GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w };
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib1s(GLMContext ctx, GLuint index, GLshort x)
+{
+    GLfloat f[4] = { (GLfloat)x };
+
+    setAttribFloats(ctx, index, f, 1);
+}
+
+void mglVertexAttrib2s(GLMContext ctx, GLuint index, GLshort x, GLshort y)
+{
+    GLfloat f[4] = { (GLfloat)x, (GLfloat)y };
+
+    setAttribFloats(ctx, index, f, 2);
+}
+
+void mglVertexAttrib3s(GLMContext ctx, GLuint index, GLshort x, GLshort y, GLshort z)
+{
+    GLfloat f[4] = { (GLfloat)x, (GLfloat)y, (GLfloat)z };
+
+    setAttribFloats(ctx, index, f, 3);
+}
+
+void mglVertexAttrib4s(GLMContext ctx, GLuint index, GLshort x, GLshort y, GLshort z, GLshort w)
+{
+    GLfloat f[4] = { (GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w };
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib1fv(GLMContext ctx, GLuint index, const GLfloat *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0];
+
+    setAttribFloats(ctx, index, f, 1);
+}
+
+void mglVertexAttrib2fv(GLMContext ctx, GLuint index, const GLfloat *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0]; f[1] = (GLfloat)v[1];
+
+    setAttribFloats(ctx, index, f, 2);
+}
+
+void mglVertexAttrib3fv(GLMContext ctx, GLuint index, const GLfloat *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0]; f[1] = (GLfloat)v[1]; f[2] = (GLfloat)v[2];
+
+    setAttribFloats(ctx, index, f, 3);
+}
+
+void mglVertexAttrib4fv(GLMContext ctx, GLuint index, const GLfloat *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0]; f[1] = (GLfloat)v[1]; f[2] = (GLfloat)v[2]; f[3] = (GLfloat)v[3];
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib1dv(GLMContext ctx, GLuint index, const GLdouble *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0];
+
+    setAttribFloats(ctx, index, f, 1);
+}
+
+void mglVertexAttrib2dv(GLMContext ctx, GLuint index, const GLdouble *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0]; f[1] = (GLfloat)v[1];
+
+    setAttribFloats(ctx, index, f, 2);
+}
+
+void mglVertexAttrib3dv(GLMContext ctx, GLuint index, const GLdouble *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0]; f[1] = (GLfloat)v[1]; f[2] = (GLfloat)v[2];
+
+    setAttribFloats(ctx, index, f, 3);
+}
+
+void mglVertexAttrib4dv(GLMContext ctx, GLuint index, const GLdouble *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0]; f[1] = (GLfloat)v[1]; f[2] = (GLfloat)v[2]; f[3] = (GLfloat)v[3];
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib1sv(GLMContext ctx, GLuint index, const GLshort *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0];
+
+    setAttribFloats(ctx, index, f, 1);
+}
+
+void mglVertexAttrib2sv(GLMContext ctx, GLuint index, const GLshort *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0]; f[1] = (GLfloat)v[1];
+
+    setAttribFloats(ctx, index, f, 2);
+}
+
+void mglVertexAttrib3sv(GLMContext ctx, GLuint index, const GLshort *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0]; f[1] = (GLfloat)v[1]; f[2] = (GLfloat)v[2];
+
+    setAttribFloats(ctx, index, f, 3);
+}
+
+void mglVertexAttrib4sv(GLMContext ctx, GLuint index, const GLshort *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    f[0] = (GLfloat)v[0]; f[1] = (GLfloat)v[1]; f[2] = (GLfloat)v[2]; f[3] = (GLfloat)v[3];
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4bv(GLMContext ctx, GLuint index, const GLbyte *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = (GLfloat)v[i];
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4ubv(GLMContext ctx, GLuint index, const GLubyte *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = (GLfloat)v[i];
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4iv(GLMContext ctx, GLuint index, const GLint *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = (GLfloat)v[i];
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4uiv(GLMContext ctx, GLuint index, const GLuint *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = (GLfloat)v[i];
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4usv(GLMContext ctx, GLuint index, const GLushort *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = (GLfloat)v[i];
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4Nbv(GLMContext ctx, GLuint index, const GLbyte *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = fmaxf((GLfloat)v[i] / 127.0f, -1.0f);
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4Nsv(GLMContext ctx, GLuint index, const GLshort *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = fmaxf((GLfloat)v[i] / 32767.0f, -1.0f);
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4Niv(GLMContext ctx, GLuint index, const GLint *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = fmaxf((GLfloat)v[i] / 2147483647.0f, -1.0f);
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4Nubv(GLMContext ctx, GLuint index, const GLubyte *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = (GLfloat)v[i] / 255.0f;
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4Nusv(GLMContext ctx, GLuint index, const GLushort *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = (GLfloat)v[i] / 65535.0f;
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4Nuiv(GLMContext ctx, GLuint index, const GLuint *v)
+{
+    GLfloat f[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        f[i] = (GLfloat)v[i] / 4294967295.0f;
+
+    setAttribFloats(ctx, index, f, 4);
+}
+
+void mglVertexAttrib4Nub(GLMContext ctx, GLuint index, GLubyte x, GLubyte y, GLubyte z, GLubyte w)
+{
+    GLubyte v[4] = { x, y, z, w };
+
+    mglVertexAttrib4Nubv(ctx, index, v);
+}
+
+/* ---------- integer, double and packed constant attributes ---------- */
+
+static GLboolean unpackPackedAttrib(GLuint value, GLenum type, GLboolean normalized, GLfloat *out)
+{
+    GLint sx, sy, sz, sw;
+    GLuint ux, uy, uz, uw;
+
+    switch (type)
+    {
+        case GL_INT_2_10_10_10_REV:
+            sx = (GLint)(value & 0x3FF);
+            sy = (GLint)((value >> 10) & 0x3FF);
+            sz = (GLint)((value >> 20) & 0x3FF);
+            sw = (GLint)((value >> 30) & 0x3);
+
+            // two's complement in 10 and 2 bit fields
+            sx = (sx ^ 0x200) - 0x200;
+            sy = (sy ^ 0x200) - 0x200;
+            sz = (sz ^ 0x200) - 0x200;
+            sw = (sw ^ 0x2) - 0x2;
+
+            if (normalized)
+            {
+                out[0] = fmaxf((GLfloat)sx / 511.0f, -1.0f);
+                out[1] = fmaxf((GLfloat)sy / 511.0f, -1.0f);
+                out[2] = fmaxf((GLfloat)sz / 511.0f, -1.0f);
+                out[3] = fmaxf((GLfloat)sw, -1.0f);
+            }
+            else
+            {
+                out[0] = (GLfloat)sx;
+                out[1] = (GLfloat)sy;
+                out[2] = (GLfloat)sz;
+                out[3] = (GLfloat)sw;
+            }
+
+            return GL_TRUE;
+
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+            ux = value & 0x3FF;
+            uy = (value >> 10) & 0x3FF;
+            uz = (value >> 20) & 0x3FF;
+            uw = (value >> 30) & 0x3;
+
+            if (normalized)
+            {
+                out[0] = (GLfloat)ux / 1023.0f;
+                out[1] = (GLfloat)uy / 1023.0f;
+                out[2] = (GLfloat)uz / 1023.0f;
+                out[3] = (GLfloat)uw / 3.0f;
+            }
+            else
+            {
+                out[0] = (GLfloat)ux;
+                out[1] = (GLfloat)uy;
+                out[2] = (GLfloat)uz;
+                out[3] = (GLfloat)uw;
+            }
+
+            return GL_TRUE;
+
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+            out[0] = mglSmallFloatToFloat(value & 0x7FF, 6, 5);
+            out[1] = mglSmallFloatToFloat((value >> 11) & 0x7FF, 6, 5);
+            out[2] = mglSmallFloatToFloat((value >> 22) & 0x3FF, 5, 5);
+            out[3] = 1.0f;
+
+            return GL_TRUE;
+    }
+
+    return GL_FALSE;
+}
+
+// the current value in whatever type the caller asked for
+static int readAttribConstant(GLMContext ctx, GLuint index, GLdouble *out)
+{
+    AttribConstant *ac = &ctx->state.attrib_constant[index];
+
+    for (int i = 0; i < 4; i++)
+    {
+        switch (ac->type)
+        {
+            case _ATTRIB_CONST_INT:  out[i] = ac->v.i[i]; break;
+            case _ATTRIB_CONST_UINT: out[i] = ac->v.u[i]; break;
+            default:                 out[i] = ac->v.f[i]; break;
+        }
+    }
+
+    return 4;
+}
+
+void mglVertexAttribI1i(GLMContext ctx, GLuint index, GLint x)
+{
+    GLint t[4] = { x };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, t, 1);
+}
+
+void mglVertexAttribI2i(GLMContext ctx, GLuint index, GLint x, GLint y)
+{
+    GLint t[4] = { x, y };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, t, 2);
+}
+
+void mglVertexAttribI3i(GLMContext ctx, GLuint index, GLint x, GLint y, GLint z)
+{
+    GLint t[4] = { x, y, z };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, t, 3);
+}
+
+void mglVertexAttribI4i(GLMContext ctx, GLuint index, GLint x, GLint y, GLint z, GLint w)
+{
+    GLint t[4] = { x, y, z, w };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, t, 4);
+}
+
+void mglVertexAttribI1ui(GLMContext ctx, GLuint index, GLuint x)
+{
+    GLuint t[4] = { x };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, t, 1);
+}
+
+void mglVertexAttribI2ui(GLMContext ctx, GLuint index, GLuint x, GLuint y)
+{
+    GLuint t[4] = { x, y };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, t, 2);
+}
+
+void mglVertexAttribI3ui(GLMContext ctx, GLuint index, GLuint x, GLuint y, GLuint z)
+{
+    GLuint t[4] = { x, y, z };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, t, 3);
+}
+
+void mglVertexAttribI4ui(GLMContext ctx, GLuint index, GLuint x, GLuint y, GLuint z, GLuint w)
+{
+    GLuint t[4] = { x, y, z, w };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, t, 4);
+}
+
+void mglVertexAttribI1iv(GLMContext ctx, GLuint index, const GLint *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, v, 1);
+}
+
+void mglVertexAttribI2iv(GLMContext ctx, GLuint index, const GLint *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, v, 2);
+}
+
+void mglVertexAttribI3iv(GLMContext ctx, GLuint index, const GLint *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, v, 3);
+}
+
+void mglVertexAttribI4iv(GLMContext ctx, GLuint index, const GLint *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, v, 4);
+}
+
+void mglVertexAttribI1uiv(GLMContext ctx, GLuint index, const GLuint *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, v, 1);
+}
+
+void mglVertexAttribI2uiv(GLMContext ctx, GLuint index, const GLuint *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, v, 2);
+}
+
+void mglVertexAttribI3uiv(GLMContext ctx, GLuint index, const GLuint *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, v, 3);
+}
+
+void mglVertexAttribI4uiv(GLMContext ctx, GLuint index, const GLuint *v)
+{
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, v, 4);
+}
+
+void mglVertexAttribI4bv(GLMContext ctx, GLuint index, const GLbyte *v)
+{
+    GLint t[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        t[i] = (GLint)v[i];
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, t, 4);
+}
+
+void mglVertexAttribI4sv(GLMContext ctx, GLuint index, const GLshort *v)
+{
+    GLint t[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        t[i] = (GLint)v[i];
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_INT, t, 4);
+}
+
+void mglVertexAttribI4ubv(GLMContext ctx, GLuint index, const GLubyte *v)
+{
+    GLuint t[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        t[i] = (GLuint)v[i];
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, t, 4);
+}
+
+void mglVertexAttribI4usv(GLMContext ctx, GLuint index, const GLushort *v)
+{
+    GLuint t[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        t[i] = (GLuint)v[i];
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_UINT, t, 4);
+}
+
+void mglVertexAttribL1d(GLMContext ctx, GLuint index, GLdouble x)
+{
+    GLfloat t[4] = { (GLfloat)x };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 1);
+}
+
+void mglVertexAttribL2d(GLMContext ctx, GLuint index, GLdouble x, GLdouble y)
+{
+    GLfloat t[4] = { (GLfloat)x, (GLfloat)y };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 2);
+}
+
+void mglVertexAttribL3d(GLMContext ctx, GLuint index, GLdouble x, GLdouble y, GLdouble z)
+{
+    GLfloat t[4] = { (GLfloat)x, (GLfloat)y, (GLfloat)z };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 3);
+}
+
+void mglVertexAttribL4d(GLMContext ctx, GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w)
+{
+    GLfloat t[4] = { (GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w };
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 4);
+}
+
+void mglVertexAttribL1dv(GLMContext ctx, GLuint index, const GLdouble *v)
+{
+    GLfloat t[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 1; i++)
+        t[i] = (GLfloat)v[i];
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 1);
+}
+
+void mglVertexAttribL2dv(GLMContext ctx, GLuint index, const GLdouble *v)
+{
+    GLfloat t[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 2; i++)
+        t[i] = (GLfloat)v[i];
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 2);
+}
+
+void mglVertexAttribL3dv(GLMContext ctx, GLuint index, const GLdouble *v)
+{
+    GLfloat t[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 3; i++)
+        t[i] = (GLfloat)v[i];
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 3);
+}
+
+void mglVertexAttribL4dv(GLMContext ctx, GLuint index, const GLdouble *v)
+{
+    GLfloat t[4];
+
+    ERROR_CHECK_RETURN(v, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        t[i] = (GLfloat)v[i];
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 4);
+}
+
+void mglVertexAttribP1ui(GLMContext ctx, GLuint index, GLenum type, GLboolean normalized, GLuint value)
+{
+    GLfloat t[4];
+
+    ERROR_CHECK_RETURN(unpackPackedAttrib(value, type, normalized, t), GL_INVALID_ENUM);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 1);
+}
+
+void mglVertexAttribP2ui(GLMContext ctx, GLuint index, GLenum type, GLboolean normalized, GLuint value)
+{
+    GLfloat t[4];
+
+    ERROR_CHECK_RETURN(unpackPackedAttrib(value, type, normalized, t), GL_INVALID_ENUM);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 2);
+}
+
+void mglVertexAttribP3ui(GLMContext ctx, GLuint index, GLenum type, GLboolean normalized, GLuint value)
+{
+    GLfloat t[4];
+
+    ERROR_CHECK_RETURN(unpackPackedAttrib(value, type, normalized, t), GL_INVALID_ENUM);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 3);
+}
+
+void mglVertexAttribP4ui(GLMContext ctx, GLuint index, GLenum type, GLboolean normalized, GLuint value)
+{
+    GLfloat t[4];
+
+    ERROR_CHECK_RETURN(unpackPackedAttrib(value, type, normalized, t), GL_INVALID_ENUM);
+
+    setAttribConstant(ctx, index, _ATTRIB_CONST_FLOAT, t, 4);
+}
+
+void mglVertexAttribP1uiv(GLMContext ctx, GLuint index, GLenum type, GLboolean normalized, const GLuint *value)
+{
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    mglVertexAttribP1ui(ctx, index, type, normalized, value[0]);
+}
+
+void mglVertexAttribP2uiv(GLMContext ctx, GLuint index, GLenum type, GLboolean normalized, const GLuint *value)
+{
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    mglVertexAttribP2ui(ctx, index, type, normalized, value[0]);
+}
+
+void mglVertexAttribP3uiv(GLMContext ctx, GLuint index, GLenum type, GLboolean normalized, const GLuint *value)
+{
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    mglVertexAttribP3ui(ctx, index, type, normalized, value[0]);
+}
+
+void mglVertexAttribP4uiv(GLMContext ctx, GLuint index, GLenum type, GLboolean normalized, const GLuint *value)
+{
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    mglVertexAttribP4ui(ctx, index, type, normalized, value[0]);
+}
+
+void mglGetVertexAttribIiv(GLMContext ctx, GLuint index, GLenum pname, GLint *params)
+{
+    GLdouble v[4];
+    GLint tmp = 0;
+
+    if (params == NULL)
+        return;
+
+    ERROR_CHECK_RETURN(index < ctx->state.max_vertex_attribs, GL_INVALID_VALUE);
+
+    if (pname == GL_CURRENT_VERTEX_ATTRIB)
+    {
+        readAttribConstant(ctx, index, v);
+
+        for (int i = 0; i < 4; i++)
+            params[i] = (GLint)v[i];
+
+        return;
+    }
+
+    mglGetVertexAttribiv(ctx, index, pname, &tmp);
+
+    *params = tmp;
+}
+
+void mglGetVertexAttribIuiv(GLMContext ctx, GLuint index, GLenum pname, GLuint *params)
+{
+    GLdouble v[4];
+    GLint tmp = 0;
+
+    if (params == NULL)
+        return;
+
+    ERROR_CHECK_RETURN(index < ctx->state.max_vertex_attribs, GL_INVALID_VALUE);
+
+    if (pname == GL_CURRENT_VERTEX_ATTRIB)
+    {
+        readAttribConstant(ctx, index, v);
+
+        for (int i = 0; i < 4; i++)
+            params[i] = (GLuint)v[i];
+
+        return;
+    }
+
+    mglGetVertexAttribiv(ctx, index, pname, &tmp);
+
+    *params = (GLuint)tmp;
+}
+
+void mglGetVertexAttribLdv(GLMContext ctx, GLuint index, GLenum pname, GLdouble *params)
+{
+    if (params == NULL)
+        return;
+
+    ERROR_CHECK_RETURN(index < ctx->state.max_vertex_attribs, GL_INVALID_VALUE);
+
+    if (pname == GL_CURRENT_VERTEX_ATTRIB)
+    {
+        readAttribConstant(ctx, index, params);
+
+        return;
+    }
+
+    mglGetVertexAttribdv(ctx, index, pname, params);
+}

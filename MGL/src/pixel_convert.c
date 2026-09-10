@@ -164,8 +164,10 @@ GLushort mglFloatToHalf(GLfloat f)
 
     GLushort half = (GLushort)((sign << 15) | ((GLuint)exp << 10) | (mant >> 13));
 
-    if ((mant & 0x1000u) && ((mant & 0x2FFFu) != 0x1000u))
-        half++;                                             // round to nearest even
+    // round to nearest even: bit 12 is the guard, bits 0-11 the sticky, and
+    // bit 13 is the low bit of the result
+    if ((mant & 0x1000u) && (mant & 0x2FFFu))
+        half++;
 
     return half;
 }
@@ -189,6 +191,12 @@ static GLfloat smallfloat_to_float(GLuint v, GLuint mant_bits, GLuint exp_bits)
         return mant ? NAN : INFINITY;
 
     return ldexpf(1.0f + (GLfloat)mant / (GLfloat)(1u << mant_bits), (GLint)exp - bias);
+}
+
+// same decoder, for the packed vertex attribute formats
+GLfloat mglSmallFloatToFloat(GLuint v, GLuint mant_bits, GLuint exp_bits)
+{
+    return smallfloat_to_float(v, mant_bits, exp_bits);
 }
 
 static GLuint float_to_smallfloat(GLfloat f, GLuint mant_bits, GLuint exp_bits)

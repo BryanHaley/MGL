@@ -179,16 +179,32 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     STATE(var.point_size) = 1.0f;
     STATE(var.polygon_mode) = GL_FILL;
 
-    STATE(var.scissor_box[0]) = 0;
-    STATE(var.scissor_box[1]) = 0;
-    STATE(var.scissor_box[2]) = 0;  // needs to be set on binding to window
-    STATE(var.scissor_box[3]) = 0;  // needs to be set on binding to window
+    STATE(scissor[0].x) = 0;
+    STATE(scissor[0].y) = 0;
+    STATE(scissor[0].width) = 0;   // needs to be set on binding to window
+    STATE(scissor[0].height) = 0;  // needs to be set on binding to window
 
     // Initialize viewport to default size - critical for rendering
-    STATE(viewport[0]) = 0;
-    STATE(viewport[1]) = 0;
-    STATE(viewport[2]) = 1024;  // Default width - should be updated when window is bound
-    STATE(viewport[3]) = 768;   // Default height - should be updated when window is bound
+    STATE(viewport[0].x) = 0;
+    STATE(viewport[0].y) = 0;
+    STATE(viewport[0].w) = 1024;  // Default width - should be updated when window is bound
+    STATE(viewport[0].h) = 768;   // Default height - should be updated when window is bound
+
+    for(int i=0; i<MAX_VIEWPORTS; i++)
+    {
+        STATE(depth_range[i].znear) = 0.0;
+        STATE(depth_range[i].zfar) = 1.0;
+    }
+
+    // a disabled array feeds (0,0,0,1) until glVertexAttrib says otherwise
+    for(int i=0; i<MAX_ATTRIBS; i++)
+    {
+        STATE(attrib_constant[i]).v.f[0] = 0.0f;
+        STATE(attrib_constant[i]).v.f[1] = 0.0f;
+        STATE(attrib_constant[i]).v.f[2] = 0.0f;
+        STATE(attrib_constant[i]).v.f[3] = 1.0f;
+        STATE(attrib_constant[i]).type = _ATTRIB_CONST_FLOAT;
+    }
 
     for(int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
     {

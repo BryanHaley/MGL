@@ -71,4 +71,7 @@ GLboolean mglConvertPixels(const void *src, size_t src_row_pitch, MGLNativeForma
 GLfloat  mglHalfToFloat(GLushort h);
 GLushort mglFloatToHalf(GLfloat f);
 
+// 10/11-bit unsigned float decode, used by the packed vertex attribs.
+GLfloat  mglSmallFloatToFloat(GLuint v, GLuint mant_bits, GLuint exp_bits);
+
 #endif /* pixel_convert_h */
