@@ -2515,3 +2515,29 @@ void mglSampleCoverage(GLMContext ctx, GLfloat value, GLboolean invert)
     MGL_INFO("MGL: glSampleCoverage called (stub) value=%f invert=%d\n", value, invert);
 }
 
+
+void mglGetTexLevelParameteriv(GLMContext ctx, GLenum target, GLint level, GLenum pname, GLint *params);
+
+void mglGetnTexImage(GLMContext ctx, GLenum target, GLint level, GLenum format, GLenum type, GLsizei bufSize, void *pixels)
+{
+    GLuint pixel_bytes;
+
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+
+    pixel_bytes = sizeForFormatType(format, type);
+
+    if (pixel_bytes)
+    {
+        GLint w = 0, h = 0;
+
+        mglGetTexLevelParameteriv(ctx, target, level, GL_TEXTURE_WIDTH, &w);
+        mglGetTexLevelParameteriv(ctx, target, level, GL_TEXTURE_HEIGHT, &h);
+
+        if (h == 0)
+            h = 1;
+
+        ERROR_CHECK_RETURN((GLint64)w * h * pixel_bytes <= (GLint64)bufSize, GL_INVALID_OPERATION);
+    }
+
+    mglGetTexImage(ctx, target, level, format, type, pixels);
+}

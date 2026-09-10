@@ -91,10 +91,7 @@ void mgl_harness_reset(void)
         if (n <= 0 || n > 64) n = 16;
 
         for (GLint i = 0; i < n; i++)
-        {
-            glDisableVertexAttribArray((GLuint)i);
             glVertexAttrib4f((GLuint)i, 0.0f, 0.0f, 0.0f, 1.0f);
-        }
     }
 
     glViewport(0, 0, 1, 1);

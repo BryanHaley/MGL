@@ -115,6 +115,18 @@ typedef struct GLMParams_t {
     GLuint draw_buffer;
     GLuint read_buffer;
     GLuint scissor_box[4];
+
+    // Tier 2 additions
+    GLenum clip_origin;
+    GLenum clip_depth;
+    GLenum clamp_read_color;
+    GLfloat min_sample_shading;
+    GLbitfield sample_mask_value;
+    GLuint conditional_render_query;
+    GLenum conditional_render_mode;
+    GLint patch_vertices;
+    GLfloat patch_default_inner[2];
+    GLfloat patch_default_outer[4];
     GLuint color_clear_value;
     GLboolean color_writemask[MAX_COLOR_ATTACHMENTS][4];
     GLuint max_texture_size;

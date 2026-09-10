@@ -1362,3 +1362,114 @@ void mglProgramUniformMatrix4x3dv(GLMContext ctx, GLuint program, GLint location
 {
     puMatrixdv(ctx, program, location, count, transpose, value, 4, 3);
 }
+
+/* ---------- uniform value getters ---------- */
+
+// Values are stored as the bytes the app wrote. bufSize, where present, is a
+// byte cap and a value that does not fit is an error rather than a truncation.
+static const Buffer *uniformValueBuffer(GLMContext ctx, GLuint program, GLint location)
+{
+    Program *ptr = findProgram(ctx, program);
+    Buffer *buf;
+
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_VALUE, NULL);
+    ERROR_CHECK_RETURN_VALUE(location >= 0 && location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION, NULL);
+
+    buf = ptr->uniform_constants.buffers[location].buf;
+
+    ERROR_CHECK_RETURN_VALUE(buf && buf->data.buffer_data, GL_INVALID_OPERATION, NULL);
+
+    return buf;
+}
+
+static void getUniformTyped(GLMContext ctx, GLuint program, GLint location,
+                            GLsizei bufSize, void *params, GLenum dst_type)
+{
+    const Buffer *buf = uniformValueBuffer(ctx, program, location);
+    const GLfloat *src;
+    const GLint *isrc;
+    GLsizei n;
+
+    if (buf == NULL)
+        return;
+
+    n = (GLsizei)(buf->size / sizeof(GLfloat));
+
+    if (n <= 0)
+        return;
+
+    // the cap counts the bytes this call would write, not the bytes stored
+    if (bufSize >= 0)
+    {
+        size_t elem = (dst_type == GL_DOUBLE) ? sizeof(GLdouble) : sizeof(GLfloat);
+
+        ERROR_CHECK_RETURN((size_t)n * elem <= (size_t)bufSize, GL_INVALID_OPERATION);
+    }
+
+    src = (const GLfloat *)buf->data.buffer_data;
+    isrc = (const GLint *)buf->data.buffer_data;
+
+    switch (dst_type)
+    {
+        case GL_FLOAT:
+            memcpy(params, src, (size_t)n * sizeof(GLfloat));
+            break;
+
+        case GL_DOUBLE:
+            for (GLsizei i = 0; i < n; i++)
+                ((GLdouble *)params)[i] = (GLdouble)src[i];
+            break;
+
+        // integer uniforms were stored as integers, so copy the bits straight
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+            memcpy(params, isrc, (size_t)n * sizeof(GLint));
+            break;
+    }
+}
+
+void mglGetUniformuiv(GLMContext ctx, GLuint program, GLint location, GLuint *params)
+{
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    getUniformTyped(ctx, program, location, -1, params, GL_UNSIGNED_INT);
+}
+
+void mglGetUniformdv(GLMContext ctx, GLuint program, GLint location, GLdouble *params)
+{
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    getUniformTyped(ctx, program, location, -1, params, GL_DOUBLE);
+}
+
+void mglGetnUniformfv(GLMContext ctx, GLuint program, GLint location, GLsizei bufSize, GLfloat *params)
+{
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    getUniformTyped(ctx, program, location, bufSize, params, GL_FLOAT);
+}
+
+void mglGetnUniformiv(GLMContext ctx, GLuint program, GLint location, GLsizei bufSize, GLint *params)
+{
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    getUniformTyped(ctx, program, location, bufSize, params, GL_INT);
+}
+
+void mglGetnUniformuiv(GLMContext ctx, GLuint program, GLint location, GLsizei bufSize, GLuint *params)
+{
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    getUniformTyped(ctx, program, location, bufSize, params, GL_UNSIGNED_INT);
+}
+
+void mglGetnUniformdv(GLMContext ctx, GLuint program, GLint location, GLsizei bufSize, GLdouble *params)
+{
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    getUniformTyped(ctx, program, location, bufSize, params, GL_DOUBLE);
+}

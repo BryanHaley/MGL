@@ -438,6 +438,13 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
+    // GL clips z to [-1,1]; Metal clips to [0,1]. Without this the whole near
+    // half of every GL projection is thrown away before rasterisation.
+    if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_FIXUP_DEPTH_CONVENTION, SPVC_TRUE) != SPVC_SUCCESS) {
+        MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_FIXUP_DEPTH_CONVENTION) failed\n");
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
+
     //ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_GLSL_VERSION, 4.5) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_install_compiler_options(compiler_msl, options) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_install_compiler_options(compiler_msl, options) != SPVC_SUCCESS) {
@@ -1124,4 +1131,536 @@ void mglUseProgramStages(GLMContext ctx, GLuint pipeline, GLbitfield stages, GLu
         
     pipe_ptr->validated = GL_FALSE;
     STATE(dirty_bits) |= DIRTY_PROGRAM;
+}
+
+/* ---------- subroutines ---------- */
+
+// MGL's linker captures no subroutines, so every program has zero of them.
+// These answer as a program with none would, rather than pretending to work.
+
+void mglGetActiveSubroutineUniformiv(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLenum pname, GLint *values)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(values, GL_INVALID_VALUE);
+
+    // no active subroutine uniforms, so any index is out of range
+    ERROR_RETURN(GL_INVALID_VALUE);
+}
+
+void mglGetActiveSubroutineUniformName(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+
+    ERROR_RETURN(GL_INVALID_VALUE);
+}
+
+GLuint mglGetSubroutineIndex(GLMContext ctx, GLuint program, GLenum shadertype, const GLchar *name)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_VALUE, GL_INVALID_INDEX);
+    ERROR_CHECK_RETURN_VALUE(name, GL_INVALID_VALUE, GL_INVALID_INDEX);
+
+    return GL_INVALID_INDEX;
+}
+
+GLint mglGetSubroutineUniformLocation(GLMContext ctx, GLuint program, GLenum shadertype, const GLchar *name)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_VALUE, -1);
+    ERROR_CHECK_RETURN_VALUE(name, GL_INVALID_VALUE, -1);
+
+    return -1;
+}
+
+void mglGetUniformSubroutineuiv(GLMContext ctx, GLenum shadertype, GLint location, GLuint *params)
+{
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(ctx->state.program, GL_INVALID_OPERATION);
+
+    // location can only be out of range when there are no subroutine uniforms
+    ERROR_RETURN(GL_INVALID_VALUE);
+}
+
+void mglUniformSubroutinesuiv(GLMContext ctx, GLenum shadertype, GLsizei count, const GLuint *indices)
+{
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(ctx->state.program, GL_INVALID_OPERATION);
+
+    // count must equal the active subroutine uniform count, which is zero
+    ERROR_CHECK_RETURN(count == 0, GL_INVALID_VALUE);
+}
+
+/* ---------- program interface query ---------- */
+
+static int spvcTypeForInterface(GLenum programInterface)
+{
+    switch (programInterface)
+    {
+        case GL_UNIFORM:                return SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT;
+        case GL_UNIFORM_BLOCK:          return SPVC_RESOURCE_TYPE_UNIFORM_BUFFER;
+        case GL_PROGRAM_INPUT:          return SPVC_RESOURCE_TYPE_STAGE_INPUT;
+        case GL_PROGRAM_OUTPUT:         return SPVC_RESOURCE_TYPE_STAGE_OUTPUT;
+        case GL_BUFFER_VARIABLE:        return SPVC_RESOURCE_TYPE_STORAGE_BUFFER;
+        case GL_SHADER_STORAGE_BLOCK:   return SPVC_RESOURCE_TYPE_STORAGE_BUFFER;
+    }
+
+    return -1;
+}
+
+// resources are numbered across all stages in stage order
+static SpirvResource *resourceAt(Program *ptr, int res_type, GLuint index)
+{
+    for (int stage = 0; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *l = &ptr->spirv_resources_list[stage][res_type];
+
+        if (index < l->count)
+            return &l->list[index];
+
+        index -= l->count;
+    }
+
+    return NULL;
+}
+
+static GLint resourceIndexByName(Program *ptr, int res_type, const char *name)
+{
+    GLuint base = 0;
+
+    for (int stage = 0; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *l = &ptr->spirv_resources_list[stage][res_type];
+
+        for (GLuint i = 0; i < l->count; i++)
+            if (l->list[i].name && strcmp(l->list[i].name, name) == 0)
+                return (GLint)(base + i);
+
+        base += l->count;
+    }
+
+    return -1;
+}
+
+static int stageListsName(Program *ptr, int stage, int res_type, const char *name)
+{
+    SpirvResourceList *l = &ptr->spirv_resources_list[stage][res_type];
+
+    for (GLuint i = 0; i < l->count; i++)
+        if (l->list[i].name && strcmp(l->list[i].name, name) == 0)
+            return 1;
+
+    return 0;
+}
+
+void mglGetProgramInterfaceiv(GLMContext ctx, GLuint program, GLenum programInterface, GLenum pname, GLint *params)
+{
+    Program *ptr = findProgram(ctx, program);
+    int res_type = spvcTypeForInterface(programInterface);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(res_type >= 0, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    switch (pname)
+    {
+        case GL_ACTIVE_RESOURCES:
+            *params = programResourceCount(ptr, res_type);
+            break;
+
+        case GL_MAX_NAME_LENGTH:
+            *params = programLongestName(ptr, res_type);
+            break;
+
+        case GL_MAX_NUM_ACTIVE_VARIABLES:
+            *params = 0;
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+}
+
+GLuint mglGetProgramResourceIndex(GLMContext ctx, GLuint program, GLenum programInterface, const GLchar *name)
+{
+    Program *ptr = findProgram(ctx, program);
+    int res_type = spvcTypeForInterface(programInterface);
+    GLint idx;
+
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_VALUE, GL_INVALID_INDEX);
+    ERROR_CHECK_RETURN_VALUE(res_type >= 0, GL_INVALID_ENUM, GL_INVALID_INDEX);
+    ERROR_CHECK_RETURN_VALUE(name, GL_INVALID_VALUE, GL_INVALID_INDEX);
+
+    idx = resourceIndexByName(ptr, res_type, name);
+
+    return (idx < 0) ? GL_INVALID_INDEX : (GLuint)idx;
+}
+
+void mglGetProgramResourceName(GLMContext ctx, GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
+{
+    Program *ptr = findProgram(ctx, program);
+    int res_type = spvcTypeForInterface(programInterface);
+    SpirvResource *res;
+    GLsizei n;
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(res_type >= 0, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+
+    res = resourceAt(ptr, res_type, index);
+    ERROR_CHECK_RETURN(res, GL_INVALID_VALUE);
+
+    if (name == NULL || bufSize == 0)
+    {
+        if (length)
+            *length = 0;
+
+        return;
+    }
+
+    n = res->name ? (GLsizei)strlen(res->name) : 0;
+
+    if (n > bufSize - 1)
+        n = bufSize - 1;
+
+    if (n > 0)
+        memcpy(name, res->name, (size_t)n);
+
+    name[n] = '\0';
+
+    if (length)
+        *length = n;
+}
+
+void mglGetProgramResourceiv(GLMContext ctx, GLuint program, GLenum programInterface, GLuint index, GLsizei propCount, const GLenum *props, GLsizei count, GLsizei *length, GLint *params)
+{
+    Program *ptr = findProgram(ctx, program);
+    int res_type = spvcTypeForInterface(programInterface);
+    SpirvResource *res;
+    GLsizei written = 0;
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(res_type >= 0, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(propCount > 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(props && params, GL_INVALID_VALUE);
+
+    res = resourceAt(ptr, res_type, index);
+    ERROR_CHECK_RETURN(res, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < propCount && written < count; i++)
+    {
+        switch (props[i])
+        {
+            case GL_NAME_LENGTH:
+                params[written++] = res->name ? (GLint)strlen(res->name) + 1 : 0;
+                break;
+
+            case GL_LOCATION:
+                params[written++] = (GLint)res->location;
+                break;
+
+            case GL_OFFSET:
+            case GL_BLOCK_INDEX:
+                params[written++] = -1;
+                break;
+
+            case GL_ARRAY_SIZE:
+                params[written++] = 1;
+                break;
+
+            // the linker does not keep GLSL types yet
+            case GL_TYPE:
+                params[written++] = GL_NONE;
+                break;
+
+            case GL_REFERENCED_BY_VERTEX_SHADER:
+                params[written++] = stageListsName(ptr, _VERTEX_SHADER, res_type, res->name);
+                break;
+
+            case GL_REFERENCED_BY_FRAGMENT_SHADER:
+                params[written++] = stageListsName(ptr, _FRAGMENT_SHADER, res_type, res->name);
+                break;
+
+            default:
+                ERROR_RETURN(GL_INVALID_ENUM);
+        }
+    }
+
+    if (length)
+        *length = written;
+}
+
+void mglGetProgramStageiv(GLMContext ctx, GLuint program, GLenum shadertype, GLenum pname, GLint *params)
+{
+    Program *ptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    switch (shadertype)
+    {
+        case GL_VERTEX_SHADER:
+        case GL_FRAGMENT_SHADER:
+        case GL_GEOMETRY_SHADER:
+        case GL_TESS_CONTROL_SHADER:
+        case GL_TESS_EVALUATION_SHADER:
+        case GL_COMPUTE_SHADER:
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+
+    switch (pname)
+    {
+        case GL_ACTIVE_SUBROUTINES:
+        case GL_ACTIVE_SUBROUTINE_UNIFORMS:
+        case GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS:
+        case GL_ACTIVE_SUBROUTINE_MAX_LENGTH:
+        case GL_ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH:
+            *params = 0;
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+}
+
+GLint mglGetFragDataLocation(GLMContext ctx, GLuint program, const GLchar *name)
+{
+    Program *ptr = findProgram(ctx, program);
+    SpirvResourceList *l;
+
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_VALUE, -1);
+    ERROR_CHECK_RETURN_VALUE(name, GL_INVALID_VALUE, -1);
+    ERROR_CHECK_RETURN_VALUE(ptr->link_status == GL_TRUE, GL_INVALID_OPERATION, -1);
+
+    l = &ptr->spirv_resources_list[_FRAGMENT_SHADER][SPVC_RESOURCE_TYPE_STAGE_OUTPUT];
+
+    for (GLuint i = 0; i < l->count; i++)
+        if (l->list[i].name && strcmp(l->list[i].name, name) == 0)
+            return (GLint)l->list[i].location;
+
+    return -1;
+}
+
+GLint mglGetFragDataIndex(GLMContext ctx, GLuint program, const GLchar *name)
+{
+    // MGL has no dual source blending, so a known output is always index 0
+    return (mglGetFragDataLocation(ctx, program, name) < 0) ? -1 : 0;
+}
+
+void mglBindFragDataLocationIndexed(GLMContext ctx, GLuint program, GLuint colorNumber, GLuint index, const GLchar *name);
+
+void mglBindFragDataLocation(GLMContext ctx, GLuint program, GLuint color, const GLchar *name)
+{
+    mglBindFragDataLocationIndexed(ctx, program, color, 0, name);
+}
+
+void mglBindFragDataLocationIndexed(GLMContext ctx, GLuint program, GLuint colorNumber, GLuint index, const GLchar *name)
+{
+    Program *ptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(name, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(colorNumber < ctx->state.max_color_attachments, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(index <= 1, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(strncmp(name, "gl_", 3) != 0, GL_INVALID_OPERATION);
+
+    // output locations come from the GLSL layout qualifier, so there is nothing
+    // to rebind; the call is still validated
+}
+
+/* ---------- validation and pipeline queries ---------- */
+
+void mglReleaseShaderCompiler(GLMContext ctx)
+{
+    // glslang is always linked in, so there is nothing to release
+}
+
+void mglValidateProgram(GLMContext ctx, GLuint program)
+{
+    Program *pptr = findProgram(ctx, program);
+    bool stage_present = false;
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+
+    for (int i = 0; i < _MAX_SHADER_TYPES; i++)
+        if (pptr->spirv[i].msl_str)
+            stage_present = true;
+
+    if (pptr->link_status == GL_TRUE && stage_present)
+    {
+        pptr->validate_status = GL_TRUE;
+
+        return;
+    }
+
+    pptr->validate_status = GL_FALSE;
+
+    free(pptr->log);
+    pptr->log = strdup("validation failed: no linked shader stage");
+}
+
+void mglValidateProgramPipeline(GLMContext ctx, GLuint pipeline)
+{
+    ProgramPipeline *pp = findProgramPipeline(ctx, pipeline);
+    bool stage_present = false;
+
+    ERROR_CHECK_RETURN(pp, GL_INVALID_OPERATION);
+
+    for (int i = 0; i < _MAX_SHADER_TYPES; i++)
+        if (pp->stage_programs[i] && pp->stage_programs[i]->link_status == GL_TRUE)
+            stage_present = true;
+
+    pp->validated = stage_present ? GL_TRUE : GL_FALSE;
+}
+
+static GLint pipelineStageName(ProgramPipeline *pp, int stage)
+{
+    return pp->stage_programs[stage] ? (GLint)pp->stage_programs[stage]->name : 0;
+}
+
+void mglGetProgramPipelineiv(GLMContext ctx, GLuint pipeline, GLenum pname, GLint *params)
+{
+    ProgramPipeline *pp = findProgramPipeline(ctx, pipeline);
+
+    ERROR_CHECK_RETURN(pp, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    switch (pname)
+    {
+        case GL_VALIDATE_STATUS:
+            *params = pp->validated;
+            break;
+
+        // MGL has no separate active program, so the vertex stage stands in
+        case GL_ACTIVE_PROGRAM:
+        case GL_VERTEX_SHADER:
+            *params = pipelineStageName(pp, _VERTEX_SHADER);
+            break;
+
+        case GL_FRAGMENT_SHADER:
+            *params = pipelineStageName(pp, _FRAGMENT_SHADER);
+            break;
+
+        case GL_GEOMETRY_SHADER:
+            *params = pipelineStageName(pp, _GEOMETRY_SHADER);
+            break;
+
+        case GL_TESS_CONTROL_SHADER:
+            *params = pipelineStageName(pp, _TESS_CONTROL_SHADER);
+            break;
+
+        case GL_TESS_EVALUATION_SHADER:
+            *params = pipelineStageName(pp, _TESS_EVALUATION_SHADER);
+            break;
+
+        case GL_COMPUTE_SHADER:
+            *params = pipelineStageName(pp, _COMPUTE_SHADER);
+            break;
+
+        case GL_INFO_LOG_LENGTH:
+            *params = 0;
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+}
+
+void mglActiveShaderProgram(GLMContext ctx, GLuint pipeline, GLuint program)
+{
+    ProgramPipeline *pp = findProgramPipeline(ctx, pipeline);
+
+    ERROR_CHECK_RETURN(pp, GL_INVALID_OPERATION);
+
+    if (program == 0)
+        return;
+
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(pptr->link_status == GL_TRUE, GL_INVALID_OPERATION);
+}
+
+void mglShaderStorageBlockBinding(GLMContext ctx, GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(storageBlockIndex < (GLuint)programResourceCount(pptr, SPVC_RESOURCE_TYPE_STORAGE_BUFFER), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(storageBlockBinding < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+}
+
+void mglGetActiveAtomicCounterBufferiv(GLMContext ctx, GLuint program, GLuint bufferIndex, GLenum pname, GLint *params)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+
+    (void)bufferIndex;
+    (void)pname;
+    (void)params;
+
+    // the linker captures no atomic counter buffers, so there is no valid index
+    ERROR_RETURN(GL_INVALID_VALUE);
+}
+
+/* ---------- program binaries ---------- */
+
+void mglProgramParameteri(GLMContext ctx, GLuint program, GLenum pname, GLint value)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(value == GL_TRUE || value == GL_FALSE, GL_INVALID_VALUE);
+
+    switch (pname)
+    {
+        case GL_PROGRAM_SEPARABLE:
+            pptr->separable = (GLboolean)value;
+            break;
+
+        case GL_PROGRAM_BINARY_RETRIEVABLE_HINT:
+            pptr->binary_retrievable_hint = (GLboolean)value;
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+}
+
+void mglGetProgramBinary(GLMContext ctx, GLuint program, GLsizei bufSize, GLsizei *length, GLenum *binaryFormat, void *binary)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+
+    if (length)
+        *length = 0;
+
+    // MGL exposes no binary formats, so there is nothing to hand back
+    ERROR_RETURN(GL_INVALID_OPERATION);
+}
+
+void mglProgramBinary(GLMContext ctx, GLuint program, GLenum binaryFormat, const void *binary, GLsizei length)
+{
+    Program *pptr = findProgram(ctx, program);
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(length >= 0, GL_INVALID_VALUE);
+
+    // the spec wants the program marked unlinked before the error
+    pptr->link_status = GL_FALSE;
+
+    ERROR_RETURN(GL_INVALID_ENUM);
 }

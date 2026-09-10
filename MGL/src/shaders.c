@@ -655,3 +655,67 @@ void mglGetShaderSource(GLMContext ctx, GLuint shader, GLsizei bufSize, GLsizei 
     }
 
 }
+
+/* ---------- ARB_gl_spirv ---------- */
+
+void mglShaderBinary(GLMContext ctx, GLsizei count, const GLuint *shaders, GLenum binaryFormat, const void *binary, GLsizei length)
+{
+    GLuint magic;
+
+    ERROR_CHECK_RETURN(binaryFormat == GL_SHADER_BINARY_FORMAT_SPIR_V, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(count >= 0 && length >= 0, GL_INVALID_VALUE);
+
+    if (count == 0)
+        return;
+
+    ERROR_CHECK_RETURN(shaders, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(binary, GL_INVALID_VALUE);
+
+    // a SPIR-V module is a stream of 32 bit words starting with a magic number
+    ERROR_CHECK_RETURN(length >= 4 && (length % 4) == 0, GL_INVALID_VALUE);
+
+    memcpy(&magic, binary, sizeof magic);
+    ERROR_CHECK_RETURN(magic == 0x07230203u || magic == 0x03022307u, GL_INVALID_VALUE);
+
+    // check every name before touching any of them
+    for (GLsizei i = 0; i < count; i++)
+        ERROR_CHECK_RETURN(findShader(ctx, shaders[i]), GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < count; i++)
+    {
+        Shader *ptr = findShader(ctx, shaders[i]);
+        void *copy = malloc((size_t)length);
+
+        ERROR_CHECK_RETURN(copy, GL_OUT_OF_MEMORY);
+
+        memcpy(copy, binary, (size_t)length);
+
+        free(ptr->spirv_binary);
+        ptr->spirv_binary = copy;
+        ptr->spirv_binary_length = length;
+        ptr->specialized = GL_FALSE;
+    }
+}
+
+void mglSpecializeShader(GLMContext ctx, GLuint shader, const GLchar *pEntryPoint, GLuint numSpecializationConstants, const GLuint *pConstantIndex, const GLuint *pConstantValue)
+{
+    Shader *ptr = findShader(ctx, shader);
+    char *ep;
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(ptr->spirv_binary, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(ptr->specialized == GL_FALSE, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(numSpecializationConstants == 0 ||
+                       (pConstantIndex && pConstantValue), GL_INVALID_VALUE);
+
+    ep = strdup(pEntryPoint ? pEntryPoint : "main");
+    ERROR_CHECK_RETURN(ep, GL_OUT_OF_MEMORY);
+
+    free((void *)ptr->entry_point);
+    ptr->entry_point = ep;
+    ptr->specialized = GL_TRUE;
+
+    // specialization constants are not rewritten yet; the module is used as is
+    free(ptr->log);
+    ptr->log = NULL;
+}

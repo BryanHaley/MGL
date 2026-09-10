@@ -77,8 +77,12 @@ void mglClearBufferfv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLf
     Framebuffer * fbo = ctx->state.framebuffer;
     FBOAttachment * fboa;
 
+    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
     switch (buffer) {
         case GL_COLOR:
+            ERROR_CHECK_RETURN(drawbuffer >= 0 && drawbuffer < MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE);
             fboa = &fbo->color_attachments[drawbuffer];
             fboa->clear_bitmask |= GL_COLOR_BUFFER_BIT;
             fboa->clear_color[0] = value[0];
@@ -501,3 +505,79 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
     ctx->mtl_funcs.mtlReadPixels(ctx, pixels, pitch, format, type, x, y, width, height);
 }
 
+
+void mglReadnPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei bufSize, void *data)
+{
+    GLuint pixel_bytes;
+
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(width >= 0 && height >= 0, GL_INVALID_VALUE);
+
+    pixel_bytes = sizeForFormatType(format, type);
+
+    if (pixel_bytes)
+    {
+        GLint64 needed = (GLint64)width * (GLint64)height * (GLint64)pixel_bytes;
+
+        ERROR_CHECK_RETURN(needed <= (GLint64)bufSize, GL_INVALID_OPERATION);
+    }
+
+    mglReadPixels(ctx, x, y, width, height, format, type, data);
+}
+
+// integer attachments are cleared with the value as written, not normalized
+static void clearBufferInteger(GLMContext ctx, GLenum buffer, GLint drawbuffer,
+                               const GLfloat *v, bool allow_stencil)
+{
+    Framebuffer *fbo = ctx->state.framebuffer;
+    FBOAttachment *fboa;
+
+    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
+    switch (buffer)
+    {
+        case GL_COLOR:
+            ERROR_CHECK_RETURN(drawbuffer >= 0 && drawbuffer < MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE);
+
+            fboa = &fbo->color_attachments[drawbuffer];
+            fboa->clear_bitmask |= GL_COLOR_BUFFER_BIT;
+            memcpy(fboa->clear_color, v, 4 * sizeof(GLfloat));
+            break;
+
+        case GL_STENCIL:
+            ERROR_CHECK_RETURN(allow_stencil, GL_INVALID_ENUM);
+            ERROR_CHECK_RETURN(drawbuffer == 0, GL_INVALID_VALUE);
+
+            fboa = &fbo->stencil;
+            fboa->clear_bitmask |= GL_STENCIL_BUFFER_BIT;
+            fboa->clear_color[0] = v[0];
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+}
+
+void mglClearBufferiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLint *value)
+{
+    GLfloat v[4];
+
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        v[i] = (GLfloat)value[i];
+
+    clearBufferInteger(ctx, buffer, drawbuffer, v, true);
+}
+
+void mglClearBufferuiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLuint *value)
+{
+    GLfloat v[4];
+
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    for (int i = 0; i < 4; i++)
+        v[i] = (GLfloat)value[i];
+
+    clearBufferInteger(ctx, buffer, drawbuffer, v, false);
+}

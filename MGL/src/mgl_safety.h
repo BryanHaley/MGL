@@ -99,15 +99,8 @@ extern "C" {
         } \
         \
         /* Check for obviously invalid pointer values */ \
-        if (ptr_val < 0x1000 || (ptr_val & 0xF) != 0) { \
+        if (ptr_val < 0x1000) { \
             fprintf(stderr, "MGL BUFFER ERROR: %s - Invalid buffer pointer %p at %s:%d\n", \
-                    (function_name), (ptr), __FILE__, __LINE__); \
-            return GL_INVALID_OPERATION; \
-        } \
-        \
-        /* Check for suspiciously high pointer values */ \
-        if (ptr_val > 0x100000000ULL) { \
-            fprintf(stderr, "MGL BUFFER ERROR: %s - Suspicious buffer pointer %p at %s:%d\n", \
                     (function_name), (ptr), __FILE__, __LINE__); \
             return GL_INVALID_OPERATION; \
         } \
@@ -132,15 +125,8 @@ extern "C" {
         } \
         \
         /* Check for obviously invalid pointer values */ \
-        if (ptr_val < 0x1000 || (ptr_val & 0xF) != 0) { \
+        if (ptr_val < 0x1000) { \
             fprintf(stderr, "MGL BUFFER ERROR: %s - Invalid buffer pointer %p at %s:%d\n", \
-                    (function_name), (ptr), __FILE__, __LINE__); \
-            return; \
-        } \
-        \
-        /* Check for suspiciously high pointer values */ \
-        if (ptr_val > 0x100000000ULL) { \
-            fprintf(stderr, "MGL BUFFER ERROR: %s - Suspicious buffer pointer %p at %s:%d\n", \
                     (function_name), (ptr), __FILE__, __LINE__); \
             return; \
         } \

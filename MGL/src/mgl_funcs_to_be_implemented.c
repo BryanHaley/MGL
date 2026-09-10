@@ -20,34 +20,9 @@ TransformFeedback *getTransformFeedback(GLMContext ctx, GLuint name);
 extern Texture *findTexture(GLMContext ctx, GLuint texture);
 extern Texture *currentTexture(GLMContext ctx, GLuint index);
 
-void mglActiveShaderProgram(GLMContext ctx, GLuint pipeline, GLuint program)
-{
-	// Set active program in pipeline - no-op for now
-	(void)pipeline;
-	(void)program;
-}
 
-void mglBeginConditionalRender(GLMContext ctx, GLuint id, GLenum mode)
-{
-	// Conditional render - no-op, always render
-	(void)id;
-	(void)mode;
-}
 
-void mglBeginQuery(GLMContext ctx, GLenum target, GLuint id)
-{
-	// Query - no-op, basic stub
-	(void)target;
-	(void)id;
-}
 
-void mglBeginQueryIndexed(GLMContext ctx, GLenum target, GLuint index, GLuint id)
-{
-	// Indexed query - no-op, basic stub
-	(void)target;
-	(void)index;
-	(void)id;
-}
 
 void mglBeginTransformFeedback(GLMContext ctx, GLenum primitiveMode)
 {
@@ -68,22 +43,7 @@ void mglBeginTransformFeedback(GLMContext ctx, GLenum primitiveMode)
 	STATE(transform_feedback)->primitive_mode = primitiveMode;
 }
 
-void mglBindFragDataLocation(GLMContext ctx, GLuint program, GLuint color, const GLchar *name)
-{
-	// Bind fragment output location - no-op, use automatic assignment
-	(void)program;
-	(void)color;
-	(void)name;
-}
 
-void mglBindFragDataLocationIndexed(GLMContext ctx, GLuint program, GLuint colorNumber, GLuint index, const GLchar *name)
-{
-	// Bind indexed fragment output location - no-op
-	(void)program;
-	(void)colorNumber;
-	(void)index;
-	(void)name;
-}
 
 void mglBindTransformFeedback(GLMContext ctx, GLenum target, GLuint id)
 {
@@ -118,35 +78,9 @@ void mglBindTransformFeedback(GLMContext ctx, GLenum target, GLuint id)
     }
 }
 
-void mglClampColor(GLMContext ctx, GLenum target, GLenum clamp)
-{
-	// Clamp color - no-op, clamping handled automatically
-	(void)target;
-	(void)clamp;
-}
 
-void mglClearBufferiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLint *value)
-{
-	// Clear buffer - use standard clear functions
-	(void)buffer;
-	(void)drawbuffer;
-	(void)value;
-}
 
-void mglClearBufferuiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLuint *value)
-{
-	// Clear buffer - use standard clear functions
-	(void)buffer;
-	(void)drawbuffer;
-	(void)value;
-}
 
-void mglClipControl(GLMContext ctx, GLenum origin, GLenum depth)
-{
-	// Clip control - no-op, use default clip control
-	(void)origin;
-	(void)depth;
-}
 
 void mglColorMaski(GLMContext ctx, GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a)
 {
@@ -218,14 +152,6 @@ void mglCreateProgramPipelines(GLMContext ctx, GLsizei n, GLuint *pipelines)
 	}
 }
 
-void mglCreateQueries(GLMContext ctx, GLenum target, GLsizei n, GLuint *ids)
-{
-	for (GLsizei i = 0; i < n; i++)
-	{
-		mglGenQueries(ctx, 1, &ids[i]);
-	}
-	(void)target;
-}
 
 GLuint  mglCreateShaderProgramv(GLMContext ctx, GLenum type, GLsizei count, const GLchar *const*strings)
 {
@@ -257,41 +183,9 @@ void mglCreateTransformFeedbacks(GLMContext ctx, GLsizei n, GLuint *ids)
 	}
 }
 
-void mglDebugMessageCallback(GLMContext ctx, GLDEBUGPROC callback, const void *userParam)
-{
-	// Debug callback - no-op if debug infrastructure not available
-	(void)callback;
-	(void)userParam;
-}
 
-void mglDebugMessageControl(GLMContext ctx, GLenum source, GLenum type, GLenum severity, GLsizei count, const GLuint *ids, GLboolean enabled)
-{
-	// Debug message control - no-op
-	(void)source;
-	(void)type;
-	(void)severity;
-	(void)count;
-	(void)ids;
-	(void)enabled;
-}
 
-void mglDebugMessageInsert(GLMContext ctx, GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *buf)
-{
-	// Insert debug message - no-op
-	(void)source;
-	(void)type;
-	(void)id;
-	(void)severity;
-	(void)length;
-	(void)buf;
-}
 
-void mglDeleteQueries(GLMContext ctx, GLsizei n, const GLuint *ids)
-{
-	// Query deletion - no-op, basic stub
-	(void)n;
-	(void)ids;
-}
 
 void mglDeleteTransformFeedbacks(GLMContext ctx, GLsizei n, const GLuint *ids)
 {
@@ -330,56 +224,12 @@ void mglDepthRangef(GLMContext ctx, GLfloat n, GLfloat f)
 	mglDepthRange(ctx, (GLdouble)n, (GLdouble)f);
 }
 
-void mglDrawTransformFeedback(GLMContext ctx, GLenum mode, GLuint id)
-{
-	// Draw from transform feedback - no-op for now
-	(void)mode;
-	(void)id;
-}
 
-void mglDrawTransformFeedbackInstanced(GLMContext ctx, GLenum mode, GLuint id, GLsizei instancecount)
-{
-	// Draw from transform feedback instanced - no-op for now
-	(void)mode;
-	(void)id;
-	(void)instancecount;
-}
 
-void mglDrawTransformFeedbackStream(GLMContext ctx, GLenum mode, GLuint id, GLuint stream)
-{
-	// Draw from transform feedback stream - no-op for now
-	(void)mode;
-	(void)id;
-	(void)stream;
-}
 
-void mglDrawTransformFeedbackStreamInstanced(GLMContext ctx, GLenum mode, GLuint id, GLuint stream, GLsizei instancecount)
-{
-	// Draw from transform feedback stream instanced - no-op for now
-	(void)mode;
-	(void)id;
-	(void)stream;
-	(void)instancecount;
-}
 
-void mglEndConditionalRender(GLMContext ctx)
-{
-	// End conditional render - no-op
-	(void)ctx;
-}
 
-void mglEndQuery(GLMContext ctx, GLenum target)
-{
-	// End query - no-op
-	(void)target;
-}
 
-void mglEndQueryIndexed(GLMContext ctx, GLenum target, GLuint index)
-{
-	// End indexed query - no-op
-	(void)target;
-	(void)index;
-}
 
 void mglEndTransformFeedback(GLMContext ctx)
 {
@@ -393,12 +243,6 @@ void mglEndTransformFeedback(GLMContext ctx)
 	STATE(transform_feedback)->paused = GL_FALSE;
 }
 
-void mglGenQueries(GLMContext ctx, GLsizei n, GLuint *ids)
-{
-	// Generate query IDs - simple sequential IDs
-	for (GLsizei i = 0; i < n; i++)
-		ids[i] = i + 1;
-}
 
 void mglGenTransformFeedbacks(GLMContext ctx, GLsizei n, GLuint *ids)
 {
@@ -409,12 +253,6 @@ void mglGenTransformFeedbacks(GLMContext ctx, GLsizei n, GLuint *ids)
     }
 }
 
-void mglGetActiveAtomicCounterBufferiv(GLMContext ctx, GLuint program, GLuint bufferIndex, GLenum pname, GLint *params)
-{
-	// Atomic counter buffers - return 0
-	(void)program; (void)bufferIndex; (void)pname;
-	if (params) *params = 0;
-}
 
 void mglGetActiveSubroutineName(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
 {
@@ -424,67 +262,16 @@ void mglGetActiveSubroutineName(GLMContext ctx, GLuint program, GLenum shadertyp
 	if (name && bufSize > 0) name[0] = '\0';
 }
 
-void mglGetActiveSubroutineUniformName(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
-{
-	// Subroutine uniforms - return empty string
-	(void)program; (void)shadertype; (void)index; (void)bufSize;
-	if (length) *length = 0;
-	if (name && bufSize > 0) name[0] = '\0';
-}
-
-void mglGetActiveSubroutineUniformiv(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLenum pname, GLint *values)
-{
-	// Subroutine uniform parameters - return 0
-	(void)program; (void)shadertype; (void)index; (void)pname;
-	if (values) *values = 0;
-}
-
-
-void mglGetBufferParameteri64v(GLMContext ctx, GLenum target, GLenum pname, GLint64 *params)
-{
-	// Buffer parameter - return 0
-	(void)target; (void)pname;
-	if (params) *params = 0;
-}
-
-GLuint  mglGetDebugMessageLog(GLMContext ctx, GLuint count, GLsizei bufSize, GLenum *sources, GLenum *types, GLuint *ids, GLenum *severities, GLsizei *lengths, GLchar *messageLog)
-{
-	// No debug messages stored
-	(void)count;
-	(void)bufSize;
-	(void)sources;
-	(void)types;
-	(void)ids;
-	(void)severities;
-	(void)lengths;
-	(void)messageLog;
-	return 0;
-}
 
 
 
-GLint  mglGetFragDataIndex(GLMContext ctx, GLuint program, const GLchar *name)
-{
-	// Return fragment output index
-	(void)program;
-	(void)name;
-	return 0;
-}
-
-GLint  mglGetFragDataLocation(GLMContext ctx, GLuint program, const GLchar *name)
-{
-	// Return fragment output location - default to 0
-	(void)program;
-	(void)name;
-	return 0;
-}
 
 
-GLenum  mglGetGraphicsResetStatus(GLMContext ctx)
-{
-	// No robust context support - always return no error
-	return GL_NO_ERROR;
-}
+
+
+
+
+
 
 void mglGetMultisamplefv(GLMContext ctx, GLenum pname, GLuint index, GLfloat *val)
 {
@@ -517,20 +304,7 @@ void mglGetObjectPtrLabel(GLMContext ctx, const void *ptr, GLsizei bufSize, GLsi
 	if (label && bufSize > 0) label[0] = '\0';
 }
 
-void mglGetProgramBinary(GLMContext ctx, GLuint program, GLsizei bufSize, GLsizei *length, GLenum *binaryFormat, void *binary)
-{
-	// Program binary not supported
-	(void)program; (void)bufSize; (void)binary;
-	if (length) *length = 0;
-	if (binaryFormat) *binaryFormat = 0;
-}
 
-void mglGetProgramInterfaceiv(GLMContext ctx, GLuint program, GLenum programInterface, GLenum pname, GLint *params)
-{
-	// Program interface query - return 0
-	(void)program; (void)programInterface; (void)pname;
-	if (params) *params = 0;
-}
 
 void mglGetProgramPipelineInfoLog(GLMContext ctx, GLuint pipeline, GLsizei bufSize, GLsizei *length, GLchar *infoLog)
 {
@@ -540,19 +314,7 @@ void mglGetProgramPipelineInfoLog(GLMContext ctx, GLuint pipeline, GLsizei bufSi
 	if (infoLog && bufSize > 0) infoLog[0] = '\0';
 }
 
-void mglGetProgramPipelineiv(GLMContext ctx, GLuint pipeline, GLenum pname, GLint *params)
-{
-	// Get program pipeline parameters - return 0
-	(void)pipeline; (void)pname;
-	if (params) *params = 0;
-}
 
-GLuint  mglGetProgramResourceIndex(GLMContext ctx, GLuint program, GLenum programInterface, const GLchar *name)
-{
-	// Program resource index - return 0 (not found)
-	(void)program; (void)programInterface; (void)name;
-	return 0;
-}
 
 GLint  mglGetProgramResourceLocation(GLMContext ctx, GLuint program, GLenum programInterface, const GLchar *name)
 {
@@ -568,83 +330,18 @@ GLint  mglGetProgramResourceLocationIndex(GLMContext ctx, GLuint program, GLenum
 	return -1;
 }
 
-void mglGetProgramResourceName(GLMContext ctx, GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetProgramResourceiv(GLMContext ctx, GLuint program, GLenum programInterface, GLuint index, GLsizei propCount, const GLenum *props, GLsizei count, GLsizei *length, GLint *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetProgramStageiv(GLMContext ctx, GLuint program, GLenum shadertype, GLenum pname, GLint *values)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryBufferObjecti64v(GLMContext ctx, GLuint id, GLuint buffer, GLenum pname, GLintptr offset)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryBufferObjectiv(GLMContext ctx, GLuint id, GLuint buffer, GLenum pname, GLintptr offset)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryBufferObjectui64v(GLMContext ctx, GLuint id, GLuint buffer, GLenum pname, GLintptr offset)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryBufferObjectuiv(GLMContext ctx, GLuint id, GLuint buffer, GLenum pname, GLintptr offset)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryIndexediv(GLMContext ctx, GLenum target, GLuint index, GLenum pname, GLint *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryObjecti64v(GLMContext ctx, GLuint id, GLenum pname, GLint64 *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryObjectiv(GLMContext ctx, GLuint id, GLenum pname, GLint *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryObjectui64v(GLMContext ctx, GLuint id, GLenum pname, GLuint64 *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryObjectuiv(GLMContext ctx, GLuint id, GLenum pname, GLuint *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetQueryiv(GLMContext ctx, GLenum target, GLenum pname, GLint *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
 void mglGetShaderPrecisionFormat(GLMContext ctx, GLenum shadertype, GLenum precisiontype, GLint *range, GLint *precision)
 {
@@ -660,60 +357,13 @@ void mglGetShaderPrecisionFormat(GLMContext ctx, GLenum shadertype, GLenum preci
 	}
 }
 
-GLuint mglGetSubroutineIndex(GLMContext ctx, GLuint program, GLenum shadertype, const GLchar *name)
-{
-	// TODO: Implement
-	(void)ctx;
-	return 0;
-}
 
-GLint mglGetSubroutineUniformLocation(GLMContext ctx, GLuint program, GLenum shadertype, const GLchar *name)
-{
-	// TODO: Implement
-	(void)ctx;
-	return 0;
-}
-void mglGetTransformFeedbackVarying(GLMContext ctx, GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetTransformFeedbacki64_v(GLMContext ctx, GLuint xfb, GLenum pname, GLuint index, GLint64 *param)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetTransformFeedbacki_v(GLMContext ctx, GLuint xfb, GLenum pname, GLuint index, GLint *param)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetTransformFeedbackiv(GLMContext ctx, GLuint xfb, GLenum pname, GLint *param)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetUniformSubroutineuiv(GLMContext ctx, GLenum shadertype, GLint location, GLuint *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetUniformdv(GLMContext ctx, GLuint program, GLint location, GLdouble *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetUniformuiv(GLMContext ctx, GLuint program, GLint location, GLuint *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
 
 
@@ -754,42 +404,11 @@ void mglGetnPixelMapusv(GLMContext ctx, GLenum map, GLsizei bufSize, GLushort *v
 	(void)ctx;
 }
 
-void mglGetnTexImage(GLMContext ctx, GLenum target, GLint level, GLenum format, GLenum type, GLsizei bufSize, void *pixels)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetnUniformdv(GLMContext ctx, GLuint program, GLint location, GLsizei bufSize, GLdouble *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetnUniformfv(GLMContext ctx, GLuint program, GLint location, GLsizei bufSize, GLfloat *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetnUniformiv(GLMContext ctx, GLuint program, GLint location, GLsizei bufSize, GLint *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglGetnUniformuiv(GLMContext ctx, GLuint program, GLint location, GLsizei bufSize, GLuint *params)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-GLboolean mglIsQuery(GLMContext ctx, GLuint id)
-{
-	// TODO: Implement
-	(void)ctx;
-	return GL_FALSE;
-}
 
 GLboolean mglIsTransformFeedback(GLMContext ctx, GLuint id)
 {
@@ -797,23 +416,8 @@ GLboolean mglIsTransformFeedback(GLMContext ctx, GLuint id)
 	return ptr ? GL_TRUE : GL_FALSE;
 }
 
-void mglMinSampleShading(GLMContext ctx, GLfloat value)
-{
-	// Set minimum sample shading - no-op
-	(void)value;
-}
 
-void mglMultiDrawArraysIndirectCount(GLMContext ctx, GLenum mode, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglMultiDrawElementsIndirectCount(GLMContext ctx, GLenum mode, GLenum type, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
 void mglNormalP3ui(GLMContext ctx, GLenum type, GLuint coords)
 {
@@ -827,34 +431,9 @@ void mglNormalP3uiv(GLMContext ctx, GLenum type, const GLuint *coords)
 	(void)ctx;
 }
 
-void mglObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, GLsizei length, const GLchar *label)
-{
-	// Object label - no-op
-	(void)identifier;
-	(void)name;
-	(void)length;
-	(void)label;
-}
 
-void mglObjectPtrLabel(GLMContext ctx, const void *ptr, GLsizei length, const GLchar *label)
-{
-	// Object ptr label - no-op
-	(void)ptr;
-	(void)length;
-	(void)label;
-}
 
-void mglPatchParameterfv(GLMContext ctx, GLenum pname, const GLfloat *values)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglPatchParameteri(GLMContext ctx, GLenum pname, GLint value)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
 void mglPauseTransformFeedback(GLMContext ctx)
 {
@@ -868,28 +447,9 @@ void mglPauseTransformFeedback(GLMContext ctx)
 }
 
 
-void mglPopDebugGroup(GLMContext ctx)
-{
-	// Pop debug group - no-op
-}
 
-void mglPrimitiveRestartIndex(GLMContext ctx, GLuint index)
-{
-	// Set primitive restart index - no-op
-	(void)index;
-}
 
-void mglProgramBinary(GLMContext ctx, GLuint program, GLenum binaryFormat, const void *binary, GLsizei length)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglProgramParameteri(GLMContext ctx, GLuint program, GLenum pname, GLint value)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
 
 
@@ -951,31 +511,9 @@ void mglProvokingVertex(GLMContext ctx, GLenum mode)
 	// State not tracked
 }
 
-void mglPushDebugGroup(GLMContext ctx, GLenum source, GLuint id, GLsizei length, const GLchar *message)
-{
-	// Push debug group - no-op
-	(void)source;
-	(void)id;
-	(void)length;
-	(void)message;
-}
 
-void mglQueryCounter(GLMContext ctx, GLuint id, GLenum target)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglReadnPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei bufSize, void *data)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglReleaseShaderCompiler(GLMContext ctx)
-{
-	// No-op - shader compiler is always available
-}
 
 void mglResumeTransformFeedback(GLMContext ctx)
 {
@@ -988,11 +526,6 @@ void mglResumeTransformFeedback(GLMContext ctx)
 	STATE(transform_feedback)->paused = GL_FALSE;
 }
 
-void mglSampleMaski(GLMContext ctx, GLuint maskNumber, GLbitfield mask)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
 
 
@@ -1009,23 +542,8 @@ void mglSecondaryColorP3uiv(GLMContext ctx, GLenum type, const GLuint *color)
 	(void)ctx;
 }
 
-void mglShaderBinary(GLMContext ctx, GLsizei count, const GLuint *shaders, GLenum binaryFormat, const void *binary, GLsizei length)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglShaderStorageBlockBinding(GLMContext ctx, GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglSpecializeShader(GLMContext ctx, GLuint shader, const GLchar *pEntryPoint, GLuint numSpecializationConstants, const GLuint *pConstantIndex, const GLuint *pConstantValue)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
 void mglTexBuffer(GLMContext ctx, GLenum target, GLenum internalformat, GLuint buffer)
 {
@@ -1070,41 +588,11 @@ void mglTexStorage3DMultisample(GLMContext ctx, GLenum target, GLsizei samples, 
 	(void)ctx;
 }
 
-void mglTransformFeedbackBufferBase(GLMContext ctx, GLuint xfb, GLuint index, GLuint buffer)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglTransformFeedbackBufferRange(GLMContext ctx, GLuint xfb, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglTransformFeedbackVaryings(GLMContext ctx, GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglUniformSubroutinesuiv(GLMContext ctx, GLenum shadertype, GLsizei count, const GLuint *indices)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
-void mglValidateProgram(GLMContext ctx, GLuint program)
-{
-	// Program validation - no-op for now, programs are validated during linking
-	(void)program;
-}
 
-void mglValidateProgramPipeline(GLMContext ctx, GLuint pipeline)
-{
-	// TODO: Implement
-	(void)ctx;
-}
 
 
 

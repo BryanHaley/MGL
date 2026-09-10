@@ -784,22 +784,29 @@ void logDirtyBits(GLMContext ctx)
 
         assert(ptr);
 
-        // for buffers less than 4k we should use this call
-        if (ptr->size < 4096)
+        // small buffers go inline; larger ones need a real MTLBuffer
+        if (ptr->size < 4096 && ptr->data.mtl_data == NULL)
         {
-            assert(ptr->data.mtl_data == NULL);
-
             [_currentRenderEncoder setVertexBytes:(const void *)ptr->data.buffer_data length:ptr->size atIndex:i];
-            
+
             // clear buffer data dirty bits
             ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
         }
         else
         {
-            assert(ptr->data.mtl_data);
+            // the vao mapping records the buffer but does not allocate it, so
+            // the first draw that uses a large one lands here with nothing yet
+            if (ptr->data.mtl_data == NULL)
+                [self bindMTLBuffer: ptr];
+
+            if (ptr->data.mtl_data == NULL)
+            {
+                MGL_NSERR(@"MGL Error: no Metal buffer for vertex attribute buffer %u (%lld bytes)",
+                          ptr->name, (long long)ptr->size);
+                return false;
+            }
 
             id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)(ptr->data.mtl_data);
-            assert(buffer);
 
             [_currentRenderEncoder setVertexBuffer:buffer offset:offset atIndex:i ];
         }
@@ -1228,9 +1235,18 @@ void logDirtyBits(GLMContext ctx)
                                     continue;
                                 }
                                 @try {
-                                    // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                    MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d) - prevents AGX driver crash", level);
-                                    // [texture replaceRegion:region mipmapLevel:level slice:0 withBytes:alignedData bytesPerRow:alignedBytesPerRow bytesPerImage:bytesPerImage];
+                                    // replaceRegion upsets the AGX driver, so stage and blit instead
+                                    if ([self uploadBytes:alignedData
+                                                toTexture:texture
+                                              bytesPerRow:alignedBytesPerRow
+                                                    slice:0
+                                                    level:level
+                                                    width:region.size.width
+                                                   height:region.size.height
+                                                    depth:region.size.depth] == false)
+                                    {
+                                        MGL_NSERR(@"MGL Error: texture upload failed (level %d, slice %d)", level, (int)(0));
+                                    }
                                 } @catch (NSException *exception) {
                                     MGL_NSERR(@"MGL ERROR: Failed to upload aligned 3D texture data (level %d, face %d): %@", level, face, exception);
                                 }
@@ -1254,9 +1270,18 @@ void logDirtyBits(GLMContext ctx)
                                 continue;
                             }
                             @try {
-                                // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d) - prevents AGX driver crash", level);
-                                // [texture replaceRegion:region mipmapLevel:level slice:0 withBytes:srcData bytesPerRow:bytesPerRow bytesPerImage:bytesPerImage];
+                                // replaceRegion upsets the AGX driver, so stage and blit instead
+                                if ([self uploadBytes:srcData
+                                            toTexture:texture
+                                          bytesPerRow:bytesPerRow
+                                                slice:0
+                                                level:level
+                                                width:region.size.width
+                                               height:region.size.height
+                                                depth:region.size.depth] == false)
+                                {
+                                    MGL_NSERR(@"MGL Error: texture upload failed (level %d, slice %d)", level, (int)(0));
+                                }
                             } @catch (NSException *exception) {
                                 MGL_NSERR(@"MGL ERROR: Failed to upload 3D texture data (level %d, face %d): %@", level, face, exception);
                             }
@@ -1353,9 +1378,18 @@ void logDirtyBits(GLMContext ctx)
                                             continue;
                                         }
                                         @try {
-                                            // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                            MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d, layer %d) - prevents AGX driver crash", level, layer);
-                                            // [texture replaceRegion:region mipmapLevel:level slice:layer withBytes:alignedData bytesPerRow:alignedBytesPerRow bytesPerImage:(NSUInteger)bytesPerImage];
+                                            // replaceRegion upsets the AGX driver, so stage and blit instead
+                                            if ([self uploadBytes:alignedData
+                                                        toTexture:texture
+                                                      bytesPerRow:alignedBytesPerRow
+                                                            slice:layer
+                                                            level:level
+                                                            width:region.size.width
+                                                           height:region.size.height
+                                                            depth:region.size.depth] == false)
+                                            {
+                                                MGL_NSERR(@"MGL Error: texture upload failed (level %d, slice %d)", level, (int)(layer));
+                                            }
                                         } @catch (NSException *exception) {
                                             MGL_NSERR(@"MGL ERROR: Failed to upload aligned array texture data (level %d, layer %d): %@", level, layer, exception);
                                         }
@@ -1378,13 +1412,18 @@ void logDirtyBits(GLMContext ctx)
                                         MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, layer %d) - SKIPPING to prevent crash", level, layer);
                                         continue;
                                     }
-                                    // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                        MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d, layer %d) - prevents AGX driver crash", level, layer);
-                                        // @try {
-                                        //     [texture replaceRegion:region mipmapLevel:level slice:layer withBytes:srcData bytesPerRow:bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage];
-                                        // } @catch (NSException *exception) {
-                                        //     MGL_NSERR(@"MGL ERROR: Failed to upload array texture data (level %d, layer %d): %@", level, layer, exception);
-                                        // }
+                                    // replaceRegion upsets the AGX driver, so stage and blit instead
+                                    if ([self uploadBytes:srcData
+                                                toTexture:texture
+                                              bytesPerRow:bytesPerRow
+                                                    slice:layer
+                                                    level:level
+                                                    width:region.size.width
+                                                   height:region.size.height
+                                                    depth:region.size.depth] == false)
+                                    {
+                                        MGL_NSERR(@"MGL Error: texture upload failed (level %d, slice %d)", level, (int)(layer));
+                                    }
                                 }
                             } else {
                                 MGL_NSERR(@"MGL WARNING: Skipping array texture upload due to invalid data or parameters");
@@ -1448,13 +1487,18 @@ void logDirtyBits(GLMContext ctx)
                                         free(alignedData);
                                         continue;
                                     }
-                                    // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                    MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d, face %d) - prevents AGX driver crash", level, face);
-                                    // @try {
-                                    //     [texture replaceRegion:region mipmapLevel:level slice:face withBytes:alignedData bytesPerRow:alignedBytesPerRow bytesPerImage:(NSUInteger)bytesPerImage];
-                                    // } @catch (NSException *exception) {
-                                    //     MGL_NSERR(@"MGL ERROR: Failed to upload aligned 2D texture data (level %d, face %d): %@", level, face, exception);
-                                    // }
+                                    // replaceRegion upsets the AGX driver, so stage and blit instead
+                                    if ([self uploadBytes:alignedData
+                                                toTexture:texture
+                                              bytesPerRow:alignedBytesPerRow
+                                                    slice:face
+                                                    level:level
+                                                    width:region.size.width
+                                                   height:region.size.height
+                                                    depth:region.size.depth] == false)
+                                    {
+                                        MGL_NSERR(@"MGL Error: texture upload failed (level %d, slice %d)", level, (int)(face));
+                                    }
                                     free(alignedData);
                                 } else {
                                     MGL_NSERR(@"MGL ERROR: Failed to allocate aligned memory for 2D texture upload (level %d, face %d)", level, face);
@@ -1474,13 +1518,18 @@ void logDirtyBits(GLMContext ctx)
                                     MGL_NSERR(@"MGL SECURITY ERROR: Invalid bytesPerImage (0) passed to Metal replaceRegion (level %d, face %d) - SKIPPING to prevent crash", level, face);
                                     continue;
                                 }
-                                // DISABLED: All replaceRegion calls crash Apple AGX driver
-                                MGL_NSERR(@"MGL CRITICAL: Disabled replaceRegion call (level %d, face %d) - prevents AGX driver crash", level, face);
-                                // @try {
-                                //     [texture replaceRegion:region mipmapLevel:level slice:face withBytes:srcData bytesPerRow:bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage];
-                                // } @catch (NSException *exception) {
-                                //     MGL_NSERR(@"MGL ERROR: Failed to upload 2D texture data (level %d, face %d): %@", level, face, exception);
-                                // }
+                                // replaceRegion upsets the AGX driver, so stage and blit instead
+                                if ([self uploadBytes:srcData
+                                            toTexture:texture
+                                          bytesPerRow:bytesPerRow
+                                                slice:face
+                                                level:level
+                                                width:region.size.width
+                                               height:region.size.height
+                                                depth:region.size.depth] == false)
+                                {
+                                    MGL_NSERR(@"MGL Error: texture upload failed (level %d, slice %d)", level, (int)(face));
+                                }
                             }
                         } else {
                             MGL_NSERR(@"MGL WARNING: Skipping 2D texture upload due to invalid data or parameters");
@@ -2335,15 +2384,27 @@ void logDirtyBits(GLMContext ctx)
 
             ptr = STATE(active_textures[spirv_binding]);
 
-            if (ptr)
+            // A shader may declare a sampler it never reads, or read one the
+            // app left unbound. GL says that samples undefined, not that the
+            // draw fails, so leave the slot empty and move on.
+            if (ptr == NULL)
+            {
+                MGL_NSDEBUG(@"MGL: sampler at binding %u has no texture bound", spirv_binding);
+                textures_to_be_mapped--;
+                continue;
+            }
+
             {
                 id<MTLTexture> texture;
 
-                RETURN_FALSE_ON_FAILURE([self bindMTLTexture: ptr]);
-                assert(ptr->mtl_data);
+                if ([self bindMTLTexture: ptr] == false || ptr->mtl_data == NULL)
+                {
+                    MGL_NSERR(@"MGL Error: texture %u could not be realised", ptr->name);
+                    textures_to_be_mapped--;
+                    continue;
+                }
 
                 texture = (__bridge id<MTLTexture>)(ptr->mtl_data);
-                assert(texture);
 
                 id<MTLSamplerState> sampler;
 
@@ -2372,12 +2433,17 @@ void logDirtyBits(GLMContext ctx)
                     }
 
                     sampler = (__bridge id<MTLSamplerState>)(gl_sampler->mtl_data);
-                    assert(sampler);
                 }
                 else
                 {
                     sampler = (__bridge id<MTLSamplerState>)(ptr->params.mtl_data);
-                    assert(sampler);
+                }
+
+                if (sampler == nil)
+                {
+                    MGL_NSERR(@"MGL Error: no sampler state for binding %u", spirv_binding);
+                    textures_to_be_mapped--;
+                    continue;
                 }
 
                 [_currentRenderEncoder setFragmentTexture:texture atIndex:spirv_binding];
@@ -2486,6 +2552,88 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     assert(tex);
 
     return tex;
+}
+
+// Upload pixel data into a Metal texture without replaceRegion, which the AGX
+// driver has trouble with. Stages the rows into a buffer and blits, on its own
+// command buffer so an active render encoder is never disturbed.
+- (bool) uploadBytes:(const void *)src
+           toTexture:(id<MTLTexture>)texture
+         bytesPerRow:(NSUInteger)srcBytesPerRow
+               slice:(NSUInteger)slice
+               level:(NSUInteger)level
+               width:(NSUInteger)width
+              height:(NSUInteger)height
+               depth:(NSUInteger)depth
+{
+    if (src == NULL || texture == nil || width == 0 || height == 0)
+        return false;
+
+    if (depth == 0)
+        depth = 1;
+
+    // Metal wants the staged rows aligned; pad each row if the source is not.
+    NSUInteger alignment = 256;
+    NSUInteger dstBytesPerRow = ((srcBytesPerRow + alignment - 1) / alignment) * alignment;
+    NSUInteger dstBytesPerImage = dstBytesPerRow * height;
+    NSUInteger totalBytes = dstBytesPerImage * depth;
+
+    id<MTLBuffer> staging = [_device newBufferWithLength:totalBytes
+                                                 options:MTLResourceStorageModeShared];
+    if (staging == nil)
+    {
+        MGL_NSERR(@"MGL Error: could not allocate %lu byte staging buffer for texture upload",
+                  (unsigned long)totalBytes);
+        return false;
+    }
+
+    uint8_t *dst = (uint8_t *)staging.contents;
+    const uint8_t *s8 = (const uint8_t *)src;
+
+    for (NSUInteger z = 0; z < depth; z++)
+        for (NSUInteger row = 0; row < height; row++)
+            memcpy(dst + z * dstBytesPerImage + row * dstBytesPerRow,
+                   s8  + z * srcBytesPerRow * height + row * srcBytesPerRow,
+                   srcBytesPerRow);
+
+    id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
+    if (cmd == nil)
+    {
+        MGL_NSERR(@"MGL Error: no command buffer for texture upload");
+        return false;
+    }
+
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+    if (blit == nil)
+    {
+        MGL_NSERR(@"MGL Error: no blit encoder for texture upload");
+        return false;
+    }
+
+    [blit copyFromBuffer:staging
+            sourceOffset:0
+       sourceBytesPerRow:dstBytesPerRow
+     sourceBytesPerImage:dstBytesPerImage
+              sourceSize:MTLSizeMake(width, height, depth)
+               toTexture:texture
+        destinationSlice:slice
+        destinationLevel:level
+       destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    if (cmd.error)
+    {
+        MGL_NSERR(@"MGL Error: texture upload blit failed: %@", cmd.error);
+        return false;
+    }
+
+    MGL_NSDEBUG(@"MGL: uploaded %lux%lux%lu level %lu slice %lu",
+                (unsigned long)width, (unsigned long)height, (unsigned long)depth,
+                (unsigned long)level, (unsigned long)slice);
+    return true;
 }
 
 - (bool)bindMTLTexture:(Texture *)tex
@@ -2930,7 +3078,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     [_currentRenderEncoder setViewport:(MTLViewport){ctx->state.viewport[0].x, ctx->state.viewport[0].y,
                                         ctx->state.viewport[0].w, ctx->state.viewport[0].h,
-                                        ctx->state.var.depth_range[0], ctx->state.var.depth_range[1]}];
+                                        ctx->state.depth_range[0].znear, ctx->state.depth_range[0].zfar}];
 
     if (ctx->state.caps.cull_face)
     {
@@ -3260,6 +3408,12 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             _renderPassDescriptor.stencilAttachment.loadAction = MTLLoadActionLoad;
         }
 
+        // Without this the depth buffer is discarded every time an encoder
+        // ends, so anything drawn after a mid-frame encoder swap loses its
+        // depth and the scene falls back to painter's order.
+        _renderPassDescriptor.depthAttachment.storeAction = MTLStoreActionStore;
+        _renderPassDescriptor.stencilAttachment.storeAction = MTLStoreActionStore;
+
         ctx->state.clear_bitmask = 0;
     }
     else
@@ -3279,6 +3433,8 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     }
 
     _renderPassDescriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
+    _renderPassDescriptor.depthAttachment.storeAction = MTLStoreActionStore;
+    _renderPassDescriptor.stencilAttachment.storeAction = MTLStoreActionStore;
 
     // create a render encoder from the renderpass descriptor
     // CRITICAL SAFETY: Validate inputs before creating render encoder
@@ -4426,19 +4582,24 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
         // a dirty vao needs to update the render encoder and buffer list
         if (ctx->state.dirty_bits & DIRTY_VAO)
         {
-            // we have a dirty VAO, all the renderbuffer bindings are invalid so we need a new renderbuffer
-            // with new renderbuffer bindings
-
-            // always end encoding and start a new encoder and bind new vertex buffers
-            // end encoding on current render encoder
-            [self endRenderEncoding];
-
-            // updateDirtyBaseBufferList binds new mtl buffers or updates old ones
+            // A new VAO only changes which vertex buffers are bound, and Metal
+            // lets us rebind those on the encoder we already have. Tearing the
+            // encoder down here used to acquire a fresh drawable mid frame, so
+            // everything drawn before the switch was thrown away with the old
+            // one -- which looked exactly like the depth test failing.
             RETURN_FALSE_ON_FAILURE([self updateDirtyBaseBufferList: &ctx->state.vertex_buffer_map_list]);
             RETURN_FALSE_ON_FAILURE([self updateDirtyBaseBufferList: &ctx->state.fragment_buffer_map_list]);
 
-            // get a new renderer encoder
-            RETURN_FALSE_ON_FAILURE([self newRenderEncoder]);
+            if (_currentRenderEncoder == nil)
+            {
+                RETURN_FALSE_ON_FAILURE([self newRenderEncoder]);
+                [self updateCurrentRenderEncoder];
+            }
+            else
+            {
+                RETURN_FALSE_ON_FAILURE([self bindVertexBuffersToCurrentRenderEncoder]);
+                RETURN_FALSE_ON_FAILURE([self bindFragmentBuffersToCurrentRenderEncoder]);
+            }
 
             // clear dirty render state
             ctx->state.dirty_bits &= ~DIRTY_RENDER_STATE;
@@ -6045,8 +6206,11 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
     assert(indexBuffer);
 
+    // with an element buffer bound, indices is a byte offset into it
+    size_t offset = (size_t)(uintptr_t)indices;
+
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType
-                                     indexBuffer:indexBuffer indexBufferOffset:0 instanceCount:1];
+                                     indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1];
 }
 
 void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type, const void *indices)
@@ -6081,15 +6245,11 @@ void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type
 
     size_t offset = (char *)indices - (char *)NULL;
 
-    // indexBufferOffset is a byte offset
-    switch(indexType)
-    {
-        case MTLIndexTypeUInt16: start <<= 1; break;
-        case MTLIndexTypeUInt32: start <<= 2; break;
-    }
+    // start and end bound the index VALUES the caller promises to use; they are
+    // a hint, not a byte offset. Only indices moves the read position.
+    (void)start;
+    (void)end;
 
-    offset += start;
-    
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType
                                      indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1];
 }
@@ -6194,7 +6354,7 @@ void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, G
 
 
 #pragma mark C interface to mtlDrawRangeElementsBaseVertex
--(void) mtlDrawRangeElementsBaseVertex: (GLMContext) glm_ctx mode:(GLenum) mode start: (GLuint) start end: (GLuint) end type: (GLenum) type indices:(const void *)indices basevertex:(GLint) basevertex
+-(void) mtlDrawRangeElementsBaseVertex: (GLMContext) glm_ctx mode:(GLenum) mode start: (GLuint) start end: (GLuint) end count: (GLsizei) count type: (GLenum) type indices:(const void *)indices basevertex:(GLint) basevertex
 {
     MTLPrimitiveType primitiveType;
     MTLIndexType indexType;
@@ -6218,19 +6378,17 @@ void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, G
 
     size_t offset = (char *)indices - (char *)NULL;
 
-    // indexBufferOffset is a byte offset
-    switch(indexType)
-    {
-        case MTLIndexTypeUInt16: start <<= 1; break;
-        case MTLIndexTypeUInt32: start <<= 2; break;
-    }
+    // start and end bound the index VALUES, not the buffer position, and the
+    // draw length is count -- not end minus start.
+    (void)start;
+    (void)end;
 
-    [_currentRenderEncoder drawIndexedPrimitives: primitiveType indexCount:end - start indexType: indexType indexBuffer:indexBuffer indexBufferOffset:offset+start instanceCount:1 baseVertex:basevertex baseInstance:0];
+    [_currentRenderEncoder drawIndexedPrimitives: primitiveType indexCount:count indexType: indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1 baseVertex:basevertex baseInstance:0];
 }
 
 void mtlDrawRangeElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices, GLint basevertex)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawRangeElementsBaseVertex:glm_ctx mode:mode start: start end: end type: type indices: indices basevertex:basevertex];
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawRangeElementsBaseVertex:glm_ctx mode:mode start: start end: end count: count type: type indices: indices basevertex:basevertex];
 }
 
 

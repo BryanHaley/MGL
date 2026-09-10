@@ -1845,3 +1845,14 @@ void mglGetNamedBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GL
     memcpy(data, (void *)(ptr->data.buffer_data + offset), (size_t)size);
 }
 
+
+void mglGetBufferParameteri64v(GLMContext ctx, GLenum target, GLenum pname, GLint64 *params)
+{
+    GLint tmp = 0;
+
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    mglGetBufferParameteriv(ctx, target, pname, &tmp);
+
+    *params = tmp;
+}

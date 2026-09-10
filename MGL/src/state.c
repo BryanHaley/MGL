@@ -1060,3 +1060,136 @@ void mglDepthRangeIndexed(GLMContext ctx, GLuint index, GLdouble n, GLdouble f)
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
 }
+
+/* ---------- tessellation patch parameters ---------- */
+
+// MGL has no tessellation stage yet, but the patch state is plain GL state and
+// is legal to set and read back regardless.
+
+void mglPatchParameteri(GLMContext ctx, GLenum pname, GLint value)
+{
+    ERROR_CHECK_RETURN(pname == GL_PATCH_VERTICES, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(value > 0, GL_INVALID_VALUE);
+
+    ctx->state.var.patch_vertices = value;
+
+    ctx->state.dirty_bits |= DIRTY_STATE;
+}
+
+void mglPatchParameterfv(GLMContext ctx, GLenum pname, const GLfloat *values)
+{
+    ERROR_CHECK_RETURN(values, GL_INVALID_VALUE);
+
+    switch (pname)
+    {
+        case GL_PATCH_DEFAULT_INNER_LEVEL:
+            memcpy(ctx->state.var.patch_default_inner, values, 2 * sizeof(GLfloat));
+            break;
+
+        case GL_PATCH_DEFAULT_OUTER_LEVEL:
+            memcpy(ctx->state.var.patch_default_outer, values, 4 * sizeof(GLfloat));
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+
+    ctx->state.dirty_bits |= DIRTY_STATE;
+}
+
+/* ---------- misc state ---------- */
+
+Query *findQuery(GLMContext ctx, GLuint name);
+
+void mglClipControl(GLMContext ctx, GLenum origin, GLenum depth)
+{
+    ERROR_CHECK_RETURN(origin == GL_LOWER_LEFT || origin == GL_UPPER_LEFT, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(depth == GL_NEGATIVE_ONE_TO_ONE || depth == GL_ZERO_TO_ONE, GL_INVALID_ENUM);
+
+    ctx->state.var.clip_origin = origin;
+    ctx->state.var.clip_depth = depth;
+
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE;
+}
+
+void mglClampColor(GLMContext ctx, GLenum target, GLenum clamp)
+{
+    ERROR_CHECK_RETURN(target == GL_CLAMP_READ_COLOR, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(clamp == GL_TRUE || clamp == GL_FALSE || clamp == GL_FIXED_ONLY, GL_INVALID_ENUM);
+
+    ctx->state.var.clamp_read_color = clamp;
+
+    ctx->state.dirty_bits |= DIRTY_STATE;
+}
+
+void mglPrimitiveRestartIndex(GLMContext ctx, GLuint index)
+{
+    ctx->state.var.primitive_restart_index = index;
+
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE;
+}
+
+void mglMinSampleShading(GLMContext ctx, GLfloat value)
+{
+    if (value < 0.0f) value = 0.0f;
+    if (value > 1.0f) value = 1.0f;
+
+    ctx->state.var.min_sample_shading = value;
+
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE;
+}
+
+void mglSampleMaski(GLMContext ctx, GLuint maskNumber, GLbitfield mask)
+{
+    // one 32 bit word covers every sample count MGL supports
+    ERROR_CHECK_RETURN(maskNumber == 0, GL_INVALID_VALUE);
+
+    ctx->state.var.sample_mask_value = mask;
+
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE;
+}
+
+void mglBeginConditionalRender(GLMContext ctx, GLuint id, GLenum mode)
+{
+    Query *q;
+
+    switch (mode)
+    {
+        case GL_QUERY_WAIT:
+        case GL_QUERY_NO_WAIT:
+        case GL_QUERY_BY_REGION_WAIT:
+        case GL_QUERY_BY_REGION_NO_WAIT:
+        case GL_QUERY_WAIT_INVERTED:
+        case GL_QUERY_NO_WAIT_INVERTED:
+        case GL_QUERY_BY_REGION_WAIT_INVERTED:
+        case GL_QUERY_BY_REGION_NO_WAIT_INVERTED:
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+
+    ERROR_CHECK_RETURN(ctx->state.var.conditional_render_query == 0, GL_INVALID_OPERATION);
+
+    q = findQuery(ctx, id);
+
+    ERROR_CHECK_RETURN(q, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(q->active == GL_FALSE, GL_INVALID_OPERATION);
+
+    ctx->state.var.conditional_render_query = id;
+    ctx->state.var.conditional_render_mode = mode;
+}
+
+void mglEndConditionalRender(GLMContext ctx)
+{
+    ERROR_CHECK_RETURN(ctx->state.var.conditional_render_query != 0, GL_INVALID_OPERATION);
+
+    ctx->state.var.conditional_render_query = 0;
+    ctx->state.var.conditional_render_mode = 0;
+}
+
+GLenum mglGetGraphicsResetStatus(GLMContext ctx)
+{
+    // MGL has no robustness context, so it never resets
+    return GL_NO_ERROR;
+}

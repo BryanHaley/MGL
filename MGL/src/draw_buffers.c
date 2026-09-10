@@ -570,3 +570,31 @@ void mglMultiDrawElementsIndirect(GLMContext ctx, GLenum mode, GLenum type, cons
     ctx->mtl_funcs.mtlMultiDrawElementsIndirect(ctx, mode, type, indirect, drawcount, stride);
 }
 
+
+// The draw count lives in a buffer bound to GL_PARAMETER_BUFFER, which MGL has
+// no target for yet, so these validate and then report that they cannot run.
+static void multiDrawIndirectCount(GLMContext ctx, GLenum mode, GLintptr drawcount,
+                                   GLsizei maxdrawcount, GLsizei stride)
+{
+    ERROR_CHECK_RETURN(check_draw_modes(mode), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(drawcount >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN((drawcount & 3) == 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(maxdrawcount >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(stride >= 0 && (stride % 4) == 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(STATE(buffers[_DRAW_INDIRECT_BUFFER]), GL_INVALID_OPERATION);
+
+    ERROR_RETURN(GL_INVALID_OPERATION);
+}
+
+void mglMultiDrawArraysIndirectCount(GLMContext ctx, GLenum mode, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride)
+{
+    multiDrawIndirectCount(ctx, mode, drawcount, maxdrawcount, stride);
+}
+
+void mglMultiDrawElementsIndirectCount(GLMContext ctx, GLenum mode, GLenum type, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride)
+{
+    ERROR_CHECK_RETURN(type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT ||
+                       type == GL_UNSIGNED_INT, GL_INVALID_ENUM);
+
+    multiDrawIndirectCount(ctx, mode, drawcount, maxdrawcount, stride);
+}

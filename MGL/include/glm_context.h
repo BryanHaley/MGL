@@ -398,6 +398,10 @@ typedef struct Shader_t {
         void *function;
         void *library;
     } mtl_data;
+    // set by glShaderBinary; a SPIR-V module skips the GLSL front end
+    void *spirv_binary;
+    GLsizei spirv_binary_length;
+    GLboolean specialized;
 } Shader;
 
 typedef struct Spirv_t {
@@ -455,6 +459,8 @@ typedef struct Program_t {
     char *log;
     // uniform values belong to the program, not the context
     BufferBase uniform_constants;
+    GLboolean separable;
+    GLboolean binary_retrievable_hint;
 } Program;
 
 typedef struct ProgramPipeline_t {
@@ -463,12 +469,68 @@ typedef struct ProgramPipeline_t {
     Program *stage_programs[_MAX_SHADER_TYPES];  // Programs attached to each stage
 } ProgramPipeline;
 
+#define MAX_QUERY_STREAMS 4
+
+typedef enum {
+    _QUERY_SAMPLES_PASSED = 0,
+    _QUERY_ANY_SAMPLES_PASSED,
+    _QUERY_ANY_SAMPLES_PASSED_CONSERVATIVE,
+    _QUERY_PRIMITIVES_GENERATED,
+    _QUERY_TF_PRIMITIVES_WRITTEN,
+    _QUERY_TF_OVERFLOW,
+    _QUERY_TF_STREAM_OVERFLOW,
+    _QUERY_TIME_ELAPSED,
+    _QUERY_TIMESTAMP,
+    _MAX_QUERY_TARGETS
+} QueryTargetIndex;
+
+typedef struct Query_t {
+    GLuint name;
+    GLenum target;
+    GLuint index;
+    GLboolean active;
+    GLboolean have_result;
+    GLuint64 result;
+    // slot in the renderer's visibility buffer while occlusion counting
+    GLint visibility_offset;
+    GLuint64 start_time;
+} Query;
+
+#define MAX_DEBUG_MESSAGES  64
+#define MAX_DEBUG_MSG_LEN   256
+#define MAX_DEBUG_GROUPS    64
+#define MAX_OBJECT_LABEL    256
+
+typedef struct DebugMessage_t {
+    GLenum source;
+    GLenum type;
+    GLuint id;
+    GLenum severity;
+    GLsizei length;
+    char text[MAX_DEBUG_MSG_LEN];
+} DebugMessage;
+
+typedef struct DebugState_t {
+    DebugMessage messages[MAX_DEBUG_MESSAGES];
+    GLuint head;              // where the next message goes
+    GLuint count;             // how many are queued
+    GLboolean messages_enabled;
+    DebugMessage groups[MAX_DEBUG_GROUPS];
+    GLuint group_depth;
+} DebugState;
+
+#define MAX_TF_BUFFERS 4
+
 typedef struct TransformFeedback_t {
     GLuint name;
     GLenum target;
     GLboolean active;
     GLboolean paused;
     GLenum primitive_mode;
+    BufferBaseTarget buffers[MAX_TF_BUFFERS];
+    char **varyings;
+    GLsizei varying_count;
+    GLenum buffer_mode;
 } TransformFeedback;
 
 typedef struct Renderbuffer_t {
@@ -631,6 +693,10 @@ typedef struct {
     HashTable renderbuffer_table;
     HashTable framebuffer_table;
     HashTable sampler_table;
+    HashTable query_table;
+
+    Query *active_query[_MAX_QUERY_TARGETS][MAX_QUERY_STREAMS];
+    DebugState debug;
 
     Shader      *shaders[_MAX_SHADER_TYPES];
     Program     *program;
