@@ -346,23 +346,29 @@ void mglSamplerParameterIuiv(GLMContext ctx, GLuint sampler, GLenum pname, const
 void mglGetSamplerParameterIiv(GLMContext ctx, GLuint sampler, GLenum pname, GLint *params)
 {
     Sampler *ptr;
+    GLfloat fparam = 0.0f;
 
     ptr = findSampler(ctx, sampler);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
-    assert(0);
+    getParam(ctx, &ptr->params, pname, params, &fparam);
 }
 
 void mglGetSamplerParameterIuiv(GLMContext ctx, GLuint sampler, GLenum pname, GLuint *params)
 {
     Sampler *ptr;
+    GLfloat fparam = 0.0f;
+    GLint value = 0;
 
     ptr = findSampler(ctx, sampler);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
-    assert(0);
+    if (getParam(ctx, &ptr->params, pname, &value, &fparam))
+        *params = (GLuint)value;
 }
 
 void mglGetSamplerParameterfv(GLMContext ctx, GLuint sampler, GLenum pname, GLfloat *params)

@@ -1071,7 +1071,7 @@ GLuint bicountForFormatType(GLenum format, GLenum type, GLenum component)
             break;
 
         default:
-            assert(0);
+            break;
     }
 
     return 0;
@@ -1830,7 +1830,7 @@ GLenum internalFormatForGLFormatType(GLenum format, GLenum type)
             return GL_RGBA8;
 
         default:
-            assert(0);
+            break;
     }
 }
 
@@ -2475,7 +2475,7 @@ MTLPixelFormat mtlPixelFormatForGLFormatType(GLenum gl_format, GLenum gl_type)
             return 0;
 
         default:
-            assert(0);
+            break;
     }
 }
 

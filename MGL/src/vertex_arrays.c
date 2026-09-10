@@ -808,19 +808,73 @@ void mglVertexArrayBindingDivisor(GLMContext ctx, GLuint vaobj, GLuint bindingin
 
 void mglGetVertexArrayiv(GLMContext ctx, GLuint vaobj, GLenum pname, GLint *param)
 {
-    // Unimplemented function
-    assert(0);
+    VertexArray *vao = getVAO(ctx, vaobj);
+
+    ERROR_CHECK_RETURN(vao, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(pname == GL_ELEMENT_ARRAY_BUFFER_BINDING, GL_INVALID_ENUM);
+
+    *param = vao->element_array.buffer ? (GLint)vao->element_array.buffer->name : 0;
+}
+
+static bool vertexArrayIndexedParam(GLMContext ctx, VertexArray *vao, GLuint index, GLenum pname, GLint64 *out)
+{
+    VertexAttrib *att;
+
+    ERROR_CHECK_RETURN_VALUE(vao, GL_INVALID_OPERATION, false);
+    ERROR_CHECK_RETURN_VALUE(index < MAX_ATTRIBS, GL_INVALID_VALUE, false);
+
+    att = &vao->attrib[index];
+
+    switch(pname)
+    {
+        case GL_VERTEX_ATTRIB_ARRAY_ENABLED:
+            *out = (vao->enabled_attribs & (0x1 << index)) ? GL_TRUE : GL_FALSE;
+            return true;
+
+        case GL_VERTEX_ATTRIB_ARRAY_SIZE:      *out = att->size; return true;
+        case GL_VERTEX_ATTRIB_ARRAY_TYPE:      *out = att->type; return true;
+        case GL_VERTEX_ATTRIB_ARRAY_STRIDE:    *out = att->stride; return true;
+        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:   *out = att->divisor; return true;
+        case GL_VERTEX_ATTRIB_RELATIVE_OFFSET: *out = att->relativeoffset; return true;
+        case GL_VERTEX_BINDING_OFFSET:         *out = att->relativeoffset; return true;
+
+        case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:
+            *out = att->normalized ? GL_TRUE : GL_FALSE;
+            return true;
+
+        case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
+        case GL_VERTEX_ATTRIB_ARRAY_LONG:
+            *out = GL_FALSE;
+            return true;
+
+        case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
+            *out = att->buffer ? (GLint64)att->buffer->name : 0;
+            return true;
+
+        default:
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
+    }
 }
 
 void mglGetVertexArrayIndexediv(GLMContext ctx, GLuint vaobj, GLuint index, GLenum pname, GLint *param)
 {
-    // Unimplemented function
-    assert(0);
+    GLint64 value = 0;
+
+    ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
+
+    if (vertexArrayIndexedParam(ctx, getVAO(ctx, vaobj), index, pname, &value))
+        *param = (GLint)value;
 }
 
 void mglGetVertexArrayIndexed64iv(GLMContext ctx, GLuint vaobj, GLuint index, GLenum pname, GLint64 *param)
 {
-    // Unimplemented function
-    assert(0);
+    GLint64 value = 0;
+
+    ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(pname == GL_VERTEX_BINDING_OFFSET, GL_INVALID_ENUM);
+
+    if (vertexArrayIndexedParam(ctx, getVAO(ctx, vaobj), index, pname, &value))
+        *param = value;
 }
 

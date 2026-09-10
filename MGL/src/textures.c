@@ -53,10 +53,8 @@ GLuint textureIndexFromTarget(GLMContext ctx, GLenum target)
         case GL_RENDERBUFFER: return _RENDERBUFFER;
 
         default:
-            assert(0);
+            break;
     }
-
-    assert(0);
 
     return _MAX_TEXTURE_TYPES;
 }
@@ -76,10 +74,7 @@ Texture *newTexObj(GLMContext ctx, GLenum target)
     GLuint index;
 
     index = textureIndexFromTarget(ctx, target);
-    if (index == _MAX_TEXTURE_TYPES)
-    {
-        assert(0);
-    }
+    ERROR_CHECK_RETURN_VALUE(index != _MAX_TEXTURE_TYPES, GL_INVALID_ENUM, NULL);
 
     ptr = (Texture *)malloc(sizeof(Texture));
     // CRITICAL SECURITY FIX: Check malloc result instead of using assert()
@@ -126,10 +121,7 @@ Texture *newTexture(GLMContext ctx, GLenum target, GLuint texture)
     GLuint index;
 
     index = textureIndexFromTarget(ctx, target);
-    if (index == _MAX_TEXTURE_TYPES)
-    {
-        assert(0);
-    }
+    ERROR_CHECK_RETURN_VALUE(index != _MAX_TEXTURE_TYPES, GL_INVALID_ENUM, NULL);
 
     ptr = newTexObj(ctx, target);
 
@@ -183,28 +175,32 @@ Texture *getTex(GLMContext ctx, GLuint name, GLenum target)
     if (name == 0)
     {
         index = textureIndexFromTarget(ctx, target);
-        assert(index != _MAX_TEXTURE_TYPES);
+
+        ERROR_CHECK_RETURN_VALUE(index != _MAX_TEXTURE_TYPES, GL_INVALID_ENUM, NULL);
 
         ptr = currentTexture(ctx, index);
-        
-        // Create default texture if none exists for this target
+
         if (!ptr) {
             GLuint active_texture = STATE(active_texture);
+
             ptr = newTexObj(ctx, target);
-            assert(ptr);
+
+            ERROR_CHECK_RETURN_VALUE(ptr, GL_OUT_OF_MEMORY, NULL);
+
             STATE(texture_units[active_texture].textures[index]) = ptr;
-            MGL_INFO("MGL: Created default texture for target 0x%x\n", target);
         }
     }
     else
     {
         ptr = findTexture(ctx, name);
-        assert(ptr);
-        
+
+        ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, NULL);
+
         target = ptr->target;
 
         index = textureIndexFromTarget(ctx, target);
-        assert(index != _MAX_TEXTURE_TYPES);
+
+        ERROR_CHECK_RETURN_VALUE(index != _MAX_TEXTURE_TYPES, GL_INVALID_ENUM, NULL);
     }
 
     return ptr;
@@ -246,7 +242,7 @@ void mglGenTextures(GLMContext ctx, GLsizei n, GLuint *textures)
     // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
-    assert(textures);
+    ERROR_CHECK_RETURN(textures, GL_INVALID_VALUE);
 
     while(n--)
     {
@@ -268,7 +264,7 @@ void mglCreateTextures(GLMContext ctx, GLenum target, GLsizei n, GLuint *texture
     while(n--)
     {
         // create a texture object
-        assert(getTexture(ctx, target, *textures++));
+        getTexture(ctx, target, *textures++);
     }
 }
 
@@ -279,10 +275,7 @@ void mglBindTexture(GLMContext ctx, GLenum target, GLuint texture)
     Texture *ptr;
 
     index = textureIndexFromTarget(ctx, target);
-    if (index == _MAX_TEXTURE_TYPES)
-    {
-        assert(0);
-    }
+    ERROR_CHECK_RETURN(index != _MAX_TEXTURE_TYPES, GL_INVALID_ENUM);
 
     if (texture)
     {

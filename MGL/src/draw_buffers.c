@@ -165,12 +165,14 @@ GLsizei getTypeSize(GLenum type)
         case GL_UNSIGNED_SHORT:
             return sizeof(unsigned short);
 
+        case GL_UNSIGNED_BYTE:
+            return sizeof(unsigned char);
+
         case GL_UNSIGNED_INT:
             return sizeof(unsigned int);
     }
 
-    assert(0);
-
+    // callers check for 0 and raise GL_INVALID_ENUM
     return 0;
 }
 

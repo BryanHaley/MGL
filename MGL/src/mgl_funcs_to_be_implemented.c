@@ -1906,9 +1906,7 @@ void mglViewportIndexedfv(GLMContext ctx, GLuint index, const GLfloat *v)
 #ifdef MGL_GL_ES
 void  mglBlendBarrier(GLMContext ctx)
 {
-    // Unimplemented function
-    assert(0);
-
+    // Metal already orders fragment writes to the same pixel
 }
 
 void mglPrimitiveBoundingBox(GLMContext ctx, GLfloat minX, GLfloat minY, GLfloat minZ, GLfloat minW, GLfloat maxX, GLfloat maxY, GLfloat maxZ, GLfloat maxW)

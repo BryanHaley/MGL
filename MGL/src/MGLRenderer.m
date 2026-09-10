@@ -1699,7 +1699,7 @@ void logDirtyBits(GLMContext ctx)
                                                 _currentRenderEncoder = nil;
                                             }
 
-                                            id<MTLBlitCommandEncoder> blitEncoder = [_currentCommandBuffer blitCommandEncoder];
+                                            id<MTLBlitCommandEncoder> blitEncoder = [[self liveCommandBuffer] blitCommandEncoder];
                                             if (blitEncoder) {
                                                 [blitEncoder copyFromBuffer:tempBuffer
                                                           sourceOffset:0
@@ -1752,7 +1752,7 @@ void logDirtyBits(GLMContext ctx)
                                                 _currentRenderEncoder = nil;
                                             }
 
-                                            id<MTLBlitCommandEncoder> blitEncoder = [_currentCommandBuffer blitCommandEncoder];
+                                            id<MTLBlitCommandEncoder> blitEncoder = [[self liveCommandBuffer] blitCommandEncoder];
                                             if (blitEncoder) {
                                                 [blitEncoder copyFromBuffer:tempBuffer
                                                           sourceOffset:0
@@ -2422,7 +2422,7 @@ extern FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum 
 
     // start blit encoder
     id<MTLBlitCommandEncoder> blitCommandEncoder;
-    blitCommandEncoder = [_currentCommandBuffer blitCommandEncoder];
+    blitCommandEncoder = [[self liveCommandBuffer] blitCommandEncoder];
     [blitCommandEncoder
         copyFromTexture:readtexid sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(srcX0, srcY0, 0) sourceSize:MTLSizeMake(srcX1-srcX0, srcY1-srcY0, 1)
         toTexture:drawtexid destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(dstX0, dstY0, 0) /*destinationSize:MTLSizeMake(dstX1, dstY1, 0)*/ ];
@@ -3244,7 +3244,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
     MGL_NSDEBUG(@"MGL DEBUG: About to create render encoder with descriptor and command buffer");
     @try {
-        _currentRenderEncoder = [_currentCommandBuffer renderCommandEncoderWithDescriptor: _renderPassDescriptor];
+        _currentRenderEncoder = [[self liveCommandBuffer] renderCommandEncoderWithDescriptor: _renderPassDescriptor];
         if (!_currentRenderEncoder) {
             MGL_NSERR(@"MGL ERROR: Failed to create render encoder - invalid render pass descriptor or command buffer");
             MGL_NSDEBUG(@"MGL DEBUG: Command buffer: %@, Render pass descriptor: %@", _currentCommandBuffer, _renderPassDescriptor);
@@ -3295,6 +3295,20 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     return true;
         
     } //     @autoreleasepool
+}
+
+// A committed command buffer cannot take another encoder; Metal asserts inside
+// setCurrentCommandEncoder. Swap in a fresh one when the current is spent.
+- (id<MTLCommandBuffer>) liveCommandBuffer
+{
+    if (_currentCommandBuffer == nil ||
+        _currentCommandBuffer.status >= MTLCommandBufferStatusCommitted)
+    {
+        _currentRenderEncoder = nil;
+        _currentCommandBuffer = [_commandQueue commandBuffer];
+    }
+
+    return _currentCommandBuffer;
 }
 
 - (bool) newCommandBuffer
@@ -4606,7 +4620,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     // end encoding on current render encoder
     [self endRenderEncoding];
 
-    id <MTLComputeCommandEncoder> computeCommandEncoder = [_currentCommandBuffer computeCommandEncoder];
+    id <MTLComputeCommandEncoder> computeCommandEncoder = [[self liveCommandBuffer] computeCommandEncoder];
     assert(computeCommandEncoder);
 
     RETURN_ON_FAILURE([self processCompute:computeCommandEncoder]);
@@ -5467,7 +5481,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
     if (_currentCommandBuffer == nil)
         [self newCommandBuffer];
 
-    id<MTLBlitCommandEncoder> blit = [_currentCommandBuffer blitCommandEncoder];
+    id<MTLBlitCommandEncoder> blit = [[self liveCommandBuffer] blitCommandEncoder];
 
     [blit copyFromTexture: src
               sourceSlice: 0
@@ -5545,7 +5559,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
     if (_currentCommandBuffer == nil)
         [self newCommandBuffer];
 
-    id<MTLBlitCommandEncoder> blit = [_currentCommandBuffer blitCommandEncoder];
+    id<MTLBlitCommandEncoder> blit = [[self liveCommandBuffer] blitCommandEncoder];
 
     [blit copyFromTexture: texture
               sourceSlice: slice
@@ -5605,7 +5619,7 @@ void mtlGetTexImage(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint b
 
     // start blit encoder
     id<MTLBlitCommandEncoder> blitCommandEncoder;
-    blitCommandEncoder = [_currentCommandBuffer blitCommandEncoder];
+    blitCommandEncoder = [[self liveCommandBuffer] blitCommandEncoder];
 
     [blitCommandEncoder generateMipmapsForTexture:texture];
     [blitCommandEncoder endEncoding];
@@ -5647,7 +5661,7 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
 
     // start blit encoder
     id<MTLBlitCommandEncoder> blitCommandEncoder;
-    blitCommandEncoder = [_currentCommandBuffer blitCommandEncoder];
+    blitCommandEncoder = [[self liveCommandBuffer] blitCommandEncoder];
 
     [blitCommandEncoder copyFromBuffer:buffer sourceOffset:src_offset sourceBytesPerRow:src_pitch sourceBytesPerImage:src_image_size sourceSize:MTLSizeMake(width, height, depth) toTexture:texture destinationSlice:zoffset destinationLevel:level destinationOrigin:MTLOriginMake(xoffset, yoffset, 0)
                                 options:MTLBlitOptionNone];

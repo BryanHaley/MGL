@@ -32,6 +32,14 @@ void mglDispatchCompute(GLMContext ctx, GLuint num_groups_x, GLuint num_groups_y
 
 void mglDispatchComputeIndirect(GLMContext ctx, GLintptr indirect)
 {
-        assert(0);
+    Buffer *buf = STATE(buffers[_DISPATCH_INDIRECT_BUFFER]);
+
+    ERROR_CHECK_RETURN(buf, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(indirect >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN((indirect & 3) == 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(indirect + 12 <= buf->size, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(STATE(program), GL_INVALID_OPERATION);
+
+    ctx->mtl_funcs.mtlDispatchComputeIndirect(ctx, indirect);
 }
 

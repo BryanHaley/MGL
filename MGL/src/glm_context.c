@@ -315,8 +315,10 @@ void MGLget(GLMContext ctx, GLenum param, GLuint *data)
         case MGL_STENCIL_FORMAT: *data = ctx->stencil_format.format; break;
         case MGL_STENCIL_TYPE: *data = ctx->stencil_format.type; break;
         case MGL_CONTEXT_FLAGS: *data = ctx->context_flags; break;
+
         default:
-            assert(0);
+            // MGLget is an MGL entry point, not GL, so there is no error to set
+            break;
     }
 }
 
