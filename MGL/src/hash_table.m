@@ -112,7 +112,12 @@ static void releaseName(HashTable *table, GLuint name)
 
 void *searchHashTable(HashTable *table, GLuint name)
 {
-    assert(table);
+    // no GL context reaches here, so a bad table is logged and refused
+    if (!table)
+    {
+        MGL_ERR("MGL Error: %s: table is NULL\n", __FUNCTION__);
+        return NULL;
+    }
     
     if (name >= table->size)
     {
@@ -127,7 +132,11 @@ void *searchHashTable(HashTable *table, GLuint name)
 
 void insertHashElement(HashTable *table, GLuint name, void *data)
 {
-    assert(table);
+    if (!table)
+    {
+        MGL_ERR("MGL Error: %s: table is NULL\n", __FUNCTION__);
+        return;
+    }
 
     if (name < table->size)
     {
@@ -202,7 +211,11 @@ void insertHashElement(HashTable *table, GLuint name, void *data)
 
 void deleteHashElement(HashTable *table, GLuint name)
 {
-    assert(table);
+    if (!table)
+    {
+        MGL_ERR("MGL Error: %s: table is NULL\n", __FUNCTION__);
+        return;
+    }
 
     if (name >= table->size) {
         // GL says deleting an unknown name is quietly ignored

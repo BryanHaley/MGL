@@ -444,6 +444,8 @@ typedef struct SpirvResource_t {
     GLuint  binding;
     GLuint  location;
     GLuint  msl_index;      // the [[buffer(n)]] / [[texture(n)]] slot SPIRV-Cross gave it
+    GLenum  gl_type;        // GL_FLOAT_VEC4 and friends, recorded at link time
+    GLint   array_size;     // 1 unless the uniform is an array
 } SpirvResource;
 
 typedef struct SpirvResourceList_t {

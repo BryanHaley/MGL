@@ -23,6 +23,7 @@
 #include <strings.h>
 
 #include "glm_context.h"
+#include "mgl_log.h"
 
 Buffer *findBuffer(GLMContext ctx, GLuint buffer);
 
@@ -74,7 +75,12 @@ VertexArray *newVAO(GLMContext ctx, GLuint vao)
     VertexArray *ptr;
 
     ptr = (VertexArray *)malloc(sizeof(VertexArray));
-    assert(ptr);
+
+    if (ptr == NULL)
+    {
+        MGL_ERR("MGL Error: %s: out of memory allocating a VertexArray\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     bzero((void *)ptr, sizeof(VertexArray));
 

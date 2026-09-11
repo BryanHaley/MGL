@@ -20,6 +20,7 @@
 
 #include <strings.h>
 #include "glm_context.h"
+#include "mgl_log.h"
 
 bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLint *param);
 bool setTexParamsi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLint *params);
@@ -37,7 +38,12 @@ Sampler *newSampler(GLMContext ctx, GLuint sampler)
     Sampler *ptr;
 
     ptr = (Sampler *)malloc(sizeof(Sampler));
-    assert(ptr);
+
+    if (ptr == NULL)
+    {
+        MGL_ERR("MGL Error: %s: out of memory allocating a Sampler\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     bzero(ptr, sizeof(Sampler));
 
@@ -198,7 +204,11 @@ void mglCreateSamplers(GLMContext ctx, GLsizei n, GLuint *samplers)
 
         name = *samplers++;
 
-        assert(getSampler(ctx, name));
+        if (!getSampler(ctx, name))
+        {
+            MGL_ERR("MGL Error: %s: could not create sampler %u\n", __FUNCTION__, name);
+            ERROR_RETURN(GL_OUT_OF_MEMORY);
+        }
     }
 }
 

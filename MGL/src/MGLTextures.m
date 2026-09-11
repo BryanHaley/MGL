@@ -150,7 +150,8 @@ MTLPixelFormat mtlPixelFormatForGLFormatType(GLenum gl_format, GLenum gl_type)
             return MTLPixelFormatBGR10A2Unorm;
 
         default:
-            assert(0);
+            // no Metal format for this GL type; the caller checks for Invalid
+            return MTLPixelFormatInvalid;
     }
 }
 
@@ -516,7 +517,8 @@ MTLPixelFormat mtlPixelFormatForGLTex(Texture * tex)
     MTLPixelFormat mtl_format;
     GLenum internal_format;
 
-    assert(tex);
+    if (tex == NULL)
+        return MTLPixelFormatInvalid;
 
     internal_format = tex->internalformat;
 

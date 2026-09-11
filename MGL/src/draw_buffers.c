@@ -70,7 +70,12 @@ bool processVAO(GLMContext ctx)
     VertexArray *vao;
 
     vao = ctx->state.vao;
-    assert(vao);
+
+    if (vao == NULL)
+    {
+        MGL_ERR("MGL Error: %s: no vertex array bound\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+    }
 
     if (vao->dirty_bits & DIRTY_VAO_BUFFER_BASE)
     {

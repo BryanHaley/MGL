@@ -68,7 +68,12 @@ Buffer *newBuffer(GLMContext ctx, GLenum target, GLuint name)
     Buffer *ptr;
 
     ptr = (Buffer *)malloc(sizeof(Buffer));
-    assert(ptr);
+
+    if (ptr == NULL)
+    {
+        MGL_ERR("MGL Error: %s: out of memory allocating a Buffer\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     bzero(ptr, sizeof(Buffer));
 
@@ -1302,7 +1307,12 @@ GLboolean mglUnmapBuffer(GLMContext ctx, GLenum target)
         // this will cause the buffer to be flushed on next draw command
         ptr->data.dirty_bits |= DIRTY_BUFFER_DATA;
 
-        assert(ptr->mapped == GL_FALSE);
+        // GL says unmapping a buffer that is not mapped is an error
+        if (ptr->mapped != GL_FALSE)
+        {
+            MGL_ERR("MGL Error: %s: buffer %u is still mapped\n", __FUNCTION__, ptr->name);
+            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, GL_FALSE);
+        }
         ptr->access = 0;
 
         return GL_TRUE;

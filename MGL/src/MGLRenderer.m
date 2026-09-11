@@ -34,6 +34,8 @@
 //#import "AAPLShaderTypes.h"
 
 #include <stdlib.h>
+
+#import "MGLScratchBuffer.h"
 #import "MGLRenderer.h"
 #import "glm_context.h"
 #import "programs.h"
@@ -170,7 +172,10 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
 
     // fans, loops, adjacency: modes Metal has no type for, expanded to indexed draws
     PrimitiveExpander         *_primitiveExpander;
-    id<MTLBuffer>              _expandIndexBuffer;
+
+    // short-lived GPU buffers that live as long as the command buffer reading
+    // them; replaces the single hand-grown _expandIndexBuffer
+    MGLScratchBufferPool      *_scratchPool;
 }
 
 // aligned_alloc needs alignment >= sizeof(void*) and a size that's a multiple of it
@@ -2215,7 +2220,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     MTLSamplerDescriptor *samplerDescriptor;
 
     samplerDescriptor = [MTLSamplerDescriptor new];
-    assert(samplerDescriptor);
+    MTL_CHECK_RETURN_VALUE(samplerDescriptor, GL_OUT_OF_MEMORY, nil);
 
     switch(tex_param->min_filter)
     {
@@ -2420,7 +2425,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     }
 
     id<MTLSamplerState> sampler = [_device newSamplerStateWithDescriptor:samplerDescriptor];
-    assert(sampler);
+    MTL_CHECK_RETURN_VALUE(sampler, GL_OUT_OF_MEMORY, nil);
 
     return sampler;
 }
@@ -2614,7 +2619,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     {
         tex = fbo_attachment->buf.tex;
     }
-    assert(tex);
+    MTL_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);
 
     return tex;
 }
@@ -2803,7 +2808,8 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 {
     Program *ptr;
 
-    assert(stage < _MAX_SPIRV_RES);
+    MTL_CHECK_RETURN_VALUE(stage >= 0 && stage < _MAX_SHADER_TYPES, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(type >= 0 && type < MAX_SPVC_RESOURCE_TYPES, GL_INVALID_OPERATION, 0);
     switch(type)
     {
         case SPVC_RESOURCE_TYPE_UNIFORM_BUFFER:
@@ -2832,7 +2838,8 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 {
     Program *ptr;
 
-    assert(stage < _MAX_SPIRV_RES);
+    MTL_CHECK_RETURN_VALUE(stage >= 0 && stage < _MAX_SHADER_TYPES, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(type >= 0 && type < MAX_SPVC_RESOURCE_TYPES, GL_INVALID_OPERATION, 0);
     switch(type)
     {
        case SPVC_RESOURCE_TYPE_UNIFORM_BUFFER:
@@ -2851,9 +2858,9 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     }
 
     ptr = ctx->state.program;
-    assert(ptr);
+    MTL_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, 0);
 
-    assert(index < ptr->spirv_resources_list[stage][type].count);
+    MTL_CHECK_RETURN_VALUE(index < ptr->spirv_resources_list[stage][type].count, GL_INVALID_VALUE, 0);
 
     return ptr->spirv_resources_list[stage][type].list[index].binding;
 }
@@ -2862,9 +2869,10 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 {
     Program *ptr = ctx->state.program;
 
-    assert(stage < _MAX_SPIRV_RES);
-    assert(ptr);
-    assert(index < ptr->spirv_resources_list[stage][type].count);
+    MTL_CHECK_RETURN_VALUE(stage >= 0 && stage < _MAX_SHADER_TYPES, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(type >= 0 && type < MAX_SPVC_RESOURCE_TYPES, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(index < ptr->spirv_resources_list[stage][type].count, GL_INVALID_VALUE, 0);
 
     return ptr->spirv_resources_list[stage][type].list[index].msl_index;
 }
@@ -2873,7 +2881,8 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 {
     Program *ptr;
 
-    assert(stage < _MAX_SPIRV_RES);
+    MTL_CHECK_RETURN_VALUE(stage >= 0 && stage < _MAX_SHADER_TYPES, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(type >= 0 && type < MAX_SPVC_RESOURCE_TYPES, GL_INVALID_OPERATION, 0);
     switch(type)
     {
        case SPVC_RESOURCE_TYPE_UNIFORM_BUFFER:
@@ -2892,9 +2901,9 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     }
 
     ptr = ctx->state.program;
-    assert(ptr);
+    MTL_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, 0);
 
-    assert(index < ptr->spirv_resources_list[stage][type].count);
+    MTL_CHECK_RETURN_VALUE(index < ptr->spirv_resources_list[stage][type].count, GL_INVALID_VALUE, 0);
     
     return ptr->spirv_resources_list[stage][type].list[index].location;
 }
@@ -2993,7 +3002,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     }
 
     texture = [_device newTextureWithDescriptor:tex_desc];
-    assert(texture);
+    MTL_CHECK_RETURN_VALUE(texture, GL_OUT_OF_MEMORY, nil);
 
     return texture;
 }
@@ -3016,7 +3025,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     }
 
     texture = [_device newTextureWithDescriptor:tex_desc];
-    assert(texture);
+    MTL_CHECK_RETURN_VALUE(texture, GL_OUT_OF_MEMORY, nil);
 
     return texture;
 }
@@ -3934,6 +3943,8 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
                 MGL_INFO("MGLCOMP: committing outgoing cmdbuf %p before replacing it\n",
                          (__bridge void *)_currentCommandBuffer);
 
+            [_scratchPool recycleWhenComplete: _currentCommandBuffer];
+
             @try {
                 [_currentCommandBuffer commit];
             } @catch (NSException *exception) {
@@ -4136,7 +4147,7 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
     // Configure a pipeline descriptor that is used to create a pipeline state.
     pipelineStateDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    assert(pipelineStateDescriptor);
+    MTL_CHECK_RETURN_VALUE(pipelineStateDescriptor, GL_OUT_OF_MEMORY, NULL);
     pipelineStateDescriptor.label = @"GLSL Pipeline";
     pipelineStateDescriptor.vertexFunction = vertexFunction;
     pipelineStateDescriptor.fragmentFunction = fragmentFunction;
@@ -4154,10 +4165,10 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
                 Texture *tex;
 
                 tex = [self framebufferAttachmentTexture: &fbo->color_attachments[i]];
-                assert(tex);
+                MTL_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);
 
                 RETURN_NULL_ON_FAILURE([self bindMTLTexture: tex]);
-                assert(tex->mtl_data);
+                MTL_CHECK_RETURN_VALUE(tex->mtl_data, GL_OUT_OF_MEMORY, NULL);
 
                 pipelineStateDescriptor.colorAttachments[i].pixelFormat = mtlPixelFormatForGLTex(tex);
             }
@@ -4175,10 +4186,10 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
             Texture *tex;
 
             tex = [self framebufferAttachmentTexture: &fbo->depth];
-            assert(tex);
+            MTL_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);
 
             RETURN_NULL_ON_FAILURE([self bindMTLTexture: tex]);
-            assert(tex->mtl_data);
+            MTL_CHECK_RETURN_VALUE(tex->mtl_data, GL_OUT_OF_MEMORY, NULL);
 
             MTLPixelFormat depthFormat = mtlPixelFormatForGLTex(tex);
             if (depthFormat == MTLPixelFormatInvalid) {
@@ -4196,10 +4207,10 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
             Texture *tex;
 
             tex = [self framebufferAttachmentTexture: &fbo->stencil];
-            assert(tex);
+            MTL_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);
 
             RETURN_NULL_ON_FAILURE([self bindMTLTexture: tex]);
-            assert(tex->mtl_data);
+            MTL_CHECK_RETURN_VALUE(tex->mtl_data, GL_OUT_OF_MEMORY, NULL);
 
             MTLPixelFormat stencilFormat = mtlPixelFormatForGLTex(tex);
             if (stencilFormat == MTLPixelFormatInvalid) {
@@ -4229,7 +4240,7 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 - (MTLVertexDescriptor *)generateVertexDescriptor
 {
     MTLVertexDescriptor *vertexDescriptor = [[MTLVertexDescriptor alloc] init];
-    assert(vertexDescriptor);
+    MTL_CHECK_RETURN_VALUE(vertexDescriptor, GL_OUT_OF_MEMORY, NULL);
 
     [vertexDescriptor reset]; // ??? debug
 
@@ -5448,6 +5459,8 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
             return;
         }
 
+        [_scratchPool recycleWhenComplete: _currentCommandBuffer];
+
         [self commitCommandBufferWithAGXRecovery:_currentCommandBuffer];
     } @catch (NSException *exception) {
         MGL_NSERR(@"MGL ERROR: Command buffer commit failed: %@", exception);
@@ -6444,25 +6457,25 @@ MTLPrimitiveType getMTLPrimitiveType(GLenum mode);
 
     NSUInteger bytes = (NSUInteger)ex.indexCount * (NSUInteger)ex.indexSize;
 
-    // one buffer grown as needed, rather than an allocation per draw
-    if (_expandIndexBuffer == nil || _expandIndexBuffer.length < bytes)
-        _expandIndexBuffer = [_device newBufferWithLength: bytes
-                                                  options: MTLResourceStorageModeShared];
+    // One buffer per draw, recycled when the command buffer finishes. Growing a
+    // single shared buffer instead resized the one the GPU was still reading as
+    // soon as two expanded draws were in flight together.
+    id<MTLBuffer> expandIndexBuffer = [_scratchPool bufferOfLength: bytes];
 
-    if (_expandIndexBuffer == nil)
+    if (expandIndexBuffer == nil)
     {
         ctx->error_func(ctx, __FUNCTION__, GL_OUT_OF_MEMORY);
 
         return true;
     }
 
-    memcpy(_expandIndexBuffer.contents, ex.indices, bytes);
+    memcpy(expandIndexBuffer.contents, ex.indices, bytes);
 
     @try {
         [_currentRenderEncoder drawIndexedPrimitives: (MTLPrimitiveType)ex.mtlType
                                           indexCount: ex.indexCount
                                            indexType: (MTLIndexType)ex.indexType
-                                         indexBuffer: _expandIndexBuffer
+                                         indexBuffer: expandIndexBuffer
                                    indexBufferOffset: 0
                                        instanceCount: (instanceCount < 1 ? 1 : instanceCount)
                                           baseVertex: baseVertex
@@ -7574,6 +7587,8 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     // getMacOSDefaults already ran and filled state.var from Apple's GL driver.
     // Anything Metal can answer for itself is more accurate, so it wins.
     [self queryDeviceLimits: glm_ctx];
+
+    _scratchPool = [[MGLScratchBufferPool alloc] initWithDevice: _device];
 
     // PROPER AGX VIRTUALIZATION DETECTION: Maintain Metal functionality with virtualization compatibility
     BOOL isVirtualized = NO;

@@ -2484,7 +2484,8 @@ MTLPixelFormat mtlPixelFormatForGLTex(Texture * tex)
     MTLPixelFormat mtl_format;
     GLenum internal_format;
 
-    assert(tex);
+    if (tex == NULL)
+        return MTLPixelFormatInvalid;
 
     internal_format = tex->internalformat;
     assert(internal_format);

@@ -456,21 +456,21 @@ void mglGetBooleanv(GLMContext ctx, GLenum pname, GLboolean *data)
 
 void mglGetDoublev(GLMContext ctx, GLenum pname, GLdouble *data)
 {
-    assert(data);
+    ERROR_CHECK_RETURN(data, GL_INVALID_VALUE);
 
     mglGet(ctx, pname, kDouble, (void *)data);
 }
 
 void mglGetFloatv(GLMContext ctx, GLenum pname, GLfloat *data)
 {
-    assert(data);
+    ERROR_CHECK_RETURN(data, GL_INVALID_VALUE);
 
     mglGet(ctx, pname, kFloat, (void *)data);
 }
 
 void mglGetIntegerv(GLMContext ctx, GLenum pname, GLint *data)
 {
-    assert(data);
+    ERROR_CHECK_RETURN(data, GL_INVALID_VALUE);
 
     mglGet(ctx, pname, kInt, (void *)data);
 }

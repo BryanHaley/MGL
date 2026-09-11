@@ -1258,8 +1258,12 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
                           (vm_address_t*) &texture_data,
                           texture_size,
                           VM_FLAGS_ANYWHERE);
-        assert(err == 0);
-        assert(texture_data);
+        if (err != 0 || texture_data == 0)
+        {
+            MGL_ERR("MGL Error: %s: could not allocate %zu bytes for a texture level\n",
+                    __FUNCTION__, (size_t)texture_size);
+            ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, false);
+        }
 
         tex->faces[face].levels[level].data_size = texture_size;
         tex->faces[face].levels[level].data = (vm_address_t)texture_data;

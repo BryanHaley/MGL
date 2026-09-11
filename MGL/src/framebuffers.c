@@ -40,7 +40,12 @@ static Renderbuffer *newRenderbuffer(GLMContext ctx, GLuint renderbuffer)
     Renderbuffer *ptr;
 
     ptr = (Renderbuffer *)malloc(sizeof(Renderbuffer));
-    assert(ptr);
+
+    if (ptr == NULL)
+    {
+        MGL_ERR("MGL Error: %s: out of memory allocating a Renderbuffer\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     bzero(ptr, sizeof(Renderbuffer));
 
@@ -109,7 +114,12 @@ static Framebuffer *newFramebuffer(GLMContext ctx, GLuint framebuffer)
     Framebuffer *ptr;
 
     ptr = (Framebuffer *)malloc(sizeof(Framebuffer));
-    assert(ptr);
+
+    if (ptr == NULL)
+    {
+        MGL_ERR("MGL Error: %s: out of memory allocating a Framebuffer\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     bzero(ptr, sizeof(Framebuffer));
 

@@ -309,7 +309,9 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     ctx->temp_element_buffer = NULL;
     
     err = glslang_initialize_process();
-    assert(err);
+
+    if (!err)
+        MGL_ERR("MGL Error: glslang would not initialise; shader compilation will fail\n");
     
     _ctx = save;
 

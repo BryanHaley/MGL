@@ -35,7 +35,8 @@ const char *getShaderTypeStr(GLuint type)
         "GEOMETRY_SHADER", "TESS_CONTROL_SHADER", "TESS_EVALUATION_SHADER",
         "COMPUTE_SHADER", "MAX_SHADER_TYPES", NULL};
 
-    assert(type < _MAX_SHADER_TYPES);
+    if (type < 0 || type >= _MAX_SHADER_TYPES)
+        return "UNKNOWN_SHADER_TYPE";
 
     return types[type];
 };

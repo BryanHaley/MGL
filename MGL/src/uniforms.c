@@ -44,7 +44,9 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
     Program *ptr;
 
     ptr = getProgram(ctx, program);
-    assert(program);
+
+    // this used to assert on the name and then dereference the pointer
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, -1);
 
     if (ptr->linked_glsl_program == NULL)
     {
@@ -245,7 +247,7 @@ void mglGetActiveUniformsiv(GLMContext ctx, GLuint program, GLsizei uniformCount
                 break;
 
             case GL_UNIFORM_SIZE:
-                params[i] = 1;
+                params[i] = res->array_size ? res->array_size : 1;
                 break;
 
             case GL_UNIFORM_BLOCK_INDEX:
@@ -266,8 +268,7 @@ void mglGetActiveUniformsiv(GLMContext ctx, GLuint program, GLsizei uniformCount
                 break;
 
             case GL_UNIFORM_TYPE:
-                // the linker does not record the GL type yet
-                params[i] = GL_NONE;
+                params[i] = (GLint)res->gl_type;
                 break;
 
             default:
@@ -303,11 +304,8 @@ void mglGetActiveUniform(GLMContext ctx, GLuint program, GLuint index, GLsizei b
 
     ERROR_CHECK_RETURN(res, GL_INVALID_VALUE);
 
-    // arrays are not reflected separately yet, so every uniform is one element
-    if (size) *size = 1;
-
-    // the linker does not record the GL type yet, same as glGetActiveUniformsiv
-    if (type) *type = GL_NONE;
+    if (size) *size = res->array_size ? res->array_size : 1;
+    if (type) *type = res->gl_type;
 
     if (name) copyName(res->name, bufSize, length, name);
     else if (length) *length = 0;
@@ -433,6 +431,78 @@ Program *programForUniform(GLMContext ctx, GLuint program)
 
 void mglUniformD(GLMContext ctx, GLint location, void *ptr, GLsizei size);
 
+// How many bytes one element of a GL uniform type occupies.
+static GLsizei glTypeSizeBytes(GLenum type)
+{
+    switch (type)
+    {
+        case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: case GL_BOOL:     return 4;
+        case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_UNSIGNED_INT_VEC2:
+        case GL_BOOL_VEC2:                                                  return 8;
+        case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3:
+        case GL_BOOL_VEC3:                                                  return 12;
+        case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4:
+        case GL_BOOL_VEC4:                                                  return 16;
+        case GL_FLOAT_MAT2:                                                 return 16;
+        case GL_FLOAT_MAT2x3: case GL_FLOAT_MAT3x2:                         return 24;
+        case GL_FLOAT_MAT2x4: case GL_FLOAT_MAT4x2:                         return 32;
+        case GL_FLOAT_MAT3:                                                 return 36;
+        case GL_FLOAT_MAT3x4: case GL_FLOAT_MAT4x3:                         return 48;
+        case GL_FLOAT_MAT4:                                                 return 64;
+        case GL_DOUBLE:                                                     return 8;
+        case GL_DOUBLE_VEC2:                                                return 16;
+        case GL_DOUBLE_VEC3:                                                return 24;
+        case GL_DOUBLE_VEC4:                                                return 32;
+        case GL_DOUBLE_MAT2:                                                return 32;
+        case GL_DOUBLE_MAT2x3: case GL_DOUBLE_MAT3x2:                       return 48;
+        case GL_DOUBLE_MAT2x4: case GL_DOUBLE_MAT4x2:                       return 64;
+        case GL_DOUBLE_MAT3:                                                return 72;
+        case GL_DOUBLE_MAT3x4: case GL_DOUBLE_MAT4x3:                       return 96;
+        case GL_DOUBLE_MAT4:                                                return 128;
+        default:                                                            return 0;   // samplers and the unknown
+    }
+}
+
+// The uniform declared at this location, or NULL if the program has none.
+static SpirvResource *uniformByLocation(Program *ptr, GLint location)
+{
+    if (location < 0)
+        return NULL;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        for (GLuint i = 0; i < list->count; i++)
+            if (list->list[i].location == (GLuint)location)
+                return &list->list[i];
+    }
+
+    return NULL;
+}
+
+// glUniform1f on a vec4 is GL_INVALID_OPERATION, and so is any other write whose
+// width does not fit the declared type. Sampler uniforms take an int and are
+// left to the existing path.
+static bool uniformWriteFits(Program *ptr, GLint location, GLsizei size)
+{
+    SpirvResource *res = uniformByLocation(ptr, location);
+
+    if (!res || res->gl_type == GL_NONE)
+        return true;                        // nothing recorded, nothing to check
+
+    GLsizei elem = glTypeSizeBytes(res->gl_type);
+
+    if (elem == 0)
+        return true;                        // a sampler, or a type we do not size
+
+    // Only the too-narrow case is policed. That is the one the spec names --
+    // glUniform1f on a vec4 -- and the one that silently corrupts a uniform.
+    // The upper bound would need array reflection this does not have yet, and
+    // guessing it wrong rejects writes that are perfectly legal.
+    return size >= elem;
+}
+
 void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size)
 {
     Buffer *buf;
@@ -444,6 +514,13 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
     ERROR_CHECK_RETURN(location >= 0, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(size > 0, GL_INVALID_VALUE);
+
+    // The spec wants a too-narrow write rejected -- glUniform1f on a vec4 is
+    // GL_INVALID_OPERATION. uniformWriteFits below knows how to decide that, but
+    // it needs a location to look the uniform up by, and MGL's locations do not
+    // line up with the SPIR-V Location decoration for every program: turning the
+    // check on rejects writes that are legal. Left off until that mapping is
+    // trustworthy; the type reflection it depends on is already in place.
 
     buf = pptr->uniform_constants.buffers[location].buf;
 

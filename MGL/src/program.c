@@ -39,7 +39,12 @@ ProgramPipeline *newProgramPipeline(GLMContext ctx, GLuint pipeline)
     ProgramPipeline *ptr;
 
     ptr = (ProgramPipeline *)malloc(sizeof(ProgramPipeline));
-    assert(ptr);
+
+    if (ptr == NULL)
+    {
+        MGL_ERR("MGL Error: %s: out of memory allocating a ProgramPipeline\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     bzero(ptr, sizeof(ProgramPipeline));
     ptr->name = pipeline;
@@ -71,7 +76,12 @@ TransformFeedback *newTransformFeedback(GLMContext ctx, GLuint name)
     TransformFeedback *ptr;
 
     ptr = (TransformFeedback *)malloc(sizeof(TransformFeedback));
-    assert(ptr);
+
+    if (ptr == NULL)
+    {
+        MGL_ERR("MGL Error: %s: out of memory allocating a TransformFeedback\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     bzero(ptr, sizeof(TransformFeedback));
     ptr->name = name;
@@ -106,7 +116,12 @@ Program *newProgram(GLMContext ctx, GLuint program)
     Program *ptr;
 
     ptr = (Program *)malloc(sizeof(Program));
-    assert(ptr);
+
+    if (ptr == NULL)
+    {
+        MGL_ERR("MGL Error: %s: out of memory allocating a Program\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     bzero(ptr, sizeof(Program));
 
@@ -346,8 +361,9 @@ void mglDetachShader(GLMContext ctx, GLuint program, GLuint shader)
 
 void error_callback(void *userdata, const char *error)
 {
-    assert(error);
-    DEBUG_PRINT("parseSPIRVShader error:%s\n", error);
+    // SPIRV-Cross always hands us a message; print nothing rather than crash
+    if (error)
+        DEBUG_PRINT("parseSPIRVShader error:%s\n", error);
 }
 
 
@@ -382,6 +398,118 @@ bool addShadersToProgram(GLMContext ctx, Program *pptr, glslang_program_t *glsl_
 
     return true;
 }
+// Sampler and image types, by dimension, arrayed-ness, depth and sample type.
+static GLenum glSamplerTypeFromSpirv(spvc_compiler compiler, spvc_type type)
+{
+    (void)compiler;
+
+    SpvDim dim = spvc_type_get_image_dimension(type);
+    spvc_bool arrayed = spvc_type_get_image_arrayed(type);
+    spvc_bool ms = spvc_type_get_image_multisampled(type);
+    spvc_bool depth = spvc_type_get_image_is_depth(type);
+
+    switch (dim)
+    {
+        case SpvDim1D:     return arrayed ? GL_SAMPLER_1D_ARRAY : GL_SAMPLER_1D;
+        case SpvDim2D:
+            if (ms)        return arrayed ? GL_SAMPLER_2D_MULTISAMPLE_ARRAY : GL_SAMPLER_2D_MULTISAMPLE;
+            if (depth)     return arrayed ? GL_SAMPLER_2D_ARRAY_SHADOW : GL_SAMPLER_2D_SHADOW;
+            return arrayed ? GL_SAMPLER_2D_ARRAY : GL_SAMPLER_2D;
+        case SpvDim3D:     return GL_SAMPLER_3D;
+        case SpvDimCube:
+            if (depth)     return GL_SAMPLER_CUBE_SHADOW;
+            return arrayed ? GL_SAMPLER_CUBE_MAP_ARRAY : GL_SAMPLER_CUBE;
+        case SpvDimRect:   return depth ? GL_SAMPLER_2D_RECT_SHADOW : GL_SAMPLER_2D_RECT;
+        case SpvDimBuffer: return GL_SAMPLER_BUFFER;
+        default:           return GL_NONE;
+    }
+}
+
+// Turn a SPIR-V type into the GL enum glGetActiveUniform is supposed to report.
+// Without this every uniform reads back as GL_NONE, and MGL cannot see the
+// size mismatch the spec requires it to reject.
+static GLenum glTypeFromSpirv(spvc_compiler compiler, spvc_type_id type_id, GLint *array_size_out)
+{
+    spvc_type type = spvc_compiler_get_type_handle(compiler, type_id);
+
+    if (array_size_out)
+        *array_size_out = 1;
+
+    if (!type)
+        return GL_NONE;
+
+    if (array_size_out && spvc_type_get_num_array_dimensions(type) > 0)
+    {
+        unsigned dim = spvc_type_get_array_dimension(type, 0);
+
+        // a zero dimension is an unsized array, which GL reports as one element
+        *array_size_out = dim ? (GLint)dim : 1;
+    }
+
+    unsigned vec = spvc_type_get_vector_size(type);
+    unsigned cols = spvc_type_get_columns(type);
+
+    switch (spvc_type_get_basetype(type))
+    {
+        case SPVC_BASETYPE_FP32:
+            if (cols > 1)
+            {
+                // GL names matrices columns x rows, square ones by one number
+                if (cols == 2) return vec == 2 ? GL_FLOAT_MAT2 : (vec == 3 ? GL_FLOAT_MAT2x3 : GL_FLOAT_MAT2x4);
+                if (cols == 3) return vec == 3 ? GL_FLOAT_MAT3 : (vec == 2 ? GL_FLOAT_MAT3x2 : GL_FLOAT_MAT3x4);
+                if (cols == 4) return vec == 4 ? GL_FLOAT_MAT4 : (vec == 2 ? GL_FLOAT_MAT4x2 : GL_FLOAT_MAT4x3);
+                return GL_NONE;
+            }
+            if (vec == 1) return GL_FLOAT;
+            if (vec == 2) return GL_FLOAT_VEC2;
+            if (vec == 3) return GL_FLOAT_VEC3;
+            if (vec == 4) return GL_FLOAT_VEC4;
+            return GL_NONE;
+
+        case SPVC_BASETYPE_FP64:
+            if (cols > 1)
+            {
+                if (cols == 2) return vec == 2 ? GL_DOUBLE_MAT2 : (vec == 3 ? GL_DOUBLE_MAT2x3 : GL_DOUBLE_MAT2x4);
+                if (cols == 3) return vec == 3 ? GL_DOUBLE_MAT3 : (vec == 2 ? GL_DOUBLE_MAT3x2 : GL_DOUBLE_MAT3x4);
+                if (cols == 4) return vec == 4 ? GL_DOUBLE_MAT4 : (vec == 2 ? GL_DOUBLE_MAT4x2 : GL_DOUBLE_MAT4x3);
+                return GL_NONE;
+            }
+            if (vec == 1) return GL_DOUBLE;
+            if (vec == 2) return GL_DOUBLE_VEC2;
+            if (vec == 3) return GL_DOUBLE_VEC3;
+            if (vec == 4) return GL_DOUBLE_VEC4;
+            return GL_NONE;
+
+        case SPVC_BASETYPE_INT32:
+            if (vec == 1) return GL_INT;
+            if (vec == 2) return GL_INT_VEC2;
+            if (vec == 3) return GL_INT_VEC3;
+            if (vec == 4) return GL_INT_VEC4;
+            return GL_NONE;
+
+        case SPVC_BASETYPE_UINT32:
+            if (vec == 1) return GL_UNSIGNED_INT;
+            if (vec == 2) return GL_UNSIGNED_INT_VEC2;
+            if (vec == 3) return GL_UNSIGNED_INT_VEC3;
+            if (vec == 4) return GL_UNSIGNED_INT_VEC4;
+            return GL_NONE;
+
+        case SPVC_BASETYPE_BOOLEAN:
+            if (vec == 1) return GL_BOOL;
+            if (vec == 2) return GL_BOOL_VEC2;
+            if (vec == 3) return GL_BOOL_VEC3;
+            if (vec == 4) return GL_BOOL_VEC4;
+            return GL_NONE;
+
+        case SPVC_BASETYPE_SAMPLED_IMAGE:
+        case SPVC_BASETYPE_IMAGE:
+            return glSamplerTypeFromSpirv(compiler, type);
+
+        default:
+            return GL_NONE;
+    }
+}
+
 
 char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
 {
@@ -401,9 +529,14 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     size_t i;
 
     spirv = ptr->spirv[stage].ir;
-    assert(spirv);
     word_count = ptr->spirv[stage].size;
-    assert(spirv);
+
+    // the second of these used to check spirv again rather than the size
+    if (spirv == NULL || word_count == 0)
+    {
+        MGL_ERR("MGL Error: %s: stage %d has no SPIR-V to translate\n", __FUNCTION__, stage);
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
 
     // Create context.
     if (spvc_context_create(&context) != SPVC_SUCCESS || context == NULL)
@@ -704,6 +837,9 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
             unsigned idx = spvc_compiler_msl_get_automatic_resource_binding(compiler_msl, rlist->list[i]._id);
 
             rlist->list[i].msl_index = (idx == (unsigned)-1) ? rlist->list[i].binding : idx;
+
+            rlist->list[i].gl_type = glTypeFromSpirv(compiler_msl, rlist->list[i].type_id,
+                                                     &rlist->list[i].array_size);
         }
     }
 
@@ -762,7 +898,12 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage)
 
     MGL_INFO("MGL DEBUG: Creating glslang program for stage %d\n", stage);
     glsl_program = glslang_program_create();
-    assert(glsl_program);
+
+    if (glsl_program == NULL)
+    {
+        MGL_ERR("MGL Error: %s: glslang would not create a program\n", __FUNCTION__);
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, false);
+    }
     MGL_INFO("MGL DEBUG: Created glslang program %p\n", (void*)glsl_program);
 
     // shaders to glsl program
@@ -1013,7 +1154,9 @@ GLint  mglGetAttribLocation(GLMContext ctx, GLuint program, const GLchar *name)
 	Program *ptr;
 
 	ptr = getProgram(ctx, program);
-	assert(program);
+
+	// this used to assert on the name and then dereference the pointer
+	ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, -1);
 
 	if (ptr->linked_glsl_program == NULL)
 	{
