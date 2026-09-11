@@ -1069,7 +1069,7 @@ void unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, void
     src = (GLubyte *)src_data;
     dst = (GLubyte *)dst_data;
 
-    assert(tex);
+    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
     dst_pitch = tex->faces[face].levels[level].pitch;
     assert(dst_pitch);
 

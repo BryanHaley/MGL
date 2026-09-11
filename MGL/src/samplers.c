@@ -137,7 +137,7 @@ void mglBindSampler(GLMContext ctx, GLuint unit, GLuint sampler)
         if(ptr == NULL)
         {
             ptr = getSampler(ctx, sampler);
-            assert(ptr);
+            ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
         }
     }
     else
@@ -162,7 +162,7 @@ void mglDeleteSamplers(GLMContext ctx, GLsizei count, const GLuint *samplers)
             Sampler *ptr;
 
             ptr = findSampler(ctx, sampler);
-            assert(ptr);
+            ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
             // remove any references to this sampler
             for(int i=0; i<TEXTURE_UNITS; i++)

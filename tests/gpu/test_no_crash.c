@@ -241,3 +241,98 @@ GPU_TEST(nocrash, sweep_of_unbound_objects)
 
     CHECK(1);
 }
+
+/* ---------- paths that used to assert inside the Metal layer ---------- */
+
+GPU_TEST(nocrash, indexed_draw_without_an_element_buffer)
+{
+    GLuint vao = 0;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    mgl_drain_errors();
+
+    glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_INT, NULL);
+    CHECK_EQ_UINT(GL_INVALID_OPERATION, mgl_drain_errors());
+
+    glDrawElementsInstanced(GL_TRIANGLES, 3, GL_UNSIGNED_INT, NULL, 1);
+    CHECK_EQ_UINT(GL_INVALID_OPERATION, mgl_drain_errors());
+
+    glDeleteVertexArrays(1, &vao);
+}
+
+/* the spec says a bad index type is GL_INVALID_ENUM, not GL_INVALID_VALUE */
+GPU_TEST(nocrash, bad_index_type_is_invalid_enum)
+{
+    GLuint vao = 0, ebo = 0;
+    GLuint idx[3] = { 0, 1, 2 };
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx, idx, GL_STATIC_DRAW);
+    mgl_drain_errors();
+
+    glDrawElements(GL_TRIANGLES, 3, GL_FLOAT, NULL);
+    CHECK_EQ_UINT(GL_INVALID_ENUM, mgl_drain_errors());
+
+    glDrawElements(GL_TRIANGLES, 3, 0x9999, NULL);
+    CHECK_EQ_UINT(GL_INVALID_ENUM, mgl_drain_errors());
+
+    /* GL_UNSIGNED_BYTE is a legal enum even where Metal cannot draw it, so it
+       must not come back as GL_INVALID_ENUM */
+    glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_BYTE, NULL);
+    CHECK(mgl_drain_errors() != GL_INVALID_ENUM);
+
+    glDeleteBuffers(1, &ebo);
+    glDeleteVertexArrays(1, &vao);
+}
+
+GPU_TEST(nocrash, indirect_draw_without_an_indirect_buffer)
+{
+    GLuint vao = 0;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+    mgl_drain_errors();
+
+    glDrawArraysIndirect(GL_TRIANGLES, NULL);
+    CHECK_EQ_UINT(GL_INVALID_OPERATION, mgl_drain_errors());
+
+    glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, NULL);
+    CHECK(mgl_drain_errors() != GL_NO_ERROR);
+
+    glDeleteVertexArrays(1, &vao);
+}
+
+GPU_TEST(nocrash, framebuffer_texture_1d_and_3d_reject_wrong_targets)
+{
+    GLuint fbo = 0, tex = 0;
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &tex);
+    mgl_drain_errors();
+
+    glFramebufferTexture1D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    CHECK_EQ_UINT(GL_INVALID_ENUM, mgl_drain_errors());
+
+    glFramebufferTexture3D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0, 0);
+    CHECK_EQ_UINT(GL_INVALID_ENUM, mgl_drain_errors());
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+}
+
+GPU_TEST(nocrash, gen_objects_with_a_null_array)
+{
+    glGenFramebuffers(1, NULL);
+    CHECK(mgl_drain_errors() != GL_NO_ERROR);
+
+    glGenRenderbuffers(1, NULL);
+    CHECK(mgl_drain_errors() != GL_NO_ERROR);
+}

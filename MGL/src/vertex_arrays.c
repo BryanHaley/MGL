@@ -566,7 +566,7 @@ void mglCreateVertexArrays(GLMContext ctx, GLsizei n, GLuint *arrays)
 
         ptr = getVAO(ctx, arrays[i]);
 
-        assert(ptr);
+        ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
     }
 }
 

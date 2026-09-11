@@ -61,6 +61,9 @@ static void make_indirect_buffer(GLuint *out_buf)
  * MGL rejects zero with GL_INVALID_VALUE — that is a bug.
  */
 
+/* A bad mode and a bad index type are both GL_INVALID_ENUM in the spec, not
+   GL_INVALID_VALUE. These checks used to assert what MGL happened to do. */
+
 GPU_TEST(draw_variants, base_instance_rejects_bad_mode)
 {
     GLuint vao;
@@ -74,7 +77,7 @@ GPU_TEST(draw_variants, base_instance_rejects_bad_mode)
     glUseProgram(prog);
 
     glDrawArraysInstancedBaseInstance(0x9999, 0, 3, 1, 0);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glDrawElementsInstancedBaseInstance(0x9999, 3, GL_UNSIGNED_SHORT, NULL, 1, 0);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
@@ -139,10 +142,10 @@ GPU_TEST(draw_variants, base_instance_rejects_bad_type)
     glUseProgram(prog);
 
     glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 3, GL_FLOAT, NULL, 1, 0);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glDrawElementsInstancedBaseVertexBaseInstance(GL_TRIANGLES, 3, 0x9999, NULL, 1, 0, 0);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glDeleteProgram(prog);
     glDeleteVertexArrays(1, &vao);
@@ -185,10 +188,10 @@ GPU_TEST(draw_variants, instanced_rejects_bad_arguments)
 
     /* bad type */
     glDrawElementsInstanced(GL_TRIANGLES, 3, 0x9999, NULL, 1);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 3, 0x9999, NULL, 1, 0);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glDeleteProgram(prog);
     glDeleteVertexArrays(1, &vao);
@@ -286,10 +289,10 @@ GPU_TEST(draw_variants, indirect_rejects_bad_element_type)
     make_indirect_buffer(&indirect_buf);
 
     glDrawElementsIndirect(GL_TRIANGLES, GL_FLOAT, NULL);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glMultiDrawElementsIndirect(GL_TRIANGLES, 0x9999, NULL, 1, 0);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
     glDeleteBuffers(1, &indirect_buf);
 }
@@ -326,7 +329,7 @@ GPU_TEST(draw_variants, range_base_vertex_rejects_bad_arguments)
 
     /* bad type */
     glDrawRangeElementsBaseVertex(GL_TRIANGLES, 0, 2, 3, 0x9999, NULL, 0);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glDeleteProgram(prog);
     glDeleteVertexArrays(1, &vao);
@@ -388,10 +391,10 @@ GPU_TEST(draw_variants, multi_draw_rejects_bad_type)
     const void *indices[] = { NULL };
 
     glMultiDrawElements(GL_TRIANGLES, count, 0x9999, indices, 1);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glMultiDrawElementsBaseVertex(GL_TRIANGLES, count, 0x9999, indices, 1, NULL);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 }
 
 /* ---------- transform feedback draw ----------

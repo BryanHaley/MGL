@@ -200,7 +200,7 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
             ptr->spirv[i].mtl_library = NULL;
         }
         
-        for(int j=0; j<_MAX_SPIRV_RES; j++)
+        for(int j=0; j<MAX_SPVC_RESOURCE_TYPES; j++)
         {
             // CRITICAL FIX: Add NULL checks and clear pointers to prevent double-frees
             if (ptr->spirv_resources_list[i][j].list) {
@@ -560,8 +560,26 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     
     // Do some basic reflection.
     spvc_compiler_create_shader_resources(compiler_msl, &resources);
-    for (int res_type=SPVC_RESOURCE_TYPE_UNIFORM_BUFFER; res_type < SPVC_RESOURCE_TYPE_ACCELERATION_STRUCTURE; res_type++)
+    // The exact types MGL consumes, listed rather than ranged: the enum's
+    // numbering has changed upstream and a range silently misses the new ones.
+    static const spvc_resource_type reflected_types[] = {
+        SPVC_RESOURCE_TYPE_UNIFORM_BUFFER,
+        SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT,
+        SPVC_RESOURCE_TYPE_STORAGE_BUFFER,
+        SPVC_RESOURCE_TYPE_STAGE_INPUT,
+        SPVC_RESOURCE_TYPE_STAGE_OUTPUT,
+        SPVC_RESOURCE_TYPE_SUBPASS_INPUT,
+        SPVC_RESOURCE_TYPE_STORAGE_IMAGE,
+        SPVC_RESOURCE_TYPE_SAMPLED_IMAGE,
+        SPVC_RESOURCE_TYPE_ATOMIC_COUNTER,
+        SPVC_RESOURCE_TYPE_PUSH_CONSTANT,
+        SPVC_RESOURCE_TYPE_SEPARATE_IMAGE,
+        SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS,
+    };
+
+    for (size_t rt_index = 0; rt_index < sizeof(reflected_types) / sizeof(reflected_types[0]); rt_index++)
     {
+        int res_type = (int)reflected_types[rt_index];
 #if DEBUG
         const char *res_name[] = {"NONE", "UNIFORM_BUFFER", "UNIFORM_CONSTANT", "STORAGE_BUFFER", "STAGE_INPUT", "STAGE_OUTPUT",
             "SUBPASS_INPUT", "STORAGE_INPUT", "SAMPLED_IMAGE", "ATOMIC_COUNTER", "PUSH_CONSTANT", "SEPARATE_IMAGE",
@@ -580,7 +598,9 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         }
 
         size_t alloc_size = count * sizeof(SpirvResource);
-        ptr->spirv_resources_list[stage][res_type].list = (SpirvResource *)malloc(alloc_size);
+        // zeroed, not raw: msl_index is filled in only after the MSL is emitted,
+        // and anything read before that must be a slot number, not heap garbage
+        ptr->spirv_resources_list[stage][res_type].list = (SpirvResource *)calloc(count ? count : 1, sizeof(SpirvResource));
         if (!ptr->spirv_resources_list[stage][res_type].list) {
             MGL_ERR("MGL SECURITY ERROR: Failed to allocate %zu bytes for resource list\n", alloc_size);
             ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
@@ -588,7 +608,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
 
         for (i = 0; i < count; i++)
         {
-            DEBUG_PRINT("res_type: %s ID: %u, BaseTypeID: %u, TypeID: %u, Name: %s ", res_name[res_type], list[i].id, list[i].base_type_id, list[i].type_id,
+            DEBUG_PRINT("res_type: %d ID: %u, BaseTypeID: %u, TypeID: %u, Name: %s ", res_type, list[i].id, list[i].base_type_id, list[i].type_id,
                    list[i].name);
             
             switch(res_type)
@@ -672,7 +692,10 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     // MSL slots are not a dense run -- an arrayed uniform reserves one index
     // per element -- so ask for each slot rather than counting. They are only
     // assigned once the shader has actually been emitted, hence after compile.
-    for (int res_type = 0; res_type < _MAX_SPIRV_RES; res_type++)
+    // Walk the whole array, not MGL's own shorter enum: SPIRV-Cross numbers
+    // plain GL uniforms 15, so a _MAX_SPIRV_RES bound skips them and leaves
+    // their msl_index holding whatever the allocator handed back.
+    for (int res_type = 0; res_type < MAX_SPVC_RESOURCE_TYPES; res_type++)
     {
         SpirvResourceList *rlist = &ptr->spirv_resources_list[stage][res_type];
 
@@ -683,6 +706,16 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
             rlist->list[i].msl_index = (idx == (unsigned)-1) ? rlist->list[i].binding : idx;
         }
     }
+
+    if (getenv("MGL_DEBUG_RESOURCES"))
+        for (int res_type = 0; res_type < MAX_SPVC_RESOURCE_TYPES; res_type++)
+        {
+            SpirvResourceList *rlist = &ptr->spirv_resources_list[stage][res_type];
+
+            for (unsigned i = 0; i < rlist->count; i++)
+                MGL_INFO("MGLMSL stage=%d type=%d name=%s msl_index=%u\n",
+                         stage, res_type, rlist->list[i].name, rlist->list[i].msl_index);
+        }
 
     if (getenv("MGL_DEBUG_MSL"))
         MGL_INFO("---- MSL stage %d ----\n%s\n", stage, result);

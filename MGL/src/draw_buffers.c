@@ -53,6 +53,10 @@ bool check_element_type(GLenum mode)
 {
     switch(mode)
     {
+        // all three are legal in GL. Metal has no uint8 index type, so that one
+        // is refused further down with GL_INVALID_OPERATION -- refusing the enum
+        // here would be telling the application it wrote something it did not.
+        case GL_UNSIGNED_BYTE:
         case GL_UNSIGNED_SHORT:
         case GL_UNSIGNED_INT:
             return true;
@@ -224,7 +228,7 @@ void mglDrawElements(GLMContext ctx, GLenum mode, GLsizei count, GLenum type, co
 
     if (count == 0) { return; }
 
-    if (!check_element_type(type)) { ERROR_RETURN(GL_INVALID_VALUE); return; }
+    if (!check_element_type(type)) { ERROR_RETURN(GL_INVALID_ENUM); return; }
 
     if(validate_vao(ctx, true) == false)
     {
@@ -246,7 +250,7 @@ void mglDrawRangeElements(GLMContext ctx, GLenum mode, GLuint start, GLuint end,
 
     if (count == 0) { return; }
 
-    if (!check_element_type(type)) { ERROR_RETURN(GL_INVALID_VALUE); return; }
+    if (!check_element_type(type)) { ERROR_RETURN(GL_INVALID_ENUM); return; }
 
     if(validate_vao(ctx, true) == false)
     {
@@ -300,7 +304,7 @@ void mglDrawElementsInstanced(GLMContext ctx, GLenum mode, GLsizei count, GLenum
 
     if (count == 0) { return; }
 
-    if (!check_element_type(type)) { ERROR_RETURN(GL_INVALID_VALUE); return; }
+    if (!check_element_type(type)) { ERROR_RETURN(GL_INVALID_ENUM); return; }
 
     ERROR_CHECK_RETURN(instancecount >= 0, GL_INVALID_VALUE);
 
@@ -324,7 +328,7 @@ void mglDrawElementsBaseVertex(GLMContext ctx, GLenum mode, GLsizei count, GLenu
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
     if (count == 0) return;
 
-    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
 
     if(validate_vao(ctx, true) == false)
     {
@@ -342,7 +346,7 @@ void mglDrawRangeElementsBaseVertex(GLMContext ctx, GLenum mode, GLuint start, G
 
     ERROR_CHECK_RETURN(count > 0, GL_INVALID_VALUE);
 
-    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
 
     ERROR_CHECK_RETURN(end > start, GL_INVALID_VALUE);
 
@@ -396,7 +400,7 @@ void mglDrawElementsIndirect(GLMContext ctx, GLenum mode, GLenum type, const voi
 {
     ERROR_CHECK_RETURN(check_draw_modes(mode), GL_INVALID_ENUM);
 
-    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
 
     if(validate_vao(ctx, true) == false)
     {
@@ -442,7 +446,7 @@ void mglDrawElementsInstancedBaseInstance(GLMContext ctx, GLenum mode, GLsizei c
 
     ERROR_CHECK_RETURN(check_draw_modes(mode), GL_INVALID_ENUM);
 
-    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
 
     if(validate_vao(ctx, true) == false)
     {
@@ -464,7 +468,7 @@ void mglDrawElementsInstancedBaseVertexBaseInstance(GLMContext ctx, GLenum mode,
 
     ERROR_CHECK_RETURN(check_draw_modes(mode), GL_INVALID_ENUM);
 
-    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
 
     if(validate_vao(ctx, true) == false)
     {
@@ -498,7 +502,7 @@ void mglMultiDrawElements(GLMContext ctx, GLenum mode, const GLsizei *count, GLe
 
     ERROR_CHECK_RETURN(drawcount > 0, GL_INVALID_VALUE);
 
-    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
 
     if(validate_vao(ctx, true) == false)
     {
@@ -518,7 +522,7 @@ void mglMultiDrawElementsBaseVertex(GLMContext ctx, GLenum mode, const GLsizei *
 
     ERROR_CHECK_RETURN(drawcount > 0, GL_INVALID_VALUE);
 
-    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
 
     if(validate_vao(ctx, true) == false)
     {
@@ -558,7 +562,7 @@ void mglMultiDrawElementsIndirect(GLMContext ctx, GLenum mode, GLenum type, cons
 
     ERROR_CHECK_RETURN(stride % 4 == 0, GL_INVALID_VALUE);
 
-    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
 
     if(validate_vao(ctx, true) == false)
     {

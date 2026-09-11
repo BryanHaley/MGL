@@ -167,7 +167,7 @@ void mglGenFramebuffers(GLMContext ctx, GLsizei n, GLuint *framebuffers)
     // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
-    assert(framebuffers);
+    ERROR_CHECK_RETURN(framebuffers, GL_INVALID_VALUE);
 
     while(n--)
     {
@@ -308,7 +308,7 @@ void mglGenRenderbuffers(GLMContext ctx, GLsizei n, GLuint *renderbuffers)
     // negative n would run past the caller's array
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
-    assert(renderbuffers);
+    ERROR_CHECK_RETURN(renderbuffers, GL_INVALID_VALUE);
 
     while(n--)
     {
@@ -795,7 +795,7 @@ void mglFramebufferTexture(GLMContext ctx, GLenum target, GLenum attachment, GLu
 
 void mglFramebufferTexture1D(GLMContext ctx, GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level)
 {
-    assert(textarget == GL_TEXTURE_1D);
+    ERROR_CHECK_RETURN(textarget == GL_TEXTURE_1D, GL_INVALID_ENUM);
 
     framebufferTexture(ctx, target, GL_TEXTURE_1D, attachment, textarget, texture, level, 0);
 }
@@ -823,7 +823,7 @@ void mglFramebufferTexture2D(GLMContext ctx, GLenum target, GLenum attachment, G
 
 void mglFramebufferTexture3D(GLMContext ctx, GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset)
 {
-    assert(textarget == GL_TEXTURE_3D);
+    ERROR_CHECK_RETURN(textarget == GL_TEXTURE_3D, GL_INVALID_ENUM);
 
     framebufferTexture(ctx, target, GL_TEXTURE_3D, attachment, textarget, texture, level, zoffset);
 }

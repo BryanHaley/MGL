@@ -123,6 +123,17 @@ enum {
     _MAX_BASE_TARGET
 };
 
+#include "spirv_cross_c.h"
+
+// Upstream SPIRV-Cross adopted MGL's local "uniform constant" resource class and
+// named it a plain GL uniform. Enum constants are invisible to the preprocessor,
+// so key off the C API version instead: the fork MGL has carried is 0.49.
+#if defined(SPVC_C_API_VERSION_MINOR) && SPVC_C_API_VERSION_MINOR >= 60
+#define SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT SPVC_RESOURCE_TYPE_GL_PLAIN_UNIFORM
+#endif
+
+#define MAX_SPVC_RESOURCE_TYPES 20
+
 enum {
     _UNKNOWN_RES = 0,
     _UNIFORM_BUFFER_RES,
@@ -464,7 +475,9 @@ typedef struct Program_t {
     Shader *shader_slots[_MAX_SHADER_TYPES];
     glslang_program_t *linked_glsl_program;
     Spirv spirv[_MAX_SHADER_TYPES];
-    SpirvResourceList spirv_resources_list[_MAX_SHADER_TYPES][_MAX_SPIRV_RES];
+    // indexed by the SPIRV-Cross resource enum, whose highest value has grown
+    // over time; sized to cover it rather than to MGL's own shorter list
+    SpirvResourceList spirv_resources_list[_MAX_SHADER_TYPES][MAX_SPVC_RESOURCE_TYPES];
     struct {
         unsigned x, y, z;
     } local_workgroup_size;

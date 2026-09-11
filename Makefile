@@ -7,9 +7,12 @@ SHELL := /bin/bash
 SDK_ROOT = $(shell xcrun --sdk macosx --show-sdk-path)
 
 # lets only install from external, devs complained about brew and we want the latest build from spirv
-spirv_cross_include_path ?= ./external/SPIRV-Cross
-spirv_cross_config_include_path ?= ./external/SPIRV-Cross
-spirv_cross_lib_path ?= ./external/SPIRV-Cross/build
+# SPIRV-Cross now comes from submodules/ -- current upstream plus the fp64
+# emulation. The old external/ fork still builds: override these three on the
+# make line to point back at it.
+spirv_cross_include_path ?= ./submodules/SPIRV-Cross
+spirv_cross_config_include_path ?= ./submodules/SPIRV-Cross
+spirv_cross_lib_path ?= ./submodules/SPIRV-Cross/build
 
 spirv_tools_include_path ?= ./external/SPIRV-Tools/include
 spirv_tools_path ?= ./external/SPIRV-Tools/build
@@ -114,7 +117,7 @@ LIBS += -L/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib
 LIBS += -lc++
 
 # add all the SPIRV libs
-SPIRV_LIBS := $(wildcard external/SPIRV-Cross/build/libspirv*.a)
+SPIRV_LIBS := $(wildcard $(spirv_cross_lib_path)/libspirv*.a)
 LIBS += $(SPIRV_LIBS)
 
 GLSL_LIBS := $(wildcard external/glslang/build/glslang/lib*.a)

@@ -386,6 +386,17 @@ static inline int mglDebugCompute(void)
     return on;
 }
 
+// assert() aborts the process. A driver that aborts cannot be run against a
+// conformance suite, and an application that passes a bad enum has earned an
+// error, not a crash. These raise the GL error and return instead.
+#define MTL_CHECK_RETURN(_expr_, _err_) \
+    do { if (!(_expr_)) { ctx->error_func(ctx, __FUNCTION__, _err_); return; } } while (0)
+
+#define MTL_CHECK_RETURN_VALUE(_expr_, _err_, _val_) \
+    do { if (!(_expr_)) { ctx->error_func(ctx, __FUNCTION__, _err_); return _val_; } } while (0)
+
+#define MTL_CHECK_RETURN_FALSE(_expr_, _err_) MTL_CHECK_RETURN_VALUE(_expr_, _err_, false)
+
 #pragma mark buffer objects
 
 // didModifyRange only means anything on a Managed buffer, where the CPU and GPU
@@ -446,7 +457,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
             buffer = [_device newBufferWithBytes:(void *)ptr->data.buffer_data
                                           length:ptr->data.buffer_size
                                          options:options];
-            assert(buffer);
+            MTL_CHECK_RETURN(buffer, GL_OUT_OF_MEMORY);
 
             kern_return_t err;
             err = vm_deallocate((vm_map_t) mach_task_self(),
@@ -806,7 +817,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     Buffer *ptr;
     GLintptr offset;
     
-    assert(_currentRenderEncoder);
+    MTL_CHECK_RETURN_FALSE(_currentRenderEncoder, GL_INVALID_OPERATION);
 
     {
         GLfloat constants[MAX_ATTRIBS * 4];
@@ -826,7 +837,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         ptr = map->buf;
         offset = map->offset;
 
-        assert(ptr);
+        MTL_CHECK_RETURN_FALSE(ptr, GL_INVALID_OPERATION);
 
         // small buffers go inline; larger ones need a real MTLBuffer
         if (ptr->size < 4096 && ptr->data.mtl_data == NULL)
@@ -867,7 +878,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     Buffer *ptr;
     GLintptr offset;
     
-    assert(_currentRenderEncoder);
+    MTL_CHECK_RETURN_FALSE(_currentRenderEncoder, GL_INVALID_OPERATION);
 
     for(int i=0; i<ctx->state.fragment_buffer_map_list.count; i++)
     {
@@ -876,24 +887,31 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         ptr = map->buf;
         offset = map->offset;
 
-        assert(ptr);
-        
-        if (ptr->size < 4096)
-        {
-            assert(ptr->data.mtl_data == NULL);
+        MTL_CHECK_RETURN_FALSE(ptr, GL_INVALID_OPERATION);
 
-            [_currentRenderEncoder setFragmentBytes:(const void *)ptr->data.buffer_data length:ptr->size atIndex:map->buffer_base_index];
-            
+        // A buffer the shader writes needs a real Metal object; so does one that
+        // already has one, whoever made it. Asserting that a small buffer has no
+        // Metal object was only true until something else allocated one.
+        bool writable = (map->gl_buffer_type == _SHADER_STORAGE_BUFFER ||
+                         map->gl_buffer_type == _ATOMIC_COUNTER_BUFFER);
+
+        if (!writable && ptr->size < 4096 && ptr->data.mtl_data == NULL)
+        {
+            [_currentRenderEncoder setFragmentBytes:(const void *)(ptr->data.buffer_data + offset)
+                                             length:ptr->size
+                                            atIndex:map->buffer_base_index];
+
             // clear buffer data dirty bits
             ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
         }
         else
         {
-            assert(ptr->data.mtl_data);
-            
+            RETURN_FALSE_ON_FAILURE([self processBuffer: ptr]);
+
             id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)(ptr->data.mtl_data);
-            assert(buffer);
-            
+
+            MTL_CHECK_RETURN_FALSE(buffer, GL_OUT_OF_MEMORY);
+
             [_currentRenderEncoder setFragmentBuffer:buffer offset:offset atIndex:map->buffer_base_index];
         }
     }
@@ -2418,7 +2436,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         int textures_to_be_mapped = count;
 
         // something is very wrong..
-        assert(textures_to_be_mapped < TEXTURE_UNITS);
+        MTL_CHECK_RETURN_FALSE(textures_to_be_mapped < TEXTURE_UNITS, GL_INVALID_VALUE);
 
         for (int i=0; textures_to_be_mapped > 0; i++)
         {
@@ -2750,7 +2768,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                     Texture *tex;
 
                     tex = STATE(active_textures[i*32+bitpos]);
-                    assert(tex);
+                    MTL_CHECK_RETURN_FALSE(tex, GL_INVALID_OPERATION);
 
                     RETURN_FALSE_ON_FAILURE([self bindMTLTexture: tex]);
                 }
@@ -2770,7 +2788,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     Texture *tex;
 
     tex = [self framebufferAttachmentTexture: fbo_attachment];
-    assert(tex);
+    MTL_CHECK_RETURN_FALSE(tex, GL_INVALID_OPERATION);
 
     tex->is_render_target = isDrawBuffer;
 
@@ -3244,7 +3262,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     }
 
     _renderPassDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
-    assert(_renderPassDescriptor);
+    MTL_CHECK_RETURN_FALSE(_renderPassDescriptor, GL_OUT_OF_MEMORY);
 
     if (ctx->state.framebuffer)
     {
@@ -3292,7 +3310,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             Texture *tex;
 
             tex = [self framebufferAttachmentTexture: &fbo->depth];
-            assert(tex);
+            MTL_CHECK_RETURN_FALSE(tex, GL_INVALID_OPERATION);
 
             _renderPassDescriptor.depthAttachment.texture = (__bridge id<MTLTexture> _Nullable)(tex->mtl_data);
         }
@@ -3303,7 +3321,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             Texture *tex;
 
             tex = [self framebufferAttachmentTexture: &fbo->stencil];
-            assert(tex);
+            MTL_CHECK_RETURN_FALSE(tex, GL_INVALID_OPERATION);
 
             _renderPassDescriptor.stencilAttachment.texture = (__bridge id<MTLTexture> _Nullable)(tex->mtl_data);
         }
@@ -3978,7 +3996,7 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     // STEP 2: Now handle pending event waits on the FRESH command buffer
     if (_currentEvent)
     {
-        assert(_currentSyncName);
+        MTL_CHECK_RETURN_FALSE(_currentSyncName, GL_INVALID_OPERATION);
 
         // SAFELY ENCODE: Event wait functionality on the new command buffer
         MGL_NSINFO(@"MGL INFO: Encoding event wait on fresh command buffer");
@@ -4985,7 +5003,7 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
 - (bool) bindBuffersToComputeEncoder:(id <MTLComputeCommandEncoder>) computeCommandEncoder
 {
-    assert(computeCommandEncoder);
+    MTL_CHECK_RETURN_FALSE(computeCommandEncoder, GL_OUT_OF_MEMORY);
 
     RETURN_FALSE_ON_FAILURE([self mapGLBuffersToMTLBufferMap: &ctx->state.compute_buffer_map_list stage:_COMPUTE_SHADER]);
 
@@ -5068,7 +5086,7 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
         {0,0}
     };
 
-    assert(computeCommandEncoder);
+    MTL_CHECK_RETURN_FALSE(computeCommandEncoder, GL_OUT_OF_MEMORY);
 
     for(int type=0; mapped_types[type].spvc_type; type++)
     {
@@ -5084,7 +5102,7 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
         {
             int textures_to_be_mapped = count;
 
-            assert(textures_to_be_mapped < TEXTURE_UNITS);
+            MTL_CHECK_RETURN_FALSE(textures_to_be_mapped < TEXTURE_UNITS, GL_INVALID_VALUE);
 
             for (int i=0; textures_to_be_mapped > 0; i++)
             {
@@ -5109,11 +5127,11 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
                 if (ptr)
                 {
                     RETURN_FALSE_ON_FAILURE([self bindMTLTexture: ptr]);
-                    assert(ptr->mtl_data);
+                    MTL_CHECK_RETURN_FALSE(ptr->mtl_data, GL_OUT_OF_MEMORY);
 
                     id<MTLTexture> texture;
                     texture = (__bridge id<MTLTexture>)(ptr->mtl_data);
-                    assert(texture);
+                    MTL_CHECK_RETURN_FALSE(texture, GL_OUT_OF_MEMORY);
 
                     id<MTLSamplerState> sampler;
 
@@ -5141,12 +5159,12 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
                         }
 
                         sampler = (__bridge id<MTLSamplerState>)(gl_sampler->mtl_data);
-                        assert(sampler);
+                        MTL_CHECK_RETURN_FALSE(sampler, GL_OUT_OF_MEMORY);
                     }
                     else
                     {
                         sampler = (__bridge id<MTLSamplerState>)(ptr->params.mtl_data);
-                        assert(sampler);
+                        MTL_CHECK_RETURN_FALSE(sampler, GL_OUT_OF_MEMORY);
                     }
 
                     [computeCommandEncoder setTexture:texture atIndex:spirv_binding];
@@ -5208,7 +5226,7 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     id <MTLComputePipelineState> computePipelineState;
     NSError *errors;
     computePipelineState = [_device newComputePipelineStateWithFunction:func error: &errors];
-    assert(computePipelineState);
+    MTL_CHECK_RETURN_FALSE(computePipelineState, GL_OUT_OF_MEMORY);
 
     [computeCommandEncoder setComputePipelineState:computePipelineState];
 
@@ -5534,7 +5552,7 @@ bool mtlBindProgram(GLMContext glm_ctx, Program *ptr)
 #pragma mark C interface to mtlDeleteMTLObj
 -(void) mtlDeleteMTLObj:(GLMContext) glm_ctx buffer: (void *)obj
 {
-    assert(obj);
+    MTL_CHECK_RETURN(obj, GL_OUT_OF_MEMORY);
     
     [self flushCommandBuffer: false];
 
@@ -5865,7 +5883,7 @@ void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
     }
 
     mtl_buffer = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
-    assert(mtl_buffer);
+    MTL_CHECK_RETURN(mtl_buffer, GL_OUT_OF_MEMORY);
 
     data = mtl_buffer.contents;
     memcpy(data+offset, ptr, size);
@@ -6276,12 +6294,12 @@ void mtlGetTexImage(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint b
 
     // no failure path..?
     RETURN_ON_FAILURE([self bindMTLTexture:tex]);
-    assert(tex->mtl_data);
+    MTL_CHECK_RETURN(tex->mtl_data, GL_OUT_OF_MEMORY);
 
     id<MTLTexture> texture;
 
     texture = (__bridge id<MTLTexture>)(tex->mtl_data);
-    assert(texture);
+    MTL_CHECK_RETURN(texture, GL_OUT_OF_MEMORY);
 
     // start blit encoder
     id<MTLBlitCommandEncoder> blitCommandEncoder;
@@ -6310,7 +6328,7 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
 
     id<MTLBuffer> buffer;
     buffer = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
-    assert(buffer);
+    MTL_CHECK_RETURN(buffer, GL_OUT_OF_MEMORY);
 
     if (tex->mtl_data == NULL)
     {
@@ -6320,7 +6338,7 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
 
     id<MTLTexture> texture;
     texture = (__bridge id<MTLTexture>)(tex->mtl_data);
-    assert(texture);
+    MTL_CHECK_RETURN(texture, GL_OUT_OF_MEMORY);
 
     // end encoding on current render encoder
     [self endRenderEncoding];
@@ -6565,16 +6583,21 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     // with an element buffer bound, indices is a byte offset into it
     size_t offset = (size_t)(uintptr_t)indices;
@@ -6604,16 +6627,21 @@ void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     size_t offset = (char *)indices - (char *)NULL;
 
@@ -6667,16 +6695,21 @@ void mtlDrawArraysInstanced(GLMContext glm_ctx, GLenum mode, GLint first, GLsize
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     size_t offset = (char *)indices - (char *)NULL;
 
@@ -6709,16 +6742,21 @@ void mtlDrawElementsInstanced(GLMContext glm_ctx, GLenum mode, GLsizei count, GL
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     size_t offset = (char *)indices - (char *)NULL;
 
@@ -6745,16 +6783,21 @@ void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, G
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     size_t offset = (char *)indices - (char *)NULL;
 
@@ -6786,16 +6829,21 @@ void mtlDrawRangeElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLuint star
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     size_t offset = (char *)indices - (char *)NULL;
 
@@ -6826,13 +6874,13 @@ void mtlDrawElementsInstancedBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei
     primitiveType = getMTLPrimitiveType(mode);
 
     Buffer *gl_indirect_buffer = getIndirectBuffer(ctx);
-    assert(gl_indirect_buffer);
+    MTL_CHECK_RETURN(gl_indirect_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_indirect_buffer] == false)
         return;
 
     id <MTLBuffer>indirectBuffer = (__bridge id<MTLBuffer>)(gl_indirect_buffer->data.mtl_data);
-    assert(indirectBuffer);
+    MTL_CHECK_RETURN(indirectBuffer, GL_OUT_OF_MEMORY);
 
     [_currentRenderEncoder drawPrimitives:primitiveType indirectBuffer:indirectBuffer indirectBufferOffset:(DrawArraysIndirectCommand *)indirect - (DrawArraysIndirectCommand *)NULL];
 }
@@ -6864,26 +6912,31 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
 
     // get element buffer
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     // get indirect buffer
     Buffer *gl_indirect_buffer = getIndirectBuffer(ctx);
-    assert(gl_indirect_buffer);
+    MTL_CHECK_RETURN(gl_indirect_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_indirect_buffer] == false)
         return;
 
     id <MTLBuffer>indirectBuffer = (__bridge id<MTLBuffer>)(gl_indirect_buffer->data.mtl_data);
-    assert(indirectBuffer);
+    MTL_CHECK_RETURN(indirectBuffer, GL_OUT_OF_MEMORY);
 
     // draw indexed primitive
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexType:indexType indexBuffer: indexBuffer indexBufferOffset:0 indirectBuffer:indirectBuffer indirectBufferOffset:(DrawElementsIndirectCommand *)indirect - (DrawElementsIndirectCommand *)NULL];
@@ -6930,16 +6983,21 @@ void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint f
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     size_t offset = (char *)indices - (char *)NULL;
 
@@ -6972,16 +7030,21 @@ void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsiz
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     size_t offset = (char *)indices - (char *)NULL;
 
@@ -7036,16 +7099,21 @@ void mtlMultiDrawArrays(GLMContext glm_ctx, GLenum mode, const GLint *first, con
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     for(int i=0; i<drawcount; i++)
     {
@@ -7081,17 +7149,22 @@ void mtlMultiDrawElements(GLMContext glm_ctx, GLenum mode, const GLsizei *count,
     primitiveType = getMTLPrimitiveType(mode);
 
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     // element buffer
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
 
     for(int i=0; i<drawcount; i++)
@@ -7132,13 +7205,13 @@ void mtlMultiDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, const GLsiz
     primitiveType = getMTLPrimitiveType(mode);
 
     Buffer *gl_indirect_buffer = getIndirectBuffer(ctx);
-    assert(gl_indirect_buffer);
+    MTL_CHECK_RETURN(gl_indirect_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_indirect_buffer] == false)
         return;
 
     id <MTLBuffer>indirectBuffer = (__bridge id<MTLBuffer>)(gl_indirect_buffer->data.mtl_data);
-    assert(indirectBuffer);
+    MTL_CHECK_RETURN(indirectBuffer, GL_OUT_OF_MEMORY);
 
     for(int i=0; i<drawcount; i++)
     {
@@ -7183,26 +7256,31 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
 
     // get element buffer
     indexType = getMTLIndexType(type);
-    assert(indexType != 0xFFFFFFFF);
+    if (indexType == 0xFFFFFFFF)
+    {
+        // the enum was legal, Metal just has no such index type
+        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
+        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
+    }
 
     Buffer *gl_element_buffer = getElementBuffer(ctx);
-    assert(gl_element_buffer);
+    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_element_buffer] == false)
         return;
 
     id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    assert(indexBuffer);
+    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
 
     // get indirect buffer
     Buffer *gl_indirect_buffer = getIndirectBuffer(ctx);
-    assert(gl_indirect_buffer);
+    MTL_CHECK_RETURN(gl_indirect_buffer, GL_INVALID_OPERATION);
 
     if ([self processBuffer: gl_indirect_buffer] == false)
         return;
 
     id <MTLBuffer>indirectBuffer = (__bridge id<MTLBuffer>)(gl_indirect_buffer->data.mtl_data);
-    assert(indirectBuffer);
+    MTL_CHECK_RETURN(indirectBuffer, GL_OUT_OF_MEMORY);
 
     for(int i=0; i<drawcount; i++)
     {

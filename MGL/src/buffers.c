@@ -572,7 +572,7 @@ void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffe
     if (buffer)
     {
         ptr = getBuffer(ctx, target, buffer);
-        assert(ptr);
+        ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
         ERROR_CHECK_RETURN(ptr->data.buffer_size, GL_INVALID_VALUE);
         ERROR_CHECK_RETURN(ptr->data.buffer_data, GL_INVALID_VALUE);
@@ -645,7 +645,7 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
     if (buffer)
     {
         ptr = getBuffer(ctx, target, buffer);
-        assert(ptr);
+        ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
         // ERROR_CHECK_RETURN(ptr->data.buffer_data, GL_INVALID_VALUE);
         if (!ptr->data.buffer_data) {
