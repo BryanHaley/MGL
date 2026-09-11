@@ -35,6 +35,13 @@ typedef struct {
     size_t size;
     GLuint current_name;
     HashObj *keys;
+
+    // Names of deleted objects, waiting to be handed out again. Without this
+    // the table only ever grows: an app that creates and deletes objects in a
+    // loop keeps pushing current_name up and the keys array along with it.
+    GLuint *free_names;
+    size_t  free_count;
+    size_t  free_capacity;
 } HashTable;
 
 HashTable *createHashTable(GLuint size);

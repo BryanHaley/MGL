@@ -197,3 +197,102 @@ GPU_TEST(objects, is_queries_reject_unknown_names)
 
     mgl_drain_errors();
 }
+
+/* ---------- deleted names come back ---------- */
+
+GPU_TEST(objects, deleted_names_are_reused)
+{
+    // Without a free list every create/delete cycle pushed the next name up,
+    // and the hash table grew with it for as long as the app ran. A game that
+    // churns objects per frame reached tens of thousands of names in seconds.
+    GLuint peak = 0;
+
+    for (int round = 0; round < 50; round++)
+    {
+        GLuint b[20];
+
+        glGenBuffers(20, b);
+
+        for (int i = 0; i < 20; i++)
+        {
+            glBindBuffer(GL_ARRAY_BUFFER, b[i]);
+            glBufferData(GL_ARRAY_BUFFER, 64, NULL, GL_STATIC_DRAW);
+
+            if (b[i] > peak)
+                peak = b[i];
+        }
+
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glDeleteBuffers(20, b);
+    }
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    // 1000 buffers came and went, but only 20 were ever alive at once
+    CHECK_MSG(peak < 200, "names ran to %u for 20 live buffers, so nothing is being reused", peak);
+}
+
+GPU_TEST(objects, reused_names_never_collide_with_live_objects)
+{
+    GLuint live[64];
+
+    glGenBuffers(64, live);
+
+    for (int i = 0; i < 64; i++)
+    {
+        glBindBuffer(GL_ARRAY_BUFFER, live[i]);
+        glBufferData(GL_ARRAY_BUFFER, 16, NULL, GL_STATIC_DRAW);
+    }
+
+    for (int i = 0; i < 64; i++)
+        for (int j = i + 1; j < 64; j++)
+            CHECK_MSG(live[i] != live[j], "live buffers %d and %d share name %u", i, j, live[i]);
+
+    // free one, then bring the same name back by binding it directly -- a
+    // later Gen must not hand that name out while it is in use again
+    GLuint victim = live[7];
+
+    glDeleteBuffers(1, &victim);
+    glBindBuffer(GL_ARRAY_BUFFER, victim);
+    glBufferData(GL_ARRAY_BUFFER, 16, NULL, GL_STATIC_DRAW);
+
+    GLuint fresh[8];
+    glGenBuffers(8, fresh);
+
+    for (int i = 0; i < 8; i++)
+        CHECK_MSG(fresh[i] != victim, "name %u was handed out while still in use", victim);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDeleteBuffers(8, fresh);
+    glDeleteBuffers(64, live);
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+GPU_TEST(objects, reused_name_still_holds_data)
+{
+    GLuint a = 0, b = 0;
+    float in[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+    float out[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    glGenBuffers(1, &a);
+    glBindBuffer(GL_ARRAY_BUFFER, a);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(in), in, GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDeleteBuffers(1, &a);
+
+    // whatever name this gets, most likely the one just freed, it must be a
+    // clean buffer and not carry anything over from the old object
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_ARRAY_BUFFER, b);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(in), in, GL_STATIC_DRAW);
+    glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(out), out);
+
+    for (int i = 0; i < 4; i++)
+        CHECK_NEAR(out[i], in[i], 0.0f);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDeleteBuffers(1, &b);
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}

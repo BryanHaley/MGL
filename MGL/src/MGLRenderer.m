@@ -5220,7 +5220,8 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
     MTLCommandBufferStatus currentStatus = _currentCommandBuffer.status;
 
     if (currentStatus >= MTLCommandBufferStatusCommitted) {
-        MGL_NSERR(@"MGL WARNING: Command buffer already committed");
+        // already submitted, so a flush has nothing left to do
+        MGL_NSDEBUG(@"MGL: flushCommandBuffer - buffer already committed, nothing to flush");
         return;
     }
 
