@@ -41,6 +41,8 @@
 #import "programs.h"
 #import "mgl_log.h"
 #import "primitive_expand.h"
+#import "MGLKernels.h"
+#import "mgl_format_table.h"
 #import "pixel_convert.h"
 
 #define TRACE_FUNCTION()    DEBUG_PRINT("%s\n", __FUNCTION__);
@@ -176,6 +178,10 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     // short-lived GPU buffers that live as long as the command buffer reading
     // them; replaces the single hand-grown _expandIndexBuffer
     MGLScratchBufferPool      *_scratchPool;
+
+    // compute kernels for what Metal draws cannot do on their own: byte
+    // indices, custom restart indices, query accumulation
+    MGLKernelLibrary          *_kernels;
 }
 
 // aligned_alloc needs alignment >= sizeof(void*) and a size that's a multiple of it
@@ -2152,67 +2158,15 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 // Helper function to calculate bytes per pixel for different OpenGL formats
 - (NSUInteger)bytesPerPixelForFormat:(GLenum)internalformat
 {
-    switch(internalformat) {
-        case GL_RED:
-        case GL_R8:
-        case GL_R8I:
-        case GL_R8UI:
-            return 1;
+    const MGLFormatDesc *d = mglFormatDesc(internalformat);
 
-        case GL_RG:
-        case GL_RG8:
-        case GL_RG8I:
-        case GL_RG8UI:
-        case GL_R16:
-        case GL_R16F:
-            return 2;
-
-        case GL_RGB:
-        case GL_RGB8:
-        case GL_RGB8I:
-        case GL_RGB8UI:
-        case GL_SRGB8:
-        case GL_R11F_G11F_B10F:
-        case GL_RGB9_E5:
-            return 3;
-
-        case GL_RGBA:
-        case GL_RGBA8:
-        case GL_RGBA8I:
-        case GL_RGBA8UI:
-        case GL_RGB10_A2:
-        case GL_RGB10_A2UI:
-        case GL_SRGB8_ALPHA8:
-            return 4;
-
-        case GL_RGBA16:
-        case GL_RGBA16F:
-        case GL_R32F:
-            return 8;
-
-        case GL_RGB16:
-        case GL_RGB16F:
-            return 6;
-
-        case GL_RGBA16I:
-        case GL_RGBA16UI:
-            return 8;
-
-        case GL_RGB32F:
-        case GL_RGB32I:
-        case GL_RGB32UI:
-            return 12;
-
-        case GL_RGBA32F:
-        case GL_RGBA32I:
-        case GL_RGBA32UI:
-            return 16;
-
-        default:
-            // Default to 4 bytes for unknown formats
-            MGL_NSERR(@"MGL WARNING: Unknown internal format 0x%x, defaulting to 4 bytes per pixel", internalformat);
-            return 4;
+    if (d->gl_format == 0)
+    {
+        MGL_NSERR(@"MGL WARNING: Unknown internal format 0x%x, defaulting to 4 bytes per pixel", internalformat);
+        return 4;
     }
+
+    return d->bytes_per_block;
 }
 
 - (id<MTLSamplerState>) createMTLSamplerForTexParam:(TextureParameter *)tex_param target:(GLuint)target
@@ -6445,14 +6399,15 @@ MTLPrimitiveType getMTLPrimitiveType(GLenum mode);
         : primitive_expand_arrays(_primitiveExpander, ctx, mode, count);
 
     // GL_PATCHES with no tessellation stage, or a mode we could not build
-    if (ex.mtlType == 0 || ex.indices == NULL)
+    if (ex.mtlType == 0)
     {
         ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
 
         return true;
     }
 
-    if (ex.indexCount == 0)
+    // too few vertices for even one primitive: nothing to draw, no error
+    if (ex.indexCount == 0 || ex.indices == NULL)
         return true;
 
     NSUInteger bytes = (NSUInteger)ex.indexCount * (NSUInteger)ex.indexSize;
@@ -6515,6 +6470,117 @@ Buffer *getIndirectBuffer(GLMContext ctx)
     Buffer *gl_indirect_buffer = STATE(buffers[_DRAW_INDIRECT_BUFFER]);
 
     return gl_indirect_buffer;
+}
+
+// what a Metal indexed draw reads from
+typedef struct {
+    id<MTLBuffer> buffer;
+    NSUInteger    offset;   // where the converted range starts
+    NSUInteger    scale;    // bytes per index here over bytes per index in GL
+    MTLIndexType  type;
+} MGLIndexSource;
+
+// Metal has no 8-bit index type and only restarts on 0xFFFF / 0xFFFFFFFF.
+// A draw whose indices are bytes, or whose restart index is anything else,
+// gets them rewritten by a kernel into a scratch buffer first. That runs a
+// compute pass, which closes the render encoder, so this must go before
+// processGLState (which opens a fresh one).
+// `count` is how many indices the draw reads starting at `offset`; pass 0
+// for the whole buffer, which indirect and multi draws need.
+- (bool) resolveIndices: (GLenum) type
+                 offset: (size_t) offset
+                  count: (GLsizei) count
+                   into: (MGLIndexSource *) out
+{
+    Buffer *gl_element_buffer = getElementBuffer(ctx);
+    MTL_CHECK_RETURN_FALSE(gl_element_buffer, GL_INVALID_OPERATION);
+
+    if ([self processBuffer: gl_element_buffer] == false)
+        return false;
+
+    id<MTLBuffer> indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
+    MTL_CHECK_RETURN_FALSE(indexBuffer, GL_OUT_OF_MEMORY);
+
+    size_t elem = (type == GL_UNSIGNED_BYTE) ? 1 : (type == GL_UNSIGNED_SHORT) ? 2 : 4;
+    size_t size = (size_t)gl_element_buffer->size;
+    size_t available = size > offset ? size - offset : 0;
+
+    if (count <= 0)
+        count = (GLsizei)(available / elem);
+
+    // the restart index in force for this index type, if any
+    uint32_t mask = elem == 1 ? 0xFFu : elem == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+    bool fixedRestart  = ctx->state.caps.primitive_restart_fixed_index;
+    bool customRestart = !fixedRestart && ctx->state.caps.primitive_restart;
+    uint32_t restart   = ctx->state.var.primitive_restart_index & mask;
+
+    // an application that picked Metal's own value needs no remap
+    if (customRestart && restart == mask)
+    {
+        customRestart = false;
+        fixedRestart = true;
+    }
+
+    out->buffer = indexBuffer;
+    out->offset = offset;
+    out->scale  = 1;
+    out->type   = (elem == 4) ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
+
+    if (elem != 1 && !customRestart)
+        return true;
+
+    if (count == 0)
+        return true;
+
+    MTL_CHECK_RETURN_FALSE(_kernels, GL_INVALID_OPERATION);
+    MTL_CHECK_RETURN_FALSE((size_t)count * elem <= available, GL_INVALID_OPERATION);
+
+    size_t outElem = (elem == 1) ? 2 : elem;
+    MTLIndexType outType = (outElem == 4) ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
+    id<MTLBuffer> scratch = [_scratchPool bufferOfLength: (NSUInteger)count * outElem];
+    MTL_CHECK_RETURN_FALSE(scratch, GL_OUT_OF_MEMORY);
+
+    bool ok = true;
+
+    if (elem != 1)
+    {
+        // same width, so a plain copy and the remap runs on the copy
+        id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
+        MTL_CHECK_RETURN_FALSE(blit, GL_OUT_OF_MEMORY);
+
+        [blit copyFromBuffer: indexBuffer sourceOffset: offset
+                    toBuffer: scratch destinationOffset: 0 size: (NSUInteger)count * elem];
+        [blit endEncoding];
+    }
+
+    id<MTLComputeCommandEncoder> enc = [self liveComputeEncoder];
+    MTL_CHECK_RETURN_FALSE(enc, GL_OUT_OF_MEMORY);
+
+    if (elem == 1)
+    {
+        // 0xFF only means restart when the fixed index is on
+        ok = [_kernels encodeConvertUint8Indices: enc
+                                          source: indexBuffer sourceOffset: offset
+                                     destination: scratch
+                                           count: count
+                                          keepFF: fixedRestart];
+    }
+
+    if (ok && customRestart)
+        ok = [_kernels encodeRemapRestartIndex: enc
+                                       buffer: scratch offset: 0
+                                        count: count
+                                    indexType: outType
+                                 restartIndex: restart];
+
+    MTL_CHECK_RETURN_FALSE(ok, GL_OUT_OF_MEMORY);
+
+    out->buffer = scratch;
+    out->offset = 0;
+    out->scale  = outElem / elem;
+    out->type   = outType;
+
+    return true;
 }
 
 #pragma mark C interface to mtlDrawArrays
@@ -6586,7 +6652,11 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
 -(void) mtlDrawElements: (GLMContext) glm_ctx mode:(GLenum) mode count: (GLsizei) count type: (GLenum) type indices:(const void *)indices
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -6595,25 +6665,10 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
-
-    // with an element buffer bound, indices is a byte offset into it
-    size_t offset = (size_t)(uintptr_t)indices;
+    size_t offset = src.offset;
 
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType
                                      indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1];
@@ -6630,7 +6685,11 @@ void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type
 -(void) mtlDrawRangeElements: (GLMContext) glm_ctx mode:(GLenum) mode start:(GLuint) start end:(GLuint) end count: (GLsizei) count type: (GLenum) type indices:(const void *)indices
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -6639,24 +6698,10 @@ void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
-
-    size_t offset = (char *)indices - (char *)NULL;
+    size_t offset = src.offset;
 
     // start and end bound the index VALUES the caller promises to use; they are
     // a hint, not a byte offset. Only indices moves the read position.
@@ -6698,7 +6743,11 @@ void mtlDrawArraysInstanced(GLMContext glm_ctx, GLenum mode, GLint first, GLsize
 -(void) mtlDrawElementsInstanced: (GLMContext) glm_ctx mode:(GLenum) mode count: (GLsizei) count type: (GLenum) type indices:(const void *)indices instancecount:(GLsizei) instancecount
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -6707,24 +6756,10 @@ void mtlDrawArraysInstanced(GLMContext glm_ctx, GLenum mode, GLint first, GLsize
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
-
-    size_t offset = (char *)indices - (char *)NULL;
+    size_t offset = src.offset;
 
     // for now lets just ignore the range data and use drawIndexedPrimitives
     //
@@ -6745,7 +6780,11 @@ void mtlDrawElementsInstanced(GLMContext glm_ctx, GLenum mode, GLsizei count, GL
 -(void) mtlDrawElementsBaseVertex: (GLMContext) glm_ctx mode:(GLenum) mode count: (GLsizei) count type: (GLenum) type indices:(const void *)indices basevertex:(GLint) basevertex
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -6754,24 +6793,10 @@ void mtlDrawElementsInstanced(GLMContext glm_ctx, GLenum mode, GLsizei count, GL
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
-
-    size_t offset = (char *)indices - (char *)NULL;
+    size_t offset = src.offset;
 
     [_currentRenderEncoder drawIndexedPrimitives: primitiveType indexCount:count indexType: indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1 baseVertex:basevertex baseInstance:0];
 }
@@ -6786,7 +6811,11 @@ void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, G
 -(void) mtlDrawRangeElementsBaseVertex: (GLMContext) glm_ctx mode:(GLenum) mode start: (GLuint) start end: (GLuint) end count: (GLsizei) count type: (GLenum) type indices:(const void *)indices basevertex:(GLint) basevertex
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -6795,24 +6824,10 @@ void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, G
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
-
-    size_t offset = (char *)indices - (char *)NULL;
+    size_t offset = src.offset;
 
     // start and end bound the index VALUES, not the buffer position, and the
     // draw length is count -- not end minus start.
@@ -6832,7 +6847,11 @@ void mtlDrawRangeElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLuint star
 -(void) mtlDrawElementsInstancedBaseVertex: (GLMContext) glm_ctx mode:(GLenum) mode count:(GLuint) count type: (GLenum) type indices:(const void *)indices instancecount:(GLsizei) instancecount basevertex:(GLint) basevertex
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -6841,24 +6860,10 @@ void mtlDrawRangeElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLuint star
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
-
-    size_t offset = (char *)indices - (char *)NULL;
+    size_t offset = src.offset;
 
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:instancecount baseVertex:basevertex baseInstance:0];
 }
@@ -6908,7 +6913,11 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
 -(void) mtlDrawElementsIndirect: (GLMContext) glm_ctx mode:(GLenum) mode type:(GLenum) type indirect: (const void *) indirect
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -6924,22 +6933,8 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
     primitiveType = getMTLPrimitiveType(mode);
 
     // get element buffer
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
-
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
     // get indirect buffer
     Buffer *gl_indirect_buffer = getIndirectBuffer(ctx);
@@ -6952,7 +6947,7 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
     MTL_CHECK_RETURN(indirectBuffer, GL_OUT_OF_MEMORY);
 
     // draw indexed primitive
-    [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexType:indexType indexBuffer: indexBuffer indexBufferOffset:0 indirectBuffer:indirectBuffer indirectBufferOffset:(DrawElementsIndirectCommand *)indirect - (DrawElementsIndirectCommand *)NULL];
+    [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexType:indexType indexBuffer: indexBuffer indexBufferOffset:src.offset indirectBuffer:indirectBuffer indirectBufferOffset:(DrawElementsIndirectCommand *)indirect - (DrawElementsIndirectCommand *)NULL];
 }
 
 void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const void *indirect)
@@ -6986,7 +6981,11 @@ void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint f
 -(void) mtlDrawElementsInstancedBaseInstance: (GLMContext) glm_ctx mode:(GLenum) mode  count: (GLsizei) count type:(GLenum) type indices:(const void *)indices instancecount:(GLsizei) instancecount baseinstance:(GLuint) baseinstance
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -6995,24 +6994,10 @@ void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint f
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
-
-    size_t offset = (char *)indices - (char *)NULL;
+    size_t offset = src.offset;
 
     // for now lets just ignore the range data and use drawIndexedPrimitives
     //
@@ -7033,7 +7018,11 @@ void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsiz
                                                         instancecount:(GLsizei) instancecount basevertex:(GLint) basevertex baseinstance:(GLuint) baseinstance
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -7042,24 +7031,10 @@ void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsiz
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
-
-    size_t offset = (char *)indices - (char *)NULL;
+    size_t offset = src.offset;
 
     // for now lets just ignore the range data and use drawIndexedPrimitives
     //
@@ -7105,34 +7080,24 @@ void mtlMultiDrawArrays(GLMContext glm_ctx, GLenum mode, const GLint *first, con
 -(void) mtlMultiDrawElements: (GLMContext)glm_ctx mode:(GLenum) mode count:(const GLsizei *)count type:(GLenum)type indices:(const void *const*)indices drawcount:(GLsizei) drawcount
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
-
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
     for(int i=0; i<drawcount; i++)
     {
         size_t offset;
 
-        offset = (char *)indices[i] - (char *)NULL;
+        offset = src.offset + (size_t)(uintptr_t)indices[i] * src.scale;
 
         if ([self expandDraw:mode count:count[i] type:type indices:indices[i] instanceCount:1 baseVertex:0 baseInstance:0])
             continue;
@@ -7155,42 +7120,31 @@ void mtlMultiDrawElements(GLMContext glm_ctx, GLenum mode, const GLsizei *count,
 -(void) mtlMultiDrawElementsBaseVertex: (GLMContext) glm_ctx mode:(GLenum) mode count: (const GLsizei *) count type: (GLenum) type indices:(const void *const *)indices drawcount:(GLsizei) drawcount basevertex:(const GLint *) basevertex
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
     primitiveType = getMTLPrimitiveType(mode);
 
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
-
-    // element buffer
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
 
     for(int i=0; i<drawcount; i++)
     {
         size_t offset;
 
-        offset = (char *)indices[i] - (char *)NULL;
+        offset = src.offset + (size_t)(uintptr_t)indices[i] * src.scale;
 
         if ([self expandDraw:mode count:count[i] type:type indices:indices[i] instanceCount:1 baseVertex:basevertex[i] baseInstance:0])
             continue;
 
         [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count[i] indexType:indexType
-                                     indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:count[i] baseVertex:basevertex[i] baseInstance:1];
+                                     indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1 baseVertex:basevertex[i] baseInstance:0];
     }
 }
 
@@ -7230,14 +7184,11 @@ void mtlMultiDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, const GLsiz
     {
         size_t offset;
 
-        if (stride)
-        {
-            offset = (char *)((char *)indirect + i * stride) - (char *)NULL;
-        }
-        else
-        {
-            offset = (char *)indirect + i - (char *)NULL;
-        }
+        // stride 0 means the commands are packed back to back
+        if (stride == 0)
+            stride = sizeof(DrawArraysIndirectCommand);
+
+        offset = (size_t)(uintptr_t)indirect + (size_t)i * (size_t)stride;
 
         [_currentRenderEncoder drawPrimitives:primitiveType indirectBuffer:indirectBuffer indirectBufferOffset:offset];
     }
@@ -7252,7 +7203,11 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
 -(void) mtlMultiDrawElementsIndirect: (GLMContext)glm_ctx mode:(GLenum) mode type:(GLenum)type indirect:(const void *)indirect drawcount:(GLsizei) drawcount stride:(GLsizei)stride
 {
     MTLPrimitiveType primitiveType;
-    MTLIndexType indexType;
+    MGLIndexSource src;
+
+    if (primitive_mode_needs_expand(mode) == false &&
+        [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
+        return;
 
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -7268,22 +7223,8 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
     primitiveType = getMTLPrimitiveType(mode);
 
     // get element buffer
-    indexType = getMTLIndexType(type);
-    if (indexType == 0xFFFFFFFF)
-    {
-        // the enum was legal, Metal just has no such index type
-        MGL_ERR("MGL Error: index type 0x%x is not supported by Metal\n", type);
-        MTL_CHECK_RETURN(0, GL_INVALID_OPERATION);
-    }
-
-    Buffer *gl_element_buffer = getElementBuffer(ctx);
-    MTL_CHECK_RETURN(gl_element_buffer, GL_INVALID_OPERATION);
-
-    if ([self processBuffer: gl_element_buffer] == false)
-        return;
-
-    id <MTLBuffer>indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
-    MTL_CHECK_RETURN(indexBuffer, GL_OUT_OF_MEMORY);
+    MTLIndexType indexType = src.type;
+    id<MTLBuffer> indexBuffer = src.buffer;
 
     // get indirect buffer
     Buffer *gl_indirect_buffer = getIndirectBuffer(ctx);
@@ -7299,17 +7240,14 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
     {
         size_t offset;
 
-        if (stride)
-        {
-            offset = (char *)((char *)indirect + i * stride) - (char *)NULL;
-        }
-        else
-        {
-            offset = (char *)indirect + i - (char *)NULL;
-        }
+        // stride 0 means the commands are packed back to back
+        if (stride == 0)
+            stride = sizeof(DrawElementsIndirectCommand);
+
+        offset = (size_t)(uintptr_t)indirect + (size_t)i * (size_t)stride;
 
         // draw indexed primitive
-        [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexType:indexType indexBuffer: indexBuffer indexBufferOffset:0 indirectBuffer:indirectBuffer indirectBufferOffset:offset];
+        [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexType:indexType indexBuffer: indexBuffer indexBufferOffset:src.offset indirectBuffer:indirectBuffer indirectBufferOffset:offset];
     }
 }
 
@@ -7588,7 +7526,19 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     // Anything Metal can answer for itself is more accurate, so it wins.
     [self queryDeviceLimits: glm_ctx];
 
+    // the format table answers "can Metal do this format here" from these
+    MGLDeviceFormatCaps fmtCaps = {
+        .apple_gpu = [_device supportsFamily: MTLGPUFamilyApple1],
+        .supports_bc = [_device supportsBCTextureCompression],
+        .supports_depth24_stencil8 = [_device isDepth24Stencil8PixelFormatSupported],
+        .supports_32bit_msaa = [_device supports32BitMSAA],
+        .supports_32bit_float_filtering = [_device supports32BitFloatFiltering],
+        .supports_astc_hdr = [_device supportsFamily: MTLGPUFamilyApple6],
+    };
+    mglFormatTableSetDevice(&fmtCaps);
+
     _scratchPool = [[MGLScratchBufferPool alloc] initWithDevice: _device];
+    _kernels = [[MGLKernelLibrary alloc] initWithDevice: _device];
 
     // PROPER AGX VIRTUALIZATION DETECTION: Maintain Metal functionality with virtualization compatibility
     BOOL isVirtualized = NO;

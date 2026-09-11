@@ -25,8 +25,8 @@
  * MTLPrimitiveType and MTLIndexType.  In an ObjC call site you can
  * assign them directly to those enum types.
  *
- * Primitive restart is not yet handled.  A draw with GL_PRIMITIVE_RESTART
- * enabled on TRIANGLE_FAN or LINE_LOOP will produce incorrect results.
+ * Primitive restart is honoured on the element path (fixed index or
+ * glPrimitiveRestartIndex); it never applies to the array path, as in GL.
  */
 
 #ifndef primitive_expand_h

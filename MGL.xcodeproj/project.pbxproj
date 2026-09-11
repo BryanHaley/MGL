@@ -22,7 +22,6 @@
 		FF7B7A542772898700C2028F /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FF7B7A532772898700C2028F /* IOKit.framework */; };
 		FF7B7A6627728A0B00C2028F /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FF7B7A6527728A0B00C2028F /* Cocoa.framework */; };
 		FF7B7A9D27728C1D00C2028F /* state.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A8427728C1D00C2028F /* state.c */; };
-		FF7B7A9E27728C1D00C2028F /* MGLTextures.m in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A8527728C1D00C2028F /* MGLTextures.m */; };
 		FF7B7A9F27728C1D00C2028F /* program.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A8627728C1D00C2028F /* program.c */; };
 		FF7B7AA027728C1D00C2028F /* pixel_utils.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A8727728C1D00C2028F /* pixel_utils.c */; };
 		FF7B7AA127728C1D00C2028F /* get.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A8827728C1D00C2028F /* get.c */; };
@@ -122,7 +121,6 @@
 		FFD4EE572F14585E0023B6C3 /* pixel_utils.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A8727728C1D00C2028F /* pixel_utils.c */; };
 		FFD4EE582F14585E0023B6C3 /* shaders.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A9827728C1D00C2028F /* shaders.c */; };
 		FFD4EE592F14585E0023B6C3 /* program.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A8627728C1D00C2028F /* program.c */; };
-		FFD4EE5A2F14585E0023B6C3 /* MGLTextures.m in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A8527728C1D00C2028F /* MGLTextures.m */; };
 		FFD4EE5B2F14585E0023B6C3 /* non_core_unimplemented.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A8B27728C1D00C2028F /* non_core_unimplemented.c */; };
 		FFD4EE5C2F14585E0023B6C3 /* MGLRenderer.m in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7A9A27728C1D00C2028F /* MGLRenderer.m */; };
 		FFD4EE5D2F14585E0023B6C3 /* hash_table.m in Sources */ = {isa = PBXBuildFile; fileRef = FFD4EE2B2F1429700023B6C3 /* hash_table.m */; };
@@ -363,7 +361,6 @@
 		FF7B7A5F277289C500C2028F /* ApplicationServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ApplicationServices.framework; path = System/Library/Frameworks/ApplicationServices.framework; sourceTree = SDKROOT; };
 		FF7B7A6527728A0B00C2028F /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
 		FF7B7A8427728C1D00C2028F /* state.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = state.c; sourceTree = "<group>"; };
-		FF7B7A8527728C1D00C2028F /* MGLTextures.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = MGLTextures.m; sourceTree = "<group>"; };
 		FF7B7A8627728C1D00C2028F /* program.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = program.c; sourceTree = "<group>"; };
 		FF7B7A8727728C1D00C2028F /* pixel_utils.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = pixel_utils.c; sourceTree = "<group>"; };
 		FF7B7A8827728C1D00C2028F /* get.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = get.c; sourceTree = "<group>"; };
@@ -587,7 +584,6 @@
 				FF7B7A9027728C1D00C2028F /* draw_buffers.c */,
 				FF7B7A9427728C1D00C2028F /* rendering.c */,
 				FF7B7A8927728C1D00C2028F /* framebuffers.c */,
-				FF7B7A8527728C1D00C2028F /* MGLTextures.m */,
 				FF7B7A9A27728C1D00C2028F /* MGLRenderer.m */,
 			);
 			path = src;
@@ -1081,7 +1077,6 @@
 				FF7B7AA027728C1D00C2028F /* pixel_utils.c in Sources */,
 				FF7B7AB127728C1D00C2028F /* shaders.c in Sources */,
 				FF7B7A9F27728C1D00C2028F /* program.c in Sources */,
-				FF7B7A9E27728C1D00C2028F /* MGLTextures.m in Sources */,
 				FF7B7AA427728C1D00C2028F /* non_core_unimplemented.c in Sources */,
 				FF7B7AB327728C1D00C2028F /* MGLRenderer.m in Sources */,
 				FFD4EE2E2F1429700023B6C3 /* hash_table.m in Sources */,
@@ -1133,7 +1128,6 @@
 				FFD4EE572F14585E0023B6C3 /* pixel_utils.c in Sources */,
 				FFD4EE582F14585E0023B6C3 /* shaders.c in Sources */,
 				FFD4EE592F14585E0023B6C3 /* program.c in Sources */,
-				FFD4EE5A2F14585E0023B6C3 /* MGLTextures.m in Sources */,
 				FFD4EE5B2F14585E0023B6C3 /* non_core_unimplemented.c in Sources */,
 				FFD4EE5C2F14585E0023B6C3 /* MGLRenderer.m in Sources */,
 				FFD4EE5D2F14585E0023B6C3 /* hash_table.m in Sources */,

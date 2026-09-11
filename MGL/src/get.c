@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include "glm_context.h"
 #include "pixel_utils.h"
+#include "mgl_format_table.h"
 
 void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data);
 
@@ -297,8 +298,27 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x80AB: RET_TYPE_VAR(type, sample_coverage_invert); break; // GL_SAMPLE_COVERAGE_INVERT
         case 0x8514: RET_TYPE_VAR(type, texture_binding_cube_map); break; // GL_TEXTURE_BINDING_CUBE_MAP
         case 0x851C: RET_TYPE_VAR(type, max_cube_map_texture_size); break; // GL_MAX_CUBE_MAP_TEXTURE_SIZE
-        case 0x86A2: RET_TYPE_VAR(type, num_compressed_texture_formats); break; // GL_NUM_COMPRESSED_TEXTURE_FORMATS
-        case 0x86A3: RET_TYPE_VAR(type, compressed_texture_formats); break; // GL_COMPRESSED_TEXTURE_FORMATS
+        // the format table knows which compressed formats Metal takes here
+        case 0x86A2: { // GL_NUM_COMPRESSED_TEXTURE_FORMATS
+            GLsizei n = mglFormatCompressedFormatList(NULL, 0);
+            switch(type) {
+                case kBool: RET_BOOL(n)
+                case kInt: RET_INT(n)
+                case kFloat: RET_FLOAT(n)
+                case kDouble: RET_DOUBLE(n)
+            }
+        } break;
+        case 0x86A3: { // GL_COMPRESSED_TEXTURE_FORMATS
+            GLenum list[128];
+            GLsizei n = mglFormatCompressedFormatList(list, 128);
+            for(int i=0, counts[]={1,4,4,8}; i<n; data+=counts[type], i++)
+                switch(type) {
+                    case kBool: RET_BOOL(list[i])
+                    case kInt: RET_INT(list[i])
+                    case kFloat: RET_FLOAT(list[i])
+                    case kDouble: RET_DOUBLE(list[i])
+                }
+        } break;
 
         case 0x80C8: RET_TYPE_VAR(type, blend_dst_rgb[0]); break; // GL_BLEND_DST_RGB
         case 0x80C9: RET_TYPE_VAR(type, blend_src_rgb[0]); break; // GL_BLEND_SRC_RGB
@@ -740,33 +760,58 @@ static GLint internalFormatQuery(GLMContext ctx, GLenum target, GLenum internalf
 
         case GL_TEXTURE_IMAGE_FORMAT:
         case GL_GET_TEXTURE_IMAGE_FORMAT:
-            return GL_RGBA;
+            return mglFormatDesc(internalformat)->upload_format ? mglFormatDesc(internalformat)->upload_format : GL_NONE;
 
         case GL_TEXTURE_IMAGE_TYPE:
         case GL_GET_TEXTURE_IMAGE_TYPE:
-            return GL_UNSIGNED_BYTE;
+            return mglFormatDesc(internalformat)->upload_type ? mglFormatDesc(internalformat)->upload_type : GL_NONE;
 
+        // what Metal can do with the format on this device
         case GL_COLOR_RENDERABLE:
+            return (mglFormatCaps(internalformat) & MGL_FMT_CAP_COLOR_ATT) ? GL_TRUE : GL_FALSE;
+
         case GL_FRAMEBUFFER_RENDERABLE:
-        case GL_TEXTURE_VIEW:
+        case GL_FRAMEBUFFER_BLEND:
+        {
+            uint16_t caps = mglFormatCaps(internalformat);
+            uint16_t need = (pname == GL_FRAMEBUFFER_BLEND) ? MGL_FMT_CAP_BLEND
+                          : (MGL_FMT_CAP_COLOR_ATT | MGL_FMT_CAP_DS_ATT);
+            return (caps & need) ? GL_FULL_SUPPORT : GL_NONE;
+        }
+
         case GL_FILTER:
-        case GL_MIPMAP:
+            return (mglFormatCaps(internalformat) & MGL_FMT_CAP_FILTER) ? GL_FULL_SUPPORT : GL_NONE;
+
         case GL_SHADER_IMAGE_LOAD:
+            return (mglFormatCaps(internalformat) & MGL_FMT_CAP_READ) ? GL_FULL_SUPPORT : GL_NONE;
+
         case GL_SHADER_IMAGE_STORE:
+            return (mglFormatCaps(internalformat) & MGL_FMT_CAP_WRITE) ? GL_FULL_SUPPORT : GL_NONE;
+
+        case GL_SHADER_IMAGE_ATOMIC:
+            return (mglFormatCaps(internalformat) & MGL_FMT_CAP_ATOMIC) ? GL_FULL_SUPPORT : GL_NONE;
+
+        case GL_TEXTURE_VIEW:
+        case GL_MIPMAP:
             return internalFormatSupported(internalformat) ? GL_FULL_SUPPORT : GL_NONE;
 
+        case GL_TEXTURE_COMPRESSED:
+            return mglFormatIsCompressed(internalformat) ? GL_TRUE : GL_FALSE;
+
+        case GL_TEXTURE_COMPRESSED_BLOCK_WIDTH:
+            return mglFormatDesc(internalformat)->block_w > 1 ? mglFormatDesc(internalformat)->block_w : 0;
+
+        case GL_TEXTURE_COMPRESSED_BLOCK_HEIGHT:
+            return mglFormatDesc(internalformat)->block_h > 1 ? mglFormatDesc(internalformat)->block_h : 0;
+
+        case GL_TEXTURE_COMPRESSED_BLOCK_SIZE:
+            return mglFormatIsCompressed(internalformat) ? mglFormatDesc(internalformat)->bytes_per_block * 8 : 0;
+
         case GL_DEPTH_RENDERABLE:
-            return (internalformat == GL_DEPTH_COMPONENT16 ||
-                    internalformat == GL_DEPTH_COMPONENT24 ||
-                    internalformat == GL_DEPTH_COMPONENT32 ||
-                    internalformat == GL_DEPTH_COMPONENT32F ||
-                    internalformat == GL_DEPTH24_STENCIL8 ||
-                    internalformat == GL_DEPTH32F_STENCIL8) ? GL_TRUE : GL_FALSE;
+            return mglFormatDesc(internalformat)->bits[4] ? GL_TRUE : GL_FALSE;
 
         case GL_STENCIL_RENDERABLE:
-            return (internalformat == GL_STENCIL_INDEX8 ||
-                    internalformat == GL_DEPTH24_STENCIL8 ||
-                    internalformat == GL_DEPTH32F_STENCIL8) ? GL_TRUE : GL_FALSE;
+            return mglFormatDesc(internalformat)->bits[5] ? GL_TRUE : GL_FALSE;
 
         default:
             return 0;
