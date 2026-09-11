@@ -1,11 +1,6 @@
-if [ ! -d "SPIRV-Cross" ]
-then
-    git clone https://github.com/r58Playz/SPIRV-Cross.git -b uniform-constants
-    cd SPIRV-Cross
-else
-    cd SPIRV-Cross
-    git pull
-fi
+# SPIRV-Cross is the submodule, not a clone of its own: the Makefile builds and
+# links that copy, and MGL's own patches live in it.
+cd "$(dirname "$0")/../submodules/SPIRV-Cross"
 
 if [ ! -d "build" ]
 then

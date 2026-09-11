@@ -13,6 +13,7 @@ SDK_ROOT = $(shell xcrun --sdk macosx --show-sdk-path)
 spirv_cross_include_path ?= ./submodules/SPIRV-Cross
 spirv_cross_config_include_path ?= ./submodules/SPIRV-Cross
 spirv_cross_lib_path ?= ./submodules/SPIRV-Cross/build
+spirv_headers_path ?= ./submodules/SPIRV-Headers
 
 spirv_tools_include_path ?= ./external/SPIRV-Tools/include
 spirv_tools_path ?= ./external/SPIRV-Tools/build
@@ -176,16 +177,13 @@ mgl_es_arc_objs := $(addprefix $(build_es_dir)/arc/,$(mgl_es_arc_objs))
 
 
 # Define the directories and repositories
+# SPIRV-Cross and SPIRV-Headers are submodules; only these are cloned
 EXT_DIRS = ./external/OpenGL-Registry \
-           ./external/SPIRV-Cross \
-           ./external/SPIRV-Headers \
            ./external/SPIRV-Tools \
            ./external/glslang \
            ./external/ezxml
 
 REPOS = https://github.com/KhronosGroup/OpenGL-Registry.git \
-        https://github.com/KhronosGroup/SPIRV-Cross.git \
-        https://github.com/KhronosGroup/SPIRV-Headers.git \
         https://github.com/KhronosGroup/SPIRV-Tools.git \
         https://github.com/KhronosGroup/glslang.git \
         https://github.com/lxfontes/ezxml.git
@@ -199,11 +197,9 @@ endef
 # Simplified mapping for common directories
 define get_repo_url
 $(if $(filter $(1),./external/OpenGL-Registry),https://github.com/KhronosGroup/OpenGL-Registry.git, \
-$(if $(filter $(1),./external/SPIRV-Cross),https://github.com/KhronosGroup/SPIRV-Cross.git, \
-$(if $(filter $(1),./external/SPIRV-Headers),https://github.com/KhronosGroup/SPIRV-Headers.git, \
 $(if $(filter $(1),./external/SPIRV-Tools),https://github.com/KhronosGroup/SPIRV-Tools.git, \
 $(if $(filter $(1),./external/glslang),https://github.com/KhronosGroup/glslang.git, \
-https://github.com/lxfontes/ezxml.git)))))
+https://github.com/lxfontes/ezxml.git)))
 endef
 
 # Function to check if a directory exists, and if not, clone it
@@ -432,7 +428,7 @@ download-pkgdeps:
 	git submodule update --depth 1
 
 compile-pkgdeps:
-	(cd SPIRV-Cross && mkdir -p build && cd build && cmake .. && make)
+	(cd $(spirv_cross_include_path) && mkdir -p build && cd build && cmake .. && make)
 
 update-pkdeps:
 	git submodule -q foreach git pull -q origin master

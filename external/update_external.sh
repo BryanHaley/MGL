@@ -1,9 +1,4 @@
-cd SPIRV-Cross
-git pull
-cd ..
-cd SPIRV-Headers
-git pull
-cd ..
+# SPIRV-Cross and SPIRV-Headers are submodules; handled by git submodule
 cd SPIRV-Tools
 git pull
 cd ..

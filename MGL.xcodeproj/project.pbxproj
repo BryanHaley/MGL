@@ -314,14 +314,14 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		DFB50A8928ADD0020084D12B /* libspirv-cross-hlsl.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-hlsl.a"; path = "external/SPIRV-Cross/build/libspirv-cross-hlsl.a"; sourceTree = "<group>"; };
-		DFB50A8A28ADD0020084D12B /* libspirv-cross-util.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-util.a"; path = "external/SPIRV-Cross/build/libspirv-cross-util.a"; sourceTree = "<group>"; };
-		DFB50A8B28ADD0030084D12B /* libspirv-cross-core.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-core.a"; path = "external/SPIRV-Cross/build/libspirv-cross-core.a"; sourceTree = "<group>"; };
-		DFB50A8C28ADD0030084D12B /* libspirv-cross-glsl.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-glsl.a"; path = "external/SPIRV-Cross/build/libspirv-cross-glsl.a"; sourceTree = "<group>"; };
-		DFB50A8D28ADD0030084D12B /* libspirv-cross-c.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-c.a"; path = "external/SPIRV-Cross/build/libspirv-cross-c.a"; sourceTree = "<group>"; };
-		DFB50A8E28ADD0030084D12B /* libspirv-cross-msl.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-msl.a"; path = "external/SPIRV-Cross/build/libspirv-cross-msl.a"; sourceTree = "<group>"; };
-		DFB50A8F28ADD0030084D12B /* libspirv-cross-reflect.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-reflect.a"; path = "external/SPIRV-Cross/build/libspirv-cross-reflect.a"; sourceTree = "<group>"; };
-		DFB50A9028ADD0030084D12B /* libspirv-cross-cpp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-cpp.a"; path = "external/SPIRV-Cross/build/libspirv-cross-cpp.a"; sourceTree = "<group>"; };
+		DFB50A8928ADD0020084D12B /* libspirv-cross-hlsl.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-hlsl.a"; path = "submodules/SPIRV-Cross/build/libspirv-cross-hlsl.a"; sourceTree = "<group>"; };
+		DFB50A8A28ADD0020084D12B /* libspirv-cross-util.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-util.a"; path = "submodules/SPIRV-Cross/build/libspirv-cross-util.a"; sourceTree = "<group>"; };
+		DFB50A8B28ADD0030084D12B /* libspirv-cross-core.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-core.a"; path = "submodules/SPIRV-Cross/build/libspirv-cross-core.a"; sourceTree = "<group>"; };
+		DFB50A8C28ADD0030084D12B /* libspirv-cross-glsl.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-glsl.a"; path = "submodules/SPIRV-Cross/build/libspirv-cross-glsl.a"; sourceTree = "<group>"; };
+		DFB50A8D28ADD0030084D12B /* libspirv-cross-c.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-c.a"; path = "submodules/SPIRV-Cross/build/libspirv-cross-c.a"; sourceTree = "<group>"; };
+		DFB50A8E28ADD0030084D12B /* libspirv-cross-msl.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-msl.a"; path = "submodules/SPIRV-Cross/build/libspirv-cross-msl.a"; sourceTree = "<group>"; };
+		DFB50A8F28ADD0030084D12B /* libspirv-cross-reflect.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-reflect.a"; path = "submodules/SPIRV-Cross/build/libspirv-cross-reflect.a"; sourceTree = "<group>"; };
+		DFB50A9028ADD0030084D12B /* libspirv-cross-cpp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libspirv-cross-cpp.a"; path = "submodules/SPIRV-Cross/build/libspirv-cross-cpp.a"; sourceTree = "<group>"; };
 		DFB50A9E28B09F1E0084D12B /* buffers.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = buffers.h; sourceTree = "<group>"; };
 		DFC728FA2894855E00990595 /* libSPIRV-Tools-shared.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = "libSPIRV-Tools-shared.dylib"; path = "external/SPIRV-Tools/build/source/libSPIRV-Tools-shared.dylib"; sourceTree = "<group>"; };
 		DFC728FC289485A000990595 /* libSPIRV-Tools.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libSPIRV-Tools.a"; path = "external/SPIRV-Tools/build/source/libSPIRV-Tools.a"; sourceTree = "<group>"; };
@@ -1495,11 +1495,11 @@
 				EXECUTABLE_PREFIX = lib;
 				GCC_C_LANGUAGE_STANDARD = "compiler-default";
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/external/SPIRV-Headers/include",
+					"$(SRCROOT)/submodules/SPIRV-Headers/include",
 					"$(SRCROOT)/external/SPIRV-Tools/build",
 					"$(SRCROOT)/external/SPIRV-Tools/",
 					"$(SRCROOT)/external/SPIRV-Tools/include",
-					"$(SRCROOT)/external/SPIRV-Cross/",
+					"$(SRCROOT)/submodules/SPIRV-Cross/",
 					"$(SRCROOT)/external/glslang/glslang/Include",
 					"$(SRCROOT)/MGL/include",
 				);
@@ -1509,7 +1509,7 @@
 					"$(PROJECT_DIR)/external/glslang/build/SPIRV",
 					"$(PROJECT_DIR)/external/glslang/build/glslang/OSDependent/Unix",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source",
-					"$(PROJECT_DIR)/external/SPIRV-Cross/build",
+					"$(PROJECT_DIR)/submodules/SPIRV-Cross/build",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/diff",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/lint",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/opt",
@@ -1551,11 +1551,11 @@
 				EXECUTABLE_PREFIX = lib;
 				GCC_C_LANGUAGE_STANDARD = "compiler-default";
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/external/SPIRV-Headers/include",
+					"$(SRCROOT)/submodules/SPIRV-Headers/include",
 					"$(SRCROOT)/external/SPIRV-Tools/build",
 					"$(SRCROOT)/external/SPIRV-Tools/",
 					"$(SRCROOT)/external/SPIRV-Tools/include",
-					"$(SRCROOT)/external/SPIRV-Cross/",
+					"$(SRCROOT)/submodules/SPIRV-Cross/",
 					"$(SRCROOT)/external/glslang/glslang/Include",
 					"$(SRCROOT)/MGL/include",
 				);
@@ -1565,7 +1565,7 @@
 					"$(PROJECT_DIR)/external/glslang/build/SPIRV",
 					"$(PROJECT_DIR)/external/glslang/build/glslang/OSDependent/Unix",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source",
-					"$(PROJECT_DIR)/external/SPIRV-Cross/build",
+					"$(PROJECT_DIR)/submodules/SPIRV-Cross/build",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/diff",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/lint",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/opt",
@@ -1687,11 +1687,11 @@
 				EXECUTABLE_PREFIX = lib;
 				GCC_C_LANGUAGE_STANDARD = "compiler-default";
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/external/SPIRV-Headers/include",
+					"$(SRCROOT)/submodules/SPIRV-Headers/include",
 					"$(SRCROOT)/external/SPIRV-Tools/build",
 					"$(SRCROOT)/external/SPIRV-Tools/",
 					"$(SRCROOT)/external/SPIRV-Tools/include",
-					"$(SRCROOT)/external/SPIRV-Cross/",
+					"$(SRCROOT)/submodules/SPIRV-Cross/",
 					"$(SRCROOT)/external/glslang/glslang/Include",
 					"$(SRCROOT)/MGL/include",
 				);
@@ -1701,7 +1701,7 @@
 					"$(PROJECT_DIR)/external/glslang/build/SPIRV",
 					"$(PROJECT_DIR)/external/glslang/build/glslang/OSDependent/Unix",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source",
-					"$(PROJECT_DIR)/external/SPIRV-Cross/build",
+					"$(PROJECT_DIR)/submodules/SPIRV-Cross/build",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/diff",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/lint",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/opt",
@@ -1743,11 +1743,11 @@
 				EXECUTABLE_PREFIX = lib;
 				GCC_C_LANGUAGE_STANDARD = "compiler-default";
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/external/SPIRV-Headers/include",
+					"$(SRCROOT)/submodules/SPIRV-Headers/include",
 					"$(SRCROOT)/external/SPIRV-Tools/build",
 					"$(SRCROOT)/external/SPIRV-Tools/",
 					"$(SRCROOT)/external/SPIRV-Tools/include",
-					"$(SRCROOT)/external/SPIRV-Cross/",
+					"$(SRCROOT)/submodules/SPIRV-Cross/",
 					"$(SRCROOT)/external/glslang/glslang/Include",
 					"$(SRCROOT)/MGL/include",
 				);
@@ -1757,7 +1757,7 @@
 					"$(PROJECT_DIR)/external/glslang/build/SPIRV",
 					"$(PROJECT_DIR)/external/glslang/build/glslang/OSDependent/Unix",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source",
-					"$(PROJECT_DIR)/external/SPIRV-Cross/build",
+					"$(PROJECT_DIR)/submodules/SPIRV-Cross/build",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/diff",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/lint",
 					"$(PROJECT_DIR)/external/SPIRV-Tools/build/source/opt",

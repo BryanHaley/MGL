@@ -1,12 +1,9 @@
-[submodule "SPIRV-Headers"]
-	path = SPIRV-Headers
-	url = https://github.com/KhronosGroup/SPIRV-Headers
-[submodule "SPIRV-Cross"]
-	path = SPIRV-Cross
-	url = https://github.com/KhronosGroup/SPIRV-Cross
 [submodule "submodules/SPIRV-Cross"]
 	path = submodules/SPIRV-Cross
 	url = https://github.com/KhronosGroup/SPIRV-Cross.git
 [submodule "submodules/IDKEngine"]
 	path = submodules/IDKEngine
 	url = https://github.com/BoyBaykiller/IDKEngine.git
+[submodule "submodules/SPIRV-Headers"]
+	path = submodules/SPIRV-Headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers.git
