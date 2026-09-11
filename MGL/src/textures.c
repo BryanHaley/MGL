@@ -289,7 +289,8 @@ void mglBindTexture(GLMContext ctx, GLenum target, GLuint texture)
     if (texture)
     {
         ptr = getTexture(ctx, target, texture);
-        assert(ptr);
+
+        ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
     }
     else
     {
@@ -495,61 +496,49 @@ void mglActiveTexture(GLMContext ctx, GLenum texture)
 
 void mglBindTextures(GLMContext ctx, GLuint first, GLsizei count, const GLuint *textures)
 {
-    for (int i=0; i < count; i++)
+    void mglBindTextureUnit(GLMContext ctx, GLuint unit, GLuint texture);
+
+    // first is a zero-based unit index, and the active unit is left alone
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(first + count <= TEXTURE_UNITS, GL_INVALID_OPERATION);
+
+    for (GLsizei i = 0; i < count; i++)
     {
-        GLuint texture;
-
-        if (textures == NULL)
-        {
-            texture = 0;
-        }
-        else
-        {
-            texture = textures[i];
-        }
-
-        STATE(active_texture) = first + i - GL_TEXTURE0;
-
-        if (texture != 0)
-        {
-            Texture *ptr;
-            GLenum target;
-
-            ptr = findTexture(ctx, textures[i]);
-            assert(ptr);
-
-            target = ptr->target;
-
-            mglBindTexture(ctx, target, textures[i]);
-        }
-        else
-        {
-            for(GLenum target=0; target<_MAX_TEXTURE_TYPES; target++)
-            {
-                mglBindTexture(ctx, target, 0);
-            }
-        }
+        // a null array unbinds the whole span
+        mglBindTextureUnit(ctx, first + i, textures ? textures[i] : 0);
     }
-
 }
 
 void mglBindTextureUnit(GLMContext ctx, GLuint unit, GLuint texture)
 {
-    // bind texture without changing the current active unit
-    // my guess
-
+    // binds into a unit without disturbing the current active unit
     Texture *ptr;
-    GLenum target;
+    GLint index;
+
+    // unit is a zero-based index here, not a GL_TEXTURE0 enum
+    ERROR_CHECK_RETURN(unit < TEXTURE_UNITS, GL_INVALID_VALUE);
+
+    if (texture == 0)
+    {
+        for (int i = 0; i < _MAX_TEXTURE_TYPES; i++)
+            STATE(texture_units[unit].textures[i]) = NULL;
+
+        STATE(dirty_bits) |= DIRTY_TEX;
+
+        return;
+    }
 
     ptr = findTexture(ctx, texture);
-    assert(ptr);
 
-    unit = unit - GL_TEXTURE0;
-    assert(unit < TEXTURE_UNITS);
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
-    target = ptr->target;
+    // textures[] is indexed by our own target index, not by the GL enum
+    index = textureIndexFromTarget(ctx, ptr->target);
 
-    STATE(texture_units[unit].textures[target]) = ptr;
+    ERROR_CHECK_RETURN(index != _MAX_TEXTURE_TYPES, GL_INVALID_OPERATION);
+
+    STATE(texture_units[unit].textures[index]) = ptr;
+    STATE(dirty_bits) |= DIRTY_TEX;
 }
 
 void generateMipmaps(GLMContext ctx, GLuint texture, GLenum target)
@@ -561,6 +550,7 @@ void generateMipmaps(GLMContext ctx, GLuint texture, GLenum target)
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
     // level 0 needs to be filled out for mipmap geneation
+    ERROR_CHECK_RETURN(ptr->faces[0].levels, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(ptr->faces[0].levels[0].complete, GL_INVALID_OPERATION);
 
     ptr->mipmapped = true;
@@ -1472,17 +1462,7 @@ void mglTexImage2D(GLMContext ctx, GLenum target, GLint level, GLint internalfor
     createTextureLevel(ctx, tex, face, level, is_array, internalformat, width, height, 1, format, type, (void *)pixels, proxy);
 }
 
-void mglTexImage2DMultisample(GLMContext ctx, GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations)
-{
-    // Multisample textures are used by virglrenderer for capability probing.
-    // Apple Silicon handles MSAA differently - we silently succeed to allow
-    // the rendering pipeline to proceed without MSAA.
-    MGL_INFO("MGL: mglTexImage2DMultisample (stub) - target=0x%x samples=%d internalformat=0x%x %dx%d\n",
-            target, samples, internalformat, width, height);
-    (void)ctx; (void)target; (void)samples; (void)internalformat;
-    (void)width; (void)height; (void)fixedsamplelocations;
-    // Don't set error - allow probing to "succeed" so virglrenderer continues
-}
+// TexImage2DMultisample moved to texture_multisample.c
 
 void mglTexImage3D(GLMContext ctx, GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void *pixels)
 {
@@ -1531,15 +1511,7 @@ void mglTexImage3D(GLMContext ctx, GLenum target, GLint level, GLint internalfor
     createTextureLevel(ctx, tex, 0, level, is_array, internalformat, width, height, depth, format, type, (void *)pixels, proxy);
 }
 
-void mglTexImage3DMultisample(GLMContext ctx, GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations)
-{
-    // Multisample array textures - silently succeed like 2D multisample
-    MGL_INFO("MGL: mglTexImage3DMultisample (stub) - target=0x%x samples=%d internalformat=0x%x %dx%dx%d\n",
-            target, samples, internalformat, width, height, depth);
-    (void)ctx; (void)target; (void)samples; (void)internalformat;
-    (void)width; (void)height; (void)depth; (void)fixedsamplelocations;
-    // Don't set error
-}
+// TexImage3DMultisample moved to texture_multisample.c
 
 #pragma mark texSubImage
 bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, void *pixels)
@@ -2027,12 +1999,7 @@ void mglTextureStorage2D(GLMContext ctx, GLuint texture, GLsizei levels, GLenum 
     texStorage(ctx, tex, 1, levels, false, internalformat, width, height, 1, false);
 }
 
-void mglTextureStorage2DMultisample(GLMContext ctx, GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations)
-{
-    MGL_ERR("MGL WARNING: glTextureStorage2DMultisample called (stub) - MSAA not fully supported\n");
-    // Fall back to non-MSAA storage
-    mglTextureStorage2D(ctx, texture, 1, internalformat, width, height);
-}
+// TextureStorage2DMultisample moved to texture_multisample.c
 
 void mglTexStorage3D(GLMContext ctx, GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth)
 {
@@ -2100,12 +2067,7 @@ void mglTextureStorage3D(GLMContext ctx, GLuint texture, GLsizei levels, GLenum 
     createTextureLevel(ctx, tex, 0, 0, false, internalformat, width, height, depth, 0, 0, NULL, false);
 }
 
-void mglTextureStorage3DMultisample(GLMContext ctx, GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations)
-{
-    MGL_ERR("MGL WARNING: glTextureStorage3DMultisample called (stub) - MSAA not fully supported\n");
-    // Fall back to non-MSAA storage
-    mglTextureStorage3D(ctx, texture, 1, internalformat, width, height, depth);
-}
+// TextureStorage3DMultisample moved to texture_multisample.c
 
 
 #pragma mark clear tex image
@@ -2428,15 +2390,9 @@ void mglTextureView(GLMContext ctx, GLuint texture, GLenum target, GLuint origte
     MGL_ERR("MGL WARNING: glTextureView called (stub) - texture views not supported\n");
 }
 
-void mglTextureBuffer(GLMContext ctx, GLuint texture, GLenum internalformat, GLuint buffer)
-{
-    MGL_ERR("MGL WARNING: glTextureBuffer called (stub)\n");
-}
+// TextureBuffer moved to texture_buffer.c
 
-void mglTextureBufferRange(GLMContext ctx, GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size)
-{
-    MGL_ERR("MGL WARNING: glTextureBufferRange called (stub)\n");
-}
+// TextureBufferRange moved to texture_buffer.c
 
 void mglCompressedTextureSubImage1D(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void *data)
 {

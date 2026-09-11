@@ -204,10 +204,13 @@ void mglCreateSamplers(GLMContext ctx, GLsizei n, GLuint *samplers)
 
 void mglBindSamplers(GLMContext ctx, GLuint first, GLsizei count, const GLuint *samplers)
 {
-    while(count--)
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(first + count <= TEXTURE_UNITS, GL_INVALID_OPERATION);
+
+    for (GLsizei i = 0; i < count; i++)
     {
-        mglBindSampler(ctx, first, *samplers++);
-        first++;
+        // a null array unbinds the whole span
+        mglBindSampler(ctx, first + i, samplers ? samplers[i] : 0);
     }
 }
 

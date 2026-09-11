@@ -223,6 +223,9 @@ typedef struct BufferBase_t {
 #define MAX_UNIFORM_LOCATIONS   256
 typedef struct UniformConstants_t {
     BufferBaseTarget    buffers[MAX_UNIFORM_LOCATIONS];
+    // 4 for float/int uniforms, 8 for double ones. Without this a readback
+    // cannot tell stored doubles from stored floats.
+    GLubyte             elem_size[MAX_UNIFORM_LOCATIONS];
 } UniformConstants;
 
 typedef struct TextureParameter_t {
@@ -583,6 +586,7 @@ typedef struct Framebuffer_t {
 typedef struct __GLsync {
     GLsizei name;
     void *mtl_event;
+    struct __GLsync *next;      // live list, so a bad GLsync can be spotted
 #ifdef __cplusplus
 } Sync;
 #else
@@ -694,6 +698,7 @@ typedef struct {
     ImageUnit   image_units[TEXTURE_UNITS];
 
     GLsizei sync_name;
+    Sync   *sync_list;          // every sync object still alive
 
     HashTable vao_table;
     HashTable buffer_table;
@@ -749,7 +754,7 @@ struct GLMMetalFuncs {
 
     void (*mtlBindBuffer)(GLMContext glm_ctx, Buffer *ptr);
     void (*mtlBindTexture)(GLMContext glm_ctx, Texture *ptr);
-    void (*mtlBindProgram)(GLMContext glm_ctx, Program *ptr);
+    bool (*mtlBindProgram)(GLMContext glm_ctx, Program *ptr);
 
     void (*mtlDeleteMTLObj)(GLMContext glm_ctx, void *obj);
 

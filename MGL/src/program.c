@@ -406,19 +406,38 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     assert(spirv);
 
     // Create context.
-    spvc_context_create(&context);
-    assert(context);
+    if (spvc_context_create(&context) != SPVC_SUCCESS || context == NULL)
+    {
+        MGL_ERR("MGL Error: could not create a SPIRV-Cross context\n");
+
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     // Set debug callback.
     spvc_context_set_error_callback(context, error_callback, ctx);
 
     // Parse the SPIR-V.
     parse_res = spvc_context_parse_spirv(context, spirv, word_count, &ir);
-    assert(parse_res == SPVC_SUCCESS);
+
+    if (parse_res != SPVC_SUCCESS)
+    {
+        MGL_ERR("MGL Error: SPIR-V parse failed for stage %d: %s\n", stage,
+                spvc_context_get_last_error_string(context));
+        spvc_context_destroy(context);
+
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
 
     // Hand it off to a compiler instance and give it ownership of the IR.
-    spvc_context_create_compiler(context, SPVC_BACKEND_MSL, ir, SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &compiler_msl);
-    assert(compiler_msl);
+    if (spvc_context_create_compiler(context, SPVC_BACKEND_MSL, ir, SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &compiler_msl) != SPVC_SUCCESS
+        || compiler_msl == NULL)
+    {
+        MGL_ERR("MGL Error: could not create an MSL compiler for stage %d: %s\n", stage,
+                spvc_context_get_last_error_string(context));
+        spvc_context_destroy(context);
+
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_msl_add_discrete_descriptor_set failed\n");
@@ -497,7 +516,15 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
 
     spvc_result err;
     err = spvc_compiler_rename_entry_point(compiler_msl, cleansed_entry_point, entry_point, model);
-    assert(err == SPVC_SUCCESS);
+
+    if (err != SPVC_SUCCESS)
+    {
+        MGL_ERR("MGL Error: could not rename the entry point for stage %d: %s\n", stage,
+                spvc_context_get_last_error_string(context));
+        spvc_context_destroy(context);
+
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
 
     // set the entry point for metal
     ptr->shader_slots[stage]->entry_point = strdup(entry_point);
@@ -511,7 +538,15 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         size_t num_entry_points;
 
         res = spvc_compiler_get_entry_points(compiler_msl, &entry_points, &num_entry_points);
-        assert(res);
+
+        if (res != SPVC_SUCCESS)
+        {
+            MGL_ERR("MGL Error: could not read compute entry points: %s\n",
+                    spvc_context_get_last_error_string(context));
+            spvc_context_destroy(context);
+
+            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        }
         
         for(int i=0; i<num_entry_points; i++)
         {
@@ -613,7 +648,25 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         }
     }
 
-    spvc_compiler_compile(compiler_msl, &result);
+    // A failure here means SPIRV-Cross could not turn the SPIR-V into MSL.
+    // Returning NULL fails the link, which is the honest answer -- ignoring it
+    // hands Metal broken source and the program silently draws nothing.
+    if (spvc_compiler_compile(compiler_msl, &result) != SPVC_SUCCESS)
+    {
+        const char *why = spvc_context_get_last_error_string(context);
+
+        if (!why) why = "SPIRV-Cross could not generate MSL";
+
+        MGL_ERR("MGL Error: MSL generation failed for stage %d: %s\n", stage, why);
+
+        if (ptr->log) free(ptr->log);
+        ptr->log = strdup(why);
+
+        spvc_context_destroy(context);
+
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
+
     DEBUG_PRINT("\n%s\n", result);
 
     // MSL slots are not a dense run -- an arrayed uniform reserves one index
@@ -806,6 +859,22 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     if (stages_linked == 0)
         pptr->link_status = GL_FALSE;
 
+    // Hand the MSL to Metal now rather than at the first draw. GL callers expect
+    // shader problems at link time, and a program that only fails later reports
+    // a successful link and then quietly draws nothing.
+    if (pptr->link_status == GL_TRUE)
+    {
+        pptr->dirty_bits |= DIRTY_PROGRAM;
+
+        if (ctx->mtl_funcs.mtlBindProgram(ctx, pptr) == false)
+        {
+            pptr->link_status = GL_FALSE;
+
+            if (pptr->log == NULL)
+                pptr->log = strdup("link failed: Metal rejected the generated MSL");
+        }
+    }
+
     if (pptr->link_status == GL_FALSE && pptr->log == NULL)
         pptr->log = strdup("link failed: no usable shader stage");
 
@@ -886,13 +955,7 @@ void mglGetActiveAttrib(GLMContext ctx, GLuint program, GLuint index, GLsizei bu
         STATE(error) = GL_INVALID_OPERATION;
 }
 
-void mglGetActiveUniform(GLMContext ctx, GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name)
-{
-    // Unimplemented function
-    // CRITICAL FIX: Handle error gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
-        STATE(error) = GL_INVALID_OPERATION;
-}
+// GetActiveUniform lives in uniforms.c, next to the reflection helpers
 
 void mglGetAttachedShaders(GLMContext ctx, GLuint program, GLsizei maxCount, GLsizei *count, GLuint *shaders)
 {

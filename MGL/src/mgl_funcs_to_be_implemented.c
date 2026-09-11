@@ -545,48 +545,13 @@ void mglSecondaryColorP3uiv(GLMContext ctx, GLenum type, const GLuint *color)
 
 
 
-void mglTexBuffer(GLMContext ctx, GLenum target, GLenum internalformat, GLuint buffer)
-{
-	// TODO: Implement
-	(void)ctx;
-}
+// TexBuffer moved to texture_buffer.c
 
-void mglTexBufferRange(GLMContext ctx, GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size)
-{
-	// TODO: Implement
-	(void)ctx;
-}
+// TexBufferRange moved to texture_buffer.c
 
-void mglTexStorage2DMultisample(GLMContext ctx, GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations)
-{
-    // For multisample textures, we need to create storage but Apple Silicon 
-    // handles MSAA differently than traditional GL. For now, we create a 
-    // regular texture and let the rendering pipeline handle any MSAA.
-    
-    MGL_INFO("MGL: mglTexStorage2DMultisample called - target=0x%x, samples=%d, format=0x%x, %dx%d\n", 
-            target, samples, internalformat, width, height);
-    
-    // Validate target
-    if (target != GL_TEXTURE_2D_MULTISAMPLE && target != GL_PROXY_TEXTURE_2D_MULTISAMPLE) {
-        MGL_ERR("MGL WARNING: mglTexStorage2DMultisample invalid target 0x%x\n", target);
-        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_ENUM);
-        return;
-    }
-    
-    // For now, silently succeed without error - multisample textures are 
-    // used for capability probing. The actual MSAA will be handled by the
-    // render pipeline when available.
-    (void)samples; (void)internalformat; (void)width; (void)height; (void)fixedsamplelocations;
-    
-    // Don't set an error - let virglrenderer think MSAA is "supported"
-    // This allows the system to fall back gracefully
-}
+// TexStorage2DMultisample moved to texture_multisample.c
 
-void mglTexStorage3DMultisample(GLMContext ctx, GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations)
-{
-	// TODO: Implement
-	(void)ctx;
-}
+// TexStorage3DMultisample moved to texture_multisample.c
 
 
 

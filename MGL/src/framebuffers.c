@@ -568,6 +568,12 @@ FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum attachm
 
         default:
             attachment = attachment - GL_COLOR_ATTACHMENT0;
+
+            // anything that isn't a real colour attachment lands here too,
+            // so bound it rather than indexing off the end of the array
+            if (attachment >= MAX_COLOR_ATTACHMENTS)
+                return NULL;
+
             return &fbo->color_attachments[attachment];
             break;
     }

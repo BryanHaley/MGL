@@ -27,6 +27,10 @@ void mglDispatchCompute(GLMContext ctx, GLuint num_groups_x, GLuint num_groups_y
     ERROR_CHECK_RETURN(num_groups_y < ctx->state.var.max_compute_work_group_size[1], GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(num_groups_z < ctx->state.var.max_compute_work_group_size[2], GL_INVALID_VALUE);
 
+    // no program, or one with no compute stage, is an error -- not an abort
+    ERROR_CHECK_RETURN(STATE(program), GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(STATE(program)->shader_slots[_COMPUTE_SHADER], GL_INVALID_OPERATION);
+
     ctx->mtl_funcs.mtlDispatchCompute(ctx, num_groups_x, num_groups_y, num_groups_z);
 }
 

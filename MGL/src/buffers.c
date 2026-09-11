@@ -595,9 +595,14 @@ void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffe
 
 void mglBindBuffersBase(GLMContext ctx, GLenum target, GLuint first, GLsizei count, const GLuint *buffers)
 {
-    while(count--)
+    ERROR_CHECK_RETURN(checkTarget(ctx, target), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(first + count <= MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
+
+    for (GLsizei i = 0; i < count; i++)
     {
-        mglBindBufferBase(ctx, target, first++, *buffers++);
+        // a null array unbinds the whole span
+        mglBindBufferBase(ctx, target, first + i, buffers ? buffers[i] : 0);
     }
 }
 

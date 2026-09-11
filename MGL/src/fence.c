@@ -38,15 +38,36 @@ Sync *newSync(GLMContext ctx)
 
     ptr->name = STATE(sync_name)++;
 
+    ptr->next = STATE(sync_list);
+    STATE(sync_list) = ptr;
+
     return ptr;
 }
 
+// The only safe test is whether we handed this pointer out and still own it.
+// Comparing sync->name would dereference whatever the caller passed.
 int isSync(GLMContext ctx, GLsync sync)
 {
-    if (sync->name < STATE(sync_name))
-        return 1;
+    if (sync == NULL)
+        return 0;
+
+    for (Sync *s = STATE(sync_list); s; s = s->next)
+        if (s == sync)
+            return 1;
 
     return 0;
+}
+
+static void unlinkSync(GLMContext ctx, GLsync sync)
+{
+    for (Sync **p = &STATE(sync_list); *p; p = &(*p)->next)
+    {
+        if (*p == sync)
+        {
+            *p = sync->next;
+            return;
+        }
+    }
 }
 
 GLsync mglFenceSync(GLMContext ctx, GLenum condition, GLbitfield flags)
@@ -92,12 +113,16 @@ GLboolean mglIsSync(GLMContext ctx, GLsync sync)
 
 void mglDeleteSync(GLMContext ctx, GLsync sync)
 {
+    // deleting a zero sync is a documented no-op
+    if (sync == NULL)
+        return;
+
     if (isSync(ctx, sync) == GL_FALSE)
     {
-        // CRITICAL FIX: Handle invalid sync gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Attempting to delete invalid sync object %p\n", sync);
-        return;
+        ERROR_RETURN(GL_INVALID_VALUE);
     }
+
+    unlinkSync(ctx, sync);
 
     if (sync->mtl_event)
     {
@@ -116,16 +141,12 @@ GLenum  mglClientWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint6
 {
     if (flags & ~GL_SYNC_FLUSH_COMMANDS_BIT)
     {
-        // CRITICAL FIX: Handle invalid flags gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Invalid sync flags 0x%x, only GL_SYNC_FLUSH_COMMANDS_BIT allowed\n", flags);
-        return GL_INVALID_VALUE;
+        ERROR_RETURN_VALUE(GL_INVALID_VALUE, GL_WAIT_FAILED);
     }
 
     if (isSync(ctx, sync) == GL_FALSE)
     {
-        // CRITICAL FIX: Handle invalid sync gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Invalid sync object %p passed to client wait sync\n", sync);
-        return GL_INVALID_VALUE;
+        ERROR_RETURN_VALUE(GL_INVALID_VALUE, GL_WAIT_FAILED);
     }
 
     if (sync->mtl_event == NULL)
@@ -135,8 +156,6 @@ GLenum  mglClientWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint6
 
     ctx->mtl_funcs.mtlWaitForSync(ctx, sync);
 
-    assert(sync->mtl_event == NULL);
-
     return GL_CONDITION_SATISFIED;
 }
 
@@ -144,9 +163,7 @@ void mglWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint64 timeout
 {
     if (isSync(ctx, sync) == GL_FALSE)
     {
-        // CRITICAL FIX: Handle invalid sync gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Invalid sync object %p passed to wait sync\n", sync);
-        return;
+        ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     if (timeout != GL_TIMEOUT_IGNORED) {
@@ -167,65 +184,49 @@ void mglGetSynciv(GLMContext ctx, GLsync sync, GLenum pname, GLsizei count, GLsi
 {
     if (isSync(ctx, sync) == GL_FALSE)
     {
-        // CRITICAL FIX: Handle invalid sync gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Invalid sync object %p passed to get sync iv\n", sync);
-        return;
+        ERROR_RETURN(GL_INVALID_VALUE);
     }
 
-    // CRITICAL FIX: Add parameter validation with graceful handling
-    if (!count || count < 0) {
-        MGL_ERR("MGL ERROR: Invalid count %d in get sync iv\n", count);
-        return;
-    }
-    if (!length) {
-        MGL_ERR("MGL ERROR: NULL length pointer in get sync iv\n");
-        return;
-    }
-    if (!values) {
-        MGL_ERR("MGL ERROR: NULL values pointer in get sync iv\n");
-        return;
-    }
-
-    if (*length < count * sizeof(GLuint))
+    // count is the size of the caller's buffer, not a number of values to write.
+    // Every pname here yields exactly one value.
+    if (count < 0)
     {
-        // CRITICAL FIX: Handle insufficient buffer size gracefully
-        MGL_ERR("MGL ERROR: Insufficient buffer size %d for %d values in get sync iv\n", *length, count);
-        *length = count * sizeof(GLuint);
-        return;
+        ERROR_RETURN(GL_INVALID_VALUE);
     }
 
-    while(count--)
+    GLint v;
+
+    switch(pname)
     {
-        switch(pname)
-        {
-            case GL_OBJECT_TYPE:
-                *values = GL_SYNC_FENCE;
-                break;
+        case GL_OBJECT_TYPE:
+            v = GL_SYNC_FENCE;
+            break;
 
-            case GL_SYNC_STATUS:
-                if (sync->mtl_event)
-                    *values = GL_UNSIGNALED;
-                else
-                    *values = GL_SIGNALED;
-                break;
+        case GL_SYNC_STATUS:
+            v = sync->mtl_event ? GL_UNSIGNALED : GL_SIGNALED;
+            break;
 
-            case GL_SYNC_CONDITION:
-                if (sync->mtl_event == NULL)
-                    *values = GL_SYNC_GPU_COMMANDS_COMPLETE;
-                break;
+        case GL_SYNC_CONDITION:
+            v = GL_SYNC_GPU_COMMANDS_COMPLETE;
+            break;
 
-            case GL_SYNC_FLAGS:
-                *values = 0;
-                break;
+        case GL_SYNC_FLAGS:
+            v = 0;
+            break;
 
-            default:
-                // CRITICAL FIX: Handle unknown sync parameters gracefully instead of crashing
-                MGL_ERR("MGL ERROR: Unknown sync parameter 0x%x in get sync iv\n", pname);
-                *values = 0; // Return safe default value
-                break;
-        }
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
 
-        values++;
+    if (count > 0 && values)
+    {
+        *values = v;
+
+        if (length) *length = 1;
+    }
+    else if (length)
+    {
+        *length = 0;
     }
 }
 

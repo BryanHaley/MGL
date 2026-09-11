@@ -360,6 +360,8 @@ void mglDrawElementsInstancedBaseVertex(GLMContext ctx, GLenum mode, GLsizei cou
 {
     ERROR_CHECK_RETURN(check_draw_modes(mode), GL_INVALID_ENUM);
 
+    ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
+
     ERROR_CHECK_RETURN(count > 0, GL_INVALID_VALUE);
 
     ERROR_CHECK_RETURN(instancecount > 0, GL_INVALID_VALUE);
