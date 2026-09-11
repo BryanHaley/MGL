@@ -616,6 +616,21 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     spvc_compiler_compile(compiler_msl, &result);
     DEBUG_PRINT("\n%s\n", result);
 
+    // MSL slots are not a dense run -- an arrayed uniform reserves one index
+    // per element -- so ask for each slot rather than counting. They are only
+    // assigned once the shader has actually been emitted, hence after compile.
+    for (int res_type = 0; res_type < _MAX_SPIRV_RES; res_type++)
+    {
+        SpirvResourceList *rlist = &ptr->spirv_resources_list[stage][res_type];
+
+        for (unsigned i = 0; i < rlist->count; i++)
+        {
+            unsigned idx = spvc_compiler_msl_get_automatic_resource_binding(compiler_msl, rlist->list[i]._id);
+
+            rlist->list[i].msl_index = (idx == (unsigned)-1) ? rlist->list[i].binding : idx;
+        }
+    }
+
     if (getenv("MGL_DEBUG_MSL"))
         MGL_INFO("---- MSL stage %d ----\n%s\n", stage, result);
 

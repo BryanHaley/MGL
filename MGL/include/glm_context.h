@@ -429,6 +429,7 @@ typedef struct SpirvResource_t {
     GLuint  set;
     GLuint  binding;
     GLuint  location;
+    GLuint  msl_index;      // the [[buffer(n)]] / [[texture(n)]] slot SPIRV-Cross gave it
 } SpirvResource;
 
 typedef struct SpirvResourceList_t {

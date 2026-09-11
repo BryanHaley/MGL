@@ -518,7 +518,8 @@ void logDirtyBits(GLMContext ctx)
                 if (buf)
                 {
                     buffer_map->buffers[buffer_map->count].attribute_mask = 0; // non attribute.. no bits set
-                    buffer_map->buffers[buffer_map->count].buffer_base_index = spirv_binding;
+                    buffer_map->buffers[buffer_map->count].buffer_base_index =
+                        [self getProgramMSLIndex:stage type:spvc_type index: i];
                     buffer_map->buffers[buffer_map->count].buf = buf;
                     buffer_map->buffers[buffer_map->count].offset = buffers[spirv_binding].offset;
                     buffer_map->count++;
@@ -549,6 +550,14 @@ void logDirtyBits(GLMContext ctx)
 
         // vao buffers start after the uniforms and shader buffers
         vao_buffer_start = buffer_map->count;
+
+        // The attribute slots have to clear every uniform slot MSL handed out,
+        // and those are sparse, so take the highest one rather than the count.
+        GLuint attrib_slot = 0;
+        for (int b=0; b<vao_buffer_start; b++)
+            if (buffer_map->buffers[b].buffer_base_index >= attrib_slot)
+                attrib_slot = buffer_map->buffers[b].buffer_base_index + 1;
+
         // CRITICAL SECURITY FIX: Check array bounds instead of using assert()
         if (buffer_map->count >= ctx->state.max_vertex_attribs) {
             MGL_NSERR(@"MGL SECURITY ERROR: buffer_map count %d exceeds max_vertex_attribs %d",
@@ -622,6 +631,7 @@ void logDirtyBits(GLMContext ctx)
                     buffer_map->buffers[buffer_map->count].buf = gl_buffer;
                     buffer_map->buffers[buffer_map->count].offset = base;
                     buffer_map->buffers[buffer_map->count].stride = stride;
+                    buffer_map->buffers[buffer_map->count].buffer_base_index = attrib_slot++;
                     buffer_map->count++;
 
                     mapped_buffers++;
@@ -797,7 +807,7 @@ void logDirtyBits(GLMContext ctx)
         {
             [_currentRenderEncoder setVertexBytes:(const void *)((const GLubyte *)ptr->data.buffer_data + offset)
                                            length:(NSUInteger)(ptr->size - offset)
-                                          atIndex:i];
+                                          atIndex:map->buffer_base_index];
 
             // clear buffer data dirty bits
             ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
@@ -818,7 +828,7 @@ void logDirtyBits(GLMContext ctx)
 
             id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)(ptr->data.mtl_data);
 
-            [_currentRenderEncoder setVertexBuffer:buffer offset:offset atIndex:i ];
+            [_currentRenderEncoder setVertexBuffer:buffer offset:offset atIndex:map->buffer_base_index];
         }
     }
 
@@ -846,7 +856,7 @@ void logDirtyBits(GLMContext ctx)
         {
             assert(ptr->data.mtl_data == NULL);
 
-            [_currentRenderEncoder setFragmentBytes:(const void *)ptr->data.buffer_data length:ptr->size atIndex:i];
+            [_currentRenderEncoder setFragmentBytes:(const void *)ptr->data.buffer_data length:ptr->size atIndex:map->buffer_base_index];
             
             // clear buffer data dirty bits
             ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
@@ -858,7 +868,7 @@ void logDirtyBits(GLMContext ctx)
             id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)(ptr->data.mtl_data);
             assert(buffer);
             
-            [_currentRenderEncoder setFragmentBuffer:buffer offset:offset atIndex:i ];
+            [_currentRenderEncoder setFragmentBuffer:buffer offset:offset atIndex:map->buffer_base_index];
         }
     }
 
@@ -2804,6 +2814,17 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     return ptr->spirv_resources_list[stage][type].list[index].binding;
 }
 
+- (int) getProgramMSLIndex: (int) stage type: (int) type index: (int) index
+{
+    Program *ptr = ctx->state.program;
+
+    assert(stage < _MAX_SPIRV_RES);
+    assert(ptr);
+    assert(index < ptr->spirv_resources_list[stage][type].count);
+
+    return ptr->spirv_resources_list[stage][type].list[index].msl_index;
+}
+
 - (int) getProgramLocation: (int) stage type: (int) type index: (int) index
 {
     Program *ptr;
@@ -2997,6 +3018,13 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     return stencil_op;
 }
 
+// True when we rasterise upside down into the current target, which we do for
+// user framebuffers so their textures end up in GL's row order.
+- (bool) renderTargetIsFlipped
+{
+    return ctx->state.framebuffer != NULL;
+}
+
 - (void) updateCurrentRenderEncoder
 {
     if (ctx->state.caps.depth_test ||
@@ -3067,8 +3095,10 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         if (w < 0) w = 0;
         if (h < 0) h = 0;
 
-        // GL counts scissor rows from the bottom, Metal from the top
-        GLint flipped_y = (th > 0) ? (GLint)th - (y + h) : y;
+        // GL counts scissor rows from the bottom, Metal from the top -- unless
+        // the viewport is already flipped for this target
+        GLint flipped_y = [self renderTargetIsFlipped] ? y
+                        : ((th > 0) ? (GLint)th - (y + h) : y);
 
         if (x < 0) { w += x; x = 0; }
         if (flipped_y < 0) { h += flipped_y; flipped_y = 0; }
@@ -3087,9 +3117,27 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             [_currentRenderEncoder setScissorRect:rect];
     }
 
-    [_currentRenderEncoder setViewport:(MTLViewport){ctx->state.viewport[0].x, ctx->state.viewport[0].y,
-                                        ctx->state.viewport[0].w, ctx->state.viewport[0].h,
-                                        ctx->state.depth_range[0].znear, ctx->state.depth_range[0].zfar}];
+    {
+        // Metal stores a render target top row first, GL bottom row first. For
+        // the drawable that cancels out on screen, but an FBO texture is read
+        // back by a shader, where GL expects v=0 at the bottom. So flip the
+        // viewport when drawing into an FBO and the texture comes out the way
+        // GL says it should. Without this every render to texture -- the whole
+        // post processing pass of any game -- came out upside down.
+        GLfloat vx = ctx->state.viewport[0].x;
+        GLfloat vy = ctx->state.viewport[0].y;
+        GLfloat vw = ctx->state.viewport[0].w;
+        GLfloat vh = ctx->state.viewport[0].h;
+
+        if ([self renderTargetIsFlipped])
+        {
+            vy = vy + vh;
+            vh = -vh;
+        }
+
+        [_currentRenderEncoder setViewport:(MTLViewport){vx, vy, vw, vh,
+                                            ctx->state.depth_range[0].znear, ctx->state.depth_range[0].zfar}];
+    }
 
     if (ctx->state.caps.cull_face)
     {
@@ -3108,6 +3156,10 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         MTLWinding winding;
 
         winding = ctx->state.var.front_face - GL_CW;
+
+        // flipping the viewport mirrors every triangle, so front and back swap
+        if ([self renderTargetIsFlipped])
+            winding = (winding == MTLWindingClockwise) ? MTLWindingCounterClockwise : MTLWindingClockwise;
 
         [_currentRenderEncoder setFrontFacingWinding:winding];
     }
@@ -4138,23 +4190,24 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
             mapped_buffer_index = [self getVertexBufferIndexWithAttributeSet: i];
 
             GLintptr slot_offset = ctx->state.vertex_buffer_map_list.buffers[mapped_buffer_index].offset;
+            GLuint   slot_index  = ctx->state.vertex_buffer_map_list.buffers[mapped_buffer_index].buffer_base_index;
 
-            vertexDescriptor.attributes[i].bufferIndex = mapped_buffer_index;
+            vertexDescriptor.attributes[i].bufferIndex = slot_index;
             // the slot is bound at its own offset, so this is the rest of the way in
             vertexDescriptor.attributes[i].offset = ctx->state.vao->attrib[i].relativeoffset - slot_offset;
             vertexDescriptor.attributes[i].format = format;
 
-            vertexDescriptor.layouts[mapped_buffer_index].stride = VAO_ATTRIB_STATE(i).stride;
+            vertexDescriptor.layouts[slot_index].stride = VAO_ATTRIB_STATE(i).stride;
 
             if (ctx->state.vao->attrib[i].divisor)
             {
-                vertexDescriptor.layouts[mapped_buffer_index].stepRate = ctx->state.vao->attrib[i].divisor;
-                vertexDescriptor.layouts[mapped_buffer_index].stepFunction = MTLVertexStepFunctionPerInstance;
+                vertexDescriptor.layouts[slot_index].stepRate = ctx->state.vao->attrib[i].divisor;
+                vertexDescriptor.layouts[slot_index].stepFunction = MTLVertexStepFunctionPerInstance;
             }
             else
             {
-                vertexDescriptor.layouts[mapped_buffer_index].stepRate = 1;
-                vertexDescriptor.layouts[mapped_buffer_index].stepFunction = MTLVertexStepFunctionPerVertex;
+                vertexDescriptor.layouts[slot_index].stepRate = 1;
+                vertexDescriptor.layouts[slot_index].stepFunction = MTLVertexStepFunctionPerVertex;
             }
         }
 
@@ -4633,8 +4686,6 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
                 RETURN_FALSE_ON_FAILURE([self bindFragmentBuffersToCurrentRenderEncoder]);
             }
 
-            // clear dirty render state
-            ctx->state.dirty_bits &= ~DIRTY_RENDER_STATE;
         }
         else if (ctx->state.dirty_bits & DIRTY_BUFFER)
         {
@@ -4644,7 +4695,11 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
             ctx->state.dirty_bits &= ~DIRTY_BUFFER;
         }
-        else if (ctx->state.dirty_bits & DIRTY_RENDER_STATE)
+
+        // Render state stands on its own. It used to hang off the end of the
+        // chain above, so binding a new VAO in the same draw threw the state
+        // away -- a glDepthFunc before a draw simply never reached the encoder.
+        if (ctx->state.dirty_bits & DIRTY_RENDER_STATE)
         {
             if (_currentRenderEncoder == NULL)
             {
@@ -5874,8 +5929,11 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
     if (x + w > src.width)  w = src.width - x;
     if (region.origin.y + h > src.height) h = src.height - region.origin.y;
 
-    // GL counts rows from the bottom, Metal from the top
-    NSUInteger flipped_y = src.height - (region.origin.y + h);
+    // GL counts rows from the bottom, Metal from the top -- except a user
+    // framebuffer, which we already rasterise flipped so it is in GL's order
+    bool src_is_flipped = (ctx->state.readbuffer != NULL);
+    NSUInteger flipped_y = src_is_flipped ? (NSUInteger)region.origin.y
+                                          : src.height - (region.origin.y + h);
 
     GLuint  bpp = mglNativeFormatBytesPerPixel(nf);
     NSUInteger staging_pitch = ((w * bpp) + 255) & ~(NSUInteger)255;   // blit wants 256 byte alignment
@@ -5915,7 +5973,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
 
     if (!mglConvertPixels([staging contents], staging_pitch, nf,
                           pixelBytes, bytesPerRow, format, type,
-                          (GLsizei)w, (GLsizei)h, GL_TRUE))
+                          (GLsizei)w, (GLsizei)h, src_is_flipped ? GL_FALSE : GL_TRUE))
     {
         ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
     }
@@ -6177,10 +6235,6 @@ Buffer *getIndirectBuffer(GLMContext ctx)
     primitiveType = getMTLPrimitiveType(mode);
     assert(primitiveType != 0xFFFFFFFF);
 
-    MGL_ERR("MGLDBG drawArrays fbo=%p count=%d target=%lux%lu\n",
-            (void*)ctx->state.framebuffer, count,
-            (unsigned long)_renderPassDescriptor.renderTargetWidth,
-            (unsigned long)_renderPassDescriptor.renderTargetHeight);
     @try {
         [_currentRenderEncoder drawPrimitives: primitiveType
                                  vertexStart: first
