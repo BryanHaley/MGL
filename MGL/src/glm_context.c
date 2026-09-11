@@ -205,6 +205,7 @@ GLMContext createGLMContext(GLenum format, GLenum type,
         STATE(attrib_constant[i]).v.f[2] = 0.0f;
         STATE(attrib_constant[i]).v.f[3] = 1.0f;
         STATE(attrib_constant[i]).type = _ATTRIB_CONST_FLOAT;
+        STATE(attrib_constant[i]).d_valid = GL_FALSE;
     }
 
     for(int i=0; i<MAX_COLOR_ATTACHMENTS; i++)

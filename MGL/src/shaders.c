@@ -312,12 +312,13 @@ void mglDeleteShader(GLMContext ctx, GLuint shader)
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
 
-    deleteHashElement(&STATE(shader_table), shader);
-
     ptr->delete_status = GL_TRUE;
 
+    // A shader still attached to a program is only flagged: glIsShader keeps
+    // saying yes and glShaderSource still works on it, until it is detached.
     if (ptr->refcount == 0)
     {
+        deleteHashElement(&STATE(shader_table), shader);
         mglFreeShader(ctx, ptr);
     }
 }

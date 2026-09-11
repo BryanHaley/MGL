@@ -754,6 +754,23 @@ GLint mglFormatComponentBits(GLenum gl_internal_format, GLenum component)
     }
 }
 
+// The unsized names above are a request to pick a format, not a format, so
+// they must not show up in GL_COMPRESSED_TEXTURE_FORMATS.
+static bool is_generic_compressed(GLenum fmt)
+{
+    switch (fmt) {
+        case GL_COMPRESSED_RED:
+        case GL_COMPRESSED_RG:
+        case GL_COMPRESSED_RGB:
+        case GL_COMPRESSED_RGBA:
+        case GL_COMPRESSED_SRGB:
+        case GL_COMPRESSED_SRGB_ALPHA:
+            return true;
+        default:
+            return false;
+    }
+}
+
 GLsizei mglFormatCompressedFormatList(GLenum *out, GLsizei max)
 {
     GLsizei n = 0;
@@ -761,6 +778,7 @@ GLsizei mglFormatCompressedFormatList(GLenum *out, GLsizei max)
     // a NULL out just counts
     for (size_t i = 0; i < gl_table_count; i++) {
         if (gl_table[i].kind != _CX) continue;
+        if (is_generic_compressed(gl_table[i].gl_format)) continue;
         uint16_t fmt = mglFormatMetalFormat(gl_table[i].gl_format);
         if (fmt != _INV && mtl_format_usable(fmt)) {
             if (out && n < max)

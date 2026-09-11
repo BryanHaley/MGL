@@ -114,7 +114,9 @@ static bool validateMultisample(GLMContext ctx, GLenum target, GLsizei samples,
     }
 
     /* --- dimensions --- */
-    if (width < 1 || height < 1 || depth < 1) {
+    // GL 4.6 8.8 makes only a *negative* size an error; a zero-sized level is
+    // legal and is how a texture's storage gets released.
+    if (width < 0 || height < 0 || depth < 0) {
         ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
     }
 

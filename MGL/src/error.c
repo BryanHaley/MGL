@@ -21,10 +21,14 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <assert.h>
 
 #include "error.h"
+#include "mgl.h"
 #include "mgl_log.h"
+
+extern int isSync(GLMContext ctx, GLsync sync);
 
 
 GLenum  mglGetError(GLMContext ctx)
@@ -278,10 +282,25 @@ void mglPopDebugGroup(GLMContext ctx)
                  GL_DEBUG_SEVERITY_NOTIFICATION, group->text);
 }
 
-void mglObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, GLsizei length, const GLchar *label)
-{
-    GLsizei len;
+/* ---------- object labels ---------- */
 
+// Labels are debug strings an app rarely sets, so they live in one list here
+// instead of costing every object a name buffer. A sync object has no name, so
+// it is keyed by its pointer with identifier left at zero.
+typedef struct ObjectLabel_t {
+    GLMContext ctx;
+    GLenum identifier;
+    GLuint name;
+    const void *ptr;
+    char text[MAX_OBJECT_LABEL];
+} ObjectLabel;
+
+static ObjectLabel *label_list = NULL;
+static GLuint label_count = 0;
+static GLuint label_capacity = 0;
+
+static GLboolean labelIdentifierValid(GLenum identifier)
+{
     switch (identifier)
     {
         case GL_BUFFER:
@@ -295,29 +314,178 @@ void mglObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, GLsizei leng
         case GL_SAMPLER:
         case GL_FRAMEBUFFER:
         case GL_RENDERBUFFER:
+            return GL_TRUE;
+    }
+
+    return GL_FALSE;
+}
+
+static GLboolean labelObjectExists(GLMContext ctx, GLenum identifier, GLuint name)
+{
+    HashTable *table;
+
+    switch (identifier)
+    {
+        case GL_BUFFER:             table = &ctx->state.buffer_table; break;
+        case GL_SHADER:             table = &ctx->state.shader_table; break;
+        case GL_PROGRAM:            table = &ctx->state.program_table; break;
+        case GL_TEXTURE:            table = &ctx->state.texture_table; break;
+        case GL_VERTEX_ARRAY:       table = &ctx->state.vao_table; break;
+        case GL_QUERY:              table = &ctx->state.query_table; break;
+        case GL_PROGRAM_PIPELINE:   table = &ctx->state.program_pipeline_table; break;
+        case GL_TRANSFORM_FEEDBACK: table = &ctx->state.transform_feedback_table; break;
+        case GL_SAMPLER:            table = &ctx->state.sampler_table; break;
+        case GL_RENDERBUFFER:       table = &ctx->state.renderbuffer_table; break;
+
+        case GL_FRAMEBUFFER:
+            // zero is the default framebuffer, which can be labelled
+            if (name == 0)
+                return GL_TRUE;
+
+            table = &ctx->state.framebuffer_table;
             break;
 
         default:
-            ERROR_RETURN(GL_INVALID_ENUM);
+            return GL_FALSE;
     }
 
-    // a NULL label removes any label, so it is not an error
+    if (name == 0)
+        return GL_FALSE;
+
+    if (searchHashTable(table, name))
+        return GL_TRUE;
+
+    // a name handed out by glGen* counts too, even though MGL only builds the
+    // object itself when the name is first used
+    return name < table->current_name;
+}
+
+static ObjectLabel *labelFind(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr)
+{
+    for (GLuint i = 0; i < label_count; i++)
+    {
+        ObjectLabel *l = &label_list[i];
+
+        if (l->ctx == ctx && l->identifier == identifier &&
+            l->name == name && l->ptr == ptr)
+            return l;
+    }
+
+    return NULL;
+}
+
+static void labelStore(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr, const char *text, GLsizei len)
+{
+    ObjectLabel *l = labelFind(ctx, identifier, name, ptr);
+
+    if (l == NULL)
+    {
+        if (label_count == label_capacity)
+        {
+            GLuint capacity = label_capacity ? label_capacity * 2 : 16;
+            ObjectLabel *grown = (ObjectLabel *)realloc(label_list, capacity * sizeof(ObjectLabel));
+
+            if (grown == NULL)
+                return;
+
+            label_list = grown;
+            label_capacity = capacity;
+        }
+
+        l = &label_list[label_count++];
+        l->ctx = ctx;
+        l->identifier = identifier;
+        l->name = name;
+        l->ptr = ptr;
+    }
+
+    memcpy(l->text, text, (size_t)len);
+    l->text[len] = '\0';
+}
+
+static void labelClear(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr)
+{
+    ObjectLabel *l = labelFind(ctx, identifier, name, ptr);
+
+    if (l)
+        *l = label_list[--label_count];
+}
+
+static void labelReturn(const ObjectLabel *l, GLsizei bufSize, GLsizei *length, GLchar *label)
+{
+    GLsizei len = l ? (GLsizei)strlen(l->text) : 0;
+
+    if (len > bufSize - 1)
+        len = bufSize - 1;
+
+    if (label)
+    {
+        if (len > 0)
+            memcpy(label, l->text, (size_t)len);
+
+        label[len] = '\0';
+    }
+
+    if (length)
+        *length = len;
+}
+
+void mglObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, GLsizei length, const GLchar *label)
+{
+    GLsizei len;
+
+    ERROR_CHECK_RETURN(labelIdentifierValid(identifier), GL_INVALID_ENUM);
+
+    // a NULL label just removes any label, so nothing about the object matters
     if (label == NULL)
+    {
+        labelClear(ctx, identifier, name, NULL);
+
         return;
+    }
+
+    ERROR_CHECK_RETURN(labelObjectExists(ctx, identifier, name), GL_INVALID_OPERATION);
 
     len = debugMeasure(label, length);
     ERROR_CHECK_RETURN(len < MAX_OBJECT_LABEL, GL_INVALID_VALUE);
+
+    labelStore(ctx, identifier, name, NULL, label, len);
+}
+
+// the body of glGetObjectLabel, which lives elsewhere
+void mglObjectLabelFetch(GLMContext ctx, GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label)
+{
+    ERROR_CHECK_RETURN(labelIdentifierValid(identifier), GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(labelObjectExists(ctx, identifier, name), GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(bufSize > 0, GL_INVALID_VALUE);
+
+    labelReturn(labelFind(ctx, identifier, name, NULL), bufSize, length, label);
 }
 
 void mglObjectPtrLabel(GLMContext ctx, const void *ptr, GLsizei length, const GLchar *label)
 {
     GLsizei len;
 
-    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(isSync(ctx, (GLsync)ptr), GL_INVALID_VALUE);
 
     if (label == NULL)
+    {
+        labelClear(ctx, 0, 0, ptr);
+
         return;
+    }
 
     len = debugMeasure(label, length);
     ERROR_CHECK_RETURN(len < MAX_OBJECT_LABEL, GL_INVALID_VALUE);
+
+    labelStore(ctx, 0, 0, ptr, label, len);
+}
+
+// the body of glGetObjectPtrLabel, which lives elsewhere
+void mglObjectPtrLabelFetch(GLMContext ctx, const void *ptr, GLsizei bufSize, GLsizei *length, GLchar *label)
+{
+    ERROR_CHECK_RETURN(isSync(ctx, (GLsync)ptr), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(bufSize > 0, GL_INVALID_VALUE);
+
+    labelReturn(labelFind(ctx, 0, 0, ptr), bufSize, length, label);
 }

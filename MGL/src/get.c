@@ -74,13 +74,83 @@ for(int i=0, counts[]={1,4,4,8};i<__COUNT__; data+=counts[__TYPE__], i++) \
 }
 
 
+// which set of indexed buffer binding points a pname reads, or -1 for a pname
+// that is not one of them
+static int bufferBaseForPname(GLenum pname)
+{
+    switch(pname)
+    {
+        case GL_UNIFORM_BUFFER_BINDING:
+        case GL_UNIFORM_BUFFER_START:
+        case GL_UNIFORM_BUFFER_SIZE:
+            return _UNIFORM_BUFFER;
+
+        case GL_SHADER_STORAGE_BUFFER_BINDING:
+        case GL_SHADER_STORAGE_BUFFER_START:
+        case GL_SHADER_STORAGE_BUFFER_SIZE:
+            return _SHADER_STORAGE_BUFFER;
+
+        case GL_ATOMIC_COUNTER_BUFFER_BINDING:
+        case GL_ATOMIC_COUNTER_BUFFER_START:
+        case GL_ATOMIC_COUNTER_BUFFER_SIZE:
+            return _ATOMIC_COUNTER_BUFFER;
+
+        case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING:
+        case GL_TRANSFORM_FEEDBACK_BUFFER_START:
+        case GL_TRANSFORM_FEEDBACK_BUFFER_SIZE:
+            return _TRANSFORM_FEEDBACK_BUFFER;
+    }
+
+    return -1;
+}
+
 // viewport, scissor and depth range are per-index state. Index 0 is what the
 // plain glViewport / glScissor / glDepthRange calls write, so the indexed and
 // non-indexed getters can share one lookup.
 int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *out)
 {
+    int buffer_base = bufferBaseForPname(pname);
+
+    if (buffer_base >= 0)
+    {
+        const BufferBaseTarget *bound;
+
+        if (index >= MAX_BINDABLE_BUFFERS) return -1;
+
+        bound = &ctx->state.buffer_base[buffer_base].buffers[index];
+
+        switch(pname)
+        {
+            case GL_UNIFORM_BUFFER_START:
+            case GL_SHADER_STORAGE_BUFFER_START:
+            case GL_ATOMIC_COUNTER_BUFFER_START:
+            case GL_TRANSFORM_FEEDBACK_BUFFER_START:
+                out[0] = (GLdouble)bound->offset;
+                break;
+
+            case GL_UNIFORM_BUFFER_SIZE:
+            case GL_SHADER_STORAGE_BUFFER_SIZE:
+            case GL_ATOMIC_COUNTER_BUFFER_SIZE:
+            case GL_TRANSFORM_FEEDBACK_BUFFER_SIZE:
+                out[0] = (GLdouble)bound->size;
+                break;
+
+            default:
+                out[0] = (GLdouble)bound->buffer;
+                break;
+        }
+
+        return 1;
+    }
+
     switch(pname)
     {
+        case GL_SAMPLER_BINDING:
+            if (index >= TEXTURE_UNITS) return -1;
+            out[0] = ctx->state.texture_samplers[index] ?
+                     ctx->state.texture_samplers[index]->name : 0;
+            return 1;
+
         case GL_VIEWPORT:
             if (index >= MAX_VIEWPORTS) return -1;
             out[0] = ctx->state.viewport[index].x;

@@ -803,9 +803,31 @@ void mglFramebufferTexture(GLMContext ctx, GLenum target, GLenum attachment, GLu
 }
 
 
+// glFramebufferTextureND only takes a texture whose own target is textarget
+static bool textargetMatchesTexture(GLMContext ctx, GLenum textarget, GLuint texture)
+{
+    Texture *tex;
+
+    if (texture == 0)
+        return true;
+
+    tex = findTexture(ctx, texture);
+
+    // a bad name, or a name never bound to a target: the attach path reports it
+    if (tex == NULL || tex->target == 0)
+        return true;
+
+    if (tex->target == GL_TEXTURE_CUBE_MAP && isCubeMapTarget(ctx, textarget))
+        return true;
+
+    return tex->target == textarget;
+}
+
 void mglFramebufferTexture1D(GLMContext ctx, GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level)
 {
     ERROR_CHECK_RETURN(textarget == GL_TEXTURE_1D, GL_INVALID_ENUM);
+
+    ERROR_CHECK_RETURN(textargetMatchesTexture(ctx, textarget, texture), GL_INVALID_OPERATION);
 
     framebufferTexture(ctx, target, GL_TEXTURE_1D, attachment, textarget, texture, level, 0);
 }
@@ -828,12 +850,16 @@ void mglFramebufferTexture2D(GLMContext ctx, GLenum target, GLenum attachment, G
             ERROR_RETURN(GL_INVALID_ENUM);
     }
 
+    ERROR_CHECK_RETURN(textargetMatchesTexture(ctx, textarget, texture), GL_INVALID_OPERATION);
+
     framebufferTexture(ctx, target, GL_TEXTURE_2D, attachment, textarget, texture, level, 0);
 }
 
 void mglFramebufferTexture3D(GLMContext ctx, GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset)
 {
     ERROR_CHECK_RETURN(textarget == GL_TEXTURE_3D, GL_INVALID_ENUM);
+
+    ERROR_CHECK_RETURN(textargetMatchesTexture(ctx, textarget, texture), GL_INVALID_OPERATION);
 
     framebufferTexture(ctx, target, GL_TEXTURE_3D, attachment, textarget, texture, level, zoffset);
 }
@@ -933,9 +959,17 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
             // target is zero for the Named variant, which passes a name instead
             ERROR_CHECK_RETURN(target == 0, GL_INVALID_ENUM);
 
-            fbo = findFrameBuffer(ctx, framebuffer);
+            // name 0 is the default framebuffer, not a bad name
+            if (framebuffer)
+            {
+                fbo = findFrameBuffer(ctx, framebuffer);
 
-            ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+                ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+            }
+            else
+            {
+                fbo = NULL;
+            }
             break;
     }
 
@@ -944,6 +978,18 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
         GLuint level __attribute__((unused));
         Texture *tex;
         GLenum target;
+
+        switch(attachment)
+        {
+            case GL_DEPTH_ATTACHMENT:
+            case GL_STENCIL_ATTACHMENT:
+            case GL_DEPTH_STENCIL_ATTACHMENT:
+                break;
+
+            default:
+                // a framebuffer object has no FRONT/BACK/LEFT/RIGHT buffers
+                ERROR_CHECK_RETURN(isColorAttachment(ctx, attachment), GL_INVALID_ENUM);
+        }
 
         if (attachment == GL_DEPTH_STENCIL_ATTACHMENT)
         {

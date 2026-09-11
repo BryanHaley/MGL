@@ -20,12 +20,35 @@ TransformFeedback *getTransformFeedback(GLMContext ctx, GLuint name);
 extern Texture *findTexture(GLMContext ctx, GLuint texture);
 extern Texture *currentTexture(GLMContext ctx, GLuint index);
 
+// Forward declarations for program reflection from program.c
+extern GLint programResourceLocation(GLMContext ctx, GLuint program, GLenum programInterface, const GLchar *name);
+extern GLint programResourceLocationIndex(GLMContext ctx, GLuint program, GLenum programInterface, const GLchar *name);
+extern ProgramPipeline *findProgramPipeline(GLMContext ctx, GLuint pipeline);
+extern Program *findProgram(GLMContext ctx, GLuint program);
+extern bool validShaderType(GLenum shadertype);
+
+// Forward declarations for the KHR_debug label store from error.c
+extern void mglObjectLabelFetch(GLMContext ctx, GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label);
+extern void mglObjectPtrLabelFetch(GLMContext ctx, const void *ptr, GLsizei bufSize, GLsizei *length, GLchar *label);
+
 
 
 
 
 void mglBeginTransformFeedback(GLMContext ctx, GLenum primitiveMode)
 {
+	// a bad mode is a bad argument, so it is caught ahead of the state checks
+	switch (primitiveMode)
+	{
+		case GL_POINTS:
+		case GL_LINES:
+		case GL_TRIANGLES:
+			break;
+
+		default:
+			ERROR_RETURN(GL_INVALID_ENUM);
+	}
+
 	if (!STATE(transform_feedback))
 	{
 		STATE(error) = GL_INVALID_OPERATION;
@@ -84,9 +107,17 @@ void mglBindTransformFeedback(GLMContext ctx, GLenum target, GLuint id)
 
 void mglColorMaski(GLMContext ctx, GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a)
 {
-	// Indexed color mask - use global mask for simplicity
-	(void)index;
-	mglColorMask(ctx, r, g, b, a);
+	ERROR_CHECK_RETURN(index < MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE);
+
+	// only the named draw buffer changes; the others keep their own mask
+	STATE(caps.use_color_mask[index]) = !(r && g && b && a);
+
+	ctx->state.var.color_writemask[index][0] = r;
+	ctx->state.var.color_writemask[index][1] = g;
+	ctx->state.var.color_writemask[index][2] = b;
+	ctx->state.var.color_writemask[index][3] = a;
+
+	ctx->state.dirty_bits |= DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
 }
 
 void mglColorP3ui(GLMContext ctx, GLenum type, GLuint color)
@@ -117,20 +148,42 @@ void mglColorP4uiv(GLMContext ctx, GLenum type, const GLuint *color)
 	(void)color;
 }
 
+// Targets glCopyImageSubData accepts. Buffer textures and the individual
+// cube faces are excluded by name in the spec.
+static bool copyImageTargetValid(GLenum target)
+{
+	switch (target)
+	{
+		case GL_RENDERBUFFER:
+		case GL_TEXTURE_1D:
+		case GL_TEXTURE_1D_ARRAY:
+		case GL_TEXTURE_2D:
+		case GL_TEXTURE_2D_ARRAY:
+		case GL_TEXTURE_2D_MULTISAMPLE:
+		case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+		case GL_TEXTURE_3D:
+		case GL_TEXTURE_CUBE_MAP:
+		case GL_TEXTURE_CUBE_MAP_ARRAY:
+		case GL_TEXTURE_RECTANGLE:
+			return true;
+	}
+
+	return false;
+}
+
 void mglCopyImageSubData(GLMContext ctx, GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth)
 {
 	MGL_INFO("MGL: glCopyImageSubData src=%u dst=%u %dx%dx%d\n",
 	        srcName, dstName, srcWidth, srcHeight, srcDepth);
-	
+
+	ERROR_CHECK_RETURN(copyImageTargetValid(srcTarget), GL_INVALID_ENUM);
+	ERROR_CHECK_RETURN(copyImageTargetValid(dstTarget), GL_INVALID_ENUM);
+
 	// Find source and destination textures
 	Texture *srcTex = findTexture(ctx, srcName);
 	Texture *dstTex = findTexture(ctx, dstName);
-	
-	if (!srcTex || !dstTex) {
-		MGL_ERR("MGL ERROR: CopyImageSubData - texture not found src=%p dst=%p\n",
-		        srcTex, dstTex);
-		return;
-	}
+
+	ERROR_CHECK_RETURN(srcTex && dstTex, GL_INVALID_VALUE);
 	
 	if (!srcTex->mtl_data || !dstTex->mtl_data) {
 		MGL_ERR("MGL ERROR: CopyImageSubData - no Metal data src=%p dst=%p\n",
@@ -170,13 +223,19 @@ GLuint  mglCreateShaderProgramv(GLMContext ctx, GLenum type, GLsizei count, cons
 	
 	mglAttachShader(ctx, program, shader);
 	mglLinkProgram(ctx, program);
+
+	// the spec detaches before deleting, so the program ends up with no
+	// attached shaders at all
+	mglDetachShader(ctx, program, shader);
 	mglDeleteShader(ctx, shader);
-	
+
 	return program;
 }
 
 void mglCreateTransformFeedbacks(GLMContext ctx, GLsizei n, GLuint *ids)
 {
+	ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
 	for (GLsizei i = 0; i < n; i++)
 	{
 		mglGenTransformFeedbacks(ctx, 1, &ids[i]);
@@ -256,10 +315,12 @@ void mglGenTransformFeedbacks(GLMContext ctx, GLsizei n, GLuint *ids)
 
 void mglGetActiveSubroutineName(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
 {
-	// Subroutines - return empty string
-	(void)program; (void)shadertype; (void)index; (void)bufSize;
-	if (length) *length = 0;
-	if (name && bufSize > 0) name[0] = '\0';
+	ERROR_CHECK_RETURN(findProgram(ctx, program), GL_INVALID_VALUE);
+	ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+	ERROR_CHECK_RETURN(validShaderType(shadertype), GL_INVALID_ENUM);
+
+	// MGL's linker captures no subroutines, so every index is out of range
+	ERROR_RETURN(GL_INVALID_VALUE);
 }
 
 
@@ -289,27 +350,22 @@ void mglGetMultisamplefv(GLMContext ctx, GLenum pname, GLuint index, GLfloat *va
 
 void mglGetObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label)
 {
-	// No labels stored
-	(void)identifier;
-	(void)name;
-	if (length) *length = 0;
-	if (label && bufSize > 0) label[0] = '\0';
+	mglObjectLabelFetch(ctx, identifier, name, bufSize, length, label);
 }
 
 void mglGetObjectPtrLabel(GLMContext ctx, const void *ptr, GLsizei bufSize, GLsizei *length, GLchar *label)
 {
-	// No labels stored
-	(void)ptr;
-	if (length) *length = 0;
-	if (label && bufSize > 0) label[0] = '\0';
+	mglObjectPtrLabelFetch(ctx, ptr, bufSize, length, label);
 }
 
 
 
 void mglGetProgramPipelineInfoLog(GLMContext ctx, GLuint pipeline, GLsizei bufSize, GLsizei *length, GLchar *infoLog)
 {
-	// Pipeline info log - return empty
-	(void)pipeline;
+	ERROR_CHECK_RETURN(findProgramPipeline(ctx, pipeline), GL_INVALID_OPERATION);
+	ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+
+	// MGL's pipelines never log anything, so the log is always empty
 	if (length) *length = 0;
 	if (infoLog && bufSize > 0) infoLog[0] = '\0';
 }
@@ -318,16 +374,12 @@ void mglGetProgramPipelineInfoLog(GLMContext ctx, GLuint pipeline, GLsizei bufSi
 
 GLint  mglGetProgramResourceLocation(GLMContext ctx, GLuint program, GLenum programInterface, const GLchar *name)
 {
-	// Program resource location - return -1 (not found)
-	(void)program; (void)programInterface; (void)name;
-	return -1;
+	return programResourceLocation(ctx, program, programInterface, name);
 }
 
 GLint  mglGetProgramResourceLocationIndex(GLMContext ctx, GLuint program, GLenum programInterface, const GLchar *name)
 {
-	// Program resource location index - return -1 (not found)
-	(void)program; (void)programInterface; (void)name;
-	return -1;
+	return programResourceLocationIndex(ctx, program, programInterface, name);
 }
 
 
@@ -345,9 +397,23 @@ GLint  mglGetProgramResourceLocationIndex(GLMContext ctx, GLuint program, GLenum
 
 void mglGetShaderPrecisionFormat(GLMContext ctx, GLenum shadertype, GLenum precisiontype, GLint *range, GLint *precision)
 {
-	// Return shader precision format - full precision for all types
-	(void)shadertype;
-	(void)precisiontype;
+	ERROR_CHECK_RETURN(shadertype == GL_VERTEX_SHADER || shadertype == GL_FRAGMENT_SHADER, GL_INVALID_ENUM);
+
+	switch (precisiontype)
+	{
+		case GL_LOW_FLOAT:
+		case GL_MEDIUM_FLOAT:
+		case GL_HIGH_FLOAT:
+		case GL_LOW_INT:
+		case GL_MEDIUM_INT:
+		case GL_HIGH_INT:
+			break;
+
+		default:
+			ERROR_RETURN(GL_INVALID_ENUM);
+	}
+
+	// Metal is full precision throughout, so every type reports the same
 	if (range) {
 		range[0] = 127;
 		range[1] = 127;

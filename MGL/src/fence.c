@@ -74,26 +74,23 @@ GLsync mglFenceSync(GLMContext ctx, GLenum condition, GLbitfield flags)
 {
     Sync *ptr;
 
-    switch(condition)
+    if (condition != GL_SYNC_GPU_COMMANDS_COMPLETE)
     {
-        case GL_SYNC_GPU_COMMANDS_COMPLETE:
-            break;
-
-        default:
-            // CRITICAL FIX: Handle unknown fence conditions gracefully instead of crashing
-            MGL_ERR("MGL ERROR: Unknown fence sync condition 0x%x, defaulting to GPU_COMMANDS_COMPLETE\n", condition);
-            condition = GL_SYNC_GPU_COMMANDS_COMPLETE;
-            break;
+        ERROR_RETURN_VALUE(GL_INVALID_ENUM, NULL);
     }
 
     // must be zero
-    if (flags != 0) {
-        // CRITICAL FIX: Handle invalid flags gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Fence sync flags must be zero, got 0x%x, continuing with zero\n", flags);
-        flags = 0;
+    if (flags != 0)
+    {
+        ERROR_RETURN_VALUE(GL_INVALID_VALUE, NULL);
     }
 
     ptr = newSync(ctx);
+
+    if (ptr == NULL)
+    {
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+    }
 
     ctx->mtl_funcs.mtlGetSync(ctx, ptr);
 
@@ -154,6 +151,10 @@ GLenum  mglClientWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint6
         return GL_ALREADY_SIGNALED;
     }
 
+    // the flush bit means "behave as if glFlush came first"
+    if (flags & GL_SYNC_FLUSH_COMMANDS_BIT)
+        ctx->mtl_funcs.mtlFlush(ctx, false);
+
     ctx->mtl_funcs.mtlWaitForSync(ctx, sync);
 
     return GL_CONDITION_SATISFIED;
@@ -166,10 +167,15 @@ void mglWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint64 timeout
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
-    if (timeout != GL_TIMEOUT_IGNORED) {
-        // CRITICAL FIX: Handle invalid timeout gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Server wait sync timeout must be GL_TIMEOUT_IGNORED, got 0x%llx\n", timeout);
-        // Continue with GL_TIMEOUT_IGNORED behavior
+    // the server wait takes no flags and no timeout of its own
+    if (flags != 0)
+    {
+        ERROR_RETURN(GL_INVALID_VALUE);
+    }
+
+    if (timeout != GL_TIMEOUT_IGNORED)
+    {
+        ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     ctx->mtl_funcs.mtlWaitForSync(ctx, sync);
@@ -237,22 +243,37 @@ void mglTextureBarrier(GLMContext ctx)
     // No-op implementation - this is optional functionality
 }
 
+#define MGL_ALL_MEMORY_BARRIERS \
+    (GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_ELEMENT_ARRAY_BARRIER_BIT | \
+     GL_UNIFORM_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | \
+     GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_COMMAND_BARRIER_BIT | \
+     GL_PIXEL_BUFFER_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT | \
+     GL_BUFFER_UPDATE_BARRIER_BIT | GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT | \
+     GL_QUERY_BUFFER_BARRIER_BIT | GL_FRAMEBUFFER_BARRIER_BIT | \
+     GL_TRANSFORM_FEEDBACK_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT | \
+     GL_SHADER_STORAGE_BARRIER_BIT)
+
+// the by-region form takes a smaller set than the full barrier
+#define MGL_BY_REGION_BARRIERS \
+    (GL_ATOMIC_COUNTER_BARRIER_BIT | GL_FRAMEBUFFER_BARRIER_BIT | \
+     GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT | \
+     GL_TEXTURE_FETCH_BARRIER_BIT | GL_UNIFORM_BARRIER_BIT)
+
 void mglMemoryBarrier(GLMContext ctx, GLbitfield barriers)
 {
-    if (barriers & ~(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_ELEMENT_ARRAY_BARRIER_BIT | GL_UNIFORM_BARRIER_BIT |  GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_COMMAND_BARRIER_BIT | GL_PIXEL_BUFFER_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT | GL_FRAMEBUFFER_BARRIER_BIT | GL_TRANSFORM_FEEDBACK_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT))
+    if (barriers != GL_ALL_BARRIER_BITS && (barriers & ~MGL_ALL_MEMORY_BARRIERS))
     {
         // extra bits...
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     if (ctx->mtl_funcs.mtlMemoryBarrier)
-        ctx->mtl_funcs.mtlMemoryBarrier(ctx, barriers);
+        ctx->mtl_funcs.mtlMemoryBarrier(ctx, barriers & MGL_ALL_MEMORY_BARRIERS);
 }
 
 void mglMemoryBarrierByRegion(GLMContext ctx, GLbitfield barriers)
 {
-
-    if (barriers & ~(GL_ATOMIC_COUNTER_BARRIER_BIT | GL_FRAMEBUFFER_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | GL_UNIFORM_BARRIER_BIT))
+    if (barriers != GL_ALL_BARRIER_BITS && (barriers & ~MGL_BY_REGION_BARRIERS))
     {
         // extra bits...
         ERROR_RETURN(GL_INVALID_VALUE);
@@ -260,6 +281,6 @@ void mglMemoryBarrierByRegion(GLMContext ctx, GLbitfield barriers)
 
     // Metal has no by-region variant; the full barrier is a legal superset
     if (ctx->mtl_funcs.mtlMemoryBarrier)
-        ctx->mtl_funcs.mtlMemoryBarrier(ctx, barriers);
+        ctx->mtl_funcs.mtlMemoryBarrier(ctx, barriers & MGL_BY_REGION_BARRIERS);
 }
 

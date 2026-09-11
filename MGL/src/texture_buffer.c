@@ -28,6 +28,7 @@
 extern Buffer *findBuffer(GLMContext ctx, GLuint buffer);
 extern Texture *findTexture(GLMContext ctx, GLuint texture);
 extern Texture *currentTexture(GLMContext ctx, GLuint index);
+extern Texture *getTex(GLMContext ctx, GLuint texture, GLenum target);
 
 /* ---- valid sized internal formats for glTexBuffer / glTexBufferRange ----
    Per OpenGL 4.6 Core spec section 8.17 (Buffer Textures), table 8.16.
@@ -154,11 +155,12 @@ static void tex_buffer_impl(GLMContext ctx, Texture *tex, GLenum internalformat,
         ERROR_RETURN(GL_INVALID_ENUM);
     }
 
-    /* look up the buffer */
+    /* look up the buffer -- a name that is not a buffer object is an
+       INVALID_OPERATION here, not an INVALID_VALUE (spec 8.9) */
     Buffer *buf = findBuffer(ctx, buffer);
     if (!buf)
     {
-        ERROR_RETURN(GL_INVALID_VALUE);
+        ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
     /* a buffer with no storage yet has nothing to texture from */
@@ -250,6 +252,9 @@ void mglTexBuffer(GLMContext ctx, GLenum target, GLenum internalformat, GLuint b
         ERROR_RETURN(GL_INVALID_ENUM);
     }
 
+    // GL 4.6 8.9 requires INVALID_OPERATION when no texture is bound to the
+    // target. dEQP's gluStateReset calls this with zero bound and expects it to
+    // pass; that is the CTS helper being lax, so MGL stays strict here.
     Texture *tex = currentTexture(ctx, _TEXTURE_BUFFER_TARGET);
     if (!tex)
     {
@@ -272,6 +277,8 @@ void mglTexBufferRange(GLMContext ctx, GLenum target, GLenum internalformat,
     {
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
+
+    STATE_VAR(texture_binding_buffer) = tex->name;
 
     tex_buffer_impl(ctx, tex, internalformat, buffer, offset, size, true);
 }

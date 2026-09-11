@@ -28,8 +28,28 @@ static bool validBlendEquation(GLenum mode);
 #define ENABLE_CAP(_cap_)   ctx->state.caps._cap_ = true; break
 #define DISABLE_CAP(_cap_)   ctx->state.caps._cap_ = false; break
 
+// glEnable(CLIP_DISTANCEi) is the same switch as glEnablei(CLIP_DISTANCE0, i);
+// the index rides in the enum. Returns false when cap is not a clip distance.
+static bool clipDistanceCap(GLMContext ctx, GLenum cap, GLuint *index)
+{
+    if (cap < GL_CLIP_DISTANCE0 || cap > GL_CLIP_DISTANCE7)
+        return false;
+
+    *index = (GLuint)(cap - GL_CLIP_DISTANCE0);
+    return true;
+}
+
 void mglDisable(GLMContext ctx, GLenum cap)
 {
+    GLuint cd;
+
+    if (clipDistanceCap(ctx, cap, &cd))
+    {
+        ctx->state.caps.clip_distances[cd] = false;
+        ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+        return;
+    }
+
     switch(cap)
     {
         case GL_BLEND: DISABLE_CAP(blend);
@@ -73,6 +93,15 @@ void mglDisable(GLMContext ctx, GLenum cap)
 
 void mglEnable(GLMContext ctx, GLenum cap)
 {
+    GLuint cd;
+
+    if (clipDistanceCap(ctx, cap, &cd))
+    {
+        ctx->state.caps.clip_distances[cd] = true;
+        ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+        return;
+    }
+
     switch(cap)
     {
         case GL_BLEND: ENABLE_CAP(blend);
@@ -170,7 +199,7 @@ void mglHint(GLMContext ctx, GLenum target, GLenum mode)
 
 void mglLineWidth(GLMContext ctx, GLfloat width)
 {
-    ERROR_CHECK_RETURN(width <= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(width > 0, GL_INVALID_VALUE);
 
     ctx->state.var.line_width = width;
 
@@ -179,7 +208,7 @@ void mglLineWidth(GLMContext ctx, GLfloat width)
 
 void mglPointSize(GLMContext ctx, GLfloat size)
 {
-    ERROR_CHECK_RETURN(size <= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(size > 0, GL_INVALID_VALUE);
 
     ctx->state.var.point_size = size;
 
@@ -263,8 +292,8 @@ void mglStencilFunc(GLMContext ctx, GLenum func, GLint ref, GLuint mask)
             ctx->state.var.stencil_back_func = func;
             ctx->state.var.stencil_ref = ref;
             ctx->state.var.stencil_back_ref = ref;
-            ctx->state.var.stencil_writemask = mask;
-            ctx->state.var.stencil_back_writemask = mask;
+            ctx->state.var.stencil_value_mask = mask;
+            ctx->state.var.stencil_back_value_mask = mask;
             break;
 
         default:
@@ -301,6 +330,9 @@ void mglStencilOp(GLMContext ctx, GLenum fail, GLenum zfail, GLenum zpass)
     ctx->state.var.stencil_fail = fail;
     ctx->state.var.stencil_pass_depth_fail = zfail;
     ctx->state.var.stencil_pass_depth_pass = zpass;
+    ctx->state.var.stencil_back_fail = fail;
+    ctx->state.var.stencil_back_pass_depth_fail = zfail;
+    ctx->state.var.stencil_back_pass_depth_pass = zpass;
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
 }
@@ -308,32 +340,26 @@ void mglStencilOp(GLMContext ctx, GLenum fail, GLenum zfail, GLenum zpass)
 
 void mglStencilMask(GLMContext ctx, GLuint mask)
 {
-    ctx->state.var.stencil_value_mask = mask;
+    ctx->state.var.stencil_writemask = mask;
+    ctx->state.var.stencil_back_writemask = mask;
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
 }
 
 void mglColorMask(GLMContext ctx, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha)
 {
-    if (red == false || green == false  || blue == false  || alpha == false)
-    {
-        for(int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
-        {
-            STATE(caps.use_color_mask[i]) = true;
+    // The flag is just a fast path for "some channel is off". The values have to
+    // be written either way, or glGetBooleanv keeps handing back the old mask.
+    bool masked = (red == false || green == false || blue == false || alpha == false);
 
-            ctx->state.var.color_writemask[i][0] = red;
-            ctx->state.var.color_writemask[i][1] = green;
-            ctx->state.var.color_writemask[i][2] = blue;
-            ctx->state.var.color_writemask[i][3] = alpha;
-
-        }
-    }
-    else
+    for(int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
     {
-        for(int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
-        {
-            STATE(caps.use_color_mask[i]) = false;
-        }
+        STATE(caps.use_color_mask[i]) = masked;
+
+        ctx->state.var.color_writemask[i][0] = red;
+        ctx->state.var.color_writemask[i][1] = green;
+        ctx->state.var.color_writemask[i][2] = blue;
+        ctx->state.var.color_writemask[i][3] = alpha;
     }
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
@@ -405,22 +431,22 @@ void mglStencilFuncSeparate(GLMContext ctx, GLenum face, GLenum func, GLint ref,
         case GL_FRONT:
             ctx->state.var.stencil_func = func;
             ctx->state.var.stencil_ref = ref;
-            ctx->state.var.stencil_writemask = mask;
+            ctx->state.var.stencil_value_mask = mask;
             break;
 
         case GL_BACK:
             ctx->state.var.stencil_back_func = func;
             ctx->state.var.stencil_back_ref = ref;
-            ctx->state.var.stencil_back_writemask = mask;
+            ctx->state.var.stencil_back_value_mask = mask;
             break;
 
         case GL_FRONT_AND_BACK:
             ctx->state.var.stencil_func = func;
             ctx->state.var.stencil_ref = ref;
-            ctx->state.var.stencil_writemask = mask;
+            ctx->state.var.stencil_value_mask = mask;
             ctx->state.var.stencil_back_func = func;
             ctx->state.var.stencil_back_ref = ref;
-            ctx->state.var.stencil_back_writemask = mask;
+            ctx->state.var.stencil_back_value_mask = mask;
             break;
 
         default:
@@ -515,6 +541,11 @@ void mglViewport(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height
 
 GLboolean mglIsEnabled(GLMContext ctx, GLenum cap)
 {
+    GLuint cd;
+
+    if (clipDistanceCap(ctx, cap, &cd))
+        return ctx->state.caps.clip_distances[cd] ? GL_TRUE : GL_FALSE;
+
     switch(cap)
     {
         case GL_BLEND: RET_CAP(blend);
@@ -552,10 +583,9 @@ GLboolean mglIsEnabled(GLMContext ctx, GLenum cap)
 void mglEnablei(GLMContext ctx, GLenum target, GLuint index)
 {
     if (target >= GL_CLIP_DISTANCE0 &&
-        target >= GL_CLIP_DISTANCE7)
+        target <= GL_CLIP_DISTANCE7)
     {
-        if (index >= 0 &&
-            index < ctx->state.var.max_clip_distances)
+        if (index < MAX_CLIP_DISTANCES)
         {
             ctx->state.caps.clip_distances[index] = true;
 
@@ -573,10 +603,9 @@ void mglEnablei(GLMContext ctx, GLenum target, GLuint index)
 void mglDisablei(GLMContext ctx, GLenum target, GLuint index)
 {
     if (target >= GL_CLIP_DISTANCE0 &&
-        target >= GL_CLIP_DISTANCE7)
+        target <= GL_CLIP_DISTANCE7)
     {
-        if (index >= 0 &&
-            index < ctx->state.var.max_clip_distances)
+        if (index < MAX_CLIP_DISTANCES)
         {
             ctx->state.caps.clip_distances[index] = false;
 
@@ -594,10 +623,9 @@ void mglDisablei(GLMContext ctx, GLenum target, GLuint index)
 GLboolean mglIsEnabledi(GLMContext ctx, GLenum target, GLuint index)
 {
     if (target >= GL_CLIP_DISTANCE0 &&
-        target >= GL_CLIP_DISTANCE7)
+        target <= GL_CLIP_DISTANCE7)
     {
-        if (index >= 0 &&
-            index < ctx->state.var.max_clip_distances)
+        if (index < MAX_CLIP_DISTANCES)
         {
             return ctx->state.caps.clip_distances[index];
         }

@@ -2705,20 +2705,22 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 
 - (bool)bindMTLTexture:(Texture *)tex
 {
-    if (tex->dirty_bits)
-    {
-        // release mtl data
-        if (tex->mtl_data)
-        {
-            CFBridgingRelease(tex->mtl_data);
-            tex->mtl_data = NULL;
-        }
+    // Sampler state and pixel storage are different things. Dropping the Metal
+    // texture throws away whatever the GPU drew into it, so only a change to
+    // the storage may do that -- a filter or wrap change must not.
+    bool storage_changed = (tex->dirty_bits & (DIRTY_TEXTURE_LEVEL | DIRTY_TEXTURE_DATA)) != 0;
+    bool sampler_changed = (tex->dirty_bits & (DIRTY_TEXTURE_PARAM | DIRTY_TEXTURE_ACCESS)) != 0;
 
-        if (tex->params.mtl_data)
-        {
-            CFBridgingRelease(tex->params.mtl_data);
-            tex->params.mtl_data = NULL;
-        }
+    if (storage_changed && tex->mtl_data)
+    {
+        CFBridgingRelease(tex->mtl_data);
+        tex->mtl_data = NULL;
+    }
+
+    if ((sampler_changed || storage_changed) && tex->params.mtl_data)
+    {
+        CFBridgingRelease(tex->params.mtl_data);
+        tex->params.mtl_data = NULL;
     }
 
     if (tex->mtl_data == NULL)
@@ -2742,6 +2744,10 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
             MGL_NSINFO(@"MGL SUCCESS: Primary texture created successfully");
         }
 
+    }
+
+    if (tex->params.mtl_data == NULL)
+    {
         tex->params.mtl_data = (void *)CFBridgingRetain([self createMTLSamplerForTexParam:&tex->params target:tex->target]);
         // Sampler creation should not fail even in recovery mode
         if (!tex->params.mtl_data) {
@@ -3808,26 +3814,10 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
 }
 
-- (bool) newCommandBuffer
+// A fence is signalled by dropping its Metal event. Retiring the list here
+// means glFinish can report the fence as signalled, not just wait for it.
+-(void) retireSyncList
 {
-    // CRITICAL FIX: Proper encoder cleanup BEFORE creating new command buffer
-    // Metal API requires ending encoders before creating new command buffers
-
-    // STEP 0: End any existing encoder to prevent MTLReleaseAssertionFailure
-    [self endComputeEncoding];
-
-    if (_currentRenderEncoder) {
-        MGL_NSINFO(@"MGL INFO: Ending existing render encoder before creating new command buffer");
-        @try {
-            [_currentRenderEncoder endEncoding];
-            _currentRenderEncoder = nil;
-        } @catch (NSException *exception) {
-            MGL_NSERR(@"MGL WARNING: Exception ending render encoder: %@", exception);
-            _currentRenderEncoder = nil; // Force clear even on exception
-        }
-    }
-
-    // STEP 1: Clean up any existing sync events safely
     if (_currentCommandBufferSyncList)
     {
         // CRITICAL: Add thread synchronization for sync list access
@@ -3896,6 +3886,29 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
             [_metalStateLock unlock];
         }
     }
+}
+
+- (bool) newCommandBuffer
+{
+    // CRITICAL FIX: Proper encoder cleanup BEFORE creating new command buffer
+    // Metal API requires ending encoders before creating new command buffers
+
+    // STEP 0: End any existing encoder to prevent MTLReleaseAssertionFailure
+    [self endComputeEncoding];
+
+    if (_currentRenderEncoder) {
+        MGL_NSINFO(@"MGL INFO: Ending existing render encoder before creating new command buffer");
+        @try {
+            [_currentRenderEncoder endEncoding];
+            _currentRenderEncoder = nil;
+        } @catch (NSException *exception) {
+            MGL_NSERR(@"MGL WARNING: Exception ending render encoder: %@", exception);
+            _currentRenderEncoder = nil; // Force clear even on exception
+        }
+    }
+
+    // STEP 1: Clean up any existing sync events safely
+    [self retireSyncList];
 
     // CRITICAL SAFETY: Validate command queue before creating buffer
     if (!_commandQueue) {
@@ -5742,6 +5755,12 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
         if (finish && currentStatus < MTLCommandBufferStatusCompleted)
             [_currentCommandBuffer waitUntilCompleted];
 
+        // A finished buffer is spent: the next pass cannot open an encoder on
+        // it. Retire its fences and start a fresh one, or everything drawn
+        // after a glFinish goes nowhere.
+        if (finish)
+            [self newCommandBuffer];
+
         return;
     }
 
@@ -5849,6 +5868,12 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
             MGL_NSERR(@"MGL ERROR: waiting on command buffer failed: %@", exception);
         }
     }
+
+    // The work is done, so the fences riding on it have fired -- and the buffer
+    // is spent, so the next pass needs a fresh one. newCommandBuffer retires
+    // the sync list on the way.
+    if (finish)
+        [self newCommandBuffer];
     }
 #pragma mark C interface to mtlBindBuffer
 void mtlBindBuffer(GLMContext glm_ctx, Buffer *ptr)
@@ -7828,6 +7853,8 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     // MAX_BINDABLE_BUFFERS is our own ceiling, and it is below Metal's 31
     // buffer slots per stage, so it is the honest answer here.
     glm_ctx->state.var.max_shader_storage_buffer_bindings = MAX_BINDABLE_BUFFERS;
+    glm_ctx->state.var.max_uniform_buffer_bindings = MAX_BINDABLE_BUFFERS;
+    glm_ctx->state.var.max_clip_planes = MAX_CLIP_DISTANCES;
     glm_ctx->state.var.max_compute_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
     glm_ctx->state.var.max_vertex_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
     glm_ctx->state.var.max_fragment_shader_storage_blocks = MAX_BINDABLE_BUFFERS;

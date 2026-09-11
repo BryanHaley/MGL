@@ -22,17 +22,6 @@
 #include "glm_context.h"
 #include "mgl_log.h"
 
-bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLint *param);
-bool setTexParamsi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLint *params);
-bool setTexParamsIiv(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLint *params);
-bool setTexParamsIuiv(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLuint *params);
-bool setTexParmf(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLfloat *param);
-bool setTexParamsf(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLfloat *params);
-bool setParam(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLint iparam, GLfloat fparam);
-
-
-bool getParam(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLint *iparam, GLfloat *fparam);
-
 Sampler *newSampler(GLMContext ctx, GLuint sampler)
 {
     Sampler *ptr;
@@ -49,27 +38,27 @@ Sampler *newSampler(GLMContext ctx, GLuint sampler)
 
     ptr->name = sampler;
 
-    float black_color[] = {0,0,0,0};
+    // sampler object defaults, OpenGL 4.6 core table 23.18
+    ptr->params.wrap_s = GL_REPEAT;
+    ptr->params.wrap_t = GL_REPEAT;
+    ptr->params.wrap_r = GL_REPEAT;
+    ptr->params.min_filter = GL_NEAREST_MIPMAP_LINEAR;
+    ptr->params.mag_filter = GL_LINEAR;
+    ptr->params.min_lod = -1000.0f;
+    ptr->params.max_lod = 1000.0f;
+    ptr->params.lod_bias = 0.0f;
+    ptr->params.max_anisotropy = 1.0f;
+    ptr->params.compare_mode = GL_NONE;
+    ptr->params.compare_func = GL_LEQUAL;
 
+    // not sampler state, but the struct is shared with textures
     ptr->params.depth_stencil_mode = GL_DEPTH_COMPONENT;
     ptr->params.base_level = 0;
-    memcpy(ptr->params.border_color, black_color, 4 * sizeof(float));
-    ptr->params.compare_func = GL_NEVER;
-    ptr->params.compare_mode = GL_ALWAYS;
-    ptr->params.lod_bias = 0.0;
-    ptr->params.min_filter = GL_NEAREST;
-    ptr->params.mag_filter = GL_NEAREST;
-    ptr->params.max_anisotropy = 0.0;
-    ptr->params.min_lod = -1000;
-    ptr->params.max_lod = 1000;
     ptr->params.max_level = 1000;
     ptr->params.swizzle_r = GL_RED;
     ptr->params.swizzle_g = GL_GREEN;
     ptr->params.swizzle_b = GL_BLUE;
     ptr->params.swizzle_a = GL_ALPHA;
-    ptr->params.wrap_s = GL_REPEAT;
-    ptr->params.wrap_t = GL_REPEAT;
-    ptr->params.wrap_r = GL_REPEAT;
 
     return ptr;
 }
@@ -84,7 +73,8 @@ Sampler *getSampler(GLMContext ctx, GLuint sampler)
     {
         ptr = newSampler(ctx, sampler);
 
-        insertHashElement(&STATE(sampler_table), sampler, ptr);
+        if (ptr)
+            insertHashElement(&STATE(sampler_table), sampler, ptr);
     }
 
     return ptr;
@@ -118,9 +108,25 @@ GLboolean mglIsSampler(GLMContext ctx, GLuint sampler)
 
 void mglGenSamplers(GLMContext ctx, GLsizei count, GLuint *samplers)
 {
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+
+    if (samplers == NULL)
+        return;
+
+    // GenSamplers hands back new objects already holding the default state
     while(count--)
     {
-        *samplers++ = getNewName(&ctx->state.sampler_table);
+        GLuint name;
+
+        name = getNewName(&ctx->state.sampler_table);
+
+        if (!getSampler(ctx, name))
+        {
+            MGL_ERR("MGL Error: %s: could not create sampler %u\n", __FUNCTION__, name);
+            ERROR_RETURN(GL_OUT_OF_MEMORY);
+        }
+
+        *samplers++ = name;
     }
 }
 
@@ -136,58 +142,55 @@ void mglBindSampler(GLMContext ctx, GLuint unit, GLuint sampler)
 
     if (sampler)
     {
-        ERROR_CHECK_RETURN(isSampler(ctx, sampler), GL_INVALID_OPERATION);
-
         ptr = findSampler(ctx, sampler);
 
-        if(ptr == NULL)
-        {
-            ptr = getSampler(ctx, sampler);
-            ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
-        }
+        ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
     }
     else
     {
         ptr = NULL;
     }
-    
+
     ctx->state.texture_samplers[unit] = ptr;
     ctx->state.dirty_bits  |= DIRTY_SAMPLER;
 }
 
 void mglDeleteSamplers(GLMContext ctx, GLsizei count, const GLuint *samplers)
 {
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+
+    if (samplers == NULL)
+        return;
+
     while(count--)
     {
         GLuint sampler;
+        Sampler *ptr;
 
         sampler = *samplers++;
 
-        if (isSampler(ctx, sampler))
+        ptr = findSampler(ctx, sampler);
+
+        if (ptr == NULL)
+            continue;
+
+        // remove any references to this sampler
+        for(int i=0; i<TEXTURE_UNITS; i++)
         {
-            Sampler *ptr;
-
-            ptr = findSampler(ctx, sampler);
-            ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
-
-            // remove any references to this sampler
-            for(int i=0; i<TEXTURE_UNITS; i++)
+            if (ctx->state.texture_samplers[i] == ptr)
             {
-                if (ctx->state.texture_samplers[i] == ptr)
-                {
-                    ctx->state.texture_samplers[i] = NULL;
-                }
+                ctx->state.texture_samplers[i] = NULL;
             }
-
-            deleteHashElement(&ctx->state.sampler_table, sampler);
-
-            if (ptr->mtl_data)
-            {
-                ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->mtl_data);
-            }
-
-            free(ptr);
         }
+
+        deleteHashElement(&ctx->state.sampler_table, sampler);
+
+        if (ptr->mtl_data)
+        {
+            ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->mtl_data);
+        }
+
+        free(ptr);
     }
 }
 
@@ -197,31 +200,194 @@ void mglCreateSamplers(GLMContext ctx, GLsizei n, GLuint *samplers)
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
 
     mglGenSamplers(ctx, n, samplers);
-
-    while(n--)
-    {
-        GLuint name;
-
-        name = *samplers++;
-
-        if (!getSampler(ctx, name))
-        {
-            MGL_ERR("MGL Error: %s: could not create sampler %u\n", __FUNCTION__, name);
-            ERROR_RETURN(GL_OUT_OF_MEMORY);
-        }
-    }
 }
 
 void mglBindSamplers(GLMContext ctx, GLuint first, GLsizei count, const GLuint *samplers)
 {
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(first + count <= TEXTURE_UNITS, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN((GLuint64)first + (GLuint64)count <= TEXTURE_UNITS, GL_INVALID_OPERATION);
+
+    // every name has to be good before anything is bound
+    if (samplers)
+    {
+        for (GLsizei i = 0; i < count; i++)
+        {
+            if (samplers[i] && !isSampler(ctx, samplers[i]))
+            {
+                ERROR_RETURN(GL_INVALID_OPERATION);
+            }
+        }
+    }
 
     for (GLsizei i = 0; i < count; i++)
     {
         // a null array unbinds the whole span
-        mglBindSampler(ctx, first + i, samplers ? samplers[i] : 0);
+        ctx->state.texture_samplers[first + i] = samplers && samplers[i]
+                                               ? findSampler(ctx, samplers[i])
+                                               : NULL;
     }
+
+    ctx->state.dirty_bits |= DIRTY_SAMPLER;
+}
+
+#pragma mark sampler parameters
+
+// The parameters a sampler object holds, OpenGL 4.6 core table 23.18. Base
+// level, swizzle and the rest of glTexParameter's list belong to the texture,
+// not the sampler, so they are rejected here.
+
+static bool sampler_value_ok(GLenum pname, GLint value)
+{
+    switch(pname)
+    {
+        case GL_TEXTURE_WRAP_S:
+        case GL_TEXTURE_WRAP_T:
+        case GL_TEXTURE_WRAP_R:
+            switch(value)
+            {
+                case GL_CLAMP_TO_EDGE:
+                case GL_CLAMP_TO_BORDER:
+                case GL_MIRRORED_REPEAT:
+                case GL_MIRROR_CLAMP_TO_EDGE:
+                case GL_REPEAT:
+                    return true;
+            }
+            return false;
+
+        case GL_TEXTURE_MIN_FILTER:
+            switch(value)
+            {
+                case GL_NEAREST:
+                case GL_LINEAR:
+                case GL_NEAREST_MIPMAP_NEAREST:
+                case GL_LINEAR_MIPMAP_NEAREST:
+                case GL_NEAREST_MIPMAP_LINEAR:
+                case GL_LINEAR_MIPMAP_LINEAR:
+                    return true;
+            }
+            return false;
+
+        case GL_TEXTURE_MAG_FILTER:
+            return (value == GL_NEAREST) || (value == GL_LINEAR);
+
+        case GL_TEXTURE_COMPARE_MODE:
+            return (value == GL_NONE) || (value == GL_COMPARE_REF_TO_TEXTURE);
+
+        case GL_TEXTURE_COMPARE_FUNC:
+            switch(value)
+            {
+                case GL_LEQUAL:
+                case GL_GEQUAL:
+                case GL_LESS:
+                case GL_GREATER:
+                case GL_EQUAL:
+                case GL_NOTEQUAL:
+                case GL_ALWAYS:
+                case GL_NEVER:
+                    return true;
+            }
+            return false;
+    }
+
+    return true;
+}
+
+// caller passes the value in both forms; each parameter picks the one it wants
+static bool setSamplerScalar(GLMContext ctx, Sampler *ptr, GLenum pname, GLint iv, GLfloat fv)
+{
+    TextureParameter *params = &ptr->params;
+
+    switch(pname)
+    {
+        case GL_TEXTURE_WRAP_S:
+        case GL_TEXTURE_WRAP_T:
+        case GL_TEXTURE_WRAP_R:
+        case GL_TEXTURE_MIN_FILTER:
+        case GL_TEXTURE_MAG_FILTER:
+        case GL_TEXTURE_COMPARE_MODE:
+        case GL_TEXTURE_COMPARE_FUNC:
+            if (sampler_value_ok(pname, iv) == false)
+                ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
+            break;
+
+        case GL_TEXTURE_MIN_LOD:
+        case GL_TEXTURE_MAX_LOD:
+        case GL_TEXTURE_LOD_BIAS:
+            break;
+
+        case GL_TEXTURE_MAX_ANISOTROPY:
+            if (fv < 1.0f)
+                ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
+            break;
+
+        default:
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
+    }
+
+    switch(pname)
+    {
+        case GL_TEXTURE_WRAP_S: params->wrap_s = iv; break;
+        case GL_TEXTURE_WRAP_T: params->wrap_t = iv; break;
+        case GL_TEXTURE_WRAP_R: params->wrap_r = iv; break;
+        case GL_TEXTURE_MIN_FILTER: params->min_filter = iv; break;
+        case GL_TEXTURE_MAG_FILTER: params->mag_filter = iv; break;
+        case GL_TEXTURE_COMPARE_MODE: params->compare_mode = iv; break;
+        case GL_TEXTURE_COMPARE_FUNC: params->compare_func = iv; break;
+        case GL_TEXTURE_MIN_LOD: params->min_lod = fv; break;
+        case GL_TEXTURE_MAX_LOD: params->max_lod = fv; break;
+        case GL_TEXTURE_LOD_BIAS: params->lod_bias = fv; break;
+        case GL_TEXTURE_MAX_ANISOTROPY: params->max_anisotropy = fv; break;
+    }
+
+    ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
+
+    return true;
+}
+
+// the border colour is one piece of state with a float, a signed and an
+// unsigned reading; keep all three in step
+static void setSamplerBorderColor(Sampler *ptr, const GLfloat *f, const GLint *i, const GLuint *ui)
+{
+    TextureParameter *params = &ptr->params;
+
+    for (int n = 0; n < 4; n++)
+    {
+        params->border_color[n]    = f  ? f[n]  : (i ? (GLfloat)i[n] : (GLfloat)ui[n]);
+        params->border_color_i[n]  = i  ? i[n]  : (f ? (GLint)f[n]   : (GLint)ui[n]);
+        params->border_color_ui[n] = ui ? ui[n] : (f ? (GLuint)f[n]  : (GLuint)i[n]);
+    }
+
+    ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
+}
+
+static bool getSamplerScalar(GLMContext ctx, Sampler *ptr, GLenum pname, GLfloat *fv)
+{
+    TextureParameter *params = &ptr->params;
+
+    switch(pname)
+    {
+        case GL_TEXTURE_WRAP_S: *fv = params->wrap_s; break;
+        case GL_TEXTURE_WRAP_T: *fv = params->wrap_t; break;
+        case GL_TEXTURE_WRAP_R: *fv = params->wrap_r; break;
+        case GL_TEXTURE_MIN_FILTER: *fv = params->min_filter; break;
+        case GL_TEXTURE_MAG_FILTER: *fv = params->mag_filter; break;
+        case GL_TEXTURE_COMPARE_MODE: *fv = params->compare_mode; break;
+        case GL_TEXTURE_COMPARE_FUNC: *fv = params->compare_func; break;
+        case GL_TEXTURE_MIN_LOD: *fv = params->min_lod; break;
+        case GL_TEXTURE_MAX_LOD: *fv = params->max_lod; break;
+        case GL_TEXTURE_LOD_BIAS: *fv = params->lod_bias; break;
+        case GL_TEXTURE_MAX_ANISOTROPY: *fv = params->max_anisotropy; break;
+
+        default:
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
+    }
+
+    return true;
+}
+
+static GLint roundToInt(GLfloat f)
+{
+    return (GLint)(f >= 0.0f ? f + 0.5f : f - 0.5f);
 }
 
 void mglSamplerParameterf(GLMContext ctx, GLuint sampler, GLenum pname, GLfloat param)
@@ -232,10 +398,29 @@ void mglSamplerParameterf(GLMContext ctx, GLuint sampler, GLenum pname, GLfloat 
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
-    if (setParam(ctx, &ptr->params, pname, 0, param))
+    // a border colour needs four values
+    if (pname == GL_TEXTURE_BORDER_COLOR)
     {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
+        ERROR_RETURN(GL_INVALID_ENUM);
     }
+
+    setSamplerScalar(ctx, ptr, pname, (GLint)param, param);
+}
+
+void mglSamplerParameteri(GLMContext ctx, GLuint sampler, GLenum pname, GLint param)
+{
+    Sampler *ptr;
+
+    ptr = findSampler(ctx, sampler);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+
+    if (pname == GL_TEXTURE_BORDER_COLOR)
+    {
+        ERROR_RETURN(GL_INVALID_ENUM);
+    }
+
+    setSamplerScalar(ctx, ptr, pname, param, (GLfloat)param);
 }
 
 void mglSamplerParameterfv(GLMContext ctx, GLuint sampler, GLenum pname, const GLfloat *param)
@@ -245,180 +430,159 @@ void mglSamplerParameterfv(GLMContext ctx, GLuint sampler, GLenum pname, const G
     ptr = findSampler(ctx, sampler);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
 
-    if (setTexParamsf(ctx, &ptr->params, pname, param))
+    if (pname == GL_TEXTURE_BORDER_COLOR)
     {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
+        setSamplerBorderColor(ptr, param, NULL, NULL);
 
         return;
     }
 
-    if (setParam(ctx, &ptr->params, pname, 0, *param))
-    {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
-
-        return;
-    }
-}
-
-void mglSamplerParameteri(GLMContext ctx, GLuint sampler, GLenum pname, GLint param)
-{
-    Sampler *ptr;
-
-    ptr = getSampler(ctx, sampler);
-
-    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
-
-    if (setParam(ctx, &ptr->params, pname, 0, param))
-    {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
-    }
+    setSamplerScalar(ctx, ptr, pname, (GLint)*param, *param);
 }
 
 void mglSamplerParameteriv(GLMContext ctx, GLuint sampler, GLenum pname, const GLint *param)
 {
-    GLfloat fparam = 0.0;
     Sampler *ptr;
 
-    ptr = getSampler(ctx, sampler);
+    ptr = findSampler(ctx, sampler);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
 
-    if (setTexParamsi(ctx, &ptr->params, pname, param))
+    if (pname == GL_TEXTURE_BORDER_COLOR)
     {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
+        setSamplerBorderColor(ptr, NULL, param, NULL);
 
         return;
     }
 
-    if (setParam(ctx, &ptr->params, pname, *param, fparam))
-    {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
-    }
+    setSamplerScalar(ctx, ptr, pname, *param, (GLfloat)*param);
 }
 
 void mglSamplerParameterIiv(GLMContext ctx, GLuint sampler, GLenum pname, const GLint *param)
 {
-    GLfloat fparam = 0.0;
     Sampler *ptr;
 
-    ptr = getSampler(ctx, sampler);
+    ptr = findSampler(ctx, sampler);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
 
-    if (setTexParamsIiv(ctx, &ptr->params, pname, param))
+    if (pname == GL_TEXTURE_BORDER_COLOR)
     {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
+        setSamplerBorderColor(ptr, NULL, param, NULL);
 
         return;
     }
 
-    if (setTexParamsi(ctx, &ptr->params, pname, param))
-    {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
-
-        return;
-    }
-
-    if (setParam(ctx, &ptr->params, pname, *param, fparam))
-    {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
-    }
+    setSamplerScalar(ctx, ptr, pname, *param, (GLfloat)*param);
 }
 
 void mglSamplerParameterIuiv(GLMContext ctx, GLuint sampler, GLenum pname, const GLuint *param)
 {
-    GLfloat fparam = 0.0;
     Sampler *ptr;
-
-    ptr = getSampler(ctx, sampler);
-
-    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
-
-    if (setTexParamsIuiv(ctx, &ptr->params, pname, param))
-    {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
-
-        return;
-    }
-
-    if (setTexParamsi(ctx, &ptr->params, pname, (GLint *)param))
-    {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
-
-        return;
-    }
-
-    if (setParam(ctx, &ptr->params, pname, *param, fparam))
-    {
-        ptr->dirty_bits |= DIRTY_SAMPLER_PARAM;
-    }
-}
-
-void mglGetSamplerParameterIiv(GLMContext ctx, GLuint sampler, GLenum pname, GLint *params)
-{
-    Sampler *ptr;
-    GLfloat fparam = 0.0f;
 
     ptr = findSampler(ctx, sampler);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
 
-    getParam(ctx, &ptr->params, pname, params, &fparam);
-}
+    if (pname == GL_TEXTURE_BORDER_COLOR)
+    {
+        setSamplerBorderColor(ptr, NULL, NULL, param);
 
-void mglGetSamplerParameterIuiv(GLMContext ctx, GLuint sampler, GLenum pname, GLuint *params)
-{
-    Sampler *ptr;
-    GLfloat fparam = 0.0f;
-    GLint value = 0;
+        return;
+    }
 
-    ptr = findSampler(ctx, sampler);
-
-    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
-
-    if (getParam(ctx, &ptr->params, pname, &value, &fparam))
-        *params = (GLuint)value;
+    setSamplerScalar(ctx, ptr, pname, (GLint)*param, (GLfloat)*param);
 }
 
 void mglGetSamplerParameterfv(GLMContext ctx, GLuint sampler, GLenum pname, GLfloat *params)
 {
     Sampler *ptr;
+    GLfloat value = 0.0f;
 
     ptr = findSampler(ctx, sampler);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
-    GLint iparam;
-    iparam = 0;
-
-    if(getParam(ctx, &ptr->params, pname, &iparam, params))
+    if (pname == GL_TEXTURE_BORDER_COLOR)
     {
-        if (iparam)
-        {
-            *params = (float)iparam;
-        }
+        for (int i = 0; i < 4; i++)
+            params[i] = ptr->params.border_color[i];
+
+        return;
     }
+
+    if (getSamplerScalar(ctx, ptr, pname, &value))
+        *params = value;
 }
 
 void mglGetSamplerParameteriv(GLMContext ctx, GLuint sampler, GLenum pname, GLint *params)
 {
     Sampler *ptr;
+    GLfloat value = 0.0f;
 
     ptr = findSampler(ctx, sampler);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
-    GLfloat fparam;
-    fparam = 0.0;
-
-    if(getParam(ctx, &ptr->params, pname, params, &fparam))
+    if (pname == GL_TEXTURE_BORDER_COLOR)
     {
-        if (fparam)
-        {
-            *params = (float)fparam;
-        }
+        for (int i = 0; i < 4; i++)
+            params[i] = roundToInt(ptr->params.border_color[i]);
+
+        return;
     }
+
+    if (getSamplerScalar(ctx, ptr, pname, &value))
+        *params = roundToInt(value);
+}
+
+void mglGetSamplerParameterIiv(GLMContext ctx, GLuint sampler, GLenum pname, GLint *params)
+{
+    Sampler *ptr;
+    GLfloat value = 0.0f;
+
+    ptr = findSampler(ctx, sampler);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (pname == GL_TEXTURE_BORDER_COLOR)
+    {
+        for (int i = 0; i < 4; i++)
+            params[i] = ptr->params.border_color_i[i];
+
+        return;
+    }
+
+    if (getSamplerScalar(ctx, ptr, pname, &value))
+        *params = (GLint)value;
+}
+
+void mglGetSamplerParameterIuiv(GLMContext ctx, GLuint sampler, GLenum pname, GLuint *params)
+{
+    Sampler *ptr;
+    GLfloat value = 0.0f;
+
+    ptr = findSampler(ctx, sampler);
+
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (pname == GL_TEXTURE_BORDER_COLOR)
+    {
+        for (int i = 0; i < 4; i++)
+            params[i] = ptr->params.border_color_ui[i];
+
+        return;
+    }
+
+    if (getSamplerScalar(ctx, ptr, pname, &value))
+        *params = (GLuint)value;
 }

@@ -423,7 +423,8 @@ Program *programForUniform(GLMContext ctx, GLuint program)
 {
     Program *pptr = findProgram(ctx, program);
 
-    ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_VALUE, NULL);
+    // here a name that is not a program is an operation error, not a value one
+    ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_OPERATION, NULL);
     ERROR_CHECK_RETURN_VALUE(pptr->linked_glsl_program, GL_INVALID_OPERATION, NULL);
 
     return pptr;
@@ -515,13 +516,6 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
     ERROR_CHECK_RETURN(location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(size > 0, GL_INVALID_VALUE);
 
-    // The spec wants a too-narrow write rejected -- glUniform1f on a vec4 is
-    // GL_INVALID_OPERATION. uniformWriteFits below knows how to decide that, but
-    // it needs a location to look the uniform up by, and MGL's locations do not
-    // line up with the SPIR-V Location decoration for every program: turning the
-    // check on rejects writes that are legal. Left off until that mapping is
-    // trustworthy; the type reflection it depends on is already in place.
-
     buf = pptr->uniform_constants.buffers[location].buf;
 
     if (buf == NULL)
@@ -595,9 +589,33 @@ void mglUniform(GLMContext ctx, GLint location, void *ptr, GLsizei size)
     programUniformWrite(ctx, pptr, location, ptr, size);
 }
 
+// The fixed width setters name their own component count, so a write narrower
+// than the uniform it lands on is an error rather than a partial write --
+// glUniform1f on a vec4. The v forms carry a count and may be filling an array,
+// which MGL cannot size yet, so they go through mglUniform unchecked.
+static void mglUniformFixed(GLMContext ctx, GLint location, void *ptr, GLsizei size)
+{
+    Program *pptr = ctx->state.program;
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(uniformWriteFits(pptr, location, size), GL_INVALID_OPERATION);
+
+    programUniformWrite(ctx, pptr, location, ptr, size);
+}
+
+static void mglUniformFixedD(GLMContext ctx, GLint location, void *ptr, GLsizei size)
+{
+    Program *pptr = ctx->state.program;
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(uniformWriteFits(pptr, location, size), GL_INVALID_OPERATION);
+
+    programUniformWriteD(ctx, pptr, location, ptr, size);
+}
+
 void mglUniform1d(GLMContext ctx, GLint location, GLdouble x)
 {
-    mglUniformD(ctx, location, &x, sizeof(GLdouble));
+    mglUniformFixedD(ctx, location, &x, sizeof(GLdouble));
 }
 
 void mglUniform1dv(GLMContext ctx, GLint location, GLsizei count, const GLdouble *value)
@@ -607,7 +625,7 @@ void mglUniform1dv(GLMContext ctx, GLint location, GLsizei count, const GLdouble
 
 void mglUniform1f(GLMContext ctx, GLint location, GLfloat v0)
 {
-    mglUniform(ctx, location, &v0, sizeof(GLfloat));
+    mglUniformFixed(ctx, location, &v0, sizeof(GLfloat));
 }
 
 void mglUniform1fv(GLMContext ctx, GLint location, GLsizei count, const GLfloat *value)
@@ -617,7 +635,7 @@ void mglUniform1fv(GLMContext ctx, GLint location, GLsizei count, const GLfloat 
 
 void mglUniform1i(GLMContext ctx, GLint location, GLint v0)
 {
-    mglUniform(ctx, location, &v0, sizeof(GLint));
+    mglUniformFixed(ctx, location, &v0, sizeof(GLint));
 }
 
 void mglUniform1iv(GLMContext ctx, GLint location, GLsizei count, const GLint *value)
@@ -627,7 +645,7 @@ void mglUniform1iv(GLMContext ctx, GLint location, GLsizei count, const GLint *v
 
 void mglUniform1ui(GLMContext ctx, GLint location, GLuint v0)
 {
-    mglUniform(ctx, location, &v0, sizeof(GLuint));
+    mglUniformFixed(ctx, location, &v0, sizeof(GLuint));
 }
 
 void mglUniform1uiv(GLMContext ctx, GLint location, GLsizei count, const GLuint *value)
@@ -639,7 +657,7 @@ void mglUniform2d(GLMContext ctx, GLint location, volatile GLdouble x, volatile 
 {
     GLdouble data[] = {x, y};
     
-    mglUniformD(ctx, location, data, 2 * sizeof(GLdouble));
+    mglUniformFixedD(ctx, location, data, 2 * sizeof(GLdouble));
 }
 
 void mglUniform2dv(GLMContext ctx, GLint location, GLsizei count, const GLdouble *value)
@@ -651,7 +669,7 @@ void mglUniform2f(GLMContext ctx, GLint location, GLfloat v0, GLfloat v1)
 {
     GLfloat data[] = {v0, v1};
     
-    mglUniform(ctx, location, data, 2 * sizeof(GLfloat));
+    mglUniformFixed(ctx, location, data, 2 * sizeof(GLfloat));
 }
 
 void mglUniform2fv(GLMContext ctx, GLint location, GLsizei count, const GLfloat *value)
@@ -663,7 +681,7 @@ void mglUniform2i(GLMContext ctx, GLint location, GLint v0, GLint v1)
 {
     GLint data[] = {v0, v1};
     
-    mglUniform(ctx, location, data, 2 * sizeof(GLint));
+    mglUniformFixed(ctx, location, data, 2 * sizeof(GLint));
 }
 
 void mglUniform2iv(GLMContext ctx, GLint location, GLsizei count, const GLint *value)
@@ -675,7 +693,7 @@ void mglUniform2ui(GLMContext ctx, GLint location, GLuint v0, GLuint v1)
 {
     GLuint data[] = {v0, v1};
     
-    mglUniform(ctx, location, data, 2 * sizeof(GLuint));
+    mglUniformFixed(ctx, location, data, 2 * sizeof(GLuint));
 }
 
 void mglUniform2uiv(GLMContext ctx, GLint location, GLsizei count, const GLuint *value)
@@ -687,7 +705,7 @@ void mglUniform3d(GLMContext ctx, GLint location, GLdouble x, GLdouble y, GLdoub
 {
     GLdouble data[] = {x, y, z};
     
-    mglUniformD(ctx, location, data, 3 * sizeof(GLdouble));
+    mglUniformFixedD(ctx, location, data, 3 * sizeof(GLdouble));
 }
 
 void mglUniform3dv(GLMContext ctx, GLint location, GLsizei count, const GLdouble *value)
@@ -699,7 +717,7 @@ void mglUniform3f(GLMContext ctx, GLint location, GLfloat v0, GLfloat v1, GLfloa
 {
     GLfloat data[] = {v0, v1, v2};
     
-    mglUniform(ctx, location, data, 3 * sizeof(GLfloat));
+    mglUniformFixed(ctx, location, data, 3 * sizeof(GLfloat));
 }
 
 void mglUniform3fv(GLMContext ctx, GLint location, GLsizei count, const GLfloat *value)
@@ -711,7 +729,7 @@ void mglUniform3i(GLMContext ctx, GLint location, GLint v0, GLint v1, GLint v2)
 {
     GLint data[] = {v0, v1, v2};
     
-    mglUniform(ctx, location, data, 3 * sizeof(GLint));
+    mglUniformFixed(ctx, location, data, 3 * sizeof(GLint));
 }
 
 void mglUniform3iv(GLMContext ctx, GLint location, GLsizei count, const GLint *value)
@@ -723,7 +741,7 @@ void mglUniform3ui(GLMContext ctx, GLint location, GLuint v0, GLuint v1, GLuint 
 {
     GLuint data[] = {v0, v1, v2};
     
-    mglUniform(ctx, location, (void *)data, 3 * sizeof(GLuint));
+    mglUniformFixed(ctx, location, (void *)data, 3 * sizeof(GLuint));
 }
 
 void mglUniform3uiv(GLMContext ctx, GLint location, GLsizei count, const GLuint *value)
@@ -735,7 +753,7 @@ void mglUniform4d(GLMContext ctx, GLint location, GLdouble x, GLdouble y, GLdoub
 {
     GLdouble data[] = {x, y, z, w};
     
-    mglUniformD(ctx, location, data, 4 * sizeof(GLdouble));
+    mglUniformFixedD(ctx, location, data, 4 * sizeof(GLdouble));
 }
 
 void mglUniform4dv(GLMContext ctx, GLint location, GLsizei count, const GLdouble *value)
@@ -747,7 +765,7 @@ void mglUniform4f(GLMContext ctx, GLint location, GLfloat v0, GLfloat v1, GLfloa
 {
     GLfloat data[] = {v0, v1, v2, v3};
     
-    mglUniform(ctx, location, (void *)data, 4 * sizeof(GLfloat));
+    mglUniformFixed(ctx, location, (void *)data, 4 * sizeof(GLfloat));
 }
 
 void mglUniform4fv(GLMContext ctx, GLint location, GLsizei count, const GLfloat *value)
@@ -759,7 +777,7 @@ void mglUniform4i(GLMContext ctx, GLint location, GLint v0, GLint v1, GLint v2, 
 {
     GLint data[] = {v0, v1, v2, v3};
     
-    mglUniform(ctx, location, data, 4 * sizeof(GLint));
+    mglUniformFixed(ctx, location, data, 4 * sizeof(GLint));
 }
 
 void mglUniform4iv(GLMContext ctx, GLint location, GLsizei count, const GLint *value)
@@ -771,7 +789,7 @@ void mglUniform4ui(GLMContext ctx, GLint location, GLuint v0, GLuint v1, GLuint 
 {
     GLuint data[] = {v0, v1, v2, v3};
     
-    mglUniform(ctx, location, data, 4 * sizeof(GLuint));
+    mglUniformFixed(ctx, location, data, 4 * sizeof(GLuint));
 }
 
 void mglUniform4uiv(GLMContext ctx, GLint location, GLsizei count, const GLuint *value)
@@ -798,6 +816,10 @@ void _name_##Transpose (const _name_ *matrix, _transposed_name_ *result) { \
 
 // Generalized function for uniform matrix upload
 #define HANDLE_MATRIX_TRANSPOSE(_type_, _src_type_, _dst_type_, _transpose_func_) \
+    /* a negative count is a bad argument, ahead of any state check */ \
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE); \
+    if (count == 0) return; \
+    ERROR_CHECK_RETURN(value, GL_INVALID_VALUE); \
     /* double matrices must be flagged as such or readback reads them as floats */ \
     void (*_wr_)(GLMContext, GLint, void *, GLsizei) = \
         (sizeof(_type_) == sizeof(GLdouble)) ? mglUniformD : mglUniform; \

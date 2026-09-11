@@ -26,6 +26,7 @@
 extern Buffer *findBuffer(GLMContext ctx, GLuint buffer);
 extern int isVAO(GLMContext ctx, GLuint vao);
 extern VertexArray *getVAO(GLMContext ctx, GLuint vao);
+extern VertexArray *namedVAO(GLMContext ctx, GLuint vao);
 extern void mglGenVertexArrays(GLMContext ctx, GLsizei n, GLuint *arrays);
 
 bool bindVertexBuffer(GLMContext ctx, GLuint vaobj, GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride)
@@ -34,20 +35,29 @@ bool bindVertexBuffer(GLMContext ctx, GLuint vaobj, GLuint bindingindex, GLuint 
 
     if (vaobj)
     {
-        vao = getVAO(ctx, vaobj);
+        vao = namedVAO(ctx, vaobj);
         // no such vao
-        ERROR_CHECK_RETURN_VALUE(vao, GL_INVALID_VALUE, false);
+        ERROR_CHECK_RETURN_VALUE(vao, GL_INVALID_OPERATION, false);
     }
     else
     {
         vao = ctx->state.vao;
         // no vao bound
-        ERROR_CHECK_RETURN_VALUE(vao, GL_INVALID_VALUE, false);
+        ERROR_CHECK_RETURN_VALUE(vao, GL_INVALID_OPERATION, false);
     }
 
     Buffer *buf;
-    buf = findBuffer(ctx, buffer);
-    ERROR_CHECK_RETURN_VALUE(buf, GL_INVALID_VALUE, false);
+
+    // zero unbinds whatever is on this binding point
+    if (buffer)
+    {
+        buf = findBuffer(ctx, buffer);
+        ERROR_CHECK_RETURN_VALUE(buf, GL_INVALID_OPERATION, false);
+    }
+    else
+    {
+        buf = NULL;
+    }
 
     // AGX Driver Compatibility: Store buffer binding information
     // Find all attributes that use this binding index and update their buffer pointer and stride

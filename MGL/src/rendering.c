@@ -161,6 +161,14 @@ void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat d
     Framebuffer * fbo = ctx->state.framebuffer;
     FBOAttachment * fboa;
 
+    if (buffer != GL_DEPTH_STENCIL)
+    {
+        MGL_ERR("MGL Error: mglClearBufferfi: invalid buffer 0x%x\n", buffer);
+        ERROR_RETURN(GL_INVALID_ENUM);
+    }
+
+    ERROR_CHECK_RETURN(drawbuffer == 0, GL_INVALID_VALUE);
+
     if (fbo == NULL)
     {
         GLfloat v[2] = { depth, (GLfloat)stencil };
@@ -169,21 +177,13 @@ void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat d
         return;
     }
 
-    switch (buffer) {
-        case GL_DEPTH_STENCIL:
-            fboa = &fbo->depth;
-            fboa->clear_bitmask |= GL_DEPTH_BUFFER_BIT;
-            fboa->clear_color[0] = depth;
+    fboa = &fbo->depth;
+    fboa->clear_bitmask |= GL_DEPTH_BUFFER_BIT;
+    fboa->clear_color[0] = depth;
 
-            fboa = &fbo->stencil;
-            fboa->clear_bitmask |= GL_STENCIL_BUFFER_BIT;
-            fboa->clear_color[0] = stencil;
-            break;
-        default:
-            MGL_ERR("MGL Error: mglClearBufferfi: invalid buffer 0x%x\n", buffer);
-            ERROR_RETURN(GL_INVALID_ENUM);
-            break;
-    }
+    fboa = &fbo->stencil;
+    fboa->clear_bitmask |= GL_STENCIL_BUFFER_BIT;
+    fboa->clear_color[0] = stencil;
 }
 
 void mglFinish(GLMContext ctx)
@@ -199,6 +199,26 @@ void mglFlush(GLMContext ctx)
 
 void mglDrawBuffers(GLMContext ctx, GLsizei n, const GLenum *bufs)
 {
+    ERROR_CHECK_RETURN(n >= 0 && n <= (GLsizei)STATE_VAR(max_draw_buffers), GL_INVALID_VALUE);
+
+    if (n == 0)
+        return;
+
+    ERROR_CHECK_RETURN(bufs, GL_INVALID_VALUE);
+
+    // these name more than one buffer each, so glDrawBuffers refuses them
+    for (GLsizei i=0; i<n; ++i) {
+        switch(bufs[i])
+        {
+            case GL_FRONT:
+            case GL_LEFT:
+            case GL_RIGHT:
+            case GL_FRONT_AND_BACK:
+                MGL_ERR("MGL Error: mglDrawBuffers: buffer 0x%x names more than one buffer\n", bufs[i]);
+                ERROR_RETURN(GL_INVALID_ENUM);
+        }
+    }
+
     for (GLsizei i=0; i<n; ++i) {
         mglDrawBuffer(ctx, bufs[i]);
     }
@@ -294,8 +314,40 @@ void mglReadBuffer(GLMContext ctx, GLenum buf)
     STATE(dirty_bits) |= DIRTY_STATE;
 }
 
+// the sixteen pnames glPixelStorei and glPixelStoref take in core
+static bool validPixelStorePname(GLenum pname)
+{
+    switch(pname)
+    {
+        case GL_PACK_SWAP_BYTES:
+        case GL_PACK_LSB_FIRST:
+        case GL_PACK_ROW_LENGTH:
+        case GL_PACK_IMAGE_HEIGHT:
+        case GL_PACK_SKIP_ROWS:
+        case GL_PACK_SKIP_PIXELS:
+        case GL_PACK_SKIP_IMAGES:
+        case GL_PACK_ALIGNMENT:
+        case GL_UNPACK_SWAP_BYTES:
+        case GL_UNPACK_LSB_FIRST:
+        case GL_UNPACK_ROW_LENGTH:
+        case GL_UNPACK_IMAGE_HEIGHT:
+        case GL_UNPACK_SKIP_ROWS:
+        case GL_UNPACK_SKIP_PIXELS:
+        case GL_UNPACK_SKIP_IMAGES:
+        case GL_UNPACK_ALIGNMENT:
+            return true;
+    }
+
+    return false;
+}
+
 void mglPixelStorei(GLMContext ctx, GLenum pname, GLint param)
 {
+    if (!validPixelStorePname(pname)) {
+        MGL_ERR("MGL Error: mglPixelStorei: invalid pname 0x%x\n", pname);
+        ERROR_RETURN(GL_INVALID_ENUM);
+    }
+
     // ERROR_CHECK_RETURN(param >= 0, GL_INVALID_VALUE);
     if (param < 0) {
         MGL_ERR("MGL Error: mglPixelStorei: param < 0 (%d) for pname 0x%x\n", param, pname);

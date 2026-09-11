@@ -19,11 +19,37 @@
  */
 
 #include "glm_context.h"
+#include "mgl_format_table.h"
 #include "pixel_utils.h"
 
 extern GLuint textureIndexFromTarget(GLMContext ctx, GLenum target);
 extern Texture *currentTexture(GLMContext ctx, GLuint index);
+extern Texture *findTexture(GLMContext ctx, GLuint texture);
+extern Texture *newTexture(GLMContext ctx, GLenum target, GLuint texture);
 Texture *getTex(GLMContext ctx, GLuint name, GLenum target);
+
+// the texture a glTexture*() call names. A name handed out by glGenTextures
+// but never bound has no object yet, so make one, the same way a bind would.
+static Texture *dsaTex(GLMContext ctx, GLuint texture)
+{
+    Texture *tex;
+
+    ERROR_CHECK_RETURN_VALUE(texture, GL_INVALID_OPERATION, NULL);
+
+    tex = findTexture(ctx, texture);
+
+    if (!tex && texture < STATE(texture_table.current_name))
+    {
+        tex = newTexture(ctx, GL_TEXTURE_2D, texture);
+
+        if (tex)
+            insertHashElement(&STATE(texture_table), texture, tex);
+    }
+
+    ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);
+
+    return tex;
+}
 
 #pragma mark set params
 bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLint *param)
@@ -239,6 +265,14 @@ bool setTexParmf(GLMContext ctx, TextureParameter *tex_params, GLenum pname, con
             tex_params->max_anisotropy = *param;
             break;
 
+        case GL_TEXTURE_MIN_LOD:
+            tex_params->min_lod = *param;
+            break;
+
+        case GL_TEXTURE_MAX_LOD:
+            tex_params->max_lod = *param;
+            break;
+
         default:
             return false;
             break;
@@ -287,7 +321,6 @@ static bool getTexParmi(GLMContext ctx, TextureParameter *tex_params, const GLen
 
         case GL_TEXTURE_COMPARE_FUNC:
             *ret = tex_params->compare_func;
-                break;
             break;
 
         case GL_TEXTURE_COMPARE_MODE:
@@ -350,8 +383,7 @@ static bool getTexParmi(GLMContext ctx, TextureParameter *tex_params, const GLen
     return true;
 }
 
-#if 0
-static bool getTexParamsi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLint *ret)
+bool getTexParamsi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLint *ret)
 {
     switch(pname)
     {
@@ -375,7 +407,7 @@ static bool getTexParamsi(GLMContext ctx, TextureParameter *tex_params, GLenum p
     return true;
 }
 
-static bool getTexParamsIiv(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLint *ret)
+bool getTexParamsIiv(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLint *ret)
 {
     switch(pname)
     {
@@ -392,7 +424,7 @@ static bool getTexParamsIiv(GLMContext ctx, TextureParameter *tex_params, GLenum
     return true;
 }
 
-static bool getTexParamsIuiv(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLuint *ret)
+bool getTexParamsIuiv(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLuint *ret)
 {
     switch(pname)
     {
@@ -409,7 +441,7 @@ static bool getTexParamsIuiv(GLMContext ctx, TextureParameter *tex_params, GLenu
     return true;
 }
 
-static bool getTexParamsf(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLfloat *ret)
+bool getTexParamsf(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLfloat *ret)
 {
     switch(pname)
     {
@@ -432,7 +464,6 @@ static bool getTexParamsf(GLMContext ctx, TextureParameter *tex_params, GLenum p
 
     return true;
 }
-#endif
 
 static bool getTexParmf(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLfloat *ret)
 {
@@ -444,6 +475,14 @@ static bool getTexParmf(GLMContext ctx, TextureParameter *tex_params, GLenum pna
 
         case GL_TEXTURE_MAX_ANISOTROPY:
             *ret = tex_params->max_anisotropy;
+            break;
+
+        case GL_TEXTURE_MIN_LOD:
+            *ret = tex_params->min_lod;
+            break;
+
+        case GL_TEXTURE_MAX_LOD:
+            *ret = tex_params->max_lod;
             break;
 
         default:
@@ -500,6 +539,39 @@ bool getParam(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLint 
     return false;
 }
 
+// The tail every setter shares: store the value or complain about the pname.
+// Only the four-value parameters raise the dirty bit; the renderer throws the
+// texture's pixels away when it sees one, so a plain filter change must not.
+static void setTexParamiv(GLMContext ctx, Texture *tex, GLenum pname, const GLint *params)
+{
+    if (setTexParamsi(ctx, &tex->params, pname, params))
+    {
+        tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+
+        return;
+    }
+
+    if (setParam(ctx, &tex->params, pname, *params, (GLfloat)*params))
+        return;
+
+    ERROR_RETURN(GL_INVALID_ENUM);
+}
+
+static void setTexParamfv(GLMContext ctx, Texture *tex, GLenum pname, const GLfloat *params)
+{
+    if (setTexParamsf(ctx, &tex->params, pname, params))
+    {
+        tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+
+        return;
+    }
+
+    if (setParam(ctx, &tex->params, pname, 0, *params))
+        return;
+
+    ERROR_RETURN(GL_INVALID_ENUM);
+}
+
 #pragma mark tex param gl calls
 void mglTexParameterf(GLMContext ctx, GLenum target, GLenum pname, GLfloat param)
 {
@@ -507,12 +579,8 @@ void mglTexParameterf(GLMContext ctx, GLenum target, GLenum pname, GLfloat param
 
     tex = getTex(ctx, 0, target);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
-
-    if (setParam(ctx, &tex->params, pname, 0, param))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-    }
+    if (tex)
+        setTexParamfv(ctx, tex, pname, &param);
 }
 
 void mglTexParameterfv(GLMContext ctx, GLenum target, GLenum pname, const GLfloat *params)
@@ -521,58 +589,32 @@ void mglTexParameterfv(GLMContext ctx, GLenum target, GLenum pname, const GLfloa
 
     tex = getTex(ctx, 0, target);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
-   // more than one param... try setTexParamsf
-    if (setTexParamsf(ctx, &tex->params, pname, params))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-
-        return;
-    }
-
-    if (setParam(ctx, &tex->params, pname, 0, *params))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-    }
+    if (tex)
+        setTexParamfv(ctx, tex, pname, params);
 }
 
 void mglTexParameteri(GLMContext ctx, GLenum target, GLenum pname, GLint param)
 {
-    GLfloat fparam = 0.0;
-
     Texture *tex;
 
     tex = getTex(ctx, 0, target);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
-
-    if (setParam(ctx, &tex->params, pname, param, fparam))
-        return;
+    if (tex)
+        setTexParamiv(ctx, tex, pname, &param);
 }
 
 void mglTexParameteriv(GLMContext ctx, GLenum target, GLenum pname, const GLint *params)
 {
-    GLfloat fparam = 0.0;
-
     Texture *tex;
 
     tex = getTex(ctx, 0, target);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
-    // more than one param... try setTexParamsi
-    if (setTexParamsi(ctx, &tex->params, pname, params))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-
-        return;
-    }
-
-    if (setParam(ctx, &tex->params, pname, *params, fparam))
-        return;
-
-    ERROR_RETURN(GL_INVALID_ENUM);
+    if (tex)
+        setTexParamiv(ctx, tex, pname, params);
 }
 
 void mglTexParameterIiv(GLMContext ctx, GLenum target, GLenum pname, const GLint *params)
@@ -581,28 +623,19 @@ void mglTexParameterIiv(GLMContext ctx, GLenum target, GLenum pname, const GLint
 
     tex = getTex(ctx, 0, target);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (!tex)
+        return;
 
     if (setTexParamsIiv(ctx, &tex->params, pname, params))
     {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
+        tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
 
         return;
     }
 
-    // more than one param... try setTexParamsi
-    if (setTexParamsi(ctx, &tex->params, pname, params))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-
-        return;
-    }
-
-    GLfloat fparam = 0.0;
-    if (setParam(ctx, &tex->params, pname, *params, fparam))
-        return;
-
-    ERROR_RETURN(GL_INVALID_ENUM);
+    setTexParamiv(ctx, tex, pname, params);
 }
 
 void mglTexParameterIuiv(GLMContext ctx, GLenum target, GLenum pname, const GLuint *params)
@@ -611,165 +644,159 @@ void mglTexParameterIuiv(GLMContext ctx, GLenum target, GLenum pname, const GLui
 
     tex = getTex(ctx, 0, target);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (!tex)
+        return;
 
     if (setTexParamsIuiv(ctx, &tex->params, pname, params))
     {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
+        tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
 
         return;
     }
 
-    // more than one param... try setTexParamsi
-    if (setTexParamsi(ctx, &tex->params, pname, (GLint *)params))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-
-        return;
-    }
-
-    GLfloat fparam = 0.0;
-    if (setParam(ctx, &tex->params, pname, *params, fparam))
-        return;
-
-    ERROR_RETURN(GL_INVALID_ENUM);
+    setTexParamiv(ctx, tex, pname, (const GLint *)params);
 }
 
 void mglTextureParameterf(GLMContext ctx, GLuint texture, GLenum pname, GLfloat param)
 {
     Texture *tex;
 
-    tex = getTex(ctx, texture, 0);
+    tex = dsaTex(ctx, texture);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
-
-    if(setTexParmf(ctx, &tex->params, pname, &param))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-    }
+    if (tex)
+        setTexParamfv(ctx, tex, pname, &param);
 }
 
 void mglTextureParameterfv(GLMContext ctx, GLuint texture, GLenum pname, const GLfloat *param)
 {
     Texture *tex;
 
-    tex = getTex(ctx, texture, 0);
+    tex = dsaTex(ctx, texture);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
 
-    if(setTexParmf(ctx, &tex->params, pname, param))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-    }
+    if (tex)
+        setTexParamfv(ctx, tex, pname, param);
 }
 
 void mglTextureParameteri(GLMContext ctx, GLuint texture, GLenum pname, GLint param)
 {
     Texture *tex;
 
-    tex = getTex(ctx, texture, 0);
+    tex = dsaTex(ctx, texture);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
-
-    if(setTexParmi(ctx, &tex->params, pname, &param))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-    }
+    if (tex)
+        setTexParamiv(ctx, tex, pname, &param);
 }
 
 void mglTextureParameteriv(GLMContext ctx, GLuint texture, GLenum pname, const GLint *param)
 {
     Texture *tex;
 
-    tex = getTex(ctx, texture, 0);
+    tex = dsaTex(ctx, texture);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
 
-    if(setTexParmi(ctx, &tex->params, pname, param))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-    }
+    if (tex)
+        setTexParamiv(ctx, tex, pname, param);
 }
 
 void mglTextureParameterIiv(GLMContext ctx, GLuint texture, GLenum pname, const GLint *params)
 {
     Texture *tex;
 
-    tex = getTex(ctx, texture, 0);
+    tex = dsaTex(ctx, texture);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (!tex)
+        return;
 
     if (setTexParamsIiv(ctx, &tex->params, pname, params))
     {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
+        tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
 
         return;
     }
 
-    // more than one param... try setTexParamsi
-    if (setTexParamsi(ctx, &tex->params, pname, params))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-
-        return;
-    }
-
-    GLfloat fparam = 0.0;
-    if (setParam(ctx, &tex->params, pname, *params, fparam))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-    }
+    setTexParamiv(ctx, tex, pname, params);
 }
 
 void mglTextureParameterIuiv(GLMContext ctx, GLuint texture, GLenum pname, const GLuint *params)
 {
     Texture *tex;
 
-    tex = getTex(ctx, texture, 0);
+    tex = dsaTex(ctx, texture);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (!tex)
+        return;
 
     if (setTexParamsIuiv(ctx, &tex->params, pname, params))
     {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
+        tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
 
         return;
     }
 
-    // more than one param... try setTexParamsi
-    if (setTexParamsi(ctx, &tex->params, pname, (GLint *)params))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-
-        return;
-    }
-
-    GLfloat fparam = 0.0;
-    if (setParam(ctx, &tex->params, pname, *params, fparam))
-    {
-        tex->dirty_bits |= DIRTY_TEX_PARAM;
-    }
+    setTexParamiv(ctx, tex, pname, (const GLint *)params);
 }
 
 #pragma mark get tex param gl calls
+void getTexParamfv(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLfloat *params)
+{
+    GLint iparam = 0;
+
+    if (getTexParamsf(ctx, tex_params, pname, params))
+        return;
+
+    if (getTexParmf(ctx, tex_params, pname, params))
+        return;
+
+    if (getTexParmi(ctx, tex_params, pname, &iparam))
+    {
+        *params = (GLfloat)iparam;
+
+        return;
+    }
+
+    ERROR_RETURN(GL_INVALID_ENUM);
+}
+
+void getTexParamiv(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLint *params)
+{
+    GLfloat fparam = 0.0f;
+
+    if (getTexParamsi(ctx, tex_params, pname, params))
+        return;
+
+    if (getTexParmi(ctx, tex_params, pname, params))
+        return;
+
+    if (getTexParmf(ctx, tex_params, pname, &fparam))
+    {
+        // float parameters round on the way out to an integer query
+        *params = (GLint)(fparam + (fparam < 0.0f ? -0.5f : 0.5f));
+
+        return;
+    }
+
+    ERROR_RETURN(GL_INVALID_ENUM);
+}
+
 void mglGetTexParameterfv(GLMContext ctx, GLenum target, GLenum pname, GLfloat *params)
 {
     Texture *tex;
 
     tex = getTex(ctx, 0, target);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
-    GLint iparam;
-    iparam = 0;
-
-    if(getParam(ctx, &tex->params, pname, &iparam, params))
-    {
-        if (iparam)
-        {
-            *params = (float)iparam;
-        }
-    }
+    if (tex)
+        getTexParamfv(ctx, &tex->params, pname, params);
 }
 
 void mglGetTexParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint *params)
@@ -778,18 +805,10 @@ void mglGetTexParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint *pa
 
     tex = getTex(ctx, 0, target);
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
-    GLfloat fparam;
-    fparam = 0.0;
-
-    if(getParam(ctx, &tex->params, pname, params, &fparam))
-    {
-        if (fparam)
-        {
-            *params = (float)fparam;
-        }
-    }
+    if (tex)
+        getTexParamiv(ctx, &tex->params, pname, params);
 }
 
 static bool getTexLevelParameter(GLMContext ctx, Texture *tex, GLint level, GLenum pname, GLint *out)
@@ -815,11 +834,15 @@ static bool getTexLevelParameter(GLMContext ctx, Texture *tex, GLint level, GLen
             return true;
 
         case GL_TEXTURE_COMPRESSED:
-            *out = GL_FALSE;
+            *out = mglFormatIsCompressed(tex->internalformat) ? GL_TRUE : GL_FALSE;
             return true;
 
         case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:
-            *out = (GLint)lvl->data_size;
+            // data_size is the padded allocation, not the packed block count
+            if (!mglFormatIsCompressed(tex->internalformat))
+                ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+            *out = (GLint)mglFormatImageSize(tex->internalformat,
+                                             lvl->width, lvl->height, lvl->depth);
             return true;
 
         case GL_TEXTURE_BUFFER_OFFSET:

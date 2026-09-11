@@ -391,6 +391,10 @@ typedef enum {
 typedef struct AttribConstant_t {
     union { GLfloat f[4]; GLint i[4]; GLuint u[4]; } v;
     AttribConstType type;
+    // glVertexAttribL* doubles do not fit in the union above, and the shader
+    // still wants the narrowed copy, so the exact value rides alongside it.
+    GLdouble  d[4];
+    GLboolean d_valid;
 } AttribConstant;
 
 typedef struct VertexArray_t {
