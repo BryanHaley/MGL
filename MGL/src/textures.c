@@ -27,6 +27,7 @@
 #include <Accelerate/Accelerate.h>
 
 #include "pixel_utils.h"
+#include "pixel_convert.h"
 #include "utils.h"
 #include "glm_context.h"
 #include "mgl_log.h"
@@ -421,6 +422,11 @@ void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
                 {
                     ctx->state.active_textures[i] = NULL;
 
+                    // the mask says which units hold something; leaving the bit
+                    // behind sends every later draw looking for a texture that
+                    // is gone
+                    ctx->state.active_texture_mask[i / 32] &= ~(0x1 << (i % 32));
+
                     ctx->state.dirty_bits |= DIRTY_TEX_BINDING;
                 }
             }
@@ -523,6 +529,10 @@ void mglBindTextureUnit(GLMContext ctx, GLuint unit, GLuint texture)
         for (int i = 0; i < _MAX_TEXTURE_TYPES; i++)
             STATE(texture_units[unit].textures[i]) = NULL;
 
+        // the shader binder reads active_textures, so it has to be kept in
+        // step here too or a DSA bind is invisible to every draw
+        STATE(active_textures[unit]) = NULL;
+        STATE(active_texture_mask[unit / 32]) &= ~(0x1 << (unit % 32));
         STATE(dirty_bits) |= DIRTY_TEX;
 
         return;
@@ -538,6 +548,8 @@ void mglBindTextureUnit(GLMContext ctx, GLuint unit, GLuint texture)
     ERROR_CHECK_RETURN(index != _MAX_TEXTURE_TYPES, GL_INVALID_OPERATION);
 
     STATE(texture_units[unit].textures[index]) = ptr;
+    STATE(active_textures[unit]) = ptr;
+    STATE(active_texture_mask[unit / 32]) |= (0x1 << (unit % 32));
     STATE(dirty_bits) |= DIRTY_TEX;
 }
 
@@ -1061,56 +1073,91 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
 }
 
 
-void unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, void *src_data, void *dst_data, size_t src_pitch, size_t pixel_size, size_t xoffset, size_t yoffset, size_t zoffset, size_t width, size_t height, size_t depth)
+bool unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, GLenum format, GLenum type, void *src_data, void *dst_data, size_t src_pitch, size_t xoffset, size_t yoffset, size_t zoffset, size_t width, size_t height, size_t depth)
 {
     GLubyte *src, *dst;
-    size_t dst_pitch;
+    size_t dst_pitch, dst_pixel_size, level_height, slice_pitch, rows;
+    MGLNativeFormat native = MGL_NF_UNKNOWN;
+    bool straight_copy;
 
     src = (GLubyte *)src_data;
     dst = (GLubyte *)dst_data;
 
-    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, false);
     dst_pitch = tex->faces[face].levels[level].pitch;
     assert(dst_pitch);
 
+    dst_pixel_size = sizeForInternalFormat(tex->internalformat, format, type);
+    ERROR_CHECK_RETURN_VALUE(dst_pixel_size, GL_INVALID_OPERATION, false);
+
+    // client data whose components already match the storage goes straight in
+    straight_copy = mglUploadNeedsNoConversion(tex->internalformat, format, type);
+
+    if (straight_copy == false)
+    {
+        native = mglNativeFormatForGLInternalFormat(tex->internalformat);
+
+        if (native == MGL_NF_UNKNOWN)
+        {
+            MGL_ERR("MGL Error: unpackTexture: no conversion from 0x%x/0x%x into 0x%x\n",
+                    format, type, tex->internalformat);
+            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+        }
+    }
+
+    // a sub-rectangle steps by the level's own size, not the region's
+    level_height = tex->faces[face].levels[level].height;
+    if (level_height == 0)
+        level_height = height;
+
     if (xoffset || yoffset || zoffset)
     {
-        size_t xoffset_bytes = xoffset * pixel_size; // num pixels
-        size_t yoffset_bytes = yoffset * dst_pitch; // num lines (rows * bytes_per_row)
-        size_t zoffset_bytes = zoffset * dst_pitch * height; // num planes
-
-        dst += xoffset_bytes;
-        dst += yoffset_bytes;
-        dst += zoffset_bytes;
+        dst += xoffset * dst_pixel_size;
+        dst += yoffset * dst_pitch;
+        dst += zoffset * dst_pitch * level_height;
     }
 
-    if (depth > 1)
+    // 3d and array textures keep their slices back to back
+    slice_pitch = dst_pitch * level_height;
+    rows = height ? height : 1;
+
+    // never write past the level: a cube face holds one face, not six
+    if (tex->faces[face].levels[level].data_size)
     {
-        // 3d texture
-        for(int y=0; y<depth; y++)
+        size_t last = (size_t)(dst - (GLubyte *)dst_data)
+                    + ((depth ? depth : 1) - 1) * slice_pitch
+                    + (rows - 1) * dst_pitch
+                    + width * dst_pixel_size;
+
+        if (last > tex->faces[face].levels[level].data_size)
         {
-            memcpy(dst, src, dst_pitch);
-            src += src_pitch;
-            dst += dst_pitch;
+            MGL_ERR("MGL Error: unpackTexture: %zu bytes past the end of level %u\n",
+                    last - tex->faces[face].levels[level].data_size, level);
+            ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
         }
     }
-    else if (height > 1)
+
+    for (size_t z = 0; z < (depth ? depth : 1); z++)
     {
-        // 2d texture
-        size_t copy_size = width * pixel_size;
-        
-        for(int y=0; y<height; y++)
+        GLubyte *slice = dst + z * slice_pitch;
+        const GLubyte *src_slice = src + z * src_pitch * rows;
+
+        if (straight_copy)
         {
-            memcpy(dst, src, copy_size);
-            src += src_pitch;
-            dst += dst_pitch;
+            for (size_t y = 0; y < rows; y++)
+                memcpy(slice + y * dst_pitch, src_slice + y * src_pitch, width * dst_pixel_size);
+        }
+        else if (mglConvertPixelsToNative(src_slice, src_pitch, format, type,
+                                          slice, dst_pitch, native,
+                                          (GLsizei)width, (GLsizei)rows) == GL_FALSE)
+        {
+            MGL_ERR("MGL Error: unpackTexture: conversion from 0x%x/0x%x into 0x%x failed\n",
+                    format, type, tex->internalformat);
+            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
         }
     }
-    else
-    {
-        // 1d texture
-        memcpy(dst, src, width * pixel_size);
-    }
+
+    return true;
 }
 
 #pragma mark texImage 1D/2D/3D
@@ -1344,7 +1391,8 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
                 pixels = &buffer_data[offset];
             }
 
-            unpackTexture(ctx, tex, face, level, (void *)pixels, (void *)texture_data, src_pitch, pixel_size, 0, 0, 0, width, height, depth);
+            if (unpackTexture(ctx, tex, face, level, format, type, (void *)pixels, (void *)texture_data, src_pitch, 0, 0, 0, width, height, depth) == false)
+                return false;
 
             tex->dirty_bits |= DIRTY_TEXTURE_DATA;
         };
@@ -1639,7 +1687,8 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
 
     texture_data = (void *)tex->faces[face].levels[level].data;
     
-    unpackTexture(ctx, tex, face, level, pixels, texture_data, src_pitch, pixel_size, xoffset, yoffset, zoffset, width, height, depth);
+    if (unpackTexture(ctx, tex, face, level, format, type, pixels, texture_data, src_pitch, xoffset, yoffset, zoffset, width, height, depth) == false)
+        return false;
 
     // use a blit command to update data
     do
@@ -2152,22 +2201,39 @@ void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoff
 
     size_t size = width * height * depth * pixel_size;
     
-    if (data == NULL) {
-        void *clear_data = calloc(1, size);
-        if (clear_data) {
-            texSubImage(ctx, tex, 0, level, xoffset, yoffset, zoffset, width, height, depth, format, type, clear_data);
-            free(clear_data);
-        }
-    } else {
-        void *fill_data = malloc(size);
-        if (fill_data) {
-            for (size_t i = 0; i < width * height * depth; i++) {
-                memcpy((char*)fill_data + i * pixel_size, data, pixel_size);
-            }
-            texSubImage(ctx, tex, 0, level, xoffset, yoffset, zoffset, width, height, depth, format, type, fill_data);
-            free(fill_data);
+    // a cubemap keeps every face in its own allocation, so z selects a face
+    GLuint first_face = 0;
+    GLuint face_count = 1;
+
+    if (tex->target == GL_TEXTURE_CUBE_MAP)
+    {
+        first_face = (GLuint)zoffset;
+        face_count = (GLuint)(depth > 0 ? depth : 1);
+        zoffset = 0;
+        depth = 1;
+
+        if (first_face + face_count > _CUBE_MAP_MAX_FACE) {
+            ERROR_RETURN(GL_INVALID_VALUE);
         }
     }
+
+    void *fill_data = calloc(1, size);
+    if (fill_data == NULL) {
+        STATE(error) = GL_OUT_OF_MEMORY;
+        return;
+    }
+
+    if (data) {
+        for (size_t i = 0; i < (size_t)width * height * depth * face_count; i++) {
+            memcpy((char*)fill_data + i * pixel_size, data, pixel_size);
+        }
+    }
+
+    for (GLuint f = 0; f < face_count; f++) {
+        texSubImage(ctx, tex, first_face + f, level, xoffset, yoffset, zoffset, width, height, depth, format, type, fill_data);
+    }
+
+    free(fill_data);
 }
 
 #pragma mark compressed tex image

@@ -72,13 +72,62 @@ void mglClearDepth(GLMContext ctx, GLdouble depth)
     ctx->state.dirty_bits |= DIRTY_STATE;
 }
 
+// The window's framebuffer has no Framebuffer object behind it, so a
+// glClearBuffer* aimed at it goes the same way glClear does.
+static bool clearDefaultFramebuffer(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLfloat *value)
+{
+    GLbitfield mask;
+
+    switch (buffer) {
+        case GL_COLOR:
+            ERROR_CHECK_RETURN_VALUE(drawbuffer == 0, GL_INVALID_VALUE, false);
+            ctx->state.color_clear_value[0] = value[0];
+            ctx->state.color_clear_value[1] = value[1];
+            ctx->state.color_clear_value[2] = value[2];
+            ctx->state.color_clear_value[3] = value[3];
+            mask = GL_COLOR_BUFFER_BIT;
+            break;
+
+        case GL_DEPTH:
+            ctx->state.var.depth_clear_value = value[0];
+            mask = GL_DEPTH_BUFFER_BIT;
+            break;
+
+        case GL_STENCIL:
+            ctx->state.var.stencil_clear_value = (GLint)value[0];
+            mask = GL_STENCIL_BUFFER_BIT;
+            break;
+
+        case GL_DEPTH_STENCIL:
+            ctx->state.var.depth_clear_value = value[0];
+            ctx->state.var.stencil_clear_value = (GLint)value[1];
+            mask = GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+            break;
+
+        default:
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
+    }
+
+    ctx->state.clear_bitmask = mask;
+
+    if (ctx->mtl_funcs.mtlClearBuffer)
+        ctx->mtl_funcs.mtlClearBuffer(ctx, 0, mask);
+
+    return true;
+}
+
 void mglClearBufferfv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLfloat *value)
 {
     Framebuffer * fbo = ctx->state.framebuffer;
     FBOAttachment * fboa;
 
-    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    if (fbo == NULL)
+    {
+        clearDefaultFramebuffer(ctx, buffer, drawbuffer, value);
+        return;
+    }
 
     switch (buffer) {
         case GL_COLOR:
@@ -111,6 +160,14 @@ void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat d
 {
     Framebuffer * fbo = ctx->state.framebuffer;
     FBOAttachment * fboa;
+
+    if (fbo == NULL)
+    {
+        GLfloat v[2] = { depth, (GLfloat)stencil };
+
+        clearDefaultFramebuffer(ctx, buffer, drawbuffer, v);
+        return;
+    }
 
     switch (buffer) {
         case GL_DEPTH_STENCIL:
@@ -536,7 +593,11 @@ static void clearBufferInteger(GLMContext ctx, GLenum buffer, GLint drawbuffer,
     Framebuffer *fbo = ctx->state.framebuffer;
     FBOAttachment *fboa;
 
-    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+    if (fbo == NULL)
+    {
+        clearDefaultFramebuffer(ctx, buffer, drawbuffer, v);
+        return;
+    }
 
     switch (buffer)
     {

@@ -603,11 +603,41 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
+    // GL is happy for a fragment shader to write a vec3 into an RGBA target and
+    // fills alpha in itself. Metal refuses the pipeline outright, so the output
+    // gets padded out to four components here.
+    if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_PAD_FRAGMENT_OUTPUT_COMPONENTS, SPVC_TRUE) != SPVC_SUCCESS) {
+        MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_PAD_FRAGMENT_OUTPUT_COMPONENTS) failed\n");
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
+
     //ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_GLSL_VERSION, 4.5) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_install_compiler_options(compiler_msl, options) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_install_compiler_options(compiler_msl, options) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_install_compiler_options failed\n");
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
+
+    // GL numbers uniform blocks and storage blocks separately, but glslang puts
+    // both in descriptor set 0 with their GL binding, so a UBO and an SSBO that
+    // share a number look like one resource. SPIRV-Cross then aliases them into
+    // a single Metal buffer and Metal rejects the cast between constant and
+    // device. Moving storage buffers to their own set keeps them apart.
+    {
+        spvc_resources pre_resources;
+
+        if (spvc_compiler_create_shader_resources(compiler_msl, &pre_resources) == SPVC_SUCCESS)
+        {
+            const spvc_reflected_resource *sb_list = NULL;
+            size_t sb_count = 0;
+
+            if (spvc_resources_get_resource_list_for_type(pre_resources, SPVC_RESOURCE_TYPE_STORAGE_BUFFER,
+                                                          &sb_list, &sb_count) == SPVC_SUCCESS)
+            {
+                for (size_t sb = 0; sb < sb_count; sb++)
+                    spvc_compiler_set_decoration(compiler_msl, sb_list[sb].id, SpvDecorationDescriptorSet, 1);
+            }
+        }
     }
 
     

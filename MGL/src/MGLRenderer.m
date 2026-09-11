@@ -42,6 +42,7 @@
 #import "mgl_log.h"
 #import "primitive_expand.h"
 #import "MGLKernels.h"
+#include "mgl_blit_msl.h"
 #import "mgl_format_table.h"
 #import "pixel_convert.h"
 
@@ -182,6 +183,17 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     // compute kernels for what Metal draws cannot do on their own: byte
     // indices, custom restart indices, query accumulation
     MGLKernelLibrary          *_kernels;
+
+    // Metal wants the topology class up front when the vertex shader writes
+    // gl_Layer, so every draw leaves its own here before the pipeline is built
+    MTLPrimitiveTopologyClass  _drawTopology;
+
+    id<MTLSamplerState>        _defaultSampler;
+    id<MTLTexture>             _dummyTextures[4];
+
+    // the shader blit, for copies Metal's own cannot make
+    id<MTLLibrary>             _blitLibrary;
+    NSMutableDictionary        *_blitPipelines;
 }
 
 // aligned_alloc needs alignment >= sizeof(void*) and a size that's a multiple of it
@@ -2498,7 +2510,15 @@ extern FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum 
     if (readfbo == NULL) {
         readtexid = _drawable ? _drawable.texture : nil;
     } else {
-        FBOAttachment *fboa = getFBOAttachment(ctx, readfbo, STATE(read_buffer));
+        // GL starts a user framebuffer reading from attachment 0, and MGL only
+        // keeps one read buffer for everything, so fall back to it
+        GLenum read_from = STATE(read_buffer);
+        FBOAttachment *fboa;
+
+        if (read_from < GL_COLOR_ATTACHMENT0 || read_from > GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
+            read_from = GL_COLOR_ATTACHMENT0;
+
+        fboa = getFBOAttachment(ctx, readfbo, read_from);
         Texture *readtexobj = NULL;
 
         if (fboa)
@@ -2524,7 +2544,13 @@ extern FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum 
     if (drawfbo == NULL) {
         drawtexid = _drawable ? _drawable.texture : nil;
     } else {
-        FBOAttachment *fboa = getFBOAttachment(ctx, drawfbo, STATE(draw_buffer));
+        GLenum draw_to = STATE(draw_buffer);
+        FBOAttachment *fboa;
+
+        if (draw_to < GL_COLOR_ATTACHMENT0 || draw_to > GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
+            draw_to = GL_COLOR_ATTACHMENT0;
+
+        fboa = getFBOAttachment(ctx, drawfbo, draw_to);
         Texture *drawtexobj = NULL;
 
         if (fboa)
@@ -2542,6 +2568,23 @@ extern FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum 
         return;
     }
 
+
+    // A plain copy needs matching formats and a destination that is not
+    // framebuffer-only; the window is neither, so draw it instead.
+    if (readtexid.pixelFormat != drawtexid.pixelFormat || drawfbo == NULL)
+    {
+        if ([self shaderBlitFrom: readtexid
+                          origin: MTLOriginMake(srcX0, srcY0, 0)
+                            size: MTLSizeMake(srcX1 - srcX0, srcY1 - srcY0, 1)
+                              to: drawtexid
+                          origin: MTLOriginMake(dstX0, dstY0, 0)
+                            size: MTLSizeMake(dstX1 - dstX0, dstY1 - dstY0, 1)] == false)
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        }
+
+        return;
+    }
 
     // end encoding on current render encoder
     [self endRenderEncoding];
@@ -2729,7 +2772,12 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
                     tex = STATE(active_textures[i*32+bitpos]);
                     MTL_CHECK_RETURN_FALSE(tex, GL_INVALID_OPERATION);
 
-                    RETURN_FALSE_ON_FAILURE([self bindMTLTexture: tex]);
+                    // one texture that will not go resident is not a reason to
+                    // drop the draw: the shader may not even read it, and the
+                    // per-stage binder still checks the ones it does
+                    if ([self bindMTLTexture: tex] == false)
+                        MGL_NSERR(@"MGL: texture %u on unit %d would not bind, leaving it out",
+                                  tex->name, i * 32 + bitpos);
                 }
 
                 // early out
@@ -2786,6 +2834,20 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         return 0;
 
     return ptr->spirv_resources_list[stage][type].count;
+}
+
+- (GLenum) getProgramGLType: (int) stage type: (int) type index: (int) index
+{
+    Program *ptr;
+
+    MTL_CHECK_RETURN_VALUE(stage >= 0 && stage < _MAX_SHADER_TYPES, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(type >= 0 && type < MAX_SPVC_RESOURCE_TYPES, GL_INVALID_OPERATION, 0);
+
+    ptr = ctx->state.program;
+    MTL_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(index < ptr->spirv_resources_list[stage][type].count, GL_INVALID_VALUE, 0);
+
+    return ptr->spirv_resources_list[stage][type].list[index].gl_type;
 }
 
 - (int) getProgramBinding: (int) stage type: (int) type index: (int) index
@@ -4063,6 +4125,221 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 }
 
 #pragma mark pipeline descriptor
+// Copy one texture into another by drawing it. MTLBlitCommandEncoder only
+// copies between matching pixel formats and refuses a framebuffer-only
+// drawable, so anything that has to change format comes through here.
+- (bool) shaderBlitFrom: (id<MTLTexture>) src
+                 origin: (MTLOrigin) srcOrigin
+                   size: (MTLSize) srcSize
+                     to: (id<MTLTexture>) dst
+                 origin: (MTLOrigin) dstOrigin
+                   size: (MTLSize) dstSize
+{
+    if (src == nil || dst == nil)
+        return false;
+
+    if (_blitLibrary == nil)
+    {
+        MTLCompileOptions *opts = [MTLCompileOptions new];
+        NSError *err = nil;
+
+        _blitLibrary = [_device newLibraryWithSource: [NSString stringWithUTF8String: mgl_blit_msl_source]
+                                             options: opts
+                                               error: &err];
+
+        if (_blitLibrary == nil)
+        {
+            MGL_NSERR(@"MGL ERROR: the blit shader would not compile: %@", err);
+            return false;
+        }
+
+        _blitPipelines = [NSMutableDictionary dictionary];
+    }
+
+    NSNumber *key = @((unsigned long)dst.pixelFormat);
+    id<MTLRenderPipelineState> pipeline = _blitPipelines[key];
+
+    if (pipeline == nil)
+    {
+        MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
+        NSError *err = nil;
+
+        desc.label = @"MGL blit";
+        desc.vertexFunction = [_blitLibrary newFunctionWithName: @"mglBlitVertex"];
+        desc.fragmentFunction = [_blitLibrary newFunctionWithName: @"mglBlitFragment"];
+        desc.colorAttachments[0].pixelFormat = dst.pixelFormat;
+        desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+
+        pipeline = [_device newRenderPipelineStateWithDescriptor: desc error: &err];
+
+        if (pipeline == nil)
+        {
+            MGL_NSERR(@"MGL ERROR: no blit pipeline for pixel format %lu: %@",
+                      (unsigned long)dst.pixelFormat, err);
+            return false;
+        }
+
+        _blitPipelines[key] = pipeline;
+    }
+
+    [self endComputeEncoding];
+    [self endRenderEncoding];
+
+    id<MTLCommandBuffer> cmd = [self liveCommandBuffer];
+
+    if (cmd == nil)
+        return false;
+
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+
+    pass.colorAttachments[0].texture = dst;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor: pass];
+
+    if (enc == nil)
+        return false;
+
+    float args[4] = { (float)srcOrigin.x, (float)srcOrigin.y, (float)srcSize.width, (float)srcSize.height };
+
+    [enc setRenderPipelineState: pipeline];
+    [enc setViewport: (MTLViewport){ (double)dstOrigin.x, (double)dstOrigin.y,
+                                     (double)dstSize.width, (double)dstSize.height, 0.0, 1.0 }];
+    [enc setVertexBytes: args length: sizeof(args) atIndex: 0];
+    [enc setVertexTexture: src atIndex: 0];
+    [enc setFragmentTexture: src atIndex: 0];
+    [enc setFragmentSamplerState: [self defaultSamplerState] atIndex: 0];
+    [enc drawPrimitives: MTLPrimitiveTypeTriangle vertexStart: 0 vertexCount: 3];
+    [enc endEncoding];
+
+    return true;
+}
+
+// A 1x1 black stand-in for a sampler the app declared but never bound. Metal
+// faults on a nil texture, and GL says reads from an incomplete texture are
+// black, so this is both safe and about right.
+- (id<MTLTexture>) dummyTextureForGLType: (GLenum) gl_type
+{
+    MTLTextureType mtl_type;
+    int slot;
+
+    switch (gl_type)
+    {
+        case GL_SAMPLER_3D:
+        case GL_INT_SAMPLER_3D:
+        case GL_UNSIGNED_INT_SAMPLER_3D:
+        case GL_IMAGE_3D:
+            mtl_type = MTLTextureType3D; slot = 1; break;
+
+        case GL_SAMPLER_CUBE:
+        case GL_SAMPLER_CUBE_SHADOW:
+        case GL_INT_SAMPLER_CUBE:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE:
+        case GL_IMAGE_CUBE:
+            mtl_type = MTLTextureTypeCube; slot = 2; break;
+
+        case GL_SAMPLER_2D_ARRAY:
+        case GL_SAMPLER_2D_ARRAY_SHADOW:
+        case GL_INT_SAMPLER_2D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+        case GL_IMAGE_2D_ARRAY:
+            mtl_type = MTLTextureType2DArray; slot = 3; break;
+
+        default:
+            mtl_type = MTLTextureType2D; slot = 0; break;
+    }
+
+    if (_dummyTextures[slot] == nil)
+    {
+        MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
+
+        desc.textureType = mtl_type;
+        desc.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        desc.width = 1;
+        desc.height = 1;
+        desc.depth = (mtl_type == MTLTextureType3D) ? 1 : 1;
+        desc.arrayLength = (mtl_type == MTLTextureType2DArray) ? 1 : 1;
+        desc.mipmapLevelCount = 1;
+        desc.usage = MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModeShared;
+
+        id<MTLTexture> tex = [_device newTextureWithDescriptor: desc];
+
+        if (tex == nil)
+        {
+            MGL_NSERR(@"MGL ERROR: could not create the %lu stand-in texture", (unsigned long)mtl_type);
+            return nil;
+        }
+
+        const uint8_t black[4] = { 0, 0, 0, 255 };
+        NSUInteger faces = (mtl_type == MTLTextureTypeCube) ? 6 : 1;
+
+        for (NSUInteger f = 0; f < faces; f++)
+        {
+            [tex replaceRegion: MTLRegionMake2D(0, 0, 1, 1)
+                   mipmapLevel: 0
+                         slice: f
+                     withBytes: black
+                   bytesPerRow: 4
+                 bytesPerImage: 4];
+        }
+
+        _dummyTextures[slot] = tex;
+    }
+
+    return _dummyTextures[slot];
+}
+
+// A stand-in for a sampler the app declared but never bound.
+- (id<MTLSamplerState>) defaultSamplerState
+{
+    if (_defaultSampler == nil)
+    {
+        MTLSamplerDescriptor *desc = [[MTLSamplerDescriptor alloc] init];
+
+        desc.minFilter = MTLSamplerMinMagFilterNearest;
+        desc.magFilter = MTLSamplerMinMagFilterNearest;
+        desc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+        desc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        desc.rAddressMode = MTLSamplerAddressModeClampToEdge;
+
+        _defaultSampler = [_device newSamplerStateWithDescriptor: desc];
+    }
+
+    return _defaultSampler;
+}
+
+- (void) setDrawTopologyForMode: (GLenum) mode
+{
+    MTLPrimitiveTopologyClass topology;
+
+    switch (mode)
+    {
+        case GL_POINTS:
+            topology = MTLPrimitiveTopologyClassPoint;
+            break;
+
+        case GL_LINES:
+        case GL_LINE_STRIP:
+        case GL_LINE_LOOP:
+        case GL_LINES_ADJACENCY:
+        case GL_LINE_STRIP_ADJACENCY:
+            topology = MTLPrimitiveTopologyClassLine;
+            break;
+
+        default:
+            topology = MTLPrimitiveTopologyClassTriangle;
+            break;
+    }
+
+    if (topology != _drawTopology)
+    {
+        _drawTopology = topology;
+        ctx->state.dirty_bits |= DIRTY_STATE;
+    }
+}
+
 -(MTLRenderPipelineDescriptor *)generatePipelineDescriptor
 {
     MTLRenderPipelineDescriptor *pipelineStateDescriptor;
@@ -4105,6 +4382,8 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     pipelineStateDescriptor.label = @"GLSL Pipeline";
     pipelineStateDescriptor.vertexFunction = vertexFunction;
     pipelineStateDescriptor.fragmentFunction = fragmentFunction;
+    pipelineStateDescriptor.inputPrimitiveTopology =
+        _drawTopology ? _drawTopology : MTLPrimitiveTopologyClassTriangle;
 
     if (ctx->state.framebuffer)
     {
@@ -5091,7 +5370,9 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
                 if (ptr)
                 {
-                    RETURN_FALSE_ON_FAILURE([self bindMTLTexture: ptr]);
+                    // residency was settled in prepareComputeTextures: uploading
+                    // here would open a blit encoder and retire the one being
+                    // written to
                     MTL_CHECK_RETURN_FALSE(ptr->mtl_data, GL_OUT_OF_MEMORY);
 
                     id<MTLTexture> texture;
@@ -5137,6 +5418,33 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
                     textures_to_be_mapped--;
                 }
+                else if (i < (int)count)
+                {
+                    // GL lets a shader declare a sampler it never binds, and
+                    // reads from it just come back black. Leaving the slot
+                    // empty and carrying on matches that; failing the dispatch
+                    // would drop work the app expects to happen.
+                    // GL lets a shader declare a sampler nothing is bound to
+                    // and reads from it come back black, so a stand-in keeps
+                    // the dispatch alive instead of dropping it.
+                    GLenum declared = [self getProgramGLType: _COMPUTE_SHADER type: spvc_type index: i];
+                    id<MTLTexture> stand_in = [self dummyTextureForGLType: declared];
+
+                    if (stand_in == nil)
+                    {
+                        MGL_NSERR(@"MGL ERROR: no stand-in for the %s at binding %u",
+                                  gl_texture_type == _TEXTURE ? "texture" : "image", spirv_binding);
+                        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+                        return false;
+                    }
+
+                    [computeCommandEncoder setTexture: stand_in atIndex: spirv_binding];
+
+                    if (gl_texture_type == _TEXTURE)
+                        [computeCommandEncoder setSamplerState: [self defaultSamplerState] atIndex: spirv_binding];
+
+                    textures_to_be_mapped--;
+                }
 
                 RETURN_FALSE_ON_FAILURE((i<TEXTURE_UNITS));
             }
@@ -5159,6 +5467,51 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 #pragma mark ------------------------------------------------------------------------------------------
 #pragma mark processCompute
 #pragma mark ------------------------------------------------------------------------------------------
+// Uploading a texture needs a blit, which retires whatever encoder is open, so
+// every texture a compute pass reads has to be made resident before its encoder
+// exists.
+- (bool) prepareComputeTextures
+{
+    // only sampled textures: a storage image is a render target with no client
+    // data, and asking for an upload of it just errors
+    struct { int spvc_type; bool is_image; } kinds[] = {
+        { SPVC_RESOURCE_TYPE_SAMPLED_IMAGE, false },
+    };
+
+    if (ctx->state.program == NULL)
+        return true;
+
+    for (int k = 0; k < (int)(sizeof(kinds) / sizeof(kinds[0])); k++)
+    {
+        int count = [self getProgramBindingCount: _COMPUTE_SHADER type: kinds[k].spvc_type];
+
+        for (int i = 0; i < count; i++)
+        {
+            GLuint binding = [self getProgramBinding: _COMPUTE_SHADER type: kinds[k].spvc_type index: i];
+            Texture *tex;
+
+            if (binding >= TEXTURE_UNITS)
+                continue;
+
+            tex = kinds[k].is_image ? STATE(image_units[binding].tex) : STATE(active_textures[binding]);
+
+            if (tex == NULL)
+                continue;
+
+            // a render target has no client data, so it is never "complete" in
+            // the upload sense; asking for one anyway just errors
+            if (tex->faces[0].levels == NULL || tex->faces[0].levels[0].complete == false)
+                continue;
+
+            // an incomplete texture is the shader's problem, not a reason to
+            // drop the dispatch here
+            [self bindMTLTexture: tex];
+        }
+    }
+
+    return true;
+}
+
 -(bool)processCompute:(id <MTLComputeCommandEncoder>) computeCommandEncoder
 {
     // from https://developer.apple.com/library/archive/documentation/Miscellaneous/Conceptual/MetalProgrammingGuide/Compute-Ctx/Compute-Ctx.html#//apple_ref/doc/uid/TP40014221-CH6-SW1
@@ -5218,6 +5571,9 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
 -(void)mtlDispatchCompute:(GLMContext)glm_ctx groupsX:(GLuint)groups_x groupsY:(GLuint)groups_y groupsZ:(GLuint)groups_z
 {
+    // Texture uploads have to happen before the encoder opens, not during
+    [self prepareComputeTextures];
+
     // Reuse the open compute encoder if there is one. A run of dispatches then
     // shares a single encoder instead of tearing down and rebuilding between
     // each pair, which is what interleaving compute with graphics needs.
@@ -6594,6 +6950,7 @@ typedef struct {
         return; // Early return to prevent crash
     }
 
+    [self setDrawTopologyForMode: mode];
     if ([self processGLState: true] == false) {
         MGL_NSERR(@"MGL ERROR: mtlDrawArrays - processGLState failed, aborting");
         return; // Early return instead of continuing with invalid state
@@ -6658,6 +7015,7 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:0 baseInstance:0])
@@ -6691,6 +7049,7 @@ void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:0 baseInstance:0])
@@ -6723,6 +7082,7 @@ void mtlDrawRangeElements(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint 
 {
     MTLPrimitiveType primitiveType;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:count type:0 indices:NULL instanceCount:instancecount baseVertex:first baseInstance:0])
@@ -6749,6 +7109,7 @@ void mtlDrawArraysInstanced(GLMContext glm_ctx, GLenum mode, GLint first, GLsize
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:instancecount baseVertex:0 baseInstance:0])
@@ -6786,6 +7147,7 @@ void mtlDrawElementsInstanced(GLMContext glm_ctx, GLenum mode, GLsizei count, GL
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:basevertex baseInstance:0])
@@ -6817,6 +7179,7 @@ void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, G
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:basevertex baseInstance:0])
@@ -6853,6 +7216,7 @@ void mtlDrawRangeElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLuint star
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:(GLsizei)count type:type indices:indices instanceCount:instancecount baseVertex:basevertex baseInstance:0])
@@ -6878,6 +7242,7 @@ void mtlDrawElementsInstancedBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei
 {
     MTLPrimitiveType primitiveType;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     // the draw parameters live in a GPU buffer, so there is nothing to expand
@@ -6919,6 +7284,7 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
         [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     // the draw parameters live in a GPU buffer, so there is nothing to expand
@@ -6961,6 +7327,7 @@ void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const
 {
     MTLPrimitiveType primitiveType;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:count type:0 indices:NULL instanceCount:instancecount baseVertex:first baseInstance:baseinstance])
@@ -6987,6 +7354,7 @@ void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint f
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:instancecount baseVertex:0 baseInstance:baseinstance])
@@ -7024,6 +7392,7 @@ void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsiz
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:0 baseInstance:0])
@@ -7055,6 +7424,7 @@ void mtlDrawElementsInstancedBaseVertexBaseInstance(GLMContext glm_ctx, GLenum m
 {
     MTLPrimitiveType primitiveType;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     primitiveType = getMTLPrimitiveType(mode);
@@ -7086,6 +7456,7 @@ void mtlMultiDrawArrays(GLMContext glm_ctx, GLenum mode, const GLint *first, con
         [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     primitiveType = getMTLPrimitiveType(mode);
@@ -7126,6 +7497,7 @@ void mtlMultiDrawElements(GLMContext glm_ctx, GLenum mode, const GLsizei *count,
         [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     primitiveType = getMTLPrimitiveType(mode);
@@ -7158,6 +7530,7 @@ void mtlMultiDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, const GLsiz
 {
     MTLPrimitiveType primitiveType;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     // the draw parameters live in a GPU buffer, so there is nothing to expand
@@ -7209,6 +7582,7 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
         [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
         return;
 
+    [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     // the draw parameters live in a GPU buffer, so there is nothing to expand
@@ -7539,6 +7913,13 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 
     _scratchPool = [[MGLScratchBufferPool alloc] initWithDevice: _device];
     _kernels = [[MGLKernelLibrary alloc] initWithDevice: _device];
+
+    // built now, because making one later would need a blit and would retire
+    // whatever encoder is open at the time
+    [self dummyTextureForGLType: GL_SAMPLER_2D];
+    [self dummyTextureForGLType: GL_SAMPLER_3D];
+    [self dummyTextureForGLType: GL_SAMPLER_CUBE];
+    [self dummyTextureForGLType: GL_SAMPLER_2D_ARRAY];
 
     // PROPER AGX VIRTUALIZATION DETECTION: Maintain Metal functionality with virtualization compatibility
     BOOL isVirtualized = NO;

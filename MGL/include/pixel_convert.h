@@ -67,6 +67,23 @@ GLboolean mglConvertPixels(const void *src, size_t src_row_pitch, MGLNativeForma
                            void *dst, size_t dst_row_pitch, GLenum format, GLenum type,
                            GLsizei width, GLsizei height, GLboolean flip_vertical);
 
+/* Converts a width x height rectangle of client pixels, laid out as format/type,
+ * into a native Metal layout. This is the upload direction: glTexImage and
+ * glTexSubImage hand over data whose component count, order and size often
+ * differ from the texture they land in, and Metal only copies bytes.
+ *
+ * Returns GL_FALSE and touches nothing if the combination is unsupported.
+ */
+GLboolean mglConvertPixelsToNative(const void *src, size_t src_row_pitch, GLenum format, GLenum type,
+                                   void *dst, size_t dst_row_pitch, MGLNativeFormat dst_fmt,
+                                   GLsizei width, GLsizei height);
+
+// The native layout a sized internal format ends up in, MGL_NF_UNKNOWN if none.
+MGLNativeFormat mglNativeFormatForGLInternalFormat(GLenum internalformat);
+
+// True when client pixels can be copied into that internal format untouched.
+GLboolean mglUploadNeedsNoConversion(GLenum internalformat, GLenum format, GLenum type);
+
 // Half float helpers, exposed for tests.
 GLfloat  mglHalfToFloat(GLushort h);
 GLushort mglFloatToHalf(GLfloat f);

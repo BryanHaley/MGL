@@ -11,6 +11,8 @@
 #include <math.h>
 
 #include "pixel_convert.h"
+#include "pixel_utils.h"
+#include "mgl_format_table.h"
 
 // not in glcorearb.h, but ES and older apps still ask for them
 #ifndef GL_LUMINANCE
@@ -936,4 +938,446 @@ GLboolean mglConvertPixels(const void *src, size_t src_row_pitch, MGLNativeForma
     }
 
     return GL_TRUE;
+}
+
+/* ---------- the upload direction: client pixels into native storage ---------- */
+
+// Mirror of select_components: put the components format carries back into RGBA
+// slots. Anything the format does not name keeps the texel's default.
+static void scatter_components(MGLTexel *t, GLenum format,
+                               const GLfloat *fi, const GLint *ii, const GLuint *ui)
+{
+    #define PUT(idx) do { t->f[idx] = fi[n]; t->i[idx] = ii[n]; t->u[idx] = ui[n]; n++; } while(0)
+    GLuint n = 0;
+
+    switch(format)
+    {
+        case GL_RED: case GL_RED_INTEGER:
+        case GL_DEPTH_COMPONENT: case GL_LUMINANCE:
+            PUT(0); break;
+
+        case GL_GREEN: case GL_GREEN_INTEGER: PUT(1); break;
+        case GL_BLUE:  case GL_BLUE_INTEGER:  PUT(2); break;
+        case GL_ALPHA:                        PUT(3); break;
+
+        case GL_RG: case GL_RG_INTEGER:       PUT(0); PUT(1); break;
+        case GL_LUMINANCE_ALPHA:              PUT(0); PUT(3); break;
+        case GL_DEPTH_STENCIL:                PUT(0); PUT(1); break;
+
+        case GL_RGB: case GL_RGB_INTEGER:     PUT(0); PUT(1); PUT(2); break;
+        case GL_BGR: case GL_BGR_INTEGER:     PUT(2); PUT(1); PUT(0); break;
+
+        case GL_RGBA: case GL_RGBA_INTEGER:   PUT(0); PUT(1); PUT(2); PUT(3); break;
+        case GL_BGRA: case GL_BGRA_INTEGER:   PUT(2); PUT(1); PUT(0); PUT(3); break;
+
+        case GL_STENCIL_INDEX:
+            t->f[1] = fi[0]; t->i[1] = ii[0]; t->u[1] = ui[0];
+            break;
+
+        default:
+            break;
+    }
+    #undef PUT
+}
+
+static GLboolean decode_plain(const GLubyte *s, GLenum format, GLenum type, MGLTexel *t)
+{
+    GLuint comps = mglComponentsForFormat(format);
+    GLuint sz = plain_type_size(type);
+    GLboolean is_int = format_is_integer(format);
+    GLfloat fv[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    GLint   iv[4] = { 0, 0, 0, 0 };
+    GLuint  uv[4] = { 0u, 0u, 0u, 0u };
+    GLuint k;
+
+    if (comps == 0 || sz == 0 || comps > 4)
+        return GL_FALSE;
+
+    for (k = 0; k < comps; k++)
+    {
+        const GLubyte *p = s + (size_t)k * sz;
+
+        switch(type)
+        {
+            case GL_UNSIGNED_BYTE:
+                uv[k] = p[0]; iv[k] = (GLint)p[0];
+                fv[k] = is_int ? (GLfloat)p[0] : unorm_to_float(p[0], 8);
+                break;
+
+            case GL_BYTE:
+                iv[k] = (GLbyte)p[0]; uv[k] = (GLuint)iv[k];
+                fv[k] = is_int ? (GLfloat)iv[k] : snorm_to_float(iv[k], 8);
+                break;
+
+            case GL_UNSIGNED_SHORT:
+                uv[k] = rd16(p); iv[k] = (GLint)uv[k];
+                fv[k] = is_int ? (GLfloat)uv[k] : unorm_to_float(uv[k], 16);
+                break;
+
+            case GL_SHORT:
+                iv[k] = (GLshort)rd16(p); uv[k] = (GLuint)iv[k];
+                fv[k] = is_int ? (GLfloat)iv[k] : snorm_to_float(iv[k], 16);
+                break;
+
+            case GL_UNSIGNED_INT:
+                uv[k] = rd32(p); iv[k] = (GLint)uv[k];
+                fv[k] = (GLfloat)uv[k];
+                break;
+
+            case GL_INT:
+                iv[k] = (GLint)rd32(p); uv[k] = (GLuint)iv[k];
+                fv[k] = (GLfloat)iv[k];
+                break;
+
+            case GL_HALF_FLOAT:
+                fv[k] = mglHalfToFloat(rd16(p));
+                iv[k] = (GLint)fv[k]; uv[k] = (GLuint)(fv[k] < 0.0f ? 0.0f : fv[k]);
+                break;
+
+            case GL_FLOAT:
+                fv[k] = rdf(p);
+                iv[k] = (GLint)fv[k]; uv[k] = (GLuint)(fv[k] < 0.0f ? 0.0f : fv[k]);
+                break;
+
+            default:
+                return GL_FALSE;
+        }
+    }
+
+    texel_zero(t);
+
+    if (is_int)
+    {
+        t->is_uint = (type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT || type == GL_UNSIGNED_INT);
+        t->is_sint = !t->is_uint;
+    }
+
+    scatter_components(t, format, fv, iv, uv);
+
+    return GL_TRUE;
+}
+
+static void wr16(GLubyte *p, GLushort v) { memcpy(p, &v, 2); }
+static void wr32(GLubyte *p, GLuint v)   { memcpy(p, &v, 4); }
+static void wrf (GLubyte *p, GLfloat v)  { memcpy(p, &v, 4); }
+
+/* sRGB storage takes the client's bytes as they are: GL does not apply the
+   transfer function on upload, the data is already encoded. */
+static GLboolean encode_native(GLubyte *d, MGLNativeFormat fmt, const MGLTexel *t)
+{
+    GLuint n, k;
+
+    switch(fmt)
+    {
+        case MGL_NF_R8_UNORM:    n = 1; goto u8;
+        case MGL_NF_RG8_UNORM:   n = 2; goto u8;
+        case MGL_NF_RGBA8_UNORM: n = 4; goto u8;
+        case MGL_NF_RGBA8_UNORM_SRGB: n = 4; goto u8;
+        u8:
+            for (k = 0; k < n; k++) d[k] = (GLubyte)float_to_unorm(t->f[k], 8);
+            return GL_TRUE;
+
+        case MGL_NF_BGRA8_UNORM:
+        case MGL_NF_BGRA8_UNORM_SRGB:
+            d[0] = (GLubyte)float_to_unorm(t->f[2], 8);
+            d[1] = (GLubyte)float_to_unorm(t->f[1], 8);
+            d[2] = (GLubyte)float_to_unorm(t->f[0], 8);
+            d[3] = (GLubyte)float_to_unorm(t->f[3], 8);
+            return GL_TRUE;
+
+        case MGL_NF_R8_SNORM:    n = 1; goto s8;
+        case MGL_NF_RG8_SNORM:   n = 2; goto s8;
+        case MGL_NF_RGBA8_SNORM: n = 4; goto s8;
+        s8:
+            for (k = 0; k < n; k++) d[k] = (GLubyte)(GLbyte)float_to_snorm(t->f[k], 8);
+            return GL_TRUE;
+
+        case MGL_NF_R8_UINT:    n = 1; goto ui8;
+        case MGL_NF_RG8_UINT:   n = 2; goto ui8;
+        case MGL_NF_RGBA8_UINT: n = 4; goto ui8;
+        ui8:
+            for (k = 0; k < n; k++) d[k] = (GLubyte)(t->u[k] > 255u ? 255u : t->u[k]);
+            return GL_TRUE;
+
+        case MGL_NF_R8_SINT:    n = 1; goto si8;
+        case MGL_NF_RG8_SINT:   n = 2; goto si8;
+        case MGL_NF_RGBA8_SINT: n = 4; goto si8;
+        si8:
+            for (k = 0; k < n; k++)
+            {
+                GLint v = t->i[k];
+                if (v > 127) v = 127;
+                if (v < -128) v = -128;
+                d[k] = (GLubyte)(GLbyte)v;
+            }
+            return GL_TRUE;
+
+        case MGL_NF_R16_UNORM:    n = 1; goto u16;
+        case MGL_NF_RG16_UNORM:   n = 2; goto u16;
+        case MGL_NF_RGBA16_UNORM: n = 4; goto u16;
+        u16:
+            for (k = 0; k < n; k++) wr16(d + 2*k, (GLushort)float_to_unorm(t->f[k], 16));
+            return GL_TRUE;
+
+        case MGL_NF_R16_SNORM:    n = 1; goto s16;
+        case MGL_NF_RG16_SNORM:   n = 2; goto s16;
+        case MGL_NF_RGBA16_SNORM: n = 4; goto s16;
+        s16:
+            for (k = 0; k < n; k++) wr16(d + 2*k, (GLushort)(GLshort)float_to_snorm(t->f[k], 16));
+            return GL_TRUE;
+
+        case MGL_NF_R16_UINT:    n = 1; goto ui16;
+        case MGL_NF_RG16_UINT:   n = 2; goto ui16;
+        case MGL_NF_RGBA16_UINT: n = 4; goto ui16;
+        ui16:
+            for (k = 0; k < n; k++) wr16(d + 2*k, (GLushort)(t->u[k] > 65535u ? 65535u : t->u[k]));
+            return GL_TRUE;
+
+        case MGL_NF_R16_SINT:    n = 1; goto si16;
+        case MGL_NF_RG16_SINT:   n = 2; goto si16;
+        case MGL_NF_RGBA16_SINT: n = 4; goto si16;
+        si16:
+            for (k = 0; k < n; k++)
+            {
+                GLint v = t->i[k];
+                if (v > 32767) v = 32767;
+                if (v < -32768) v = -32768;
+                wr16(d + 2*k, (GLushort)(GLshort)v);
+            }
+            return GL_TRUE;
+
+        case MGL_NF_R16_FLOAT:    n = 1; goto f16;
+        case MGL_NF_RG16_FLOAT:   n = 2; goto f16;
+        case MGL_NF_RGBA16_FLOAT: n = 4; goto f16;
+        f16:
+            for (k = 0; k < n; k++) wr16(d + 2*k, mglFloatToHalf(t->f[k]));
+            return GL_TRUE;
+
+        case MGL_NF_R32_UINT:    n = 1; goto ui32;
+        case MGL_NF_RG32_UINT:   n = 2; goto ui32;
+        case MGL_NF_RGBA32_UINT: n = 4; goto ui32;
+        ui32:
+            for (k = 0; k < n; k++) wr32(d + 4*k, t->u[k]);
+            return GL_TRUE;
+
+        case MGL_NF_R32_SINT:    n = 1; goto si32;
+        case MGL_NF_RG32_SINT:   n = 2; goto si32;
+        case MGL_NF_RGBA32_SINT: n = 4; goto si32;
+        si32:
+            for (k = 0; k < n; k++) wr32(d + 4*k, (GLuint)t->i[k]);
+            return GL_TRUE;
+
+        case MGL_NF_R32_FLOAT:    n = 1; goto f32;
+        case MGL_NF_RG32_FLOAT:   n = 2; goto f32;
+        case MGL_NF_RGBA32_FLOAT: n = 4; goto f32;
+        f32:
+            for (k = 0; k < n; k++) wrf(d + 4*k, t->f[k]);
+            return GL_TRUE;
+
+        case MGL_NF_RGB10A2_UNORM:
+            wr32(d, (float_to_unorm(t->f[3], 2) << 30) |
+                    (float_to_unorm(t->f[2], 10) << 20) |
+                    (float_to_unorm(t->f[1], 10) << 10) |
+                     float_to_unorm(t->f[0], 10));
+            return GL_TRUE;
+
+        case MGL_NF_RGB10A2_UINT:
+            wr32(d, ((t->u[3] & 0x3u) << 30) | ((t->u[2] & 0x3FFu) << 20) |
+                    ((t->u[1] & 0x3FFu) << 10) | (t->u[0] & 0x3FFu));
+            return GL_TRUE;
+
+        case MGL_NF_RG11B10_FLOAT:
+            wr32(d, (float_to_smallfloat(t->f[2], 5, 5) << 22) |
+                    (float_to_smallfloat(t->f[1], 6, 5) << 11) |
+                     float_to_smallfloat(t->f[0], 6, 5));
+            return GL_TRUE;
+
+        case MGL_NF_DEPTH16_UNORM:
+            wr16(d, (GLushort)float_to_unorm(t->f[0], 16));
+            return GL_TRUE;
+
+        case MGL_NF_DEPTH32_FLOAT:
+            wrf(d, t->f[0]);
+            return GL_TRUE;
+
+        case MGL_NF_STENCIL8:
+            d[0] = (GLubyte)(t->u[1] > 255u ? 255u : t->u[1]);
+            return GL_TRUE;
+
+        default:
+            // RGB9E5 and the packed depth/stencil pairs still have no encoder
+            return GL_FALSE;
+    }
+}
+
+GLboolean mglConvertPixelsToNative(const void *src, size_t src_row_pitch, GLenum format, GLenum type,
+                                   void *dst, size_t dst_row_pitch, MGLNativeFormat dst_fmt,
+                                   GLsizei width, GLsizei height)
+{
+    GLuint src_bpp = mglPackedPixelSize(format, type);
+    GLuint dst_bpp = mglNativeFormatBytesPerPixel(dst_fmt);
+    GLsizei row, col;
+
+    if (!src || !dst || src_bpp == 0 || dst_bpp == 0)
+        return GL_FALSE;
+
+    // the packed client types are readback-only for now
+    if (packed_type_size(type) != 0)
+        return GL_FALSE;
+
+    if (width < 0 || height < 0)
+        return GL_FALSE;
+
+    if (width == 0 || height == 0)
+        return GL_TRUE;
+
+    for (row = 0; row < height; row++)
+    {
+        const GLubyte *s = (const GLubyte *)src + (size_t)row * src_row_pitch;
+        GLubyte *d = (GLubyte *)dst + (size_t)row * dst_row_pitch;
+
+        for (col = 0; col < width; col++)
+        {
+            MGLTexel t;
+
+            if (!decode_plain(s + (size_t)col * src_bpp, format, type, &t))
+                return GL_FALSE;
+
+            if (!encode_native(d + (size_t)col * dst_bpp, dst_fmt, &t))
+                return GL_FALSE;
+        }
+    }
+
+    return GL_TRUE;
+}
+
+/* ---------- which native layout a GL internal format lands in ---------- */
+
+MGLNativeFormat mglNativeFormatForGLInternalFormat(GLenum internalformat)
+{
+    switch(mglFormatMetalFormat(internalformat))
+    {
+        case MTLPixelFormatR8Unorm:      return MGL_NF_R8_UNORM;
+        case MTLPixelFormatRG8Unorm:     return MGL_NF_RG8_UNORM;
+        case MTLPixelFormatRGBA8Unorm:   return MGL_NF_RGBA8_UNORM;
+        case MTLPixelFormatBGRA8Unorm:   return MGL_NF_BGRA8_UNORM;
+        case MTLPixelFormatRGBA8Unorm_sRGB: return MGL_NF_RGBA8_UNORM_SRGB;
+        case MTLPixelFormatBGRA8Unorm_sRGB: return MGL_NF_BGRA8_UNORM_SRGB;
+        case MTLPixelFormatR8Snorm:      return MGL_NF_R8_SNORM;
+        case MTLPixelFormatRG8Snorm:     return MGL_NF_RG8_SNORM;
+        case MTLPixelFormatRGBA8Snorm:   return MGL_NF_RGBA8_SNORM;
+        case MTLPixelFormatR8Uint:       return MGL_NF_R8_UINT;
+        case MTLPixelFormatRG8Uint:      return MGL_NF_RG8_UINT;
+        case MTLPixelFormatRGBA8Uint:    return MGL_NF_RGBA8_UINT;
+        case MTLPixelFormatR8Sint:       return MGL_NF_R8_SINT;
+        case MTLPixelFormatRG8Sint:      return MGL_NF_RG8_SINT;
+        case MTLPixelFormatRGBA8Sint:    return MGL_NF_RGBA8_SINT;
+
+        case MTLPixelFormatR16Unorm:     return MGL_NF_R16_UNORM;
+        case MTLPixelFormatRG16Unorm:    return MGL_NF_RG16_UNORM;
+        case MTLPixelFormatRGBA16Unorm:  return MGL_NF_RGBA16_UNORM;
+        case MTLPixelFormatR16Snorm:     return MGL_NF_R16_SNORM;
+        case MTLPixelFormatRG16Snorm:    return MGL_NF_RG16_SNORM;
+        case MTLPixelFormatRGBA16Snorm:  return MGL_NF_RGBA16_SNORM;
+        case MTLPixelFormatR16Uint:      return MGL_NF_R16_UINT;
+        case MTLPixelFormatRG16Uint:     return MGL_NF_RG16_UINT;
+        case MTLPixelFormatRGBA16Uint:   return MGL_NF_RGBA16_UINT;
+        case MTLPixelFormatR16Sint:      return MGL_NF_R16_SINT;
+        case MTLPixelFormatRG16Sint:     return MGL_NF_RG16_SINT;
+        case MTLPixelFormatRGBA16Sint:   return MGL_NF_RGBA16_SINT;
+        case MTLPixelFormatR16Float:     return MGL_NF_R16_FLOAT;
+        case MTLPixelFormatRG16Float:    return MGL_NF_RG16_FLOAT;
+        case MTLPixelFormatRGBA16Float:  return MGL_NF_RGBA16_FLOAT;
+
+        case MTLPixelFormatR32Uint:      return MGL_NF_R32_UINT;
+        case MTLPixelFormatRG32Uint:     return MGL_NF_RG32_UINT;
+        case MTLPixelFormatRGBA32Uint:   return MGL_NF_RGBA32_UINT;
+        case MTLPixelFormatR32Sint:      return MGL_NF_R32_SINT;
+        case MTLPixelFormatRG32Sint:     return MGL_NF_RG32_SINT;
+        case MTLPixelFormatRGBA32Sint:   return MGL_NF_RGBA32_SINT;
+        case MTLPixelFormatR32Float:     return MGL_NF_R32_FLOAT;
+        case MTLPixelFormatRG32Float:    return MGL_NF_RG32_FLOAT;
+        case MTLPixelFormatRGBA32Float:  return MGL_NF_RGBA32_FLOAT;
+
+        case MTLPixelFormatRGB10A2Unorm: return MGL_NF_RGB10A2_UNORM;
+        case MTLPixelFormatRGB10A2Uint:  return MGL_NF_RGB10A2_UINT;
+        case MTLPixelFormatRG11B10Float: return MGL_NF_RG11B10_FLOAT;
+        case MTLPixelFormatRGB9E5Float:  return MGL_NF_RGB9E5_FLOAT;
+
+        case MTLPixelFormatDepth16Unorm: return MGL_NF_DEPTH16_UNORM;
+        case MTLPixelFormatDepth32Float: return MGL_NF_DEPTH32_FLOAT;
+        case MTLPixelFormatStencil8:     return MGL_NF_STENCIL8;
+        case MTLPixelFormatDepth24Unorm_Stencil8: return MGL_NF_DEPTH24_UNORM_STENCIL8;
+        case MTLPixelFormatDepth32Float_Stencil8: return MGL_NF_DEPTH32_FLOAT_STENCIL8;
+
+        default: return MGL_NF_UNKNOWN;
+    }
+}
+
+// The one format/type pair that already matches a native layout byte for byte.
+static GLboolean identity_pair(MGLNativeFormat fmt, GLenum *format, GLenum *type)
+{
+    switch(fmt)
+    {
+        case MGL_NF_R8_UNORM:    *format = GL_RED;  *type = GL_UNSIGNED_BYTE; return GL_TRUE;
+        case MGL_NF_RG8_UNORM:   *format = GL_RG;   *type = GL_UNSIGNED_BYTE; return GL_TRUE;
+        case MGL_NF_RGBA8_UNORM:
+        case MGL_NF_RGBA8_UNORM_SRGB: *format = GL_RGBA; *type = GL_UNSIGNED_BYTE; return GL_TRUE;
+        case MGL_NF_BGRA8_UNORM:
+        case MGL_NF_BGRA8_UNORM_SRGB: *format = GL_BGRA; *type = GL_UNSIGNED_BYTE; return GL_TRUE;
+
+        case MGL_NF_R8_SNORM:    *format = GL_RED;  *type = GL_BYTE; return GL_TRUE;
+        case MGL_NF_RG8_SNORM:   *format = GL_RG;   *type = GL_BYTE; return GL_TRUE;
+        case MGL_NF_RGBA8_SNORM: *format = GL_RGBA; *type = GL_BYTE; return GL_TRUE;
+
+        case MGL_NF_R8_UINT:    *format = GL_RED_INTEGER;  *type = GL_UNSIGNED_BYTE; return GL_TRUE;
+        case MGL_NF_RG8_UINT:   *format = GL_RG_INTEGER;   *type = GL_UNSIGNED_BYTE; return GL_TRUE;
+        case MGL_NF_RGBA8_UINT: *format = GL_RGBA_INTEGER; *type = GL_UNSIGNED_BYTE; return GL_TRUE;
+        case MGL_NF_R8_SINT:    *format = GL_RED_INTEGER;  *type = GL_BYTE; return GL_TRUE;
+        case MGL_NF_RG8_SINT:   *format = GL_RG_INTEGER;   *type = GL_BYTE; return GL_TRUE;
+        case MGL_NF_RGBA8_SINT: *format = GL_RGBA_INTEGER; *type = GL_BYTE; return GL_TRUE;
+
+        case MGL_NF_R16_UNORM:    *format = GL_RED;  *type = GL_UNSIGNED_SHORT; return GL_TRUE;
+        case MGL_NF_RG16_UNORM:   *format = GL_RG;   *type = GL_UNSIGNED_SHORT; return GL_TRUE;
+        case MGL_NF_RGBA16_UNORM: *format = GL_RGBA; *type = GL_UNSIGNED_SHORT; return GL_TRUE;
+        case MGL_NF_R16_SNORM:    *format = GL_RED;  *type = GL_SHORT; return GL_TRUE;
+        case MGL_NF_RG16_SNORM:   *format = GL_RG;   *type = GL_SHORT; return GL_TRUE;
+        case MGL_NF_RGBA16_SNORM: *format = GL_RGBA; *type = GL_SHORT; return GL_TRUE;
+        case MGL_NF_R16_UINT:     *format = GL_RED_INTEGER;  *type = GL_UNSIGNED_SHORT; return GL_TRUE;
+        case MGL_NF_RG16_UINT:    *format = GL_RG_INTEGER;   *type = GL_UNSIGNED_SHORT; return GL_TRUE;
+        case MGL_NF_RGBA16_UINT:  *format = GL_RGBA_INTEGER; *type = GL_UNSIGNED_SHORT; return GL_TRUE;
+        case MGL_NF_R16_SINT:     *format = GL_RED_INTEGER;  *type = GL_SHORT; return GL_TRUE;
+        case MGL_NF_RG16_SINT:    *format = GL_RG_INTEGER;   *type = GL_SHORT; return GL_TRUE;
+        case MGL_NF_RGBA16_SINT:  *format = GL_RGBA_INTEGER; *type = GL_SHORT; return GL_TRUE;
+        case MGL_NF_R16_FLOAT:    *format = GL_RED;  *type = GL_HALF_FLOAT; return GL_TRUE;
+        case MGL_NF_RG16_FLOAT:   *format = GL_RG;   *type = GL_HALF_FLOAT; return GL_TRUE;
+        case MGL_NF_RGBA16_FLOAT: *format = GL_RGBA; *type = GL_HALF_FLOAT; return GL_TRUE;
+
+        case MGL_NF_R32_UINT:    *format = GL_RED_INTEGER;  *type = GL_UNSIGNED_INT; return GL_TRUE;
+        case MGL_NF_RG32_UINT:   *format = GL_RG_INTEGER;   *type = GL_UNSIGNED_INT; return GL_TRUE;
+        case MGL_NF_RGBA32_UINT: *format = GL_RGBA_INTEGER; *type = GL_UNSIGNED_INT; return GL_TRUE;
+        case MGL_NF_R32_SINT:    *format = GL_RED_INTEGER;  *type = GL_INT; return GL_TRUE;
+        case MGL_NF_RG32_SINT:   *format = GL_RG_INTEGER;   *type = GL_INT; return GL_TRUE;
+        case MGL_NF_RGBA32_SINT: *format = GL_RGBA_INTEGER; *type = GL_INT; return GL_TRUE;
+        case MGL_NF_R32_FLOAT:    *format = GL_RED;  *type = GL_FLOAT; return GL_TRUE;
+        case MGL_NF_RG32_FLOAT:   *format = GL_RG;   *type = GL_FLOAT; return GL_TRUE;
+        case MGL_NF_RGBA32_FLOAT: *format = GL_RGBA; *type = GL_FLOAT; return GL_TRUE;
+
+        case MGL_NF_DEPTH16_UNORM: *format = GL_DEPTH_COMPONENT; *type = GL_UNSIGNED_SHORT; return GL_TRUE;
+        case MGL_NF_DEPTH32_FLOAT: *format = GL_DEPTH_COMPONENT; *type = GL_FLOAT; return GL_TRUE;
+        case MGL_NF_STENCIL8:      *format = GL_STENCIL_INDEX;   *type = GL_UNSIGNED_BYTE; return GL_TRUE;
+
+        default: return GL_FALSE;
+    }
+}
+
+GLboolean mglUploadNeedsNoConversion(GLenum internalformat, GLenum format, GLenum type)
+{
+    MGLNativeFormat nf = mglNativeFormatForGLInternalFormat(internalformat);
+    GLenum want_format, want_type;
+
+    if (identity_pair(nf, &want_format, &want_type) == GL_FALSE)
+        return GL_FALSE;
+
+    return (format == want_format && type == want_type) ? GL_TRUE : GL_FALSE;
 }
