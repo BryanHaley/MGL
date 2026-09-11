@@ -177,7 +177,7 @@ void mglGetUniformfv(GLMContext ctx, GLuint program, GLint location, GLfloat *pa
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(location >= 0 && location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(location >= 0 && location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
 
     buf = ptr->uniform_constants.buffers[location].buf;
 
@@ -193,7 +193,7 @@ void mglGetUniformiv(GLMContext ctx, GLuint program, GLint location, GLint *para
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(location >= 0 && location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(location >= 0 && location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
 
     buf = ptr->uniform_constants.buffers[location].buf;
 
@@ -391,7 +391,7 @@ bool checkUniformParams(GLMContext ctx, GLint location)
 
     ERROR_CHECK_RETURN_VALUE(location >= 0, GL_INVALID_OPERATION, false);
         
-    ERROR_CHECK_RETURN_VALUE(location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION, false);
+    ERROR_CHECK_RETURN_VALUE(location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION, false);
 
     return true;
 }
@@ -417,7 +417,7 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
         return;
 
     ERROR_CHECK_RETURN(location >= 0, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(size > 0, GL_INVALID_VALUE);
 
     buf = pptr->uniform_constants.buffers[location].buf;
@@ -430,6 +430,37 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
     }
 
     initBufferData(ctx, buf, size, (void *)ptr, true);
+}
+
+// A uniform the app never wrote still reads as zero in GL, so hand the draw a
+// zero filled buffer instead of failing it. 256 bytes covers every uniform
+// type the MSL side can ask for, including a mat4 array.
+Buffer *programUniformDefaultBuffer(GLMContext ctx, Program *pptr, GLint location)
+{
+    static const GLubyte zeros[256] = {0};
+    Buffer *buf;
+
+    if (pptr == NULL)
+        return NULL;
+
+    if (location < 0 || location >= MAX_UNIFORM_LOCATIONS)
+        return NULL;
+
+    buf = pptr->uniform_constants.buffers[location].buf;
+
+    if (buf)
+        return buf;
+
+    buf = newBuffer(ctx, GL_UNIFORM_BUFFER, location);
+
+    if (buf == NULL)
+        return NULL;
+
+    pptr->uniform_constants.buffers[location].buf = buf;
+
+    initBufferData(ctx, buf, sizeof(zeros), (void *)zeros, true);
+
+    return buf;
 }
 
 void mglUniform(GLMContext ctx, GLint location, void *ptr, GLsizei size)
@@ -1373,7 +1404,7 @@ static const Buffer *uniformValueBuffer(GLMContext ctx, GLuint program, GLint lo
     Buffer *buf;
 
     ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_VALUE, NULL);
-    ERROR_CHECK_RETURN_VALUE(location >= 0 && location < MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION, NULL);
+    ERROR_CHECK_RETURN_VALUE(location >= 0 && location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION, NULL);
 
     buf = ptr->uniform_constants.buffers[location].buf;
 

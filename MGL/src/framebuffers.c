@@ -114,6 +114,7 @@ static Framebuffer *newFramebuffer(GLMContext ctx, GLuint framebuffer)
     bzero(ptr, sizeof(Framebuffer));
 
     ptr->name = framebuffer;
+    ptr->draw_buffer = GL_COLOR_ATTACHMENT0;
 
     return ptr;
 }
@@ -204,6 +205,12 @@ void mglBindFramebuffer(GLMContext ctx, GLenum target, GLuint framebuffer)
             break;
     }
     
+    // the draw buffer belongs to the framebuffer, so swap in the new one's
+    if (ctx->state.framebuffer)
+        STATE(draw_buffer) = ctx->state.framebuffer->draw_buffer;
+    else
+        STATE(draw_buffer) = STATE(default_draw_buffer);
+
     STATE(dirty_bits) |= DIRTY_FBO;
 
     if (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER)

@@ -118,6 +118,7 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     assert(STATE(max_vertex_attribs) <= MAX_ATTRIBS);
 
     STATE(draw_buffer) = GL_FRONT;
+    STATE(default_draw_buffer) = GL_FRONT;
     STATE(read_buffer) = GL_FRONT;
     STATE(active_texture) = 0;
 
@@ -252,6 +253,14 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     STATE(var.stencil_back_func) = GL_ALWAYS;
     STATE(var.stencil_back_ref) = 0;
     STATE(var.stencil_back_writemask) = 0xFFFFFFFF;
+
+    // plain uniforms are indexed by location, so report what we can actually hold
+    STATE(var.max_uniform_locations) = MAX_UNIFORM_LOCATIONS;
+
+    // left at zero these rejected every texture unit past the first
+    STATE(var.max_combined_texture_image_units) = TEXTURE_UNITS;
+    STATE(var.max_texture_image_units) = TEXTURE_UNITS;
+    STATE(var.max_texture_size) = 16384;
 
     STATE(var.max_compute_work_group_invocations) = 1024;
 

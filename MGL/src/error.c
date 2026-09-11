@@ -44,12 +44,10 @@ GLenum  mglGetError(GLMContext ctx)
 
 void error_func(GLMContext ctx, const char *func, GLenum error)
 {
-    // GL keeps only the first error until glGetError clears it, so only report
-    // that one; otherwise a bad call in a loop floods the log
-    if (ctx->state.error)
-        return;
-
-    ctx->state.error = error;
+    // GL keeps only the first error until glGetError clears it, but an app that
+    // never calls glGetError would then silence every later error in the log
+    if (ctx->state.error == GL_NO_ERROR)
+        ctx->state.error = error;
 
     MGL_ERR("MGL GL Error in %s: 0x%x\n", func, error);
 

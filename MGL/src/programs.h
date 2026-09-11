@@ -13,5 +13,6 @@
 
 int isProgram(GLMContext ctx, GLuint program);
 Program *getProgram(GLMContext ctx, GLuint program);
+Buffer *programUniformDefaultBuffer(GLMContext ctx, Program *pptr, GLint location);
 
 #endif /* programs_h */

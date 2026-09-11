@@ -35,9 +35,18 @@ extern void *getBufferData(GLMContext ctx, Buffer *ptr);
 
 bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, void *pixels);
 
+// a cube map face target names the cube map object it belongs to
+GLenum normalizeTextureTarget(GLenum target)
+{
+    if (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)
+        return GL_TEXTURE_CUBE_MAP;
+
+    return target;
+}
+
 GLuint textureIndexFromTarget(GLMContext ctx, GLenum target)
 {
-    switch(target)
+    switch(normalizeTextureTarget(target))
     {
         case GL_TEXTURE_BUFFER: return _TEXTURE_BUFFER_TARGET;
         case GL_TEXTURE_1D: return _TEXTURE_1D;
@@ -87,7 +96,7 @@ Texture *newTexObj(GLMContext ctx, GLenum target)
     bzero(ptr, sizeof(Texture));
 
     ptr->name = TEX_OBJ_RES_NAME;
-    ptr->target = target;
+    ptr->target = normalizeTextureTarget(target);
     ptr->index = index;
 
     float black_color[] = {0,0,0,0};
@@ -475,9 +484,9 @@ void mglActiveTexture(GLMContext ctx, GLenum texture)
 {
     texture -= GL_TEXTURE0;
 
-    if (texture > STATE_VAR(max_combined_texture_image_units))
+    if (texture >= STATE_VAR(max_combined_texture_image_units))
     {
-        ERROR_RETURN(GL_INVALID_INDEX);
+        ERROR_RETURN(GL_INVALID_ENUM);
     }
 
     STATE(active_texture) = texture;
@@ -628,7 +637,24 @@ void invalidateTexture(GLMContext ctx, Texture *tex)
             free(tex->faces[i].levels);
     }
 
+    // the object itself stays bound and keeps its name, so only wipe its
+    // contents -- clearing target/index/params here left the texture
+    // unusable for every later draw
+    GLuint name = tex->name;
+    GLuint target = tex->target;
+    GLuint index = tex->index;
+    GLboolean immutable_storage = tex->immutable_storage;
+    GLenum access = tex->access;
+    TextureParameter params = tex->params;
+
     bzero(tex, sizeof(Texture));
+
+    tex->name = name;
+    tex->target = target;
+    tex->index = index;
+    tex->immutable_storage = immutable_storage;
+    tex->access = access;
+    tex->params = params;
 }
 
 void initBaseTexLevel(GLMContext ctx, Texture *tex, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth)

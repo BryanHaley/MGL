@@ -358,7 +358,7 @@ static_assert(_GEOMETRY_SHADER == GLSLANG_STAGE_GEOMETRY, "_GEOMETRY_SHADER == G
 static_assert(_FRAGMENT_SHADER == GLSLANG_STAGE_FRAGMENT, "_FRAGMENT_SHADER == GLSLANG_STAGE_FRAGMENT failed");
 static_assert(_COMPUTE_SHADER == GLSLANG_STAGE_COMPUTE, "_COMPUTE_SHADER == GLSLANG_STAGE_COMPUTE failed");
 
-void addShadersToProgram(GLMContext ctx, Program *pptr, glslang_program_t *glsl_program)
+bool addShadersToProgram(GLMContext ctx, Program *pptr, glslang_program_t *glsl_program)
 {
     // add shaders
     for(int i=0;i<_MAX_SHADER_TYPES; i++)
@@ -367,14 +367,20 @@ void addShadersToProgram(GLMContext ctx, Program *pptr, glslang_program_t *glsl_
 
         ptr = pptr->shader_slots[i];
 
-        if(ptr)
+        if(ptr && ptr->compiled_glsl_shader)
         {
-            // should have glsl shader here
-            assert(ptr->compiled_glsl_shader);
-
             glslang_program_add_shader(glsl_program, ptr->compiled_glsl_shader);
         }
+        else if(ptr)
+        {
+            // attached but never compiled -- let the link report it
+            MGL_ERR("MGL Error: shader %d attached to program %d never compiled\n", ptr->name, pptr->name);
+
+            return false;
+        }
     }
+
+    return true;
 }
 
 char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
@@ -660,7 +666,10 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage)
 
     // shaders to glsl program
     MGL_INFO("MGL DEBUG: Adding shaders to program\n");
-    addShadersToProgram(ctx, pptr, glsl_program);
+    if (!addShadersToProgram(ctx, pptr, glsl_program))
+    {
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+    }
     MGL_INFO("MGL DEBUG: Shaders added\n");
 
     // link
@@ -674,6 +683,15 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage)
         MGL_ERR("MGL Error: glslang_program_SPIRV_get_messages:\n%s\n", glslang_program_SPIRV_get_messages(glsl_program));
         MGL_ERR("MGL Error: glslang_program_get_info_log:\n%s\n", glslang_program_get_info_log(glsl_program));
         MGL_ERR("MGL Error: glslang_program_get_info_debug_log:\n%s\n", glslang_program_get_info_debug_log(glsl_program));
+
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+    }
+
+    // hands out the locations auto-map left pending, matching them across stages
+    if (!glslang_program_map_io(glsl_program))
+    {
+        MGL_ERR("MGL Error: glslang_program_map_io failed\n");
+        MGL_ERR("MGL Error: glslang_program_get_info_log:\n%s\n", glslang_program_get_info_log(glsl_program));
 
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
     }

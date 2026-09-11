@@ -122,11 +122,10 @@ void mglBindSampler(GLMContext ctx, GLuint unit, GLuint sampler)
 {
     Sampler *ptr;
 
-    unit = unit - GL_TEXTURE0;
-
-    if (unit > STATE_VAR(max_combined_texture_image_units))
+    // glBindSampler takes a unit index, not a GL_TEXTUREi enum
+    if (unit >= STATE_VAR(max_combined_texture_image_units))
     {
-        ERROR_RETURN(GL_INVALID_INDEX);
+        ERROR_RETURN(GL_INVALID_VALUE);
     }
 
     if (sampler)

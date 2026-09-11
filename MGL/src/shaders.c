@@ -429,6 +429,14 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
+    // no source was ever accepted for this shader, so there is nothing to compile
+    if (ptr->src == NULL)
+    {
+        if (ptr->log) free(ptr->log);
+        ptr->log = strdup("shader has no source");
+        return;
+    }
+
     initGLSLInput(ctx, ptr->type, ptr->src, &glsl_input);
 
     glsl_shader = glslang_shader_create(&glsl_input);
@@ -450,21 +458,11 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         ptr->log = NULL;
     }
 
-    /* Set glslang options to auto-assign locations for legacy shaders */
-    int options = GLSLANG_SHADER_VULKAN_RULES_RELAXED;
+    /* SPIR-V wants every varying to carry an explicit location, but GL never
+     * required that at any version, so let glslang hand out the missing ones.
+     * Locations the shader does declare are left alone. */
+    int options = GLSLANG_SHADER_VULKAN_RULES_RELAXED | GLSLANG_SHADER_AUTO_MAP_LOCATIONS;
 
-    /* Detect if this is a legacy GLSL shader that needs location auto-assignment */
-    int shader_version = 330; /* Default */
-    const char *version_str = strstr(ptr->src, "#version");
-    if (version_str) {
-        sscanf(version_str, "#version %d", &shader_version);
-    }
-
-    /* For GLSL < 330, auto-assign locations since old shaders don't have layout() qualifiers */
-    if (shader_version < 330) {
-        options |= GLSLANG_SHADER_AUTO_MAP_LOCATIONS;
-        MGL_INFO("[MGL] Enabling auto-map locations for legacy GLSL %d shader\n", shader_version);
-    }
     glslang_shader_set_options(glsl_shader, options);
 
     err = glslang_shader_preprocess(glsl_shader, &glsl_input);

@@ -218,6 +218,13 @@ typedef struct BufferBase_t {
     BufferBaseTarget    buffers[MAX_BINDABLE_BUFFERS];
 } BufferBase;
 
+// plain uniforms are stored by their layout location, which GL lets run well
+// past the number of buffer binding points
+#define MAX_UNIFORM_LOCATIONS   256
+typedef struct UniformConstants_t {
+    BufferBaseTarget    buffers[MAX_UNIFORM_LOCATIONS];
+} UniformConstants;
+
 typedef struct TextureParameter_t {
     GLenum  depth_stencil_mode;
     GLuint  base_level;
@@ -434,6 +441,7 @@ typedef struct BufferMap_t {
     GLuint      attribute_mask;
     Buffer      *buf;
     GLintptr    offset;
+    GLuint      stride;     // vertex stride of the attributes sharing this slot
 } BufferMap;
 
 typedef struct BufferMapList_t {
@@ -458,7 +466,7 @@ typedef struct Program_t {
     GLboolean validate_status;
     char *log;
     // uniform values belong to the program, not the context
-    BufferBase uniform_constants;
+    UniformConstants uniform_constants;
     GLboolean separable;
     GLboolean binary_retrievable_hint;
 } Program;
@@ -558,6 +566,8 @@ typedef struct Framebuffer_t {
     GLuint dirty_bits;
     GLuint  name;
     GLbitfield color_attachment_bitfield;
+    // GL keeps the draw buffer per framebuffer, so each one remembers its own
+    GLenum draw_buffer;
     FBOAttachment color_attachments[MAX_COLOR_ATTACHMENTS];
     FBOAttachment depth;
     FBOAttachment stencil;
@@ -655,7 +665,8 @@ typedef struct {
     void *debug_callback;
     const void *debug_user_param;   // glGetError
 
-    GLuint draw_buffer; // GL_DRAW_BUFFER
+    GLuint draw_buffer; // GL_DRAW_BUFFER, of whichever framebuffer is bound
+    GLuint default_draw_buffer; // the default framebuffer's own draw buffer
     GLuint read_buffer; // GL_READ_BUFFER
     GLuint max_color_attachments; // GL_MAX_COLOR_ATTACHMENTS
     GLuint max_vertex_attribs; // GL_MAX_VERTEX_ATTRIBS

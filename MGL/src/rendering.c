@@ -192,6 +192,10 @@ void mglDrawBuffer(GLMContext ctx, GLenum buf)
     }
 
     STATE(draw_buffer) = buf;
+    if (ctx->state.framebuffer)
+        ctx->state.framebuffer->draw_buffer = buf;
+    else
+        STATE(default_draw_buffer) = buf;
     STATE(dirty_bits) |= DIRTY_STATE;
 }
 

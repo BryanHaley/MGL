@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #import "MGLRenderer.h"
 #import "glm_context.h"
+#import "programs.h"
 #import "mgl_log.h"
 #import "pixel_convert.h"
 
@@ -147,6 +148,7 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     SyncList  *_currentCommandBufferSyncList;
 
     id<MTLRenderCommandEncoder> _currentRenderEncoder;
+    Framebuffer *_encoderFramebuffer;   // which framebuffer _currentRenderEncoder writes to
 
     GLuint _blitOperationComplete;
 
@@ -509,6 +511,10 @@ void logDirtyBits(GLMContext ctx)
 
                 buf = buffers[spirv_binding].buf;
 
+                // a uniform the app never set is not an error in GL
+                if (buf == NULL && spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT)
+                    buf = programUniformDefaultBuffer(ctx, ctx->state.program, spirv_binding);
+
                 if (buf)
                 {
                     buffer_map->buffers[buffer_map->count].attribute_mask = 0; // non attribute.. no bits set
@@ -565,58 +571,60 @@ void logDirtyBits(GLMContext ctx)
                     return false;
                 }
 
-                // check all the buffers for metal objects
-                Buffer *gl_buffer;
-                Buffer *map_buffer;
+                Buffer *gl_buffer = VAO_ATTRIB_STATE(att).buffer;
+                GLuint stride = VAO_ATTRIB_STATE(att).stride;
+                GLintptr base = VAO_ATTRIB_STATE(att).relativeoffset;
 
-                gl_buffer = VAO_ATTRIB_STATE(att).buffer;
+                // Metal reads an attribute at (buffer offset + stride*vertex +
+                // attribute offset), and the attribute offset has to sit inside
+                // one stride. So attributes only share a slot when they walk the
+                // same buffer with the same stride from the same base. Packing
+                // several arrays end to end in one buffer -- positions, then
+                // normals, then uvs -- needs a slot each, or every attribute but
+                // the first reads the wrong array.
+                bool found_buffer = false;
 
-                // check start for map... then check
-                map_buffer = buffer_map->buffers[vao_buffer_start].buf;
-
-                // empty slot map it here, only works on first buffer..
-                if (map_buffer == NULL)
+                for (int map=vao_buffer_start; map<buffer_map->count; map++)
                 {
-                    // map the buffer object to a metal vertex index
-                    assert(buffer_map->count < ctx->state.max_vertex_attribs);
-                    buffer_map->buffers[vao_buffer_start].attribute_mask |= (0x1 << att);
-                    buffer_map->buffers[vao_buffer_start].buf = gl_buffer;
+                    Buffer *map_buffer = buffer_map->buffers[map].buf;
+
+                    if (map_buffer == NULL)
+                        continue;
+
+                    // we need to check name and target, not pointers..
+                    if ((map_buffer->name != gl_buffer->name) ||
+                        (map_buffer->target != gl_buffer->target))
+                        continue;
+
+                    if (buffer_map->buffers[map].stride != stride)
+                        continue;
+
+                    GLintptr delta = base - buffer_map->buffers[map].offset;
+
+                    if (delta < 0 || delta >= (GLintptr)stride)
+                        continue;
+
+                    buffer_map->buffers[map].attribute_mask |= (0x1 << att);
+                    found_buffer = true;
+                    mapped_buffers++;
+                    break;
+                }
+
+                if (found_buffer == false)
+                {
+                    if (buffer_map->count >= MAX_MAPPED_BUFFERS)
+                    {
+                        MGL_NSERR(@"MGL ERROR: out of vertex buffer slots mapping attribute %d", att);
+                        return false;
+                    }
+
+                    buffer_map->buffers[buffer_map->count].attribute_mask = (0x1 << att);
+                    buffer_map->buffers[buffer_map->count].buf = gl_buffer;
+                    buffer_map->buffers[buffer_map->count].offset = base;
+                    buffer_map->buffers[buffer_map->count].stride = stride;
                     buffer_map->count++;
 
                     mapped_buffers++;
-                }
-                else
-                {
-                    bool found_buffer = false;
-
-                    // find vao attrib with same buffer
-                    for (int map=vao_buffer_start;
-                         (found_buffer == false) && map<buffer_map->count;
-                         map++)
-                    {
-                        // we need to check name and target, not pointers..
-                        // FIX ME: I think we don't need a target as all attribs should be an array_buffer
-                        if ((map_buffer->name == gl_buffer->name) &&
-                            (map_buffer->target == gl_buffer->target))
-                        {
-                            // include it the list of attributes
-                            buffer_map->buffers[map].attribute_mask |= (0x1 << att);
-                            found_buffer = true;
-                            mapped_buffers++;
-                            break;
-                        }
-                    }
-
-                    if (found_buffer == false)
-                    {
-                        // map the next buffer object to a metal vertex index
-                        assert(buffer_map->count < ctx->state.max_vertex_attribs);
-                        buffer_map->buffers[buffer_map->count].attribute_mask = (0x1 << att);
-                        buffer_map->buffers[buffer_map->count].buf = gl_buffer;
-                        buffer_map->count++;
-
-                        mapped_buffers++;
-                    }
                 }
             }
 
@@ -787,7 +795,9 @@ void logDirtyBits(GLMContext ctx)
         // small buffers go inline; larger ones need a real MTLBuffer
         if (ptr->size < 4096 && ptr->data.mtl_data == NULL)
         {
-            [_currentRenderEncoder setVertexBytes:(const void *)ptr->data.buffer_data length:ptr->size atIndex:i];
+            [_currentRenderEncoder setVertexBytes:(const void *)((const GLubyte *)ptr->data.buffer_data + offset)
+                                           length:(NSUInteger)(ptr->size - offset)
+                                          atIndex:i];
 
             // clear buffer data dirty bits
             ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
@@ -979,7 +989,7 @@ void logDirtyBits(GLMContext ctx)
 
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: unhandled texture target 0x%x at line %d", tex->target, __LINE__);
             return NULL;
             break;
     }
@@ -1113,10 +1123,9 @@ void logDirtyBits(GLMContext ctx)
         case GL_READ_WRITE:
             tex_desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite; break;
         default:
-            // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
-            return NULL;
-            break;
+            // access is only set by glBindImageTexture; an ordinary sampled
+            // texture has none, and GL still lets shaders read it
+            tex_desc.usage = MTLTextureUsageShaderRead; break;
     }
 
     if (tex->is_render_target)
@@ -1724,8 +1733,10 @@ void logDirtyBits(GLMContext ctx)
                                     MGL_NSINFO(@"MGL INFO: Attempting buffer-based texture fill");
 
                                     // Create a temporary MTLBuffer with the texture data
+                                    // properData only holds fillSize bytes -- handing Metal the
+                                    // whole texture size here read far past the allocation
                                     id<MTLBuffer> tempBuffer = [_device newBufferWithBytes:properData
-                                                                                    length:dataSize
+                                                                                    length:fillSize
                                                                                    options:MTLResourceStorageModeShared];
 
                                     if (tempBuffer) {
@@ -2255,7 +2266,7 @@ void logDirtyBits(GLMContext ctx)
 
             default:
                 // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
+            MGL_NSERR(@"MGL ERROR: unhandled wrap mode 0x%x (axis %d) at line %d", type, i, __LINE__);
             return NULL;
                 break;
         }
@@ -3473,6 +3484,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     MGL_NSDEBUG(@"MGL DEBUG: About to create render encoder with descriptor and command buffer");
     @try {
         _currentRenderEncoder = [[self liveCommandBuffer] renderCommandEncoderWithDescriptor: _renderPassDescriptor];
+        _encoderFramebuffer = ctx->state.framebuffer;
         if (!_currentRenderEncoder) {
             MGL_NSERR(@"MGL ERROR: Failed to create render encoder - invalid render pass descriptor or command buffer");
             MGL_NSDEBUG(@"MGL DEBUG: Command buffer: %@, Render pass descriptor: %@", _currentCommandBuffer, _renderPassDescriptor);
@@ -4125,8 +4137,11 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
             mapped_buffer_index = [self getVertexBufferIndexWithAttributeSet: i];
 
+            GLintptr slot_offset = ctx->state.vertex_buffer_map_list.buffers[mapped_buffer_index].offset;
+
             vertexDescriptor.attributes[i].bufferIndex = mapped_buffer_index;
-            vertexDescriptor.attributes[i].offset = ctx->state.vao->attrib[i].relativeoffset;
+            // the slot is bound at its own offset, so this is the rest of the way in
+            vertexDescriptor.attributes[i].offset = ctx->state.vao->attrib[i].relativeoffset - slot_offset;
             vertexDescriptor.attributes[i].format = format;
 
             vertexDescriptor.layouts[mapped_buffer_index].stride = VAO_ATTRIB_STATE(i).stride;
@@ -4521,35 +4536,52 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
         // branches below clear bits, so remember what was dirty
         GLuint dirty_on_entry = ctx->state.dirty_bits;
 
+        // a framebuffer change is its own thing -- glBindFramebuffer does not
+        // set DIRTY_STATE, so this can't be nested inside it
+        if (ctx->state.dirty_bits & DIRTY_FBO)
+        {
+            // MEMORY SAFETY: Add comprehensive validation to prevent use-after-free crashes
+            if (ctx->state.framebuffer)
+            {
+                // Validate framebuffer pointer is within reasonable bounds
+                uintptr_t fb_addr = (uintptr_t)ctx->state.framebuffer;
+                if (fb_addr < 0x1000 || fb_addr > 0x100000000000ULL) {
+                    MGL_NSERR(@"MGL ERROR: Invalid framebuffer pointer detected: 0x%lx", fb_addr);
+                    return false;
+                }
+
+                if (ctx->state.framebuffer->dirty_bits & DIRTY_FBO_BINDING)
+                {
+                    RETURN_FALSE_ON_FAILURE([self bindFramebufferAttachmentTextures]);
+
+                    // Additional validation after binding
+                    if (ctx->state.framebuffer) {  // Re-validate in case binding corrupted memory
+                        ctx->state.framebuffer->dirty_bits &= ~DIRTY_FBO_BINDING;
+                    }
+                }
+            }
+
+            // The encoder still writes to whichever framebuffer was bound when
+            // it was made, so a real change means rebuilding it. Without this
+            // everything drawn after a render to texture landed back in that
+            // texture instead of on screen. Rebinding the same framebuffer is
+            // not a change, and swapping the encoder for nothing loses work.
+            if (_currentRenderEncoder != nil && _encoderFramebuffer != ctx->state.framebuffer)
+            {
+                [self endRenderEncoding];
+                RETURN_FALSE_ON_FAILURE([self newRenderEncoder]);
+                [self updateCurrentRenderEncoder];
+
+                // the new encoder has none of the old one's bindings
+                ctx->state.dirty_bits |= DIRTY_VAO | DIRTY_TEX;
+            }
+
+            // dirty FBO state can't be cleared just yet its needed below
+        }
+
         // dirty state covers all rendering attachments and general state
         if (ctx->state.dirty_bits & DIRTY_STATE)
         {
-            if (ctx->state.dirty_bits & DIRTY_FBO)
-            {
-                // MEMORY SAFETY: Add comprehensive validation to prevent use-after-free crashes
-                if (ctx->state.framebuffer)
-                {
-                    // Validate framebuffer pointer is within reasonable bounds
-                    uintptr_t fb_addr = (uintptr_t)ctx->state.framebuffer;
-                    if (fb_addr < 0x1000 || fb_addr > 0x100000000000ULL) {
-                        MGL_NSERR(@"MGL ERROR: Invalid framebuffer pointer detected: 0x%lx", fb_addr);
-                        return false;
-                    }
-
-                    if (ctx->state.framebuffer->dirty_bits & DIRTY_FBO_BINDING)
-                    {
-                        RETURN_FALSE_ON_FAILURE([self bindFramebufferAttachmentTextures]);
-
-                        // Additional validation after binding
-                        if (ctx->state.framebuffer) {  // Re-validate in case binding corrupted memory
-                            ctx->state.framebuffer->dirty_bits &= ~DIRTY_FBO_BINDING;
-                        }
-                    }
-                }
-
-                // dirty FBO state can't be cleared just yet its needed below
-            }
-
             ctx->state.dirty_bits &= ~DIRTY_STATE;
         }
 
@@ -6145,6 +6177,10 @@ Buffer *getIndirectBuffer(GLMContext ctx)
     primitiveType = getMTLPrimitiveType(mode);
     assert(primitiveType != 0xFFFFFFFF);
 
+    MGL_ERR("MGLDBG drawArrays fbo=%p count=%d target=%lux%lu\n",
+            (void*)ctx->state.framebuffer, count,
+            (unsigned long)_renderPassDescriptor.renderTargetWidth,
+            (unsigned long)_renderPassDescriptor.renderTargetHeight);
     @try {
         [_currentRenderEncoder drawPrimitives: primitiveType
                                  vertexStart: first
