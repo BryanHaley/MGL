@@ -928,6 +928,9 @@ void mglUseProgram(GLMContext ctx, GLuint program)
 
         ctx->state.program = pptr;
 
+        // the queryable GL_CURRENT_PROGRAM lives in a separate variable
+        STATE_VAR(current_program) = pptr ? pptr->name : 0;
+
         if (ctx->state.program)
         {
             ctx->state.program->refcount++;

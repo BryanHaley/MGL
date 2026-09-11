@@ -151,6 +151,12 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     id<MTLRenderCommandEncoder> _currentRenderEncoder;
     Framebuffer *_encoderFramebuffer;   // which framebuffer _currentRenderEncoder writes to
 
+    // Metal allows one encoder at a time on a command buffer, so this and
+    // _currentRenderEncoder are never both live. Keeping it open lets a run of
+    // glDispatchCompute calls share one encoder instead of building and tearing
+    // down the world between each pair.
+    id<MTLComputeCommandEncoder> _currentComputeEncoder;
+
     GLuint _blitOperationComplete;
 
     id<MTLEvent> _currentEvent;
@@ -371,12 +377,38 @@ void logDirtyBits(GLMContext ctx)
     }
 }
 
+// MGL_DEBUG_COMPUTE traces the compute path. Cached because liveCommandBuffer
+// is hot and getenv is not free.
+static inline int mglDebugCompute(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("MGL_DEBUG_COMPUTE") ? 1 : 0;
+    return on;
+}
+
 #pragma mark buffer objects
+
+// didModifyRange only means anything on a Managed buffer, where the CPU and GPU
+// hold separate copies. On a Shared buffer there is one copy and calling it is a
+// validation error, so every flush goes through here.
+static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
+{
+    if (buffer && [buffer storageMode] == MTLStorageModeManaged)
+        [buffer didModifyRange: range];
+}
+
 - (void) bindMTLBuffer:(Buffer *) ptr
 {
     MTLResourceOptions options;
 
-    options = MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeManaged;
+    // Managed means the CPU and GPU hold separate copies and every transfer in
+    // either direction has to be asked for. On unified memory there is only one
+    // copy, so Shared is both correct and free -- and without it a compute
+    // shader's writes never become visible to glGetBufferSubData.
+    if ([_device hasUnifiedMemory])
+        options = MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeShared;
+    else
+        options = MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeManaged;
 
     // ways we will only write to this
     if ((ptr->storage_flags & GL_MAP_READ_BIT) == 0)
@@ -408,33 +440,21 @@ void logDirtyBits(GLMContext ctx)
         // backing data to the MTL buffer
         if (ptr->data.buffer_data)
         {
-            // check the GL allocated size, not the vm_allocated size as these are page aligned
-            if (ptr->size > 4095)
-            {
-                buffer = [_device newBufferWithBytes:(void *)ptr->data.buffer_data
-                                                            length:ptr->data.buffer_size
-                                                           options:options];
-                assert(buffer);
+            // buffer_size is already page aligned, so this is safe at any size.
+            // Small buffers used to keep their own CPU copy instead, which meant
+            // the GPU and glGetBufferSubData were looking at different memory.
+            buffer = [_device newBufferWithBytes:(void *)ptr->data.buffer_data
+                                          length:ptr->data.buffer_size
+                                         options:options];
+            assert(buffer);
 
-                kern_return_t err;
-                err = vm_deallocate((vm_map_t) mach_task_self(),
-                                    (vm_address_t) ptr->data.buffer_data,
-                                    ptr->data.buffer_size);
-                assert(err == 0);
+            kern_return_t err;
+            err = vm_deallocate((vm_map_t) mach_task_self(),
+                                (vm_address_t) ptr->data.buffer_data,
+                                ptr->data.buffer_size);
+            assert(err == 0);
 
-                ptr->data.buffer_data = (vm_address_t)buffer.contents;
-            }
-            else
-            {
-                // AGX Driver Compatibility: For small buffers, still create a Metal buffer to avoid NULL assertion
-                buffer = [_device newBufferWithBytes:(void *)ptr->data.buffer_data
-                                              length:ptr->size
-                                             options:options];
-                assert(buffer);
-
-                // Don't deallocate the original buffer for small sizes to maintain compatibility
-                ptr->data.mtl_data = (void *)CFBridgingRetain(buffer);
-            }
+            ptr->data.buffer_data = (vm_address_t)buffer.contents;
         }
         else
         {
@@ -527,6 +547,7 @@ void logDirtyBits(GLMContext ctx)
                         [self getProgramMSLIndex:stage type:spvc_type index: i];
                     buffer_map->buffers[buffer_map->count].buf = buf;
                     buffer_map->buffers[buffer_map->count].offset = buffers[spirv_binding].offset;
+                    buffer_map->buffers[buffer_map->count].gl_buffer_type = (GLubyte)gl_buffer_type;
                     buffer_map->count++;
                     buffers_to_be_mapped--;
                     
@@ -716,13 +737,13 @@ void logDirtyBits(GLMContext ctx)
         // contents in check for EVERY drawing operation
         if (ptr->access & GL_MAP_COHERENT_BIT)
         {
-            [buffer didModifyRange: NSMakeRange(ptr->mapped_offset, ptr->mapped_length)];
+            mglDidModify(buffer, NSMakeRange(ptr->mapped_offset, ptr->mapped_length));
 
             ptr->data.dirty_bits = DIRTY_BUFFER_DATA;
         }
         else
         {
-            [buffer didModifyRange: NSMakeRange(0, ptr->data.buffer_size)];
+            mglDidModify(buffer, NSMakeRange(0, ptr->data.buffer_size));
 
             ptr->data.dirty_bits = 0;
         }
@@ -1810,7 +1831,7 @@ void logDirtyBits(GLMContext ctx)
                                                 _currentRenderEncoder = nil;
                                             }
 
-                                            id<MTLBlitCommandEncoder> blitEncoder = [[self liveCommandBuffer] blitCommandEncoder];
+                                            id<MTLBlitCommandEncoder> blitEncoder = [self newBlitEncoder];
                                             if (blitEncoder) {
                                                 [blitEncoder copyFromBuffer:tempBuffer
                                                           sourceOffset:0
@@ -1863,7 +1884,7 @@ void logDirtyBits(GLMContext ctx)
                                                 _currentRenderEncoder = nil;
                                             }
 
-                                            id<MTLBlitCommandEncoder> blitEncoder = [[self liveCommandBuffer] blitCommandEncoder];
+                                            id<MTLBlitCommandEncoder> blitEncoder = [self newBlitEncoder];
                                             if (blitEncoder) {
                                                 [blitEncoder copyFromBuffer:tempBuffer
                                                           sourceOffset:0
@@ -2550,7 +2571,7 @@ extern FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum 
 
     // start blit encoder
     id<MTLBlitCommandEncoder> blitCommandEncoder;
-    blitCommandEncoder = [[self liveCommandBuffer] blitCommandEncoder];
+    blitCommandEncoder = [self newBlitEncoder];
     [blitCommandEncoder
         copyFromTexture:readtexid sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(srcX0, srcY0, 0) sourceSize:MTLSizeMake(srcX1-srcX0, srcY1-srcY0, 1)
         toTexture:drawtexid destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(dstX0, dstY0, 0) /*destinationSize:MTLSizeMake(dstX1, dstY1, 0)*/ ];
@@ -3200,6 +3221,7 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     }
 
     // end encoding on current render encoder
+    [self endComputeEncoding];
     [self endRenderEncoding];
 
     // grab the next drawable from CAMetalLayer
@@ -3607,6 +3629,11 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     if (_currentCommandBuffer == nil ||
         _currentCommandBuffer.status >= MTLCommandBufferStatusCommitted)
     {
+        if (mglDebugCompute())
+            MGL_INFO("MGLCOMP: liveCommandBuffer replacing %p (status %ld)\n",
+                     (__bridge void *)_currentCommandBuffer,
+                     (long)(_currentCommandBuffer ? _currentCommandBuffer.status : -1));
+
         _currentRenderEncoder = nil;
         _currentCommandBuffer = [_commandQueue commandBuffer];
     }
@@ -3743,7 +3770,9 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     // CRITICAL FIX: Proper encoder cleanup BEFORE creating new command buffer
     // Metal API requires ending encoders before creating new command buffers
 
-    // STEP 0: End any existing render encoder to prevent MTLReleaseAssertionFailure
+    // STEP 0: End any existing encoder to prevent MTLReleaseAssertionFailure
+    [self endComputeEncoding];
+
     if (_currentRenderEncoder) {
         MGL_NSINFO(@"MGL INFO: Ending existing render encoder before creating new command buffer");
         @try {
@@ -3872,6 +3901,25 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
                 MGL_NSINFO(@"MGL AGX CRITICAL: Failed to recreate command queue after exception");
                 [self recordGPUError];
                 return false;
+            }
+        }
+
+        // Anything recorded on the outgoing buffer is lost unless it is
+        // committed first. This is where compute dispatches used to disappear:
+        // the dispatch set DIRTY_ALL, the next processGLState asked for a fresh
+        // command buffer, and the work went with the old one.
+        if (_currentCommandBuffer &&
+            _currentCommandBuffer.status == MTLCommandBufferStatusNotEnqueued &&
+            _currentCommandBuffer.error == nil)
+        {
+            if (mglDebugCompute())
+                MGL_INFO("MGLCOMP: committing outgoing cmdbuf %p before replacing it\n",
+                         (__bridge void *)_currentCommandBuffer);
+
+            @try {
+                [_currentCommandBuffer commit];
+            } @catch (NSException *exception) {
+                MGL_NSERR(@"MGL WARNING: could not commit outgoing command buffer: %@", exception);
             }
         }
 
@@ -4432,6 +4480,54 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     return true;
 }
 
+// A blit encoder, with whatever else was open closed first.
+- (id<MTLBlitCommandEncoder>) newBlitEncoder
+{
+    [self endComputeEncoding];
+    [self endRenderEncoding];
+
+    return [[self liveCommandBuffer] blitCommandEncoder];
+}
+
+- (void) endComputeEncoding
+{
+    if (_currentComputeEncoder)
+    {
+        @try {
+            [_currentComputeEncoder endEncoding];
+        } @catch (NSException *exception) {
+            MGL_NSERR(@"MGL ERROR: Exception ending compute encoder: %@ - ignoring", exception.reason);
+        }
+
+        _currentComputeEncoder = NULL;
+    }
+}
+
+// The compute encoder for right now: whatever is already open, or a new one.
+// Opening it closes the render encoder, because Metal only allows one.
+- (id<MTLComputeCommandEncoder>) liveComputeEncoder
+{
+    id<MTLCommandBuffer> cmd = [self liveCommandBuffer];
+
+    if (!cmd)
+        return nil;
+
+    if (_currentComputeEncoder)
+        return _currentComputeEncoder;
+
+    [self endRenderEncoding];
+
+    _currentComputeEncoder = [cmd computeCommandEncoder];
+
+    if (mglDebugCompute())
+        MGL_INFO("MGLCOMP: opened a compute encoder\n");
+
+    if (!_currentComputeEncoder)
+        MGL_NSERR(@"MGL ERROR: could not create a compute command encoder");
+
+    return _currentComputeEncoder;
+}
+
 - (void) endRenderEncoding
 {
     if (_currentRenderEncoder)
@@ -4440,6 +4536,12 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
             MGL_NSDEBUG(@"MGL DEBUG: Ending render encoder");
             [_currentRenderEncoder endEncoding];
             _currentRenderEncoder = NULL;
+
+            // pipeline, buffers, textures and viewport all lived on that
+            // encoder and are gone with it
+            if (ctx)
+                ctx->state.dirty_bits = DIRTY_ALL;
+
             MGL_NSDEBUG(@"MGL DEBUG: Render encoder ended successfully");
         } @catch (NSException *exception) {
             MGL_NSERR(@"MGL ERROR: Exception ending render encoder: %@ - ignoring", exception.reason);
@@ -4898,18 +5000,54 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
     for(int i=0; i<ctx->state.compute_buffer_map_list.count; i++)
     {
-        Buffer *ptr;
-
-        ptr = ctx->state.compute_buffer_map_list.buffers[i].buf;
+        BufferMap *map = &ctx->state.compute_buffer_map_list.buffers[i];
+        Buffer *ptr = map->buf;
 
         RETURN_FALSE_ON_NULL(ptr);
-        RETURN_FALSE_ON_NULL(ptr->data.mtl_data);
+
+        // The index has to be the one MSL assigned, not the loop counter. With
+        // a uniform and a storage buffer in the same kernel the two swap places
+        // and every write lands in the wrong object.
+        GLuint index = map->buffer_base_index;
+
+        bool writable = (map->gl_buffer_type == _SHADER_STORAGE_BUFFER ||
+                         map->gl_buffer_type == _ATOMIC_COUNTER_BUFFER);
+
+        // Small read-only buffers can go straight to the encoder, the way the
+        // draw path does it, and never need a Metal object at all. A buffer the
+        // shader writes always does.
+        if (!writable && ptr->size < 4096 && ptr->data.mtl_data == NULL)
+        {
+            [computeCommandEncoder setBytes:(const void *)(ptr->data.buffer_data + map->offset)
+                                     length:ptr->size
+                                    atIndex:index];
+
+            ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
+
+            if (mglDebugCompute())
+                MGL_INFO("MGLCOMP: bind buffer %u at index %u by value, %ld bytes\n",
+                         ptr->name, index, (long)ptr->size);
+
+            continue;
+        }
+
+        RETURN_FALSE_ON_FAILURE([self processBuffer: ptr]);
 
         id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)(ptr->data.mtl_data);
-        assert(buffer);
 
-        [computeCommandEncoder setBuffer:buffer offset:0 atIndex:i ];
+        RETURN_FALSE_ON_NULL(buffer);
+
+        if (mglDebugCompute())
+            MGL_INFO("MGLCOMP: bind buffer %u at index %u, mtl %p len %lu offset %ld\n",
+                     ptr->name, index, (__bridge void *)buffer,
+                     (unsigned long)[buffer length], (long)map->offset);
+
+        [computeCommandEncoder setBuffer:buffer offset:map->offset atIndex:index];
     }
+
+    if (mglDebugCompute())
+        MGL_INFO("MGLCOMP: %d buffers bound to compute encoder\n",
+                 ctx->state.compute_buffer_map_list.count);
 
     return true;
 }
@@ -5087,18 +5225,26 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
     // [computeCommandEncoder setThreadgroupMemoryLength:atIndex:
 
-    ctx->state.dirty_bits = 0;
+    // only what this pass consumed -- the render path still needs the rest
+    ctx->state.dirty_bits &= ~(DIRTY_PROGRAM | DIRTY_SHADER | DIRTY_BUFFER |
+                               DIRTY_BUFFER_BASE_STATE | DIRTY_TEX |
+                               DIRTY_TEX_BINDING | DIRTY_IMAGE_UNIT_STATE);
 
     return true;
 }
 
 -(void)mtlDispatchCompute:(GLMContext)glm_ctx groupsX:(GLuint)groups_x groupsY:(GLuint)groups_y groupsZ:(GLuint)groups_z
 {
-    // end encoding on current render encoder
-    [self endRenderEncoding];
+    // Reuse the open compute encoder if there is one. A run of dispatches then
+    // shares a single encoder instead of tearing down and rebuilding between
+    // each pair, which is what interleaving compute with graphics needs.
+    id <MTLComputeCommandEncoder> computeCommandEncoder = [self liveComputeEncoder];
 
-    id <MTLComputeCommandEncoder> computeCommandEncoder = [[self liveCommandBuffer] computeCommandEncoder];
-    assert(computeCommandEncoder);
+    if (!computeCommandEncoder)
+    {
+        glm_ctx->error_func(glm_ctx, __FUNCTION__, GL_OUT_OF_MEMORY);
+        return;
+    }
 
     RETURN_ON_FAILURE([self processCompute:computeCommandEncoder]);
 
@@ -5108,51 +5254,30 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     Program *ptr;
     ptr = glm_ctx->state.program;
 
-    if (ptr->local_workgroup_size.x || ptr->local_workgroup_size.y || ptr->local_workgroup_size.z)
-    {
-        GLuint mod_x, mod_y, mod_z;
-        GLuint size_x, size_y, size_z;
+    if (mglDebugCompute())
+        MGL_INFO("MGLCOMP: cmdbuf %p\n", (__bridge void *)_currentCommandBuffer);
 
-        mod_x = groups_x % ptr->local_workgroup_size.x;
-        mod_y = groups_y % ptr->local_workgroup_size.y;
-        mod_z = groups_z % ptr->local_workgroup_size.z;
+    if (mglDebugCompute())
+        MGL_INFO("MGLCOMP: dispatch groups %u,%u,%u local %u,%u,%u\n",
+                 groups_x, groups_y, groups_z,
+                 ptr->local_workgroup_size.x, ptr->local_workgroup_size.y,
+                 ptr->local_workgroup_size.z);
 
-        size_x = groups_x / ptr->local_workgroup_size.x;
-        size_y = groups_y / ptr->local_workgroup_size.y;
-        size_z = groups_z / ptr->local_workgroup_size.z;
+    // glDispatchCompute counts WORKGROUPS, and so does dispatchThreadgroups.
+    // They pass straight through. Dividing the count by the local size, as this
+    // used to, launched a fraction of the threads the shader asked for.
+    numThreadgroups = MTLSizeMake(groups_x, groups_y, groups_z);
 
-        if (mod_x || mod_y || mod_z)
-        {
-            if (mod_x)
-                size_x++;
+    threadsPerThreadgroup = MTLSizeMake(ptr->local_workgroup_size.x ? ptr->local_workgroup_size.x : 1,
+                                        ptr->local_workgroup_size.y ? ptr->local_workgroup_size.y : 1,
+                                        ptr->local_workgroup_size.z ? ptr->local_workgroup_size.z : 1);
 
-            if (mod_y)
-                size_y++;
+    [computeCommandEncoder dispatchThreadgroups:numThreadgroups
+                          threadsPerThreadgroup:threadsPerThreadgroup];
 
-            if (mod_z)
-                size_z++;
-        }
-
-        numThreadgroups = MTLSizeMake(size_x, size_y, size_z);
-        threadsPerThreadgroup = MTLSizeMake(ptr->local_workgroup_size.x,
-                                            ptr->local_workgroup_size.y,
-                                            ptr->local_workgroup_size.z);
-
-        [computeCommandEncoder dispatchThreadgroups:numThreadgroups
-                                        threadsPerThreadgroup:threadsPerThreadgroup];
-    }
-    else
-    {
-        numThreadgroups = MTLSizeMake(groups_x, groups_y, groups_z);
-        threadsPerThreadgroup = MTLSizeMake(1, 1, 1);
-
-        [computeCommandEncoder dispatchThreadgroups:numThreadgroups
-                                        threadsPerThreadgroup:threadsPerThreadgroup];
-    }
-
-    [computeCommandEncoder endEncoding];
-
-    glm_ctx->state.dirty_bits = DIRTY_ALL;
+    // The encoder stays open. Ending the render encoder is what invalidates
+    // render state, and endRenderEncoding marks that itself now -- a dispatch
+    // does not need to declare the whole world dirty.
 
     //[self newRenderEncoder];
 }
@@ -5163,6 +5288,45 @@ void mtlDispatchCompute(GLMContext glm_ctx, GLuint num_groups_x, GLuint num_grou
     [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDispatchCompute: glm_ctx groupsX:num_groups_x groupsY:num_groups_y groupsZ:num_groups_z];
 }
 
+
+// glMemoryBarrier, as far as Metal has an equivalent.
+//
+// Inside one compute encoder, Metal already runs dispatches serially, so the
+// ordering GL asks for is mostly there. What is missing is the guarantee that
+// one dispatch's writes are visible to the next one's reads, and that is what
+// memoryBarrierWithScope: provides. Across encoder types -- compute to draw, or
+// either to the CPU -- Metal tracks the hazard itself once the encoder ends,
+// which is what creating a render encoder or committing already does.
+-(void)mtlMemoryBarrier:(GLMContext)glm_ctx barriers:(GLbitfield)barriers
+{
+    if (!_currentComputeEncoder)
+        return;
+
+    MTLBarrierScope scope = 0;
+
+    if (barriers & (GL_SHADER_STORAGE_BARRIER_BIT | GL_UNIFORM_BARRIER_BIT |
+                    GL_BUFFER_UPDATE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT |
+                    GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_ELEMENT_ARRAY_BARRIER_BIT |
+                    GL_COMMAND_BARRIER_BIT | GL_PIXEL_BUFFER_BARRIER_BIT |
+                    GL_TRANSFORM_FEEDBACK_BARRIER_BIT))
+    {
+        scope |= MTLBarrierScopeBuffers;
+    }
+
+    if (barriers & (GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
+                    GL_TEXTURE_UPDATE_BARRIER_BIT | GL_FRAMEBUFFER_BARRIER_BIT))
+    {
+        scope |= MTLBarrierScopeTextures;
+    }
+
+    if (scope)
+        [_currentComputeEncoder memoryBarrierWithScope: scope];
+}
+
+void mtlMemoryBarrier(GLMContext glm_ctx, GLbitfield barriers)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMemoryBarrier: glm_ctx barriers: barriers];
+}
 
 -(void)mtlDispatchComputeIndirect:(GLMContext)glm_ctx indirect:(GLintptr)indirect
 {
@@ -5212,6 +5376,7 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
     }
 
     // end encoding on current render encoder
+    [self endComputeEncoding];
     [self endRenderEncoding];
 
     // SAFETY: Check command buffer before using
@@ -5231,8 +5396,13 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
     MTLCommandBufferStatus currentStatus = _currentCommandBuffer.status;
 
     if (currentStatus >= MTLCommandBufferStatusCommitted) {
-        // already submitted, so a flush has nothing left to do
+        // already submitted, so a flush has nothing left to do -- but glFinish
+        // still has to wait for it
         MGL_NSDEBUG(@"MGL: flushCommandBuffer - buffer already committed, nothing to flush");
+
+        if (finish && currentStatus < MTLCommandBufferStatusCompleted)
+            [_currentCommandBuffer waitUntilCompleted];
+
         return;
     }
 
@@ -5324,6 +5494,20 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
             MGL_NSERR(@"MGL ERROR: Error checking command buffer status: %@", exception);
             [self recordGPUError];
         }
+
+    // glFinish means the GPU is done, not merely that the work was handed over.
+    // This argument used to be ignored entirely, so a compute dispatch was still
+    // in flight when the application read the buffer back.
+    if (finish && _currentCommandBuffer &&
+        _currentCommandBuffer.status >= MTLCommandBufferStatusCommitted &&
+        _currentCommandBuffer.status < MTLCommandBufferStatusCompleted)
+    {
+        @try {
+            [_currentCommandBuffer waitUntilCompleted];
+        } @catch (NSException *exception) {
+            MGL_NSERR(@"MGL ERROR: waiting on command buffer failed: %@", exception);
+        }
+    }
     }
 #pragma mark C interface to mtlBindBuffer
 void mtlBindBuffer(GLMContext glm_ctx, Buffer *ptr)
@@ -5686,7 +5870,7 @@ void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
     data = mtl_buffer.contents;
     memcpy(data+offset, ptr, size);
 
-    [mtl_buffer didModifyRange:NSMakeRange(offset, size)];
+    mglDidModify(mtl_buffer, NSMakeRange(offset, size));
 }
 
 void mtlBufferSubData(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, const void *ptr)
@@ -5712,7 +5896,7 @@ void mtlBufferSubData(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t siz
         return mtl_buffer.contents + offset;
     }
 
-    [mtl_buffer didModifyRange:NSMakeRange(offset, size)];
+    mglDidModify(mtl_buffer, NSMakeRange(offset, size));
 
     return NULL;
 }
@@ -5730,7 +5914,7 @@ void *mtlMapUnmapBuffer(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t s
 
     mtl_buffer = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
 
-    [mtl_buffer didModifyRange:NSMakeRange(offset, length)];
+    mglDidModify(mtl_buffer, NSMakeRange(offset, length));
 }
 
 void mtlFlushBufferRange(GLMContext glm_ctx, Buffer *buf, GLintptr offset, GLsizeiptr length)
@@ -5963,7 +6147,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
     if (_currentCommandBuffer == nil)
         [self newCommandBuffer];
 
-    id<MTLBlitCommandEncoder> blit = [[self liveCommandBuffer] blitCommandEncoder];
+    id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
 
     [blit copyFromTexture: src
               sourceSlice: 0
@@ -6041,7 +6225,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
     if (_currentCommandBuffer == nil)
         [self newCommandBuffer];
 
-    id<MTLBlitCommandEncoder> blit = [[self liveCommandBuffer] blitCommandEncoder];
+    id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
 
     [blit copyFromTexture: texture
               sourceSlice: slice
@@ -6101,7 +6285,7 @@ void mtlGetTexImage(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint b
 
     // start blit encoder
     id<MTLBlitCommandEncoder> blitCommandEncoder;
-    blitCommandEncoder = [[self liveCommandBuffer] blitCommandEncoder];
+    blitCommandEncoder = [self newBlitEncoder];
 
     [blitCommandEncoder generateMipmapsForTexture:texture];
     [blitCommandEncoder endEncoding];
@@ -6143,7 +6327,7 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
 
     // start blit encoder
     id<MTLBlitCommandEncoder> blitCommandEncoder;
-    blitCommandEncoder = [[self liveCommandBuffer] blitCommandEncoder];
+    blitCommandEncoder = [self newBlitEncoder];
 
     [blitCommandEncoder copyFromBuffer:buffer sourceOffset:src_offset sourceBytesPerRow:src_pitch sourceBytesPerImage:src_image_size sourceSize:MTLSizeMake(width, height, depth) toTexture:texture destinationSlice:zoffset destinationLevel:level destinationOrigin:MTLOriginMake(xoffset, yoffset, 0)
                                 options:MTLBlitOptionNone];
@@ -7102,6 +7286,7 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
 
     glm_ctx->mtl_funcs.mtlDispatchCompute = mtlDispatchCompute;
     glm_ctx->mtl_funcs.mtlDispatchComputeIndirect = mtlDispatchComputeIndirect;
+    glm_ctx->mtl_funcs.mtlMemoryBarrier = mtlMemoryBarrier;
 }
 
 - (id) initMGLRendererFromContext: (void *)glm_ctx andBindToWindow: (NSWindow *)window;
@@ -7202,6 +7387,80 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     _layer.drawableSize = want;
 }
 
+
+#pragma mark device limits
+
+// What the GPU can actually do, asked of Metal.
+//
+// getMacOSDefaults fills most of state.var by opening Apple's OpenGL framework
+// and copying its answers. That works for the things both drivers share, but it
+// reports Apple's 4.1 limits -- which say nothing at all about compute, since
+// 4.1 has none. Anything Metal knows for itself is overwritten here.
+- (void) queryDeviceLimits: (GLMContext) glm_ctx
+{
+    if (!_device || !glm_ctx)
+        return;
+
+    MTLSize maxThreads = [_device maxThreadsPerThreadgroup];
+
+    // GL counts workgroups per dispatch; Metal has no stated ceiling, so use
+    // the value the spec asks every implementation to reach.
+    glm_ctx->state.var.max_compute_work_group_count[0] = 65535;
+    glm_ctx->state.var.max_compute_work_group_count[1] = 65535;
+    glm_ctx->state.var.max_compute_work_group_count[2] = 65535;
+
+    glm_ctx->state.var.max_compute_work_group_size[0] = (GLint)maxThreads.width;
+    glm_ctx->state.var.max_compute_work_group_size[1] = (GLint)maxThreads.height;
+    glm_ctx->state.var.max_compute_work_group_size[2] = (GLint)maxThreads.depth;
+
+    // Metal caps the total threads in a threadgroup, not just each dimension
+    glm_ctx->state.var.max_compute_work_group_invocations =
+        (GLuint)(maxThreads.width * maxThreads.height * maxThreads.depth);
+    if (glm_ctx->state.var.max_compute_work_group_invocations > 1024)
+        glm_ctx->state.var.max_compute_work_group_invocations = 1024;
+
+    glm_ctx->state.var.max_compute_shared_memory_size =
+        (GLuint)[_device maxThreadgroupMemoryLength];
+
+    // MAX_BINDABLE_BUFFERS is our own ceiling, and it is below Metal's 31
+    // buffer slots per stage, so it is the honest answer here.
+    glm_ctx->state.var.max_shader_storage_buffer_bindings = MAX_BINDABLE_BUFFERS;
+    glm_ctx->state.var.max_compute_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
+    glm_ctx->state.var.max_vertex_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
+    glm_ctx->state.var.max_fragment_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
+    glm_ctx->state.var.max_combined_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
+
+    if (@available(macOS 10.14, *))
+    {
+        glm_ctx->state.var.max_shader_storage_block_size = (GLuint)[_device maxBufferLength];
+        glm_ctx->state.var.max_uniform_block_size = (GLuint)[_device maxBufferLength];
+    }
+
+    // highest sample count Metal will actually give us
+    GLuint samples = 1;
+    for (NSUInteger n = 2; n <= 8; n *= 2)
+        if ([_device supportsTextureSampleCount: n])
+            samples = (GLuint)n;
+
+    glm_ctx->state.var.max_samples = samples;
+    glm_ctx->state.var.max_color_texture_samples = samples;
+    glm_ctx->state.var.max_depth_texture_samples = samples;
+    glm_ctx->state.var.max_integer_samples = samples;
+
+    // eight is both Metal's render target count and the 4.6 minimum
+    glm_ctx->state.var.max_color_attachments = 8;
+    glm_ctx->state.var.max_draw_buffers = 8;
+
+    if (mglDebugCompute())
+        MGL_INFO("MGLCOMP: limits: workgroup %u,%u,%u invocations %u shared %u samples %u\n",
+                 glm_ctx->state.var.max_compute_work_group_size[0],
+                 glm_ctx->state.var.max_compute_work_group_size[1],
+                 glm_ctx->state.var.max_compute_work_group_size[2],
+                 glm_ctx->state.var.max_compute_work_group_invocations,
+                 glm_ctx->state.var.max_compute_shared_memory_size,
+                 samples);
+}
+
 - (void) createMGLRendererAndBindToContext: (GLMContext) glm_ctx view: (NSView *) view
 {
     ctx = glm_ctx;
@@ -7233,6 +7492,10 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     }
 
     MGL_NSINFO(@"MGL INFO: Metal device created: %@", _device);
+
+    // getMacOSDefaults already ran and filled state.var from Apple's GL driver.
+    // Anything Metal can answer for itself is more accurate, so it wins.
+    [self queryDeviceLimits: glm_ctx];
 
     // PROPER AGX VIRTUALIZATION DETECTION: Maintain Metal functionality with virtualization compatibility
     BOOL isVirtualized = NO;

@@ -244,6 +244,9 @@ void mglMemoryBarrier(GLMContext ctx, GLbitfield barriers)
         // extra bits...
         ERROR_RETURN(GL_INVALID_VALUE);
     }
+
+    if (ctx->mtl_funcs.mtlMemoryBarrier)
+        ctx->mtl_funcs.mtlMemoryBarrier(ctx, barriers);
 }
 
 void mglMemoryBarrierByRegion(GLMContext ctx, GLbitfield barriers)
@@ -254,5 +257,9 @@ void mglMemoryBarrierByRegion(GLMContext ctx, GLbitfield barriers)
         // extra bits...
         ERROR_RETURN(GL_INVALID_VALUE);
     }
+
+    // Metal has no by-region variant; the full barrier is a legal superset
+    if (ctx->mtl_funcs.mtlMemoryBarrier)
+        ctx->mtl_funcs.mtlMemoryBarrier(ctx, barriers);
 }
 

@@ -446,6 +446,9 @@ typedef struct BufferMap_t {
     Buffer      *buf;
     GLintptr    offset;
     GLuint      stride;     // vertex stride of the attributes sharing this slot
+    // which GL buffer kind this slot came from. A shader can write a storage
+    // buffer, so it must be a real MTLBuffer; a uniform can go through setBytes.
+    GLubyte     gl_buffer_type;
 } BufferMap;
 
 typedef struct BufferMapList_t {
@@ -814,6 +817,7 @@ struct GLMMetalFuncs {
 
     void (*mtlDispatchCompute)(GLMContext ctx, GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z);
     void (*mtlDispatchComputeIndirect)(GLMContext ctx, GLintptr indirect);
+    void (*mtlMemoryBarrier)(GLMContext ctx, GLbitfield barriers);
 } ;
 
 typedef struct GLMContextRec_t {

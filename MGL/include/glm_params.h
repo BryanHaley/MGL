@@ -329,6 +329,7 @@ typedef struct GLMParams_t {
     GLuint max_color_texture_samples;
     GLuint max_depth_texture_samples;
     GLuint max_integer_samples;
+    GLuint max_samples;
     GLuint max_dual_source_draw_buffers;
     GLuint sampler_binding;
     GLuint max_tess_control_uniform_blocks;
@@ -384,6 +385,8 @@ typedef struct GLMParams_t {
     GLuint max_compute_shader_storage_blocks;
     GLuint max_combined_shader_storage_blocks;
     GLuint max_shader_storage_buffer_bindings;
+    GLuint max_compute_shared_memory_size;
+    GLuint max_shader_storage_block_size;
     GLuint shader_storage_buffer_offset_alignment;
     GLuint texture_buffer_offset_alignment;
     GLuint vertex_binding_divisor;

@@ -19,17 +19,32 @@
  */
 
 #include "glm_context.h"
+#include "mgl_log.h"
 
 
 void mglDispatchCompute(GLMContext ctx, GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z)
 {
-    ERROR_CHECK_RETURN(num_groups_x < ctx->state.var.max_compute_work_group_size[0], GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(num_groups_y < ctx->state.var.max_compute_work_group_size[1], GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(num_groups_z < ctx->state.var.max_compute_work_group_size[2], GL_INVALID_VALUE);
+    // the limit on a dispatch is the workgroup COUNT, not the workgroup size --
+    // those are different numbers and this used to check the wrong one
+    ERROR_CHECK_RETURN(num_groups_x < ctx->state.var.max_compute_work_group_count[0], GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(num_groups_y < ctx->state.var.max_compute_work_group_count[1], GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(num_groups_z < ctx->state.var.max_compute_work_group_count[2], GL_INVALID_VALUE);
 
     // no program, or one with no compute stage, is an error -- not an abort
-    ERROR_CHECK_RETURN(STATE(program), GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(STATE(program)->shader_slots[_COMPUTE_SHADER], GL_INVALID_OPERATION);
+    if (STATE(program) == NULL)
+    {
+        MGL_ERR("MGL Error: glDispatchCompute with no program in use\n");
+        ERROR_RETURN(GL_INVALID_OPERATION);
+    }
+
+    // Ask what the program LINKED, not what is still attached. Detaching after
+    // a successful link is ordinary GL, and it clears shader_slots.
+    if (STATE(program)->spirv[_COMPUTE_SHADER].msl_str == NULL)
+    {
+        MGL_ERR("MGL Error: glDispatchCompute: program %u has no linked compute stage\n",
+                STATE(program)->name);
+        ERROR_RETURN(GL_INVALID_OPERATION);
+    }
 
     ctx->mtl_funcs.mtlDispatchCompute(ctx, num_groups_x, num_groups_y, num_groups_z);
 }

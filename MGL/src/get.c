@@ -377,6 +377,10 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x8E59: RET_TYPE_VAR(type, max_sample_mask_words); break; // GL_MAX_SAMPLE_MASK_WORDS
         case 0x9104: RET_TYPE_VAR(type, texture_binding_2d_multisample); break; // GL_TEXTURE_BINDING_2D_MULTISAMPLE
         case 0x9105: RET_TYPE_VAR(type, texture_binding_2d_multisample_array); break; // GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY
+        case 0x8CDF: RET_TYPE_VAR(type, max_color_attachments); break; // GL_MAX_COLOR_ATTACHMENTS
+        case 0x8D57: RET_TYPE_VAR(type, max_samples); break; // GL_MAX_SAMPLES
+        case 0x8262: RET_TYPE_VAR(type, max_compute_shared_memory_size); break; // GL_MAX_COMPUTE_SHARED_MEMORY_SIZE
+        case 0x90DE: RET_TYPE_VAR(type, max_shader_storage_block_size); break; // GL_MAX_SHADER_STORAGE_BLOCK_SIZE
         case 0x910E: RET_TYPE_VAR(type, max_color_texture_samples); break; // GL_MAX_COLOR_TEXTURE_SAMPLES
         case 0x910F: RET_TYPE_VAR(type, max_depth_texture_samples); break; // GL_MAX_DEPTH_TEXTURE_SAMPLES
         case 0x9110: RET_TYPE_VAR(type, max_integer_samples); break; // GL_MAX_INTEGER_SAMPLES

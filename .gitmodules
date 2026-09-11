@@ -7,3 +7,6 @@
 [submodule "submodules/SPIRV-Cross"]
 	path = submodules/SPIRV-Cross
 	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+[submodule "submodules/IDKEngine"]
+	path = submodules/IDKEngine
+	url = https://github.com/BoyBaykiller/IDKEngine.git

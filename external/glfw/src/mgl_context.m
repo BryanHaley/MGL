@@ -72,7 +72,12 @@ static GLFWglproc getProcAddressMGL(const char* procname)
     assert(_glfw.mgl.handle);
 
     symbol = _glfwPlatformGetModuleSymbol(_glfw.mgl.handle, procname);
-    assert(symbol);
+
+    // NULL is the right answer for a function MGL does not have. Loaders ask
+    // for every extension entry point they know about and expect to be told no;
+    // asserting here killed the process instead.
+    if (symbol == NULL && getenv("MGL_DEBUG_CONTEXT"))
+        fprintf(stderr, "MGLCTX: no entry point for %s\n", procname);
 
     return symbol;
 }
