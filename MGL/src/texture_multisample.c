@@ -1,5 +1,5 @@
 /*
- * Copyright (C) Michael Larson on 1/6/2022
+ * Copyright (C) The Moogle Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
