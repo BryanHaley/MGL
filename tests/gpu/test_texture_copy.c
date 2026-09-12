@@ -251,8 +251,8 @@ GPU_TEST(texture_copy, copy_tex_image_2d_copies_from_framebuffer)
     glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 0, 0, 4, 4, 0);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
-    // Read back and verify a pixel
-    unsigned char px[4] = { 0 };
+    // glGetTexImage returns the whole level, not one texel
+    unsigned char px[4 * 4 * 4] = { 0 };
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
     // 0.25 -> 64, 0.5 -> 128, 0.75 -> 191, 1.0 -> 255

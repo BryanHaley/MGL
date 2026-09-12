@@ -2416,7 +2416,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
             GLuint spirv_binding;
             Texture *ptr;
 
-            spirv_binding = [self getProgramBinding:_FRAGMENT_SHADER type:SPVC_RESOURCE_TYPE_SAMPLED_IMAGE index: i];
+            spirv_binding = [self getProgramTexUnit:_FRAGMENT_SHADER type:SPVC_RESOURCE_TYPE_SAMPLED_IMAGE index: i];
 
             ptr = STATE(active_textures[spirv_binding]);
 
@@ -2854,6 +2854,27 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     MTL_CHECK_RETURN_VALUE(index < ptr->spirv_resources_list[stage][type].count, GL_INVALID_VALUE, 0);
 
     return ptr->spirv_resources_list[stage][type].list[index].gl_type;
+}
+
+// The texture unit a sampler reads from -- glUniform1i sets it, so this is not
+// the binding baked into the SPIR-V.
+- (int) getProgramTexUnit: (int) stage type: (int) type index: (int) index
+{
+    Program *ptr;
+
+    MTL_CHECK_RETURN_VALUE(stage >= 0 && stage < _MAX_SHADER_TYPES, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(type >= 0 && type < MAX_SPVC_RESOURCE_TYPES, GL_INVALID_OPERATION, 0);
+
+    ptr = ctx->state.program;
+    MTL_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, 0);
+    MTL_CHECK_RETURN_VALUE(index < ptr->spirv_resources_list[stage][type].count, GL_INVALID_VALUE, 0);
+
+    GLint unit = ptr->spirv_resources_list[stage][type].list[index].tex_unit;
+
+    if (unit < 0 || unit >= TEXTURE_UNITS)
+        unit = 0;
+
+    return unit;
 }
 
 - (int) getProgramBinding: (int) stage type: (int) type index: (int) index
@@ -3583,13 +3604,6 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         return false;
     }
 
-    // CRITICAL FIX: Validate command buffer state before creating render encoder
-    if (!_currentCommandBuffer) {
-        MGL_NSERR(@"MGL ERROR: Cannot create render encoder - command buffer is NULL");
-        [self recordGPUError];
-        return false;
-    }
-
     // Check if command buffer already has an active encoder (Metal API violation)
     if (_currentRenderEncoder) {
         MGL_NSERR(@"MGL WARNING: Active render encoder detected - ending it before creating new one");
@@ -3601,10 +3615,10 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
         _currentRenderEncoder = nil;
     }
 
-    // Validate command buffer status - cannot create encoders on committed/buffer
-    MTLCommandBufferStatus bufferStatus = _currentCommandBuffer.status;
-    if (bufferStatus >= MTLCommandBufferStatusCommitted) {
-        MGL_NSERR(@"MGL ERROR: Cannot create render encoder on committed command buffer (status: %ld)", (long)bufferStatus);
+    // A committed buffer can't take another encoder, so swap in a fresh one
+    // rather than refusing to draw for the rest of the context's life.
+    if (![self liveCommandBuffer]) {
+        MGL_NSERR(@"MGL ERROR: Cannot create render encoder - no command buffer available");
         [self recordGPUError];
         return false;
     }
@@ -4033,68 +4047,8 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
         return false;
     }
 
-    // STEP 2: Now handle pending event waits on the FRESH command buffer
-    if (_currentEvent)
-    {
-        MTL_CHECK_RETURN_FALSE(_currentSyncName, GL_INVALID_OPERATION);
-
-        // SAFELY ENCODE: Event wait functionality on the new command buffer
-        MGL_NSINFO(@"MGL INFO: Encoding event wait on fresh command buffer");
-
-        // CRITICAL SAFETY: Cache event and sync values to prevent race conditions
-        id<MTLEvent> cachedEvent = _currentEvent;
-        GLuint cachedSyncName = _currentSyncName;
-
-        // COMPREHENSIVE EVENT VALIDATION: Validate Metal event pointer
-        if (!cachedEvent) {
-            MGL_NSERR(@"MGL ERROR: Cannot encode event wait - cached event is NULL");
-            _currentEvent = NULL;
-            _currentSyncName = 0;
-            return false;
-        }
-
-        // Validate event pointer looks like a valid object address
-        uintptr_t eventPtr = (uintptr_t)cachedEvent;
-        if (eventPtr == 0x10 || eventPtr == 0x30 || eventPtr == 0x1000) {
-            MGL_NSERR(@"MGL CRITICAL ERROR: Known corrupted event pointer pattern detected: 0x%lx", eventPtr);
-            MGL_NSERR(@"MGL CRITICAL ERROR: Skipping event wait to prevent crash");
-            _currentEvent = NULL;
-            _currentSyncName = 0;
-            return false;
-        }
-
-        if (eventPtr < 0x1000 || (eventPtr & 0x7) != 0) {
-            MGL_NSERR(@"MGL ERROR: Suspicious event pointer value: %p", cachedEvent);
-            MGL_NSINFO(@"MGL INFO: Skipping event wait for safety");
-            _currentEvent = NULL;
-            _currentSyncName = 0;
-            return false;
-        }
-
-        // ADDITIONAL SAFETY: Validate command buffer is still valid before encoding
-        if (!_currentCommandBuffer) {
-            MGL_NSERR(@"MGL ERROR: Command buffer became NULL before event wait encoding");
-            _currentEvent = NULL;
-            _currentSyncName = 0;
-            return false;
-        }
-
-        @try {
-            MGL_NSINFO(@"MGL INFO: Encoding safe event wait: event=%p, syncName=%u, cmdbuf=%p", cachedEvent, cachedSyncName, _currentCommandBuffer);
-
-            // Use conservative approach: only encode if everything looks perfect
-            [_currentCommandBuffer encodeWaitForEvent:cachedEvent value:cachedSyncName];
-
-            MGL_NSINFO(@"MGL SUCCESS: Event wait encoded successfully on fresh command buffer");
-        } @catch (NSException *exception) {
-            MGL_NSERR(@"MGL ERROR: Event wait failed - %@: %@", exception.name, exception.reason);
-            MGL_NSINFO(@"MGL INFO: Continuing without event wait to maintain stability");
-            // Continue without event wait - system remains stable
-        }
-
-        _currentEvent = NULL;
-        _currentSyncName = 0;
-    }
+    _currentEvent = NULL;
+    _currentSyncName = 0;
 
     return true;
 }
@@ -5946,6 +5900,19 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
 
     sync->mtl_event = (void *)CFBridgingRetain(_currentEvent);
 
+    // GL says the fence goes off once everything queued before it has run, so
+    // signal it from the buffer holding that work. Waiting on it here instead
+    // would stall the GPU on a value nobody ever sets.
+    @try {
+        // Metal refuses to take a signal while an encoder is open.
+        [self endComputeEncoding];
+        [self endRenderEncoding];
+
+        [[self liveCommandBuffer] encodeSignalEvent: _currentEvent value: sync->name];
+    } @catch (NSException *exception) {
+        MGL_NSERR(@"MGL ERROR: Exception encoding fence signal: %@", exception);
+    }
+
     if (_currentCommandBufferSyncList == NULL)
     {
         // CRITICAL SECURITY FIX: Check malloc results instead of using assert()
@@ -6033,6 +6000,38 @@ void mtlWaitForSync (GLMContext glm_ctx, Sync *sync)
 {
     // Call the Objective-C method using Objective-C syntax
     [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlWaitForSync: glm_ctx sync: sync];
+}
+
+#pragma mark C interface to mtlForgetSync
+// The app is about to free this Sync, so drop our pointer to it. Keeping it
+// would leave retireSyncList walking freed memory on the next command buffer.
+-(void) mtlForgetSync:(GLMContext) glm_ctx sync: (Sync *)sync
+{
+    if (!sync || !_currentCommandBufferSyncList)
+        return;
+
+    if (_metalStateLock)
+        [_metalStateLock lock];
+
+    GLuint out = 0;
+
+    for (GLuint i = 0; i < _currentCommandBufferSyncList->count; i++)
+    {
+        Sync *entry = _currentCommandBufferSyncList->list[i];
+
+        if (entry != sync)
+            _currentCommandBufferSyncList->list[out++] = entry;
+    }
+
+    _currentCommandBufferSyncList->count = out;
+
+    if (_metalStateLock)
+        [_metalStateLock unlock];
+}
+
+void mtlForgetSync (GLMContext glm_ctx, Sync *sync)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlForgetSync: glm_ctx sync: sync];
 }
 
 #pragma mark C interface to mtlFlush
@@ -7669,6 +7668,7 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
 
     glm_ctx->mtl_funcs.mtlGetSync = mtlGetSync;
     glm_ctx->mtl_funcs.mtlWaitForSync = mtlWaitForSync;
+    glm_ctx->mtl_funcs.mtlForgetSync = mtlForgetSync;
     glm_ctx->mtl_funcs.mtlFlush = mtlFlush;
     glm_ctx->mtl_funcs.mtlSwapBuffers = mtlSwapBuffers;
     glm_ctx->mtl_funcs.mtlClearBuffer = mtlClearBuffer;
@@ -7852,8 +7852,8 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 
     // MAX_BINDABLE_BUFFERS is our own ceiling, and it is below Metal's 31
     // buffer slots per stage, so it is the honest answer here.
-    glm_ctx->state.var.max_shader_storage_buffer_bindings = MAX_BINDABLE_BUFFERS;
-    glm_ctx->state.var.max_uniform_buffer_bindings = MAX_BINDABLE_BUFFERS;
+    glm_ctx->state.var.max_shader_storage_buffer_bindings = MAX_SHADER_STORAGE_BUFFER_BINDINGS;
+    glm_ctx->state.var.max_uniform_buffer_bindings = MAX_UNIFORM_BUFFER_BINDINGS;
     glm_ctx->state.var.max_clip_planes = MAX_CLIP_DISTANCES;
     glm_ctx->state.var.max_compute_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
     glm_ctx->state.var.max_vertex_shader_storage_blocks = MAX_BINDABLE_BUFFERS;

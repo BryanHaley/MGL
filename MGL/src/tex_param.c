@@ -52,6 +52,15 @@ static Texture *dsaTex(GLMContext ctx, GLuint texture)
 }
 
 #pragma mark set params
+// Metal only needs a swizzled view when the channels are not the identity.
+static void refreshSwizzled(TextureParameter *tex_params)
+{
+    tex_params->swizzled = (tex_params->swizzle_r != GL_RED)   ||
+                           (tex_params->swizzle_g != GL_GREEN) ||
+                           (tex_params->swizzle_b != GL_BLUE)  ||
+                           (tex_params->swizzle_a != GL_ALPHA);
+}
+
 bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, const GLint *param)
 {
     switch(pname)
@@ -150,18 +159,22 @@ bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, con
 
         case GL_TEXTURE_SWIZZLE_R:
             tex_params->swizzle_r = *param;
+            refreshSwizzled(tex_params);
             break;
 
         case GL_TEXTURE_SWIZZLE_G:
             tex_params->swizzle_g = *param;
+            refreshSwizzled(tex_params);
             break;
 
         case GL_TEXTURE_SWIZZLE_B:
             tex_params->swizzle_b = *param;
+            refreshSwizzled(tex_params);
             break;
 
         case GL_TEXTURE_SWIZZLE_A:
             tex_params->swizzle_a = *param;
+            refreshSwizzled(tex_params);
             break;
 
         case GL_TEXTURE_WRAP_S:
@@ -194,21 +207,11 @@ bool setTexParamsi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, c
             break;
 
         case GL_TEXTURE_SWIZZLE_RGBA:
-         if ((params[0] != GL_RED) ||
-             (params[1] != GL_GREEN) ||
-             (params[2] != GL_BLUE) ||
-             (params[3] != GL_ALPHA))
-            {
-                tex_params->swizzled = true;
-                tex_params->swizzle_r = params[0];
-                tex_params->swizzle_g = params[1];
-                tex_params->swizzle_b = params[2];
-                tex_params->swizzle_a = params[3];
-            }
-            else
-            {
-                tex_params->swizzled = false;
-            }
+            tex_params->swizzle_r = params[0];
+            tex_params->swizzle_g = params[1];
+            tex_params->swizzle_b = params[2];
+            tex_params->swizzle_a = params[3];
+            refreshSwizzled(tex_params);
             break;
 
         default:
@@ -295,6 +298,7 @@ bool setTexParamsf(GLMContext ctx, TextureParameter *tex_params, GLenum pname, c
             tex_params->swizzle_g = (GLint)params[1];
             tex_params->swizzle_b = (GLint)params[2];
             tex_params->swizzle_a = (GLint)params[3];
+            refreshSwizzled(tex_params);
             break;
 
         default:

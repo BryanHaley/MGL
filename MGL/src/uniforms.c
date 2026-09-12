@@ -32,6 +32,10 @@
 
 #pragma mark uniforms
 
+static int opaqueCount(Program *ptr);
+static SpirvResource *opaqueAt(Program *ptr, GLuint index);
+static GLint opaqueLocBase(Program *ptr);
+
 GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
 {
     if (isProgram(ctx, program) == GL_FALSE)
@@ -73,11 +77,95 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
             }
         }
     }
-    
+
+    // samplers and images are uniforms too, and the app needs a location to
+    // point them at a texture unit with glUniform1i
+    {
+        int n = opaqueCount(ptr);
+        GLint base = opaqueLocBase(ptr);
+
+        for (int i = 0; i < n; i++)
+        {
+            SpirvResource *res = opaqueAt(ptr, (GLuint)i);
+
+            if (res && res->name && !strcmp(res->name, name))
+                return base + i;
+        }
+    }
+
     return -1;
 }
 
 Program *findProgram(GLMContext ctx, GLuint program);
+
+// GL exposes samplers and images as ordinary uniforms whose value names a
+// texture unit. SPIRV-Cross files them under the opaque resource types, so
+// they need their own pass over the reflection.
+static const int mgl_opaque_res_types[] = {
+    SPVC_RESOURCE_TYPE_SAMPLED_IMAGE,
+    SPVC_RESOURCE_TYPE_SEPARATE_IMAGE,
+    SPVC_RESOURCE_TYPE_STORAGE_IMAGE,
+    SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS,
+};
+#define MGL_OPAQUE_RES_COUNT (int)(sizeof(mgl_opaque_res_types)/sizeof(mgl_opaque_res_types[0]))
+
+static int opaqueCount(Program *ptr)
+{
+    int n = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        for (int t = 0; t < MGL_OPAQUE_RES_COUNT; t++)
+            n += ptr->spirv_resources_list[stage][mgl_opaque_res_types[t]].count;
+
+    return n;
+}
+
+static SpirvResource *opaqueAt(Program *ptr, GLuint index)
+{
+    GLuint seen = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        for (int t = 0; t < MGL_OPAQUE_RES_COUNT; t++)
+        {
+            SpirvResourceList *list = &ptr->spirv_resources_list[stage][mgl_opaque_res_types[t]];
+
+            if (index < seen + list->count)
+                return &list->list[index - seen];
+
+            seen += list->count;
+        }
+
+    return NULL;
+}
+
+// Opaque uniforms sit above every plain uniform location so the two never collide.
+static GLint opaqueLocBase(Program *ptr)
+{
+    GLint top = -1;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        for (GLuint i = 0; i < list->count; i++)
+            if ((GLint)list->list[i].location > top)
+                top = (GLint)list->list[i].location;
+    }
+
+    return top + 1;
+}
+
+SpirvResource *mglOpaqueUniformByLocation(Program *ptr, GLint location)
+{
+    GLint base = opaqueLocBase(ptr);
+
+    if (location < base)
+        return NULL;
+
+    return opaqueAt(ptr, (GLuint)(location - base));
+}
+
+
 
 // Walks every plain uniform the linker saw, across all stages, in a stable order.
 // index is what glGetUniformIndices and friends hand back.
@@ -88,7 +176,10 @@ static int uniformCount(Program *ptr)
     for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
         n += ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].count;
 
-    return n;
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        n += ptr->block_uniforms[stage].count;
+
+    return n + opaqueCount(ptr);
 }
 
 static SpirvResource *uniformAt(Program *ptr, GLuint index)
@@ -105,7 +196,17 @@ static SpirvResource *uniformAt(Program *ptr, GLuint index)
         seen += list->count;
     }
 
-    return NULL;
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->block_uniforms[stage];
+
+        if (index < seen + list->count)
+            return &list->list[index - seen];
+
+        seen += list->count;
+    }
+
+    return opaqueAt(ptr, index - seen);
 }
 
 static int uniformIndexByName(Program *ptr, const char *name)
@@ -121,6 +222,30 @@ static int uniformIndexByName(Program *ptr, const char *name)
                 return (int)(seen + i);
 
         seen += list->count;
+    }
+
+    // a name may also be a member of a uniform block
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->block_uniforms[stage];
+
+        for (GLuint i = 0; i < list->count; i++)
+            if (list->list[i].name && !strcmp(list->list[i].name, name))
+                return (int)(seen + i);
+
+        seen += list->count;
+    }
+
+    {
+        int n = opaqueCount(ptr);
+
+        for (int i = 0; i < n; i++)
+        {
+            SpirvResource *res = opaqueAt(ptr, (GLuint)i);
+
+            if (res && res->name && !strcmp(res->name, name))
+                return (int)(seen + i);
+        }
     }
 
     return -1;
@@ -251,20 +376,23 @@ void mglGetActiveUniformsiv(GLMContext ctx, GLuint program, GLsizei uniformCount
                 break;
 
             case GL_UNIFORM_BLOCK_INDEX:
-                params[i] = -1;         // these live in the default block
+                params[i] = res->block_index;
                 break;
 
             case GL_UNIFORM_OFFSET:
-                params[i] = -1;
+                params[i] = res->offset;
                 break;
 
             case GL_UNIFORM_ARRAY_STRIDE:
+                params[i] = res->array_stride;
+                break;
+
             case GL_UNIFORM_MATRIX_STRIDE:
-                params[i] = 0;
+                params[i] = res->matrix_stride;
                 break;
 
             case GL_UNIFORM_IS_ROW_MAJOR:
-                params[i] = GL_FALSE;
+                params[i] = res->is_row_major;
                 break;
 
             case GL_UNIFORM_TYPE:
@@ -337,6 +465,35 @@ GLuint  mglGetUniformBlockIndex(GLMContext ctx, GLuint program, const GLchar *un
     return GL_INVALID_INDEX;
 }
 
+// A block is referenced by a stage if that stage's reflection lists it.
+static GLint uniformBlockInStage(Program *ptr, SpirvResource *blk, int stage)
+{
+    SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER];
+
+    for (GLuint i = 0; i < list->count; i++)
+        if (list->list[i].name && blk->name && !strcmp(list->list[i].name, blk->name))
+            return GL_TRUE;
+
+    return GL_FALSE;
+}
+
+// what ACTIVE_UNIFORMS and ACTIVE_UNIFORM_INDICES must agree on
+static GLint blockMemberCount(Program *ptr, GLuint block_index)
+{
+    GLint n = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->block_uniforms[stage];
+
+        for (GLuint i = 0; i < list->count; i++)
+            if (list->list[i].block_index == (GLint)block_index)
+                n++;
+    }
+
+    return n;
+}
+
 void mglGetActiveUniformBlockiv(GLMContext ctx, GLuint program, GLuint uniformBlockIndex, GLenum pname, GLint *params)
 {
     Program *ptr = findProgram(ctx, program);
@@ -359,14 +516,51 @@ void mglGetActiveUniformBlockiv(GLMContext ctx, GLuint program, GLuint uniformBl
             break;
 
         case GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS:
+            *params = blockMemberCount(ptr, uniformBlockIndex);
+            break;
+
+        case GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES:
+        {
+            // the caller's array is sized from ACTIVE_UNIFORMS above
+            GLuint plain = 0, seen = 0, out = 0;
+            GLuint room = (GLuint)blockMemberCount(ptr, uniformBlockIndex);
+
+            for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+                plain += ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].count;
+
+            for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+            {
+                SpirvResourceList *list = &ptr->block_uniforms[stage];
+
+                for (GLuint i = 0; i < list->count && out < room; i++)
+                    if (list->list[i].block_index == (GLint)uniformBlockIndex)
+                        params[out++] = (GLint)(plain + seen + i);
+
+                seen += list->count;
+            }
+            break;
+        }
+
         case GL_UNIFORM_BLOCK_DATA_SIZE:
-            *params = 0;
+            *params = blk->block_size;
             break;
 
         case GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
+            *params = uniformBlockInStage(ptr, blk, _VERTEX_SHADER);
+            break;
+
         case GL_UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
+            *params = uniformBlockInStage(ptr, blk, _FRAGMENT_SHADER);
+            break;
+
         case GL_UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER:
+            *params = uniformBlockInStage(ptr, blk, _COMPUTE_SHADER);
+            break;
+
         case GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
+            *params = uniformBlockInStage(ptr, blk, _GEOMETRY_SHADER);
+            break;
+
         case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_CONTROL_SHADER:
         case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_EVALUATION_SHADER:
             *params = GL_FALSE;
@@ -397,7 +591,7 @@ void mglUniformBlockBinding(GLMContext ctx, GLuint program, GLuint uniformBlockI
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(uniformBlockIndex < (GLuint)uniformBlockCount(ptr), GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(uniformBlockBinding < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(uniformBlockBinding < MAX_UNIFORM_BUFFER_BINDINGS, GL_INVALID_VALUE);
 
     uniformBlockAt(ptr, uniformBlockIndex)->binding = uniformBlockBinding;
 
@@ -593,11 +787,44 @@ void mglUniform(GLMContext ctx, GLint location, void *ptr, GLsizei size)
 // than the uniform it lands on is an error rather than a partial write --
 // glUniform1f on a vec4. The v forms carry a count and may be filling an array,
 // which MGL cannot size yet, so they go through mglUniform unchecked.
+// Setting a sampler uniform picks a texture unit; it does not write into the
+// uniform buffer the way a float or a vec4 does.
+static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, void *ptr, GLsizei size)
+{
+    SpirvResource *res = mglOpaqueUniformByLocation(pptr, location);
+
+    if (!res)
+        return false;
+
+    if (size < (GLsizei)sizeof(GLint))
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        return true;
+    }
+
+    GLint unit = *(GLint *)ptr;
+
+    if (unit < 0 || unit >= TEXTURE_UNITS)
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_VALUE);
+        return true;
+    }
+
+    res->tex_unit = unit;
+    pptr->dirty_bits |= DIRTY_PROGRAM;
+
+    return true;
+}
+
 static void mglUniformFixed(GLMContext ctx, GLint location, void *ptr, GLsizei size)
 {
     Program *pptr = ctx->state.program;
 
     ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
+
+    if (writeOpaqueUniform(ctx, pptr, location, ptr, size))
+        return;
+
     ERROR_CHECK_RETURN(uniformWriteFits(pptr, location, size), GL_INVALID_OPERATION);
 
     programUniformWrite(ctx, pptr, location, ptr, size);

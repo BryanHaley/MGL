@@ -320,6 +320,26 @@ static bool checkClearInternalFormat(GLenum internalformat)
 {
     switch(internalformat)
     {
+        case GL_R8_SNORM:
+        case GL_R16_SNORM:
+        case GL_RG8_SNORM:
+        case GL_RG16_SNORM:
+        case GL_RGB8_SNORM:
+        case GL_RGB16_SNORM:
+        case GL_RGBA8_SNORM:
+        case GL_RGBA16_SNORM:
+        case GL_RGB10_A2:
+        case GL_RGB10_A2UI:
+        case GL_R11F_G11F_B10F:
+        case GL_SRGB8:
+        case GL_SRGB8_ALPHA8:
+        case GL_RGB8:
+        case GL_RGB16:
+        case GL_RGB16F:
+        case GL_RGB8I:
+        case GL_RGB8UI:
+        case GL_RGB16I:
+        case GL_RGB16UI:
         case GL_R8:
         case GL_R16:
         case GL_R16F:
@@ -538,7 +558,7 @@ void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
 
             for(int b=0; b<_MAX_BUFFER_TYPES; b++)
             {
-                for(int i=0; i<MAX_BINDABLE_BUFFERS; i++)
+                for(int i=0; i<MAX_BUFFER_BASE_BINDINGS; i++)
                 {
                     if (ctx->state.buffer_base[b].buffers[i].buf == ptr)
                     {
@@ -618,6 +638,20 @@ static bool checkIndexedTarget(GLenum target)
     return false;
 }
 
+// Each indexed target has its own binding space with its own ceiling.
+GLuint maxBindingsForIndexedTarget(GLenum target)
+{
+    switch(target)
+    {
+        case GL_UNIFORM_BUFFER:           return MAX_UNIFORM_BUFFER_BINDINGS;
+        case GL_SHADER_STORAGE_BUFFER:    return MAX_SHADER_STORAGE_BUFFER_BINDINGS;
+        case GL_ATOMIC_COUNTER_BUFFER:    return MAX_ATOMIC_COUNTER_BUFFER_BINDINGS;
+        case GL_TRANSFORM_FEEDBACK_BUFFER:return MAX_TRANSFORM_FEEDBACK_BUFFERS;
+    }
+
+    return 0;
+}
+
 // glBindBuffersBase / glBindBuffersRange reject a bad name with
 // GL_INVALID_OPERATION, and check the whole array before binding anything.
 static bool checkBindBuffersNames(GLMContext ctx, GLsizei count, const GLuint *buffers)
@@ -634,12 +668,14 @@ static bool checkBindBuffersNames(GLMContext ctx, GLsizei count, const GLuint *b
     return true;
 }
 
-static bool checkBindBuffersSpan(GLuint first, GLsizei count)
+static bool checkBindBuffersSpan(GLenum target, GLuint first, GLsizei count)
 {
-    if (first > MAX_BINDABLE_BUFFERS)
+    GLuint max = maxBindingsForIndexedTarget(target);
+
+    if (first > max)
         return false;
 
-    return (GLuint)count <= MAX_BINDABLE_BUFFERS - first;
+    return (GLuint)count <= max - first;
 }
 
 void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffer)
@@ -649,20 +685,19 @@ void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffe
 
     ERROR_CHECK_RETURN(checkIndexedTarget(target), GL_INVALID_ENUM);
 
-    ERROR_CHECK_RETURN(index < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(index < maxBindingsForIndexedTarget(target), GL_INVALID_VALUE);
 
     buffer_index = bufferIndexFromTarget(ctx, target);
 
     if (buffer)
     {
-        ERROR_CHECK_RETURN(isBuffer(ctx, buffer), GL_INVALID_VALUE);
-
+        // "Buffer objects may be created and bound to indexed targets": a name
+        // straight out of glGenBuffers is fine here, and getBuffer makes it real.
         ptr = getBuffer(ctx, target, buffer);
         ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
-        ERROR_CHECK_RETURN(ptr->data.buffer_size, GL_INVALID_VALUE);
-        ERROR_CHECK_RETURN(ptr->data.buffer_data, GL_INVALID_VALUE);
-
+        // A buffer with no storage yet is a legal thing to bind -- callers
+        // routinely bind first and call glBufferData afterwards.
         ctx->state.buffer_base[buffer_index].buffers[index].buffer = buffer;
         ctx->state.buffer_base[buffer_index].buffers[index].offset = 0;
         ctx->state.buffer_base[buffer_index].buffers[index].size = ptr->size;
@@ -672,8 +707,14 @@ void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffe
     }
     else
     {
+        ptr = NULL;
         bzero(&ctx->state.buffer_base[buffer_index].buffers[index], sizeof(BufferBaseTarget));
     }
+
+    // BindBufferBase also binds to the generic target, so a following
+    // glBufferData on that target lands on this buffer.
+    if (STATE(buffers[buffer_index]) != ptr)
+        STATE(buffers[buffer_index]) = ptr;
 
     ctx->state.dirty_bits |= (DIRTY_BUFFER | DIRTY_BUFFER_BASE_STATE);
 }
@@ -683,7 +724,7 @@ void mglBindBuffersBase(GLMContext ctx, GLenum target, GLuint first, GLsizei cou
 {
     ERROR_CHECK_RETURN(checkIndexedTarget(target), GL_INVALID_ENUM);
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(checkBindBuffersSpan(first, count), GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(checkBindBuffersSpan(target, first, count), GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(checkBindBuffersNames(ctx, count, buffers), GL_INVALID_OPERATION);
 
     for (GLsizei i = 0; i < count; i++)
@@ -700,7 +741,7 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
 
     ERROR_CHECK_RETURN(checkIndexedTarget(target), GL_INVALID_ENUM);
 
-    ERROR_CHECK_RETURN(index < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(index < maxBindingsForIndexedTarget(target), GL_INVALID_VALUE);
 
     buffer_index = bufferIndexFromTarget(ctx, target);
 
@@ -708,11 +749,10 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
     if (buffer == 0)
     {
         bzero(&ctx->state.buffer_base[buffer_index].buffers[index], sizeof(BufferBaseTarget));
+        STATE(buffers[buffer_index]) = NULL;
         ctx->state.dirty_bits |= (DIRTY_BUFFER | DIRTY_BUFFER_BASE_STATE);
         return;
     }
-
-    ERROR_CHECK_RETURN(isBuffer(ctx, buffer), GL_INVALID_VALUE);
 
     // ERROR_CHECK_RETURN(offset >= 0, GL_INVALID_VALUE);
     if (offset < 0) {
@@ -746,6 +786,9 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
     ctx->state.buffer_base[buffer_index].buffers[index].buf = ptr;
 
     ptr->target = target;
+
+    // like BindBufferBase, this also takes the generic binding
+    STATE(buffers[buffer_index]) = ptr;
 
     ctx->state.dirty_bits |= (DIRTY_BUFFER | DIRTY_BUFFER_BASE_STATE);
 }
@@ -1569,7 +1612,7 @@ void mglBindBuffersRange(GLMContext ctx, GLenum target, GLuint first, GLsizei co
 {
     ERROR_CHECK_RETURN(checkIndexedTarget(target), GL_INVALID_ENUM);
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(checkBindBuffersSpan(first, count), GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(checkBindBuffersSpan(target, first, count), GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(checkBindBuffersNames(ctx, count, buffers), GL_INVALID_OPERATION);
 
     for (GLsizei i = 0; i < count; i++)

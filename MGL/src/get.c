@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include "glm_context.h"
+#include "mgl_log.h"
 #include "pixel_utils.h"
 #include "mgl_format_table.h"
 
@@ -30,6 +31,15 @@ void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data);
 #define RET_INT(__value__) *((GLint *)data) = (GLint)__value__; break;
 #define RET_FLOAT(__value__) *((GLfloat *)data) = (GLfloat)__value__; break;
 #define RET_DOUBLE(__value__) *((GLdouble *)data) = (GLdouble)__value__; break;
+
+// same as RET_TYPE_VAR but for a limit we answer with a constant
+#define RET_TYPE_CONST(__TYPE__, __VALUE__) \
+switch(type) {  \
+    case kBool: RET_BOOL(__VALUE__)    \
+    case kInt: RET_INT(__VALUE__)    \
+    case kFloat: RET_FLOAT(__VALUE__)    \
+    case kDouble: RET_DOUBLE(__VALUE__)    \
+}
 
 enum {
     kBool, kInt, kFloat, kDouble
@@ -115,7 +125,7 @@ int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *
     {
         const BufferBaseTarget *bound;
 
-        if (index >= MAX_BINDABLE_BUFFERS) return -1;
+        if (index >= MAX_BUFFER_BASE_BINDINGS) return -1;
 
         bound = &ctx->state.buffer_base[buffer_base].buffers[index];
 
@@ -536,6 +546,50 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x82D8: RET_TYPE_VAR(type, vertex_binding_stride); break; // GL_VERTEX_BINDING_STRIDE
         case 0x82D9: RET_TYPE_VAR(type, max_vertex_attrib_relative_offset); break; // GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET
         case 0x82DA: RET_TYPE_VAR(type, max_vertex_attrib_bindings); break; // GL_MAX_VERTEX_ATTRIB_BINDINGS
+
+        case 0x8C80: RET_TYPE_CONST(type, 4); break;   // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS
+        case 0x8C8A: RET_TYPE_CONST(type, 128); break; // GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS
+        // this one is a loop bound in the CTS's state reset, so it has to be
+        // the number of binding points we actually accept
+        case 0x8C8B: RET_TYPE_CONST(type, MAX_TRANSFORM_FEEDBACK_BUFFERS); break; // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS
+        case 0x8E70: RET_TYPE_CONST(type, MAX_TRANSFORM_FEEDBACK_BUFFERS); break; // GL_MAX_TRANSFORM_FEEDBACK_BUFFERS
+
+        case 0x9143: RET_TYPE_CONST(type, 1024); break; // GL_MAX_DEBUG_MESSAGE_LENGTH
+        case 0x9144: RET_TYPE_CONST(type, 64); break;   // GL_MAX_DEBUG_LOGGED_MESSAGES
+
+        case 0x8E7D: RET_TYPE_CONST(type, 32); break;   // GL_MAX_PATCH_VERTICES
+        case 0x8E7E: RET_TYPE_CONST(type, 64); break;   // GL_MAX_TESS_GEN_LEVEL
+        case 0x8E84: RET_TYPE_CONST(type, 120); break;  // GL_MAX_TESS_PATCH_COMPONENTS
+        case 0x8E85: RET_TYPE_CONST(type, 4096); break; // GL_MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS
+        case 0x886C: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_CONTROL_INPUT_COMPONENTS
+        case 0x8E83: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_CONTROL_OUTPUT_COMPONENTS
+        case 0x886D: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_EVALUATION_INPUT_COMPONENTS
+        case 0x8E86: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_EVALUATION_OUTPUT_COMPONENTS
+
+        case 0x8F38: RET_TYPE_CONST(type, 1); break;    // GL_MAX_IMAGE_SAMPLES
+        case 0x8F39: RET_TYPE_CONST(type, 0); break;    // GL_IMAGE_BINDING_FORMAT
+
+        case 0x8E22: RET_TYPE_CONST(type, 0); break;    // GL_TRANSFORM_FEEDBACK
+        case 0x8E23: RET_TYPE_CONST(type, GL_FALSE); break; // GL_TRANSFORM_FEEDBACK_PAUSED
+        case 0x8E24: RET_TYPE_CONST(type, GL_FALSE); break; // GL_TRANSFORM_FEEDBACK_ACTIVE
+
+        case 0x8E5A: RET_TYPE_CONST(type, 32); break;   // GL_MAX_GEOMETRY_SHADER_INVOCATIONS
+        case 0x8DE1: RET_TYPE_CONST(type, 1024); break; // GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS
+
+        case 0x8E5B: RET_TYPE_CONST(type, -0.5); break; // GL_MIN_FRAGMENT_INTERPOLATION_OFFSET
+        case 0x8E5C: RET_TYPE_CONST(type, 0.5); break;  // GL_MAX_FRAGMENT_INTERPOLATION_OFFSET
+        case 0x8E5D: RET_TYPE_CONST(type, 4); break;    // GL_FRAGMENT_INTERPOLATION_OFFSET_BITS
+
+        case 0x92DC: RET_TYPE_CONST(type, MAX_ATOMIC_COUNTER_BUFFER_BINDINGS); break; // GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS
+        case 0x92D8: RET_TYPE_CONST(type, 32768); break; // GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE
+        case 0x92D9: RET_TYPE_CONST(type, MAX_ATOMIC_COUNTER_BUFFER_BINDINGS); break; // GL_ACTIVE_ATOMIC_COUNTER_BUFFERS
+
+        default:
+            // Falling out of the switch used to leave the caller's variable
+            // untouched and report no error, so it read back whatever was
+            // already there and believed it.
+            MGL_ERR("MGL: mglGet unhandled pname 0x%x\n", pname);
+            ERROR_RETURN(GL_INVALID_ENUM);
     }
 }
 

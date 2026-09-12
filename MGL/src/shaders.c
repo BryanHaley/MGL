@@ -24,6 +24,7 @@
 #include <glslang_c_shader_types.h>
 
 #include "shaders.h"
+#include <ctype.h>
 #include "glm_context.h"
 #include "mgl_log.h"
 
@@ -418,6 +419,59 @@ void mglShaderSource(GLMContext ctx, GLuint shader, GLsizei count, const GLchar 
     ptr->dirty_bits |= DIRTY_SHADER;
 }
 
+// SPIR-V has no notion of the shared or packed block layouts, so glslang
+// refuses them outright. They are legal GLSL, and an app using them is meant
+// to ask the API where each member sits -- which MGL answers -- so treat them
+// as std140. All three words are six letters, so this rewrites in place.
+static void rewriteBlockLayouts(char *src)
+{
+    char *p = src;
+
+    while ((p = strstr(p, "layout")) != NULL)
+    {
+        char *q = p + 6;
+
+        if (p != src && (isalnum((unsigned char)p[-1]) || p[-1] == '_'))
+        {
+            p = q;
+            continue;
+        }
+
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
+            q++;
+
+        if (*q != '(')
+        {
+            p = q;
+            continue;
+        }
+
+        int depth = 0;
+
+        for (; *q; q++)
+        {
+            if (*q == '(') { depth++; continue; }
+            if (*q == ')') { if (--depth == 0) { q++; break; } continue; }
+
+            if (depth > 0 && (*q == 's' || *q == 'p'))
+            {
+                const char *word = (*q == 's') ? "shared" : "packed";
+                char before = q[-1];
+
+                if (!strncmp(q, word, 6) &&
+                    !isalnum((unsigned char)before) && before != '_' &&
+                    !isalnum((unsigned char)q[6]) && q[6] != '_')
+                {
+                    memcpy(q, "std140", 6);
+                    q += 5;
+                }
+            }
+        }
+
+        p = q;
+    }
+}
+
 void mglCompileShader(GLMContext ctx, GLuint shader)
 {
     Shader *ptr;
@@ -463,11 +517,30 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     /* SPIR-V wants every varying to carry an explicit location, but GL never
      * required that at any version, so let glslang hand out the missing ones.
      * Locations the shader does declare are left alone. */
-    int options = GLSLANG_SHADER_VULKAN_RULES_RELAXED | GLSLANG_SHADER_AUTO_MAP_LOCATIONS;
+    int options = GLSLANG_SHADER_VULKAN_RULES_RELAXED | GLSLANG_SHADER_AUTO_MAP_LOCATIONS |
+                  GLSLANG_SHADER_AUTO_MAP_BINDINGS;
 
     glslang_shader_set_options(glsl_shader, options);
 
     err = glslang_shader_preprocess(glsl_shader, &glsl_input);
+
+    if (err)
+    {
+        const char *pp = glslang_shader_get_preprocessed_code(glsl_shader);
+
+        if (pp)
+        {
+            char *fixed = strdup(pp);
+
+            if (fixed)
+            {
+                rewriteBlockLayouts(fixed);
+                glslang_shader_set_preprocessed_code(glsl_shader, fixed);
+                free(fixed);
+            }
+        }
+    }
+
     if (!err)
     {
         // PROPER FIX: Enhanced error logging with proper formatting

@@ -183,6 +183,12 @@ void mglFormatTableSetDevice(const MGLDeviceFormatCaps *caps);
 /*  everyday answers                                                 */
 /* ---------------------------------------------------------------- */
 uint16_t mglFormatMetalFormat(GLenum gl_internal_format);
+
+/* MGL_FMT_COLOR_FLOAT / _COLOR_INT / _DEPTH / ... for a GL internal format */
+uint8_t mglFormatKind(GLenum gl_internal_format);
+
+/* GL_RGBA and friends leave the bit depth to us; this picks it. Sized formats pass through. */
+GLenum mglFormatSizedForBase(GLenum gl_internal_format);
 uint16_t mglFormatCaps(GLenum gl_internal_format);
 bool     mglFormatIsCompressed(GLenum gl_internal_format);
 size_t   mglFormatBytesPerRow(GLenum gl_internal_format, GLsizei width);

@@ -224,14 +224,26 @@ typedef struct BufferBaseTarget_t {
     Buffer      *buf;
 } BufferBaseTarget;
 
+// Vertex buffer binding slots -- glBindVertexBuffer and friends. GL asks for 16.
 #define MAX_BINDABLE_BUFFERS    16
+
+// The indexed buffer targets each have their own binding space and their own
+// spec minimum, so they get their own ceilings rather than one shared number.
+#define MAX_UNIFORM_BUFFER_BINDINGS         96
+#define MAX_SHADER_STORAGE_BUFFER_BINDINGS  16
+#define MAX_ATOMIC_COUNTER_BUFFER_BINDINGS  16
+#define MAX_TRANSFORM_FEEDBACK_BUFFERS      16
+
+// one array wide enough for the largest of them
+#define MAX_BUFFER_BASE_BINDINGS            MAX_UNIFORM_BUFFER_BINDINGS
+
 typedef struct BufferBase_t {
-    BufferBaseTarget    buffers[MAX_BINDABLE_BUFFERS];
+    BufferBaseTarget    buffers[MAX_BUFFER_BASE_BINDINGS];
 } BufferBase;
 
 // plain uniforms are stored by their layout location, which GL lets run well
 // past the number of buffer binding points
-#define MAX_UNIFORM_LOCATIONS   256
+#define MAX_UNIFORM_LOCATIONS   1024
 typedef struct UniformConstants_t {
     BufferBaseTarget    buffers[MAX_UNIFORM_LOCATIONS];
     // 4 for float/int uniforms, 8 for double ones. Without this a readback
@@ -450,6 +462,18 @@ typedef struct SpirvResource_t {
     GLuint  msl_index;      // the [[buffer(n)]] / [[texture(n)]] slot SPIRV-Cross gave it
     GLenum  gl_type;        // GL_FLOAT_VEC4 and friends, recorded at link time
     GLint   array_size;     // 1 unless the uniform is an array
+    // GL picks the texture unit from the sampler uniform's value, not from the
+    // binding baked into the SPIR-V. glUniform1i writes here.
+    GLint   tex_unit;
+    // for uniform and storage blocks: what glGetActiveUniformBlockiv reports
+    GLint   block_size;
+    GLint   member_count;
+    // for a uniform that lives inside a block: where it sits in that block
+    GLint   block_index;        // -1 for a plain uniform
+    GLint   offset;
+    GLint   array_stride;
+    GLint   matrix_stride;
+    GLboolean is_row_major;
 } SpirvResource;
 
 typedef struct SpirvResourceList_t {
@@ -484,6 +508,9 @@ typedef struct Program_t {
     // indexed by the SPIRV-Cross resource enum, whose highest value has grown
     // over time; sized to cover it rather than to MGL's own shorter list
     SpirvResourceList spirv_resources_list[_MAX_SHADER_TYPES][MAX_SPVC_RESOURCE_TYPES];
+    // the uniforms declared inside uniform blocks, which GL lists as active
+    // uniforms in their own right
+    SpirvResourceList block_uniforms[_MAX_SHADER_TYPES];
     struct {
         unsigned x, y, z;
     } local_workgroup_size;
@@ -637,6 +664,11 @@ typedef struct PixelStore_t {
     GLint alignment;
 } PixelStore;
 
+/* GL 4.6 8.4.4 / 18.2: rows are row_length (or width) pixels wide padded up to
+   the alignment, and the skip_* modes move where the data starts. */
+size_t mglPixelStoreRowPitch(const PixelStore *ps, GLsizei width, GLuint pixel_size);
+size_t mglPixelStoreSkipBytes(const PixelStore *ps, GLsizei height, GLuint pixel_size, size_t row_pitch);
+
 
 enum {
     dirtyVAO = 0,
@@ -782,6 +814,7 @@ struct GLMMetalFuncs {
 
     void (*mtlGetSync)(GLMContext glm_ctx, Sync *sync);
     void (*mtlWaitForSync)(GLMContext glm_ctx, Sync *sync);
+    void (*mtlForgetSync)(GLMContext glm_ctx, Sync *sync);
 
     void (*mtlFlush)(GLMContext glm_ctx, bool finish);
     void (*mtlSwapBuffers)(GLMContext glm_ctx);

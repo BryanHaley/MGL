@@ -252,10 +252,9 @@ void mglTexBuffer(GLMContext ctx, GLenum target, GLenum internalformat, GLuint b
         ERROR_RETURN(GL_INVALID_ENUM);
     }
 
-    // GL 4.6 8.9 requires INVALID_OPERATION when no texture is bound to the
-    // target. dEQP's gluStateReset calls this with zero bound and expects it to
-    // pass; that is the CTS helper being lax, so MGL stays strict here.
-    Texture *tex = currentTexture(ctx, _TEXTURE_BUFFER_TARGET);
+    // The spec's error list for TexBuffer has no "nothing bound" case, so the
+    // default buffer texture is a legal target here.
+    Texture *tex = getTex(ctx, 0, GL_TEXTURE_BUFFER);
     if (!tex)
     {
         ERROR_RETURN(GL_INVALID_OPERATION);

@@ -131,6 +131,9 @@ void mglDeleteSync(GLMContext ctx, GLsync sync)
         }
     }
 
+    if (ctx->mtl_funcs.mtlForgetSync)
+        ctx->mtl_funcs.mtlForgetSync(ctx, sync);
+
     free(sync);
 }
 

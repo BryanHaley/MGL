@@ -485,13 +485,13 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
     GLuint pitch;
     size_t buffer_size;
 
-    row_length = (STATE(pack.row_length) ? (size_t)STATE(pack.row_length) : (size_t)width);
-    pitch_size = row_length * (size_t)pixel_size;
+    pitch_size = mglPixelStoreRowPitch(&ctx->state.pack, width, pixel_size);
     if (pitch_size > UINT_MAX)
     {
-        MGL_ERR("MGL Error: mglReadPixels: pitch overflow (row_length=%zu pixel_size=%u)\n", row_length, pixel_size);
+        MGL_ERR("MGL Error: mglReadPixels: pitch overflow (width=%d pixel_size=%u)\n", width, pixel_size);
         ERROR_RETURN(GL_OUT_OF_MEMORY);
     }
+    row_length = pitch_size;
     pitch = (GLuint)pitch_size;
 
     if (pitch_size > 0 && (size_t)height > (SIZE_MAX / pitch_size))
@@ -615,6 +615,8 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
     }
 
     // the renderer converts straight into the caller's buffer
+    pixels = (GLubyte *)pixels + mglPixelStoreSkipBytes(&ctx->state.pack, height, pixel_size, pitch);
+
     ctx->mtl_funcs.mtlReadPixels(ctx, pixels, pitch, format, type, x, y, width, height);
 }
 

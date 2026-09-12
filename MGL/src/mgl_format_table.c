@@ -699,6 +699,27 @@ const MGLFormatDesc *mglFormatDescForMetal(uint16_t mtl_format)
 /*  everyday answers                                                 */
 /* ================================================================ */
 
+/* GL lets you ask for a plain GL_RGBA and leaves the exact bit depth to us,
+ * so pick the obvious sized format for each of those. */
+GLenum mglFormatSizedForBase(GLenum gl_internal_format)
+{
+    switch (gl_internal_format) {
+        case GL_RED:             return GL_R8;
+        case GL_RG:              return GL_RG8;
+        case GL_RGB:             return GL_RGB8;
+        case GL_RGBA:            return GL_RGBA8;
+        case GL_DEPTH_COMPONENT: return GL_DEPTH_COMPONENT24;
+        case GL_DEPTH_STENCIL:   return GL_DEPTH24_STENCIL8;
+        case GL_STENCIL_INDEX:   return GL_STENCIL_INDEX8;
+        default:                 return gl_internal_format;
+    }
+}
+
+uint8_t mglFormatKind(GLenum gl_internal_format)
+{
+    return mglFormatDesc(gl_internal_format)->kind;
+}
+
 uint16_t mglFormatMetalFormat(GLenum gl_internal_format)
 {
     const MGLFormatDesc *d = mglFormatDesc(gl_internal_format);
@@ -707,6 +728,16 @@ uint16_t mglFormatMetalFormat(GLenum gl_internal_format)
         return d->mtl_format;
     if (mtl_format_usable(d->mtl_substitute))
         return d->mtl_substitute;
+
+    GLenum sized = mglFormatSizedForBase(gl_internal_format);
+    if (sized != gl_internal_format) {
+        d = mglFormatDesc(sized);
+        if (mtl_format_usable(d->mtl_format))
+            return d->mtl_format;
+        if (mtl_format_usable(d->mtl_substitute))
+            return d->mtl_substitute;
+    }
+
     return _INV;
 }
 

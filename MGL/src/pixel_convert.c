@@ -1210,6 +1210,192 @@ static GLboolean encode_native(GLubyte *d, MGLNativeFormat fmt, const MGLTexel *
     }
 }
 
+
+// The inverse of encode_packed: client pixels that stuff every component into
+// one word. Without this, any upload using a packed type had to be stored in
+// whatever format the data happened to be, which quietly changed the texture's
+// internal format out from under the app.
+static GLboolean decode_packed(const GLubyte *sp, GLenum format, GLenum type, MGLTexel *t)
+{
+    GLuint comps = mglComponentsForFormat(format);
+    GLboolean bgr = (format == GL_BGR || format == GL_BGRA ||
+                     format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
+    GLfloat fv[4] = {0,0,0,1};
+    GLint   iv[4] = {0,0,0,1};
+    GLuint  uv[4] = {0,0,0,1};
+    GLuint v = 0;
+    GLushort h = 0;
+
+    switch(type)
+    {
+        case GL_UNSIGNED_BYTE_3_3_2:
+            if (comps != 3) return GL_FALSE;
+            fv[0] = unorm_to_float((sp[0] >> 5) & 0x7u, 3);
+            fv[1] = unorm_to_float((sp[0] >> 2) & 0x7u, 3);
+            fv[2] = unorm_to_float(sp[0] & 0x3u, 2);
+            break;
+
+        case GL_UNSIGNED_BYTE_2_3_3_REV:
+            if (comps != 3) return GL_FALSE;
+            fv[0] = unorm_to_float(sp[0] & 0x7u, 3);
+            fv[1] = unorm_to_float((sp[0] >> 3) & 0x7u, 3);
+            fv[2] = unorm_to_float((sp[0] >> 6) & 0x3u, 2);
+            break;
+
+        case GL_UNSIGNED_SHORT_5_6_5:
+            if (comps != 3) return GL_FALSE;
+            memcpy(&h, sp, 2);
+            fv[0] = unorm_to_float((h >> 11) & 0x1Fu, 5);
+            fv[1] = unorm_to_float((h >> 5) & 0x3Fu, 6);
+            fv[2] = unorm_to_float(h & 0x1Fu, 5);
+            break;
+
+        case GL_UNSIGNED_SHORT_5_6_5_REV:
+            if (comps != 3) return GL_FALSE;
+            memcpy(&h, sp, 2);
+            fv[2] = unorm_to_float((h >> 11) & 0x1Fu, 5);
+            fv[1] = unorm_to_float((h >> 5) & 0x3Fu, 6);
+            fv[0] = unorm_to_float(h & 0x1Fu, 5);
+            break;
+
+        case GL_UNSIGNED_SHORT_4_4_4_4:
+            if (comps != 4) return GL_FALSE;
+            memcpy(&h, sp, 2);
+            fv[0] = unorm_to_float((h >> 12) & 0xFu, 4);
+            fv[1] = unorm_to_float((h >> 8) & 0xFu, 4);
+            fv[2] = unorm_to_float((h >> 4) & 0xFu, 4);
+            fv[3] = unorm_to_float(h & 0xFu, 4);
+            break;
+
+        case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+            if (comps != 4) return GL_FALSE;
+            memcpy(&h, sp, 2);
+            fv[3] = unorm_to_float((h >> 12) & 0xFu, 4);
+            fv[2] = unorm_to_float((h >> 8) & 0xFu, 4);
+            fv[1] = unorm_to_float((h >> 4) & 0xFu, 4);
+            fv[0] = unorm_to_float(h & 0xFu, 4);
+            break;
+
+        case GL_UNSIGNED_SHORT_5_5_5_1:
+            if (comps != 4) return GL_FALSE;
+            memcpy(&h, sp, 2);
+            fv[0] = unorm_to_float((h >> 11) & 0x1Fu, 5);
+            fv[1] = unorm_to_float((h >> 6) & 0x1Fu, 5);
+            fv[2] = unorm_to_float((h >> 1) & 0x1Fu, 5);
+            fv[3] = unorm_to_float(h & 0x1u, 1);
+            break;
+
+        case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+            if (comps != 4) return GL_FALSE;
+            memcpy(&h, sp, 2);
+            fv[3] = unorm_to_float((h >> 15) & 0x1u, 1);
+            fv[2] = unorm_to_float((h >> 10) & 0x1Fu, 5);
+            fv[1] = unorm_to_float((h >> 5) & 0x1Fu, 5);
+            fv[0] = unorm_to_float(h & 0x1Fu, 5);
+            break;
+
+        case GL_UNSIGNED_INT_8_8_8_8:
+            if (comps != 4) return GL_FALSE;
+            memcpy(&v, sp, 4);
+            fv[0] = unorm_to_float((v >> 24) & 0xFFu, 8);
+            fv[1] = unorm_to_float((v >> 16) & 0xFFu, 8);
+            fv[2] = unorm_to_float((v >> 8) & 0xFFu, 8);
+            fv[3] = unorm_to_float(v & 0xFFu, 8);
+            break;
+
+        case GL_UNSIGNED_INT_8_8_8_8_REV:
+            if (comps != 4) return GL_FALSE;
+            memcpy(&v, sp, 4);
+            fv[3] = unorm_to_float((v >> 24) & 0xFFu, 8);
+            fv[2] = unorm_to_float((v >> 16) & 0xFFu, 8);
+            fv[1] = unorm_to_float((v >> 8) & 0xFFu, 8);
+            fv[0] = unorm_to_float(v & 0xFFu, 8);
+            break;
+
+        case GL_UNSIGNED_INT_10_10_10_2:
+            if (comps != 4) return GL_FALSE;
+            memcpy(&v, sp, 4);
+            fv[0] = unorm_to_float((v >> 22) & 0x3FFu, 10);
+            fv[1] = unorm_to_float((v >> 12) & 0x3FFu, 10);
+            fv[2] = unorm_to_float((v >> 2) & 0x3FFu, 10);
+            fv[3] = unorm_to_float(v & 0x3u, 2);
+            uv[0] = (v >> 22) & 0x3FFu; uv[1] = (v >> 12) & 0x3FFu;
+            uv[2] = (v >> 2) & 0x3FFu;  uv[3] = v & 0x3u;
+            break;
+
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+            if (comps != 4) return GL_FALSE;
+            memcpy(&v, sp, 4);
+            fv[3] = unorm_to_float((v >> 30) & 0x3u, 2);
+            fv[2] = unorm_to_float((v >> 20) & 0x3FFu, 10);
+            fv[1] = unorm_to_float((v >> 10) & 0x3FFu, 10);
+            fv[0] = unorm_to_float(v & 0x3FFu, 10);
+            uv[3] = (v >> 30) & 0x3u;   uv[2] = (v >> 20) & 0x3FFu;
+            uv[1] = (v >> 10) & 0x3FFu; uv[0] = v & 0x3FFu;
+            break;
+
+        case GL_UNSIGNED_INT_24_8:
+            if (format != GL_DEPTH_STENCIL) return GL_FALSE;
+            memcpy(&v, sp, 4);
+            texel_zero(t);
+            t->f[0] = unorm_to_float((v >> 8) & 0xFFFFFFu, 24);
+            t->u[1] = v & 0xFFu;
+            return GL_TRUE;
+
+        case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+            if (format != GL_DEPTH_STENCIL) return GL_FALSE;
+            texel_zero(t);
+            memcpy(&t->f[0], sp, 4);
+            memcpy(&v, sp + 4, 4);
+            t->u[1] = v & 0xFFu;
+            return GL_TRUE;
+
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+            if (comps != 3) return GL_FALSE;
+            memcpy(&v, sp, 4);
+            fv[0] = smallfloat_to_float(v & 0x7FFu, 6, 5);
+            fv[1] = smallfloat_to_float((v >> 11) & 0x7FFu, 6, 5);
+            fv[2] = smallfloat_to_float((v >> 22) & 0x3FFu, 5, 5);
+            break;
+
+        case GL_UNSIGNED_INT_5_9_9_9_REV:
+        {
+            if (comps != 3) return GL_FALSE;
+            memcpy(&v, sp, 4);
+            GLint exp = (GLint)((v >> 27) & 0x1Fu) - 15 - 9;
+            GLfloat scale = ldexpf(1.0f, exp);
+            fv[0] = (GLfloat)(v & 0x1FFu) * scale;
+            fv[1] = (GLfloat)((v >> 9) & 0x1FFu) * scale;
+            fv[2] = (GLfloat)((v >> 18) & 0x1FFu) * scale;
+            break;
+        }
+
+        default:
+            return GL_FALSE;
+    }
+
+    if (bgr) { GLfloat tmp = fv[0]; fv[0] = fv[2]; fv[2] = tmp; }
+
+    for (GLuint k = 0; k < 4; k++)
+    {
+        if (type != GL_UNSIGNED_INT_10_10_10_2 && type != GL_UNSIGNED_INT_2_10_10_10_REV)
+            uv[k] = (GLuint)(fv[k] < 0.0f ? 0.0f : fv[k]);
+        iv[k] = (GLint)uv[k];
+    }
+
+    texel_zero(t);
+
+    if (format_is_integer(format))
+    {
+        t->is_uint = GL_TRUE;
+        t->is_sint = GL_FALSE;
+    }
+
+    scatter_components(t, format, fv, iv, uv);
+
+    return GL_TRUE;
+}
+
 GLboolean mglConvertPixelsToNative(const void *src, size_t src_row_pitch, GLenum format, GLenum type,
                                    void *dst, size_t dst_row_pitch, MGLNativeFormat dst_fmt,
                                    GLsizei width, GLsizei height)
@@ -1219,10 +1405,6 @@ GLboolean mglConvertPixelsToNative(const void *src, size_t src_row_pitch, GLenum
     GLsizei row, col;
 
     if (!src || !dst || src_bpp == 0 || dst_bpp == 0)
-        return GL_FALSE;
-
-    // the packed client types are readback-only for now
-    if (packed_type_size(type) != 0)
         return GL_FALSE;
 
     if (width < 0 || height < 0)
@@ -1240,7 +1422,11 @@ GLboolean mglConvertPixelsToNative(const void *src, size_t src_row_pitch, GLenum
         {
             MGLTexel t;
 
-            if (!decode_plain(s + (size_t)col * src_bpp, format, type, &t))
+            const GLubyte *sp = s + (size_t)col * src_bpp;
+            GLboolean got = packed_type_size(type) ? decode_packed(sp, format, type, &t)
+                                                   : decode_plain(sp, format, type, &t);
+
+            if (!got)
                 return GL_FALSE;
 
             if (!encode_native(d + (size_t)col * dst_bpp, dst_fmt, &t))

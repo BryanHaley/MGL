@@ -7,3 +7,9 @@
 [submodule "submodules/SPIRV-Headers"]
 	path = submodules/SPIRV-Headers
 	url = https://github.com/KhronosGroup/SPIRV-Headers.git
+[submodule "submodules/VK-GL-CTS"]
+	path = submodules/VK-GL-CTS
+	url = https://github.com/KhronosGroup/VK-GL-CTS.git
+[submodule "submodules/OpenCL-CTS"]
+	path = submodules/OpenCL-CTS
+	url = https://github.com/KhronosGroup/OpenCL-CTS.git

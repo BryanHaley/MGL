@@ -375,7 +375,7 @@ GPU_TEST(misc_core, tex_buffer_rejects_bad_target)
     glDeleteBuffers(1, &b);
 }
 
-GPU_TEST(misc_core, tex_buffer_requires_bound_texture)
+GPU_TEST(misc_core, tex_buffer_works_on_the_default_texture)
 {
     GLuint b = 0;
 
@@ -384,9 +384,11 @@ GPU_TEST(misc_core, tex_buffer_requires_bound_texture)
     glBufferData(GL_ARRAY_BUFFER, 64, NULL, GL_STATIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    // no texture bound to GL_TEXTURE_BUFFER
+    // Texture 0 is a real texture object here, so this is legal: the spec's
+    // error list for TexBuffer has no "nothing bound" case.
+    glBindTexture(GL_TEXTURE_BUFFER, 0);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA8, b);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     glDeleteBuffers(1, &b);
 }

@@ -81,6 +81,18 @@ void mgl_harness_reset(void)
     glCullFace(GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    // A leftover row length silently widens every later readback, so the next
+    // test writes past the buffer it sized for itself.
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_PACK_SWAP_BYTES, GL_FALSE);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
+    glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
 
     // constant attribute values are context state and persist across tests
     {
@@ -180,6 +192,7 @@ unsigned char *mgl_read_rgba8(const MGLTestTarget *t)
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, t->fbo);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
     glReadPixels(0, 0, t->width, t->height, GL_RGBA, GL_UNSIGNED_BYTE, px);
 
     return px;

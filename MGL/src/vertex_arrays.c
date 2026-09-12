@@ -810,6 +810,8 @@ void mglVertexAttribDivisor(GLMContext ctx, GLuint index, GLuint divisor)
 {
     VertexArray *ptr;
 
+    ERROR_CHECK_RETURN(index < MAX_ATTRIBS, GL_INVALID_VALUE);
+
     ptr = ctx->state.vao;
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);

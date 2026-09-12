@@ -885,6 +885,25 @@ bool checkTexLevelParams(GLMContext ctx, Texture *tex, GLint level, GLuint inter
 }
 
 
+// GL_RED_INTEGER and friends carry raw integers, not normalised values.
+static bool formatIsIntegerPixelFormat(GLenum format)
+{
+    switch (format)
+    {
+        case GL_RED_INTEGER:
+        case GL_RG_INTEGER:
+        case GL_RGB_INTEGER:
+        case GL_BGR_INTEGER:
+        case GL_RGBA_INTEGER:
+        case GL_BGRA_INTEGER:
+        case GL_GREEN_INTEGER:
+        case GL_BLUE_INTEGER:
+            return true;
+    }
+
+    return false;
+}
+
 bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLenum format, GLenum type)
 {
     switch(internalformat)
@@ -1197,6 +1216,48 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
             break;
     }
 
+    // The pixel format has to belong to the same family as the storage: you
+    // cannot feed GL_BLUE into a depth texture, or plain GL_RGBA into an
+    // integer one. GL 4.6 table 8.2 spells the pairings out; this is the part
+    // of it that does not depend on component counts.
+    {
+        // the unsized base formats carry no kind of their own, so ask about the
+        // sized format they stand for
+        uint8_t kind = mglFormatKind(mglFormatSizedForBase((GLenum)internalformat));
+        bool fmt_depth = (format == GL_DEPTH_COMPONENT);
+        bool fmt_stencil = (format == GL_STENCIL_INDEX);
+        bool fmt_ds = (format == GL_DEPTH_STENCIL);
+        bool fmt_int = formatIsIntegerPixelFormat(format);
+
+        switch (kind)
+        {
+            case MGL_FMT_DEPTH:
+                ERROR_CHECK_RETURN_VALUE(fmt_depth, GL_INVALID_OPERATION, false);
+                break;
+
+            case MGL_FMT_STENCIL:
+                ERROR_CHECK_RETURN_VALUE(fmt_stencil, GL_INVALID_OPERATION, false);
+                break;
+
+            case MGL_FMT_DEPTH_STENCIL:
+                ERROR_CHECK_RETURN_VALUE(fmt_ds, GL_INVALID_OPERATION, false);
+                break;
+
+            case MGL_FMT_COLOR_INT:
+            case MGL_FMT_COLOR_UINT:
+                ERROR_CHECK_RETURN_VALUE(fmt_int, GL_INVALID_OPERATION, false);
+                break;
+
+            case MGL_FMT_COLOR_FLOAT:
+                ERROR_CHECK_RETURN_VALUE(!fmt_int && !fmt_depth && !fmt_stencil && !fmt_ds,
+                                         GL_INVALID_OPERATION, false);
+                break;
+
+            default:
+                break;
+        }
+    }
+
     return true;
 }
 
@@ -1316,18 +1377,20 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
         }
         else if (pixels)
         {
-            GLuint temp_format;
+            // The app asked for this internal format and GL says it gets it.
+            // Where the upload data is laid out differently, unpackTexture
+            // converts -- adopting the data's format instead used to turn an
+            // sRGB or 10/10/10/2 texture into a plain RGBA8 one behind its back.
+            GLuint temp_format = internalFormatForGLFormatType(format, type);
 
-            // check if format type can be copied directly to the internal format
-            temp_format = internalFormatForGLFormatType(format, type);
-
-            // MGL doesn't support pixel format conversion
-            // If mismatch, use the format that matches the incoming data
-            if (temp_format != internalformat)
+            if (temp_format == 0 && checkInternalFormatForMetal(ctx, internalformat) == false)
             {
-                internalformat = temp_format;
+                ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
             }
         }
+
+        // GL lets the app name a base format and leave the bit depth to us
+        internalformat = mglFormatSizedForBase(internalformat);
 
         // see if we can actually use this internal format
         if (checkInternalFormatForMetal(ctx, internalformat) == false)
@@ -1461,58 +1524,13 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
 
         if (pixels)
         {
-            GLsizei src_size;
+            GLuint src_pixel_size = sizeForFormatType(format, type);
 
-            src_size = width * sizeForFormatType(format, type);
+            src_pitch = mglPixelStoreRowPitch(&ctx->state.unpack, width, src_pixel_size);
 
-            if (ctx->state.unpack.row_length)
+            if (ctx->state.unpack.row_length > 0 && ctx->state.unpack.row_length < width)
             {
-                size_t alignment;
-
-                if (ctx->state.unpack.row_length < width) {
-                    ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
-                }
-
-                alignment = ctx->state.unpack.alignment;
-                if (alignment)
-                {
-                    /* row_length is in pixels, so multiply by pixel_size to get bytes per row */
-                    size_t row_bytes = ctx->state.unpack.row_length * pixel_size;
-                    if (row_bytes >= alignment)
-                    {
-                        src_pitch = row_bytes;
-                        assert(src_pitch);
-                    }
-                    else if (depth > 1)
-                    {
-                        // 3d texture
-                        src_pitch = alignment / src_size;
-
-                        src_pitch = src_pitch * src_size * ctx->state.unpack.row_length * height;
-
-                        src_pitch = src_pitch / alignment;
-                        assert(src_pitch);
-                    }
-                    else
-                    {
-                        src_pitch = alignment / src_size;
-
-                        src_pitch = src_pitch * src_size * ctx->state.unpack.row_length;
-
-                        src_pitch = src_pitch / alignment;
-                        assert(src_pitch);
-                    }
-                }
-                else
-                {
-                    src_pitch = src_size * ctx->state.unpack.row_length;
-                    assert(src_pitch);
-                }
-            }
-            else
-            {
-                src_pitch = tex->faces[face].levels[level].pitch;
-                assert(src_pitch);
+                ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
             }
 
             // unpack from pixel buffer
@@ -1534,6 +1552,9 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
 
                 pixels = &buffer_data[offset];
             }
+
+            pixels = (const GLubyte *)pixels +
+                     mglPixelStoreSkipBytes(&ctx->state.unpack, height, src_pixel_size, src_pitch);
 
             if (unpackTexture(ctx, tex, face, level, format, type, (void *)pixels, (void *)texture_data, src_pitch, 0, 0, 0, width, height, depth) == false)
                 return false;
@@ -1610,6 +1631,10 @@ void mglTexImage2D(GLMContext ctx, GLenum target, GLint level, GLint internalfor
         case GL_PROXY_TEXTURE_2D:
         case GL_PROXY_TEXTURE_CUBE_MAP:
             proxy = true;
+            break;
+
+        case GL_TEXTURE_1D_ARRAY:
+            is_array = true;
             break;
 
         case GL_PROXY_TEXTURE_1D_ARRAY:
@@ -1775,56 +1800,18 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
     pixel_size = sizeForFormatType(format, type);
     src_size = width * pixel_size;
 
-    if (ctx->state.unpack.row_length)
     {
-        size_t alignment;
+        GLuint src_pixel_size = sizeForFormatType(format, type);
 
-        // ERROR_CHECK_RETURN_VALUE((ctx->state.unpack.row_length >> level) >= width, GL_INVALID_VALUE, false);
-        // Fix: row_length applies to the source data for the current level, do not shift by level
-        if (ctx->state.unpack.row_length < width) {
-             ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
-        }
+        src_pitch = mglPixelStoreRowPitch(&ctx->state.unpack, width, src_pixel_size);
 
-        alignment = ctx->state.unpack.alignment;
-        if (alignment)
+        if (ctx->state.unpack.row_length > 0 && ctx->state.unpack.row_length < width)
         {
-            if (src_size >= alignment)
-            {
-                size_t row_bytes = (ctx->state.unpack.row_length >> level) * pixel_size;
-                src_pitch = row_bytes;
-                assert(src_pitch);
-            }
-            else if (depth > 1)
-            {
-                // 3d texture
-                src_pitch = alignment / src_size;
-
-                src_pitch = src_pitch * src_size * ctx->state.unpack.row_length * height;
-
-                src_pitch = src_pitch / alignment;
-                assert(src_pitch);
-            }
-            else
-            {
-                src_pitch = alignment / src_size;
-
-                src_pitch = src_pitch * src_size * ctx->state.unpack.row_length;
-
-                src_pitch = src_pitch / alignment;
-                assert(src_pitch);
-            }
+            ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
         }
-        else
-        {
-            size_t row_bytes = (ctx->state.unpack.row_length >> level) * pixel_size;
-            src_pitch = row_bytes;
-            assert(src_pitch);
-        }
-    }
-    else
-    {
-        src_pitch = src_size;
-        assert(src_pitch);
+
+        pixels = (GLubyte *)pixels +
+                 mglPixelStoreSkipBytes(&ctx->state.unpack, height, src_pixel_size, src_pitch);
     }
 
     void *texture_data;
@@ -3065,7 +3052,10 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
     GLsizei height = lvl->height ? (GLsizei)lvl->height : 1;
     GLsizei depth = lvl->depth ? (GLsizei)lvl->depth : 1;
 
-    bytes_per_row = (size_t)width * pixel_size;
+    // GetTexImage honours the pack modes exactly like ReadPixels does
+    bytes_per_row = mglPixelStoreRowPitch(&ctx->state.pack, width, pixel_size);
+
+    pixels = (GLubyte *)pixels + mglPixelStoreSkipBytes(&ctx->state.pack, height, pixel_size, bytes_per_row);
 
     if (check_size)
     {

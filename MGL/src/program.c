@@ -824,6 +824,30 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
             ptr->spirv_resources_list[stage][res_type].list[i].set = spvc_compiler_get_decoration(compiler_msl, list[i].id, SpvDecorationDescriptorSet);
             ptr->spirv_resources_list[stage][res_type].list[i].binding = spvc_compiler_get_decoration(compiler_msl, list[i].id, SpvDecorationBinding);
             ptr->spirv_resources_list[stage][res_type].list[i].location = spvc_compiler_get_decoration(compiler_msl, list[i].id, SpvDecorationLocation);
+            // GL reads the texture unit out of the sampler uniform's value.
+            // The binding the shader declared (or glslang handed out) is only
+            // the starting value; glUniform1i replaces it.
+            ptr->spirv_resources_list[stage][res_type].list[i].tex_unit =
+                (GLint)ptr->spirv_resources_list[stage][res_type].list[i].binding;
+
+            // The CTS sizes its buffer from GL_UNIFORM_BLOCK_DATA_SIZE, so a
+            // block that reports 0 gets no data written into it at all.
+            if (res_type == SPVC_RESOURCE_TYPE_UNIFORM_BUFFER ||
+                res_type == SPVC_RESOURCE_TYPE_STORAGE_BUFFER)
+            {
+                spvc_type block_type = spvc_compiler_get_type_handle(compiler_msl, list[i].base_type_id);
+                size_t block_size = 0;
+
+                if (block_type &&
+                    spvc_compiler_get_declared_struct_size(compiler_msl, block_type, &block_size) == SPVC_SUCCESS)
+                {
+                    // std140 rounds the block out to a multiple of 16
+                    block_size = (block_size + 15) & ~(size_t)15;
+                    ptr->spirv_resources_list[stage][res_type].list[i].block_size = (GLint)block_size;
+                    ptr->spirv_resources_list[stage][res_type].list[i].member_count =
+                        (GLint)spvc_type_get_num_member_types(block_type);
+                }
+            }
             if (getenv("MGL_DEBUG_RESOURCES"))
                 MGL_INFO("MGLRES stage=%d type=%d name=%s id=%u basetype=%u set=%u binding=%u location=%u\n",
                         stage, res_type, list[i].name, list[i].id, list[i].base_type_id,
@@ -872,6 +896,88 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
 
             rlist->list[i].gl_type = glTypeFromSpirv(compiler_msl, rlist->list[i].type_id,
                                                      &rlist->list[i].array_size);
+            rlist->list[i].block_index = -1;
+            rlist->list[i].offset = -1;
+        }
+    }
+
+    // GL treats the members of a uniform block as active uniforms of their own,
+    // with offsets and strides the app needs to lay its buffer out. Collect them.
+    {
+        SpirvResourceList *blocks = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER];
+        GLuint total = 0;
+        GLuint block_base = 0;
+
+        // uniformBlockAt numbers blocks across every stage, so members have to
+        // point at the same global index the block queries use
+        for (int prev = _VERTEX_SHADER; prev < stage; prev++)
+            block_base += ptr->spirv_resources_list[prev][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER].count;
+
+        for (GLuint b = 0; b < blocks->count; b++)
+            total += (GLuint)(blocks->list[b].member_count > 0 ? blocks->list[b].member_count : 0);
+
+        ptr->block_uniforms[stage].count = 0;
+        ptr->block_uniforms[stage].list = (SpirvResource *)calloc(total ? total : 1, sizeof(SpirvResource));
+
+        if (ptr->block_uniforms[stage].list)
+        {
+            GLuint out = 0;
+
+            for (GLuint b = 0; b < blocks->count; b++)
+            {
+                spvc_type bt = spvc_compiler_get_type_handle(compiler_msl, blocks->list[b].base_type_id);
+
+                if (!bt)
+                    continue;
+
+                unsigned members = spvc_type_get_num_member_types(bt);
+
+                for (unsigned m = 0; m < members && out < total; m++)
+                {
+                    SpirvResource *dst = &ptr->block_uniforms[stage].list[out];
+                    const char *mname = spvc_compiler_get_member_name(compiler_msl, blocks->list[b].base_type_id, m);
+                    unsigned off = 0, astride = 0, mstride = 0;
+                    bool already = false;
+
+                    // a block declared in two stages is still one set of uniforms
+                    for (int prev = _VERTEX_SHADER; prev < stage && !already; prev++)
+                        for (GLuint k = 0; k < ptr->block_uniforms[prev].count; k++)
+                            if (ptr->block_uniforms[prev].list[k].name && mname &&
+                                !strcmp(ptr->block_uniforms[prev].list[k].name, mname))
+                            {
+                                already = true;
+                                break;
+                            }
+
+                    if (already)
+                        continue;
+
+                    dst->type_id = spvc_type_get_member_type(bt, m);
+                    dst->gl_type = glTypeFromSpirv(compiler_msl, dst->type_id, &dst->array_size);
+
+                    // A nested struct has no GL type of its own -- GL flattens
+                    // those into their leaves, which this does not do yet. List
+                    // it and callers get a type nothing can name.
+                    if (dst->gl_type == 0)
+                        continue;
+
+                    dst->name = strdup(mname ? mname : "");
+                    dst->block_index = (GLint)(block_base + b);
+
+                    dst->offset = (spvc_compiler_type_struct_member_offset(compiler_msl, bt, m, &off) == SPVC_SUCCESS)
+                                ? (GLint)off : -1;
+                    dst->array_stride = (spvc_compiler_type_struct_member_array_stride(compiler_msl, bt, m, &astride) == SPVC_SUCCESS)
+                                ? (GLint)astride : 0;
+                    dst->matrix_stride = (spvc_compiler_type_struct_member_matrix_stride(compiler_msl, bt, m, &mstride) == SPVC_SUCCESS)
+                                ? (GLint)mstride : 0;
+                    dst->is_row_major = spvc_compiler_has_member_decoration(compiler_msl, blocks->list[b].base_type_id, m, SpvDecorationRowMajor)
+                                ? GL_TRUE : GL_FALSE;
+
+                    out++;
+                }
+            }
+
+            ptr->block_uniforms[stage].count = out;
         }
     }
 
@@ -1299,7 +1405,18 @@ static int programResourceCount(Program *ptr, int res_type)
 
 static int programUniformCount(Program *ptr)
 {
-    return programResourceCount(ptr, SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT);
+    int block_members = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        block_members += ptr->block_uniforms[stage].count;
+
+    // samplers, images and block members are all active uniforms too
+    return block_members +
+           programResourceCount(ptr, SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT) +
+           programResourceCount(ptr, SPVC_RESOURCE_TYPE_SAMPLED_IMAGE) +
+           programResourceCount(ptr, SPVC_RESOURCE_TYPE_SEPARATE_IMAGE) +
+           programResourceCount(ptr, SPVC_RESOURCE_TYPE_STORAGE_IMAGE) +
+           programResourceCount(ptr, SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS);
 }
 
 static int programLongestName(Program *ptr, int res_type)
@@ -2055,7 +2172,7 @@ void mglShaderStorageBlockBinding(GLMContext ctx, GLuint program, GLuint storage
 
     ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(storageBlockIndex < (GLuint)programResourceCount(pptr, SPVC_RESOURCE_TYPE_STORAGE_BUFFER), GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(storageBlockBinding < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(storageBlockBinding < MAX_SHADER_STORAGE_BUFFER_BINDINGS, GL_INVALID_VALUE);
 }
 
 void mglGetActiveAtomicCounterBufferiv(GLMContext ctx, GLuint program, GLuint bufferIndex, GLenum pname, GLint *params)

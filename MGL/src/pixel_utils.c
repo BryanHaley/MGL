@@ -347,6 +347,17 @@ GLuint sizeForFormatType(GLenum format, GLenum type)
         case GL_HALF_FLOAT:
             return sizeof(uint16_t) * numComponentsForFormat(format);
 
+        // These pack every component into one word, so the component count
+        // must not multiply the size. Guessing 4 x components made the pitch
+        // two to three times too wide.
+        case GL_UNSIGNED_INT_24_8:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+        case GL_UNSIGNED_INT_5_9_9_9_REV:
+            return sizeof(uint32_t);
+
+        case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+            return sizeof(float) + sizeof(uint32_t);
+
         default:
             MGL_ERR("MGL WARNING: sizeForFormatType unknown type 0x%x, format 0x%x\n", type, format);
             return sizeof(uint32_t) * numComponentsForFormat(format);
@@ -546,6 +557,12 @@ GLenum internalFormatForGLFormatType(GLenum format, GLenum type)
                 case GL_BGR: return GL_RGB8;  /* BGR treated as RGB */
                 case GL_RGBA: return GL_RGBA8;
                 case GL_BGRA: return GL_RGBA8;  /* BGRA treated as RGBA */
+                case GL_RED_INTEGER: return GL_R8UI;
+                case GL_RG_INTEGER: return GL_RG8UI;
+                case GL_RGB_INTEGER: return GL_RGB8UI;
+                case GL_BGR_INTEGER: return GL_RGB8UI;
+                case GL_RGBA_INTEGER: return GL_RGBA8UI;
+                case GL_BGRA_INTEGER: return GL_RGBA8UI;
                 default:
                     return 0;
             }
@@ -558,6 +575,12 @@ GLenum internalFormatForGLFormatType(GLenum format, GLenum type)
                 case GL_RG: return GL_RG8_SNORM;
                 case GL_RGB: return GL_RGB8_SNORM;
                 case GL_RGBA: return GL_RGBA8_SNORM;
+                case GL_RED_INTEGER: return GL_R8I;
+                case GL_RG_INTEGER: return GL_RG8I;
+                case GL_RGB_INTEGER: return GL_RGB8I;
+                case GL_BGR_INTEGER: return GL_RGB8I;
+                case GL_RGBA_INTEGER: return GL_RGBA8I;
+                case GL_BGRA_INTEGER: return GL_RGBA8I;
                 default:
                     return 0;
             }
@@ -570,6 +593,12 @@ GLenum internalFormatForGLFormatType(GLenum format, GLenum type)
                 case GL_RG: return GL_RG16;
                 case GL_RGB: return GL_RGB16;
                 case GL_RGBA: return GL_RGBA16;
+                case GL_RED_INTEGER: return GL_R16UI;
+                case GL_RG_INTEGER: return GL_RG16UI;
+                case GL_RGB_INTEGER: return GL_RGB16UI;
+                case GL_BGR_INTEGER: return GL_RGB16UI;
+                case GL_RGBA_INTEGER: return GL_RGBA16UI;
+                case GL_BGRA_INTEGER: return GL_RGBA16UI;
                 default:
                     return 0;
             }
@@ -582,6 +611,12 @@ GLenum internalFormatForGLFormatType(GLenum format, GLenum type)
                 case GL_RG: return GL_RG16_SNORM;
                 case GL_RGB: return GL_RGB16_SNORM;
                 case GL_RGBA: return GL_RGBA16_SNORM;
+                case GL_RED_INTEGER: return GL_R16I;
+                case GL_RG_INTEGER: return GL_RG16I;
+                case GL_RGB_INTEGER: return GL_RGB16I;
+                case GL_BGR_INTEGER: return GL_RGB16I;
+                case GL_RGBA_INTEGER: return GL_RGBA16I;
+                case GL_BGRA_INTEGER: return GL_RGBA16I;
                 default:
                     return 0;
             }
@@ -594,6 +629,12 @@ GLenum internalFormatForGLFormatType(GLenum format, GLenum type)
                 case GL_RG: return GL_RG32UI;
                 case GL_RGB: return GL_RGB32UI;
                 case GL_RGBA: return GL_RGBA32UI;
+                case GL_RED_INTEGER: return GL_R32UI;
+                case GL_RG_INTEGER: return GL_RG32UI;
+                case GL_RGB_INTEGER: return GL_RGB32UI;
+                case GL_BGR_INTEGER: return GL_RGB32UI;
+                case GL_RGBA_INTEGER: return GL_RGBA32UI;
+                case GL_BGRA_INTEGER: return GL_RGBA32UI;
                 default:
                     return 0;
             }
@@ -606,6 +647,26 @@ GLenum internalFormatForGLFormatType(GLenum format, GLenum type)
                 case GL_RG: return GL_RG32I;
                 case GL_RGB: return GL_RGB32I;
                 case GL_RGBA: return GL_RGBA32I;
+                case GL_RED_INTEGER: return GL_R32I;
+                case GL_RG_INTEGER: return GL_RG32I;
+                case GL_RGB_INTEGER: return GL_RGB32I;
+                case GL_BGR_INTEGER: return GL_RGB32I;
+                case GL_RGBA_INTEGER: return GL_RGBA32I;
+                case GL_BGRA_INTEGER: return GL_RGBA32I;
+                default:
+                    return 0;
+            }
+            break;
+
+        case GL_HALF_FLOAT:
+            switch(format)
+            {
+                case GL_RED: return GL_R16F;
+                case GL_RG: return GL_RG16F;
+                case GL_RGB: return GL_RGB16F;
+                case GL_BGR: return GL_RGB16F;
+                case GL_RGBA: return GL_RGBA16F;
+                case GL_BGRA: return GL_RGBA16F;
                 default:
                     return 0;
             }
@@ -807,3 +868,27 @@ MTLPixelFormat mtlPixelFormatForGLTex(Texture * tex)
     return mtl_format;
 }
 
+size_t mglPixelStoreRowPitch(const PixelStore *ps, GLsizei width, GLuint pixel_size)
+{
+    size_t row_pixels = (ps && ps->row_length > 0) ? (size_t)ps->row_length : (size_t)width;
+    size_t bytes = row_pixels * pixel_size;
+    size_t align = (ps && ps->alignment > 0) ? (size_t)ps->alignment : 1;
+
+    // alignment is only ever 1, 2, 4 or 8
+    if (align > 1)
+        bytes = (bytes + align - 1) & ~(align - 1);
+
+    return bytes;
+}
+
+size_t mglPixelStoreSkipBytes(const PixelStore *ps, GLsizei height, GLuint pixel_size, size_t row_pitch)
+{
+    if (!ps)
+        return 0;
+
+    size_t rows_per_image = (ps->image_height > 0) ? (size_t)ps->image_height : (size_t)(height > 0 ? height : 1);
+
+    return (size_t)(ps->skip_pixels > 0 ? ps->skip_pixels : 0) * pixel_size
+         + (size_t)(ps->skip_rows > 0 ? ps->skip_rows : 0) * row_pitch
+         + (size_t)(ps->skip_images > 0 ? ps->skip_images : 0) * rows_per_image * row_pitch;
+}
