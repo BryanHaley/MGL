@@ -166,6 +166,9 @@ enum {
 #define DIRTY_TEXTURE_DATA  (DIRTY_TEXTURE_LEVEL << 1)
 #define DIRTY_TEXTURE_PARAM (DIRTY_TEXTURE_DATA << 1)
 #define DIRTY_TEXTURE_ACCESS (DIRTY_TEXTURE_PARAM << 1)
+// Metal fixes a texture's swizzle in its descriptor, so changing it needs a
+// new texture or a view -- the sampler alone will not do it.
+#define DIRTY_TEXTURE_SWIZZLE (DIRTY_TEXTURE_ACCESS << 1)
 
 #define DIRTY_FBO_BINDING   0x1
 #define DIRTY_FBO_TEX      (DIRTY_FBO_BINDING << 1)
@@ -335,6 +338,8 @@ typedef struct Texture_t {
     GLuint mipmap_levels;
     TextureFace faces[6];
     void    *mtl_data;
+    // the swizzle the Metal texture was built with, so a later change is seen
+    GLuint  mtl_swizzle;
     GLsizei samples;
 } Texture;
 

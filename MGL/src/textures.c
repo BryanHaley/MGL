@@ -1260,6 +1260,10 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
         }
     }
 
+    // table 8.5: a packed type names the client formats it may pair with, and
+    // a float type is not allowed with an integer format
+    ERROR_CHECK_RETURN_VALUE(mglFormatTypeAgrees(format, type), GL_INVALID_OPERATION, false);
+
     return true;
 }
 
@@ -3132,6 +3136,8 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
     ERROR_CHECK_RETURN_VALUE(mglReadbackFormatAgrees(tex->internalformat, format),
                              GL_INVALID_OPERATION, false);
 
+    ERROR_CHECK_RETURN_VALUE(mglFormatTypeAgrees(format, type), GL_INVALID_OPERATION, false);
+
     lvl = &tex->faces[0].levels[level];
 
     GLsizei width = lvl->width ? (GLsizei)lvl->width : 1;
@@ -3142,7 +3148,11 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
     if (tex->target == GL_TEXTURE_2D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY)
         depth = tex->depth ? (GLsizei)tex->depth : 1;
     else if (tex->target == GL_TEXTURE_1D_ARRAY)
+    {
+        // GL puts the layer count in height here, and one layer is one row
         depth = tex->height ? (GLsizei)tex->height : 1;
+        height = 1;
+    }
 
     // GetTexImage honours the pack modes exactly like ReadPixels does
     bytes_per_row = mglPixelStoreRowPitch(&ctx->state.pack, width, pixel_size);

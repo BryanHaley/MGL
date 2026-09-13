@@ -701,6 +701,49 @@ const MGLFormatDesc *mglFormatDescForMetal(uint16_t mtl_format)
 
 /* GL lets you ask for a plain GL_RGBA and leaves the exact bit depth to us,
  * so pick the obvious sized format for each of those. */
+// GL 4.6 table 8.5: a packed type names the exact client formats it may be
+// paired with, and section 8.4.4 forbids a float type with an integer format.
+bool mglFormatTypeAgrees(GLenum format, GLenum type)
+{
+    bool integer = mglClientFormatIsInteger(format);
+
+    if (integer && (type == GL_FLOAT || type == GL_HALF_FLOAT))
+        return false;
+
+    if (format == GL_DEPTH_STENCIL)
+        return type == GL_UNSIGNED_INT_24_8 || type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV;
+
+    switch (type)
+    {
+        case GL_UNSIGNED_BYTE_3_3_2:
+        case GL_UNSIGNED_BYTE_2_3_3_REV:
+        case GL_UNSIGNED_SHORT_5_6_5:
+        case GL_UNSIGNED_SHORT_5_6_5_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+        case GL_UNSIGNED_INT_5_9_9_9_REV:
+            return format == GL_RGB;
+
+        case GL_UNSIGNED_SHORT_4_4_4_4:
+        case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+        case GL_UNSIGNED_SHORT_5_5_5_1:
+        case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+            return format == GL_RGBA || format == GL_BGRA;
+
+        case GL_UNSIGNED_INT_8_8_8_8:
+        case GL_UNSIGNED_INT_8_8_8_8_REV:
+        case GL_UNSIGNED_INT_10_10_10_2:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+            return format == GL_RGBA || format == GL_BGRA ||
+                   format == GL_RGBA_INTEGER || format == GL_BGRA_INTEGER;
+
+        case GL_UNSIGNED_INT_24_8:
+        case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+            return false;   // DEPTH_STENCIL only, handled above
+    }
+
+    return true;
+}
+
 GLenum mglFormatSizedForBase(GLenum gl_internal_format)
 {
     switch (gl_internal_format) {

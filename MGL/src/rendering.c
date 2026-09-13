@@ -493,6 +493,8 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
 
         if (src_format)
             ERROR_CHECK_RETURN(mglReadbackFormatAgrees(src_format, format), GL_INVALID_OPERATION);
+
+        ERROR_CHECK_RETURN(mglFormatTypeAgrees(format, type), GL_INVALID_OPERATION);
     }
 
     // ERROR_CHECK_RETURN(width > 0, GL_INVALID_ENUM);

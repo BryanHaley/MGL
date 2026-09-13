@@ -53,6 +53,9 @@ extern void  glGetBufferSubData(GLenum, GLintptr, GLsizeiptr, void *);
 extern void  glUseProgram(GLuint);
 extern void  glDispatchCompute(GLuint, GLuint, GLuint);
 extern void  glMemoryBarrier(GLbitfield);
+extern void  glTexImage3D(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+extern void  glTexParameteri(GLenum, GLenum, GLint);
+extern void  glDeleteTextures(GLsizei, const GLuint *);
 
 /* --- reporting ----------------------------------------------------------- */
 static int  g_gates;
@@ -232,6 +235,57 @@ static void phase4(void)
 
         gate("sampler uniforms have locations", ok && glGetUniformLocation(p, "s") >= 0,
              "glUniform1i picks the texture unit");
+    }
+
+    /* Array and rectangle textures used to reach Metal as NULL and come back
+       as the renderer's emergency gradient, so a round trip is the check. */
+    {
+        GLubyte src[7 * 5 * 12 * 4], got[sizeof src];
+        GLuint tex;
+        int layers = 12, w = 7, h = 5, bad, i;
+
+        for (i = 0; i < w * h * layers * 4; i++)
+            src[i] = (GLubyte)(i * 7 + 1);
+
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+        drain();
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, w, h, layers, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, src);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0);
+        memset(got, 0xAB, sizeof got);
+        glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+
+        for (bad = 0, i = 0; i < w * h * layers * 4; i++)
+            if (src[i] != got[i]) bad++;
+
+        gate("array textures round trip", glGetError() == GL_NO_ERROR && bad == 0,
+             "12 layers of 7x5, every byte");
+        glDeleteTextures(1, &tex);
+    }
+
+    {
+        GLubyte src[7 * 5 * 4], got[sizeof src];
+        GLuint tex;
+        int bad, i;
+
+        for (i = 0; i < (int)sizeof src; i++)
+            src[i] = (GLubyte)(i * 3 + 2);
+
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_RECTANGLE, tex);
+        drain();
+        glTexImage2D(GL_TEXTURE_RECTANGLE, 0, GL_RGBA8, 7, 5, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, src);
+        memset(got, 0xAB, sizeof got);
+        glGetTexImage(GL_TEXTURE_RECTANGLE, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+
+        for (bad = 0, i = 0; i < (int)sizeof src; i++)
+            if (src[i] != got[i]) bad++;
+
+        gate("rectangle textures round trip", glGetError() == GL_NO_ERROR && bad == 0,
+             "core since 3.1");
+        glDeleteTextures(1, &tex);
     }
 
     /* Advertising the string is not the criterion -- the arithmetic is. 1e-10

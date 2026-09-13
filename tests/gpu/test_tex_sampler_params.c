@@ -5,6 +5,7 @@
  * Texture and sampler parameter setters, including the integer variants.
  */
 
+#include <string.h>
 #include "mgl_test.h"
 #include "harness.h"
 
@@ -441,4 +442,112 @@ GPU_TEST(tex_sampler_params, texture_parameter_dsa_iiv_and_iuiv)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glDeleteTextures(1, &t);
+}
+
+/* GL 3.3 allows GL_ZERO and GL_ONE as swizzle sources. Neither reached Metal,
+   so a swizzle of GL_ONE handed back the original component instead of 1.0. */
+static void set_swizzle(void)
+{
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_ZERO);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
+}
+
+static void swizzle_case(int after_first_use);
+
+/* Metal fixes a texture's swizzle when the texture is made, so a swizzle set
+   after it has already been sampled needs a new view of the same storage. */
+GPU_TEST(tex_sampler_params, swizzle_set_after_first_use_takes_effect)
+{
+    swizzle_case(1);
+}
+
+GPU_TEST(tex_sampler_params, swizzle_accepts_zero_and_one)
+{
+    swizzle_case(0);
+}
+
+static void swizzle_case(int after_first_use)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "void main(){vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));"
+        "gl_Position=vec4(p[gl_VertexID],0,1);}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "uniform sampler2D s;out vec4 o;void main(){o=texelFetch(s,ivec2(0),0);}\n";
+
+    GLubyte px[4] = {0x10, 0x20, 0x30, 0x40};
+    GLubyte out[4 * 4 * 4];
+    GLuint tex = 0, rt = 0, fb = 0, vao = 0;
+    GLint ok = 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    if (!after_first_use)
+        set_swizzle();
+
+    glGenTextures(1, &rt);
+    glBindTexture(GL_TEXTURE_2D, rt);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+
+    GLuint v = glCreateShader(GL_VERTEX_SHADER), f = glCreateShader(GL_FRAGMENT_SHADER);
+    GLuint p = glCreateProgram();
+
+    glShaderSource(v, 1, &VS, NULL); glCompileShader(v);
+    glShaderSource(f, 1, &FS, NULL); glCompileShader(f);
+    glAttachShader(p, v); glAttachShader(p, f); glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK_EQ_INT(GL_TRUE, ok);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(p);
+    glUniform1i(glGetUniformLocation(p, "s"), 0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glViewport(0, 0, 4, 4);
+    mgl_drain_errors();
+
+    if (after_first_use)
+    {
+        glDrawArrays(GL_TRIANGLES, 0, 3);   /* sample once with the default */
+
+        /* The flush is load-bearing, and that is a separate bug: a texture
+           state change between two draws inside one render pass is not seen,
+           because nothing re-binds the texture on the open encoder. */
+        glFinish();
+
+        set_swizzle();
+    }
+
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    memset(out, 0xAB, sizeof out);
+    glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, out);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    CHECK_EQ_INT(0x30, out[0]);   /* R <- blue  */
+    CHECK_EQ_INT(0x00, out[1]);   /* G <- zero  */
+    CHECK_EQ_INT(0x10, out[2]);   /* B <- red   */
+    CHECK_EQ_INT(0xFF, out[3]);   /* A <- one   */
+
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteProgram(p);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &rt);
+    glDeleteTextures(1, &tex);
 }

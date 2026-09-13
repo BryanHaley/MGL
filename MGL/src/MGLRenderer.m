@@ -957,59 +957,29 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 
 #pragma mark textures
 
+// GL 3.3 allows GL_ZERO and GL_ONE alongside the four channels, and neither
+// was mapped -- a swizzle of GL_ONE handed back the original component.
+static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
+{
+    switch (v)
+    {
+        case GL_RED:   return MTLTextureSwizzleRed;
+        case GL_GREEN: return MTLTextureSwizzleGreen;
+        case GL_BLUE:  return MTLTextureSwizzleBlue;
+        case GL_ALPHA: return MTLTextureSwizzleAlpha;
+        case GL_ZERO:  return MTLTextureSwizzleZero;
+        case GL_ONE:   return MTLTextureSwizzleOne;
+    }
+
+    return fallback;
+}
+
 - (void)swizzleTexDesc:(MTLTextureDescriptor *)tex_desc forTex:(Texture*)tex
 {
-    unsigned channel_r, channel_g, channel_b, channel_a;
-
-    channel_r = channel_g = channel_b = channel_a = 0;
-
-    switch(tex->params.swizzle_r)
-    {
-        case GL_RED: channel_r = MTLTextureSwizzleRed; break;
-        case GL_GREEN: channel_r = MTLTextureSwizzleGreen; break;
-        case GL_BLUE: channel_r = MTLTextureSwizzleBlue; break;
-        case GL_ALPHA: channel_r = MTLTextureSwizzleAlpha; break;
-        default: // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
-            channel_r = MTLTextureSwizzleRed; // Safe default
-            break;
-    }
-
-    switch(tex->params.swizzle_g)
-    {
-        case GL_RED: channel_g = MTLTextureSwizzleRed; break;
-        case GL_GREEN: channel_g = MTLTextureSwizzleGreen; break;
-        case GL_BLUE: channel_g = MTLTextureSwizzleBlue; break;
-        case GL_ALPHA: channel_g = MTLTextureSwizzleAlpha; break;
-        default: // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
-            channel_g = MTLTextureSwizzleGreen; // Safe default
-            break;
-    }
-
-    switch(tex->params.swizzle_b)
-    {
-        case GL_RED: channel_b = MTLTextureSwizzleRed; break;
-        case GL_GREEN: channel_b = MTLTextureSwizzleGreen; break;
-        case GL_BLUE: channel_b = MTLTextureSwizzleBlue; break;
-        case GL_ALPHA: channel_b = MTLTextureSwizzleAlpha; break;
-        default: // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
-            channel_b = MTLTextureSwizzleBlue; // Safe default
-            break;
-    }
-
-    switch(tex->params.swizzle_a)
-    {
-        case GL_RED: channel_a = MTLTextureSwizzleRed; break;
-        case GL_GREEN: channel_a = MTLTextureSwizzleGreen; break;
-        case GL_BLUE: channel_a = MTLTextureSwizzleBlue; break;
-        case GL_ALPHA: channel_a = MTLTextureSwizzleAlpha; break;
-        default: // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Unknown swizzle value in swizzleTexDesc at line %d", __LINE__);
-            channel_a = MTLTextureSwizzleAlpha; // Safe default
-            break;
-    }
+    MTLTextureSwizzle channel_r = swizzleForGL(tex->params.swizzle_r, MTLTextureSwizzleRed);
+    MTLTextureSwizzle channel_g = swizzleForGL(tex->params.swizzle_g, MTLTextureSwizzleGreen);
+    MTLTextureSwizzle channel_b = swizzleForGL(tex->params.swizzle_b, MTLTextureSwizzleBlue);
+    MTLTextureSwizzle channel_a = swizzleForGL(tex->params.swizzle_a, MTLTextureSwizzleAlpha);
 
     tex_desc.swizzle = MTLTextureSwizzleChannelsMake(channel_r, channel_g, channel_b, channel_a);
 }
@@ -1047,6 +1017,9 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         case GL_RENDERBUFFER: tex_type = MTLTextureType2D; break;
         case GL_TEXTURE_1D_ARRAY: tex_type = MTLTextureType1DArray; is_array = true; break;
         case GL_TEXTURE_2D: tex_type = MTLTextureType2D; break;
+        // a rectangle is a 2D texture with unnormalised coordinates and no
+        // mip chain; Metal has no separate type for it
+        case GL_TEXTURE_RECTANGLE: tex_type = MTLTextureType2D; break;
         case GL_TEXTURE_2D_ARRAY: tex_type = MTLTextureType2DArray; is_array = true; break;
         // case GL_TEXTURE_2D_MULTISAMPLE: tex_type = MTLTextureType2DMultisample; break;
 
@@ -1074,12 +1047,9 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     // verify completeness of texture when used
     if (tex->num_levels > 1)
     {
-        // mipmapped texture
-        if (tex->num_levels != tex->mipmap_levels)
-        {
-            return NULL;
-        }
-
+        // An application may define only the first few levels of a chain and
+        // set MAX_LEVEL to match. Demanding the whole chain here threw the
+        // texture away and handed back the emergency gradient instead.
         for(int face=0; face<num_faces; face++)
         {
             for (int i=0; i<tex->num_levels; i++)
@@ -1201,7 +1171,8 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 
     if (mipmapped)
     {
-        tex_desc.mipmapLevelCount = tex->mipmap_levels;
+        // as many as are actually defined, not as many as the chain could hold
+        tex_desc.mipmapLevelCount = tex->num_levels ? tex->num_levels : 1;
     }
 
     switch(tex->access)
@@ -1403,19 +1374,26 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                         size_t offset;
                         GLubyte *tex_data;
 
-                        num_layers = tex->depth;
+                        // a 1D array keeps its layer count in height, not depth
+                        num_layers = (tex->target == GL_TEXTURE_1D_ARRAY)
+                                   ? (tex->height ? tex->height : 1)
+                                   : (tex->depth ? tex->depth : 1);
 
-                        // adjust GL to metal bytesPerImage
-                        bytesPerImage /= num_layers;
+                        // One layer is pitch x its own height. data_size is the
+                        // page-aligned allocation, so dividing that by the layer
+                        // count put every layer after the first at a wrong offset.
+                        bytesPerImage = (tex->target == GL_TEXTURE_1D_ARRAY)
+                                      ? bytesPerRow
+                                      : bytesPerRow * (size_t)(height ? height : 1);
 
-                        if (depth > 1) // 2d array
-                            region = MTLRegionMake3D(0,0,0,width,height,1);
-                        else if (height >= 1) // 1d array
-                            region = MTLRegionMake2D(0,0,width,1);
-                        else // ?
-                            // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
-            return NULL;
+                        // The target says which shape a layer is; guessing it from
+                        // the dimensions got a one-layer 2D array wrong. The
+                        // unbraced else here also ran `return NULL` for every
+                        // array texture, so none of them ever reached Metal.
+                        if (tex->target == GL_TEXTURE_1D_ARRAY)
+                            region = MTLRegionMake2D(0, 0, width, 1);
+                        else
+                            region = MTLRegionMake3D(0, 0, 0, width, height ? height : 1, 1);
 
                         for(int layer=0; layer<num_layers; layer++)
                         {
@@ -1448,7 +1426,9 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 
                                     if (alignedData) {
                                         // Copy data with row alignment
-                                        NSUInteger sliceHeight = (depth > 1) ? 1 : height; // Array texture slice height
+                                        // one layer is a whole image: every row of it has to
+                                        // be copied, not just the first
+                                        NSUInteger sliceHeight = region.size.height;
                                         NSUInteger srcRowSize = bytesPerRow;
                                         NSUInteger dstRowSize = alignedBytesPerRow;
                                         uint8_t *srcPtr = (uint8_t *)srcData;
@@ -2026,6 +2006,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         }
     }
 
+    tex->mtl_swizzle = packedSwizzle(&tex->params);
     tex->dirty_bits = 0;
 
     // debug aid only; this corrupts render targets
@@ -2716,6 +2697,16 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     return true;
 }
 
+// Metal fixes the swizzle when a texture is made, so a change afterwards needs
+// a new one. Pack the four channels to notice when it moves.
+static GLuint packedSwizzle(const TextureParameter *p)
+{
+    return ((GLuint)(p->swizzle_r & 0xFF))
+         | ((GLuint)(p->swizzle_g & 0xFF) << 8)
+         | ((GLuint)(p->swizzle_b & 0xFF) << 16)
+         | ((GLuint)(p->swizzle_a & 0xFF) << 24);
+}
+
 - (bool)bindMTLTexture:(Texture *)tex
 {
     // Sampler state and pixel storage are different things. Dropping the Metal
@@ -2723,6 +2714,31 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     // the storage may do that -- a filter or wrap change must not.
     bool storage_changed = (tex->dirty_bits & (DIRTY_TEXTURE_LEVEL | DIRTY_TEXTURE_DATA)) != 0;
     bool sampler_changed = (tex->dirty_bits & (DIRTY_TEXTURE_PARAM | DIRTY_TEXTURE_ACCESS)) != 0;
+
+    // A swizzle set after the texture exists was silently ignored. Re-view the
+    // same storage under the new channels; nothing drawn into it is lost.
+    if (tex->mtl_data && packedSwizzle(&tex->params) != tex->mtl_swizzle)
+    {
+        id<MTLTexture> base = (__bridge id<MTLTexture>)(tex->mtl_data);
+        MTLTextureSwizzleChannels sw = MTLTextureSwizzleChannelsMake(
+            swizzleForGL(tex->params.swizzle_r, MTLTextureSwizzleRed),
+            swizzleForGL(tex->params.swizzle_g, MTLTextureSwizzleGreen),
+            swizzleForGL(tex->params.swizzle_b, MTLTextureSwizzleBlue),
+            swizzleForGL(tex->params.swizzle_a, MTLTextureSwizzleAlpha));
+
+        id<MTLTexture> view = [base newTextureViewWithPixelFormat: base.pixelFormat
+                                                     textureType: base.textureType
+                                                          levels: NSMakeRange(0, base.mipmapLevelCount)
+                                                          slices: NSMakeRange(0, base.arrayLength)
+                                                         swizzle: sw];
+
+        if (view)
+        {
+            CFBridgingRelease(tex->mtl_data);
+            tex->mtl_data = (void *)CFBridgingRetain(view);
+            tex->mtl_swizzle = packedSwizzle(&tex->params);
+        }
+    }
 
     if (storage_changed && tex->mtl_data)
     {
