@@ -46,12 +46,28 @@ GLenum  mglGetError(GLMContext ctx)
 }
 
 
+void mglDebugEmit(GLMContext ctx, GLenum source, GLenum type, GLuint id, GLenum severity, const char *text);
+
+// The whole point of KHR_debug for a developer is that the driver tells you
+// which call went wrong, as it happens. Route every GL error into the log.
+static void debugReportError(GLMContext ctx, const char *func, GLenum error)
+{
+    char text[256];
+
+    snprintf(text, sizeof text, "%s raised 0x%04x", func ? func : "?", error);
+
+    mglDebugEmit(ctx, GL_DEBUG_SOURCE_API, GL_DEBUG_TYPE_ERROR, error,
+                 GL_DEBUG_SEVERITY_HIGH, text);
+}
+
 void error_func(GLMContext ctx, const char *func, GLenum error)
 {
     // GL keeps only the first error until glGetError clears it, but an app that
     // never calls glGetError would then silence every later error in the log
     if (ctx->state.error == GL_NO_ERROR)
         ctx->state.error = error;
+
+    debugReportError(ctx, func, error);
 
     MGL_ERR("MGL GL Error in %s: 0x%x\n", func, error);
 
@@ -126,6 +142,11 @@ void mglDebugEmit(GLMContext ctx, GLenum source, GLenum type, GLuint id, GLenum 
     GLDEBUGPROC callback;
     DebugMessage *msg;
     GLsizei len;
+
+    // GL only generates debug output while GL_DEBUG_OUTPUT is enabled, which
+    // is what keeps this off the hot path for an app that never asked for it.
+    if (ctx->state.caps.debug_output == false)
+        return;
 
     if (debug->messages_enabled == GL_FALSE)
         return;
@@ -266,6 +287,9 @@ void mglPushDebugGroup(GLMContext ctx, GLenum source, GLuint id, GLsizei length,
     debug->group_depth++;
 
     mglDebugEmit(ctx, source, GL_DEBUG_TYPE_PUSH_GROUP, id, GL_DEBUG_SEVERITY_NOTIFICATION, text);
+
+    if (ctx->mtl_funcs.mtlPushDebugGroup)
+        ctx->mtl_funcs.mtlPushDebugGroup(ctx, text);
 }
 
 void mglPopDebugGroup(GLMContext ctx)
@@ -280,6 +304,9 @@ void mglPopDebugGroup(GLMContext ctx)
 
     mglDebugEmit(ctx, group->source, GL_DEBUG_TYPE_POP_GROUP, group->id,
                  GL_DEBUG_SEVERITY_NOTIFICATION, group->text);
+
+    if (ctx->mtl_funcs.mtlPopDebugGroup)
+        ctx->mtl_funcs.mtlPopDebugGroup(ctx);
 }
 
 /* ---------- object labels ---------- */
@@ -450,6 +477,17 @@ void mglObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, GLsizei leng
     ERROR_CHECK_RETURN(len < MAX_OBJECT_LABEL, GL_INVALID_VALUE);
 
     labelStore(ctx, identifier, name, NULL, label, len);
+
+    // carry it to Metal too, so a capture names the same object the GL code does
+    if (ctx->mtl_funcs.mtlLabelObject)
+    {
+        char text[MAX_OBJECT_LABEL];
+
+        memcpy(text, label, (size_t)len);
+        text[len] = '\0';
+
+        ctx->mtl_funcs.mtlLabelObject(ctx, identifier, name, text);
+    }
 }
 
 // the body of glGetObjectLabel, which lives elsewhere

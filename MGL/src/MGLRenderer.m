@@ -6034,6 +6034,78 @@ void mtlForgetSync (GLMContext glm_ctx, Sync *sync)
     [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlForgetSync: glm_ctx sync: sync];
 }
 
+extern Texture *findTexture(GLMContext ctx, GLuint texture);
+extern Buffer *findBuffer(GLMContext ctx, GLuint buffer);
+
+#pragma mark C interface to the KHR_debug hooks
+// Xcode's capture shows these, so a GL debug group and a Metal one line up.
+-(void) mtlPushDebugGroup:(GLMContext) glm_ctx name:(const char *)name
+{
+    NSString *label = [NSString stringWithUTF8String: name ? name : "GL group"];
+
+    if (_currentRenderEncoder)
+        [_currentRenderEncoder pushDebugGroup: label];
+    else if (_currentComputeEncoder)
+        [_currentComputeEncoder pushDebugGroup: label];
+    else if (_currentCommandBuffer)
+        [_currentCommandBuffer pushDebugGroup: label];
+}
+
+-(void) mtlPopDebugGroup:(GLMContext) glm_ctx
+{
+    if (_currentRenderEncoder)
+        [_currentRenderEncoder popDebugGroup];
+    else if (_currentComputeEncoder)
+        [_currentComputeEncoder popDebugGroup];
+    else if (_currentCommandBuffer)
+        [_currentCommandBuffer popDebugGroup];
+}
+
+-(void) mtlLabelObject:(GLMContext) glm_ctx identifier:(GLenum)identifier name:(GLuint)name label:(const char *)label
+{
+    NSString *str = [NSString stringWithUTF8String: label ? label : ""];
+
+    switch (identifier)
+    {
+        case GL_TEXTURE:
+        {
+            Texture *tex = findTexture(glm_ctx, name);
+
+            if (tex && tex->mtl_data)
+                ((__bridge id<MTLTexture>)tex->mtl_data).label = str;
+            break;
+        }
+
+        case GL_BUFFER:
+        {
+            Buffer *buf = findBuffer(glm_ctx, name);
+
+            if (buf && buf->data.mtl_data)
+                ((__bridge id<MTLBuffer>)buf->data.mtl_data).label = str;
+            break;
+        }
+
+        default:
+            // the rest have no Metal object of their own; the GL-side label still stands
+            break;
+    }
+}
+
+void mtlPushDebugGroup (GLMContext glm_ctx, const char *name)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlPushDebugGroup: glm_ctx name: name];
+}
+
+void mtlPopDebugGroup (GLMContext glm_ctx)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlPopDebugGroup: glm_ctx];
+}
+
+void mtlLabelObject (GLMContext glm_ctx, GLenum identifier, GLuint name, const char *label)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlLabelObject: glm_ctx identifier: identifier name: name label: label];
+}
+
 #pragma mark C interface to mtlFlush
 -(void) mtlFlush:(GLMContext) glm_ctx finish:(bool)finish
 {
@@ -7669,6 +7741,9 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
     glm_ctx->mtl_funcs.mtlGetSync = mtlGetSync;
     glm_ctx->mtl_funcs.mtlWaitForSync = mtlWaitForSync;
     glm_ctx->mtl_funcs.mtlForgetSync = mtlForgetSync;
+    glm_ctx->mtl_funcs.mtlPushDebugGroup = mtlPushDebugGroup;
+    glm_ctx->mtl_funcs.mtlPopDebugGroup = mtlPopDebugGroup;
+    glm_ctx->mtl_funcs.mtlLabelObject = mtlLabelObject;
     glm_ctx->mtl_funcs.mtlFlush = mtlFlush;
     glm_ctx->mtl_funcs.mtlSwapBuffers = mtlSwapBuffers;
     glm_ctx->mtl_funcs.mtlClearBuffer = mtlClearBuffer;

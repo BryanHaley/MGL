@@ -816,6 +816,11 @@ struct GLMMetalFuncs {
     void (*mtlWaitForSync)(GLMContext glm_ctx, Sync *sync);
     void (*mtlForgetSync)(GLMContext glm_ctx, Sync *sync);
 
+    // KHR_debug, so a GPU capture reads the way the GL code does
+    void (*mtlPushDebugGroup)(GLMContext glm_ctx, const char *name);
+    void (*mtlPopDebugGroup)(GLMContext glm_ctx);
+    void (*mtlLabelObject)(GLMContext glm_ctx, GLenum identifier, GLuint name, const char *label);
+
     void (*mtlFlush)(GLMContext glm_ctx, bool finish);
     void (*mtlSwapBuffers)(GLMContext glm_ctx);
     

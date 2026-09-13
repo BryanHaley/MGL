@@ -340,6 +340,16 @@ gears-test: gears
 	@echo "== OpenGL 4.6 port =="
 	@$(gears_gl46_exe) --check --frames 4 --size 256 256 --out $(build_dir)/gears_gl46.tga
 
+probe_srcs := $(wildcard $(test_dir)/probes/*.c)
+probe_exes := $(patsubst $(test_dir)/probes/%.c,$(build_dir)/%,$(probe_srcs))
+
+$(build_dir)/%: $(test_dir)/probes/%.c $(mgl_lib)
+	$(CC) $(CFLAGS) -o $@ $< -L$(build_dir) -lmgl -Wl,-rpath,$(abspath $(build_dir))
+
+# Roadmap finish criteria you can run. A phase is done when its gates are clear.
+probe: $(probe_exes)
+	@for p in $(probe_exes); do echo; $$p || true; done
+
 tests: $(test_exe)
 
 test: $(test_exe)

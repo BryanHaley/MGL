@@ -259,6 +259,9 @@ GPU_TEST(khr_debug, insert_then_read_back_in_order)
     char log[512] = { 0 };
     GLuint got;
 
+    // a non-debug context generates no messages until this is on
+    glEnable(GL_DEBUG_OUTPUT);
+
     glDebugMessageCallback(NULL, NULL);
 
     glDebugMessageInsert(GL_DEBUG_SOURCE_APPLICATION, GL_DEBUG_TYPE_MARKER, 11,
@@ -303,6 +306,9 @@ GPU_TEST(khr_debug, callback_bypasses_the_queue)
     GLsizei lens[2];
     char log[256];
 
+    // a non-debug context generates no messages until this is on
+    glEnable(GL_DEBUG_OUTPUT);
+
     g_cb_seen = 0;
     g_cb_last_id = 0;
     g_cb_user_ok = 0;
@@ -326,6 +332,9 @@ GPU_TEST(khr_debug, groups_push_and_pop)
     GLuint ids[4];
     GLsizei lens[4];
     char log[512];
+
+    // a non-debug context generates no messages until this is on
+    glEnable(GL_DEBUG_OUTPUT);
 
     glDebugMessageCallback(NULL, NULL);
 

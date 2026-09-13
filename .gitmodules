@@ -16,3 +16,6 @@
 [submodule "submodules/FidelityFX-FSR2-OpenGL"]
 	path = submodules/FidelityFX-FSR2-OpenGL
 	url = https://github.com/JuanDiegoMontoya/FidelityFX-FSR2-OpenGL.git
+[submodule "submodules/glu"]
+	path = submodules/glu
+	url = https://gitlab.freedesktop.org/mesa/glu.git

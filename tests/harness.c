@@ -93,6 +93,9 @@ void mgl_harness_reset(void)
     glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
     glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
     glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
+    // debug output is off in a non-debug context; a test that turns it on
+    // must not leave it on for the next one
+    glDisable(GL_DEBUG_OUTPUT);
 
     // constant attribute values are context state and persist across tests
     {

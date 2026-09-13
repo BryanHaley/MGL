@@ -566,8 +566,14 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x886D: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_EVALUATION_INPUT_COMPONENTS
         case 0x8E86: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_EVALUATION_OUTPUT_COMPONENTS
 
-        case 0x8F38: RET_TYPE_CONST(type, 1); break;    // GL_MAX_IMAGE_SAMPLES
-        case 0x8F39: RET_TYPE_CONST(type, 0); break;    // GL_IMAGE_BINDING_FORMAT
+        // 0x8F38 is MAX_IMAGE_UNITS, not MAX_IMAGE_SAMPLES -- an earlier pass
+        // mislabelled it and answered 1 where the 4.6 floor is 8.
+        case 0x8F38: RET_TYPE_CONST(type, TEXTURE_UNITS); break; // GL_MAX_IMAGE_UNITS
+        case 0x906D: RET_TYPE_CONST(type, 1); break;    // GL_MAX_IMAGE_SAMPLES
+        case 0x90CA: RET_TYPE_CONST(type, 8); break;    // GL_MAX_VERTEX_IMAGE_UNIFORMS
+        case 0x90CE: RET_TYPE_CONST(type, 8); break;    // GL_MAX_FRAGMENT_IMAGE_UNIFORMS
+        case 0x90CF: RET_TYPE_CONST(type, 8); break;    // GL_MAX_COMBINED_IMAGE_UNIFORMS
+        case 0x91BD: RET_TYPE_CONST(type, 8); break;    // GL_MAX_COMPUTE_IMAGE_UNIFORMS
 
         case 0x8E22: RET_TYPE_CONST(type, 0); break;    // GL_TRANSFORM_FEEDBACK
         case 0x8E23: RET_TYPE_CONST(type, GL_FALSE); break; // GL_TRANSFORM_FEEDBACK_PAUSED
