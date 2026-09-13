@@ -13,3 +13,6 @@
 [submodule "submodules/OpenCL-CTS"]
 	path = submodules/OpenCL-CTS
 	url = https://github.com/KhronosGroup/OpenCL-CTS.git
+[submodule "submodules/FidelityFX-FSR2-OpenGL"]
+	path = submodules/FidelityFX-FSR2-OpenGL
+	url = https://github.com/JuanDiegoMontoya/FidelityFX-FSR2-OpenGL.git
