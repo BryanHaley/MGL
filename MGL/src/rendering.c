@@ -26,6 +26,7 @@
 #include <stdint.h>
 
 #include "mgl.h"
+#include "mgl_format_table.h"
 
 #include "pixel_utils.h"
 #include "glm_context.h"
@@ -234,7 +235,10 @@ void mglDrawBuffer(GLMContext ctx, GLenum buf)
     else
     switch(buf)
     {
+        // GL_BACK is what a double-buffered default framebuffer draws to, so
+        // it is the common case, not an exotic one
         case GL_FRONT:
+        case GL_BACK:
             break;
 
         case GL_NONE:
@@ -461,6 +465,34 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
     if (pixel_size == 0) {
         MGL_ERR("MGL Error: mglReadPixels: invalid format/type combination (format=0x%x type=0x%x)\n", format, type);
         ERROR_RETURN(GL_INVALID_ENUM);
+    }
+
+    // the read buffer decides which client formats are legal here
+    {
+        Framebuffer *fbo = ctx->state.readbuffer;
+        GLenum src_format = 0;
+
+        if (fbo)
+        {
+            GLuint att = 0;
+
+            if (ctx->state.read_buffer >= GL_COLOR_ATTACHMENT0 &&
+                ctx->state.read_buffer < GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
+                att = ctx->state.read_buffer - GL_COLOR_ATTACHMENT0;
+
+            if (fbo->color_attachments[att].textarget == GL_RENDERBUFFER)
+            {
+                if (fbo->color_attachments[att].buf.rbo && fbo->color_attachments[att].buf.rbo->tex)
+                    src_format = fbo->color_attachments[att].buf.rbo->tex->internalformat;
+            }
+            else if (fbo->color_attachments[att].buf.tex)
+            {
+                src_format = fbo->color_attachments[att].buf.tex->internalformat;
+            }
+        }
+
+        if (src_format)
+            ERROR_CHECK_RETURN(mglReadbackFormatAgrees(src_format, format), GL_INVALID_OPERATION);
     }
 
     // ERROR_CHECK_RETURN(width > 0, GL_INVALID_ENUM);

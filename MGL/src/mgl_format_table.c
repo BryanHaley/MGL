@@ -708,6 +708,14 @@ GLenum mglFormatSizedForBase(GLenum gl_internal_format)
         case GL_RG:              return GL_RG8;
         case GL_RGB:             return GL_RGB8;
         case GL_RGBA:            return GL_RGBA8;
+        case GL_SRGB:            return GL_SRGB8;
+        case GL_SRGB_ALPHA:      return GL_SRGB8_ALPHA8;
+        case GL_COMPRESSED_RED:  return GL_R8;
+        case GL_COMPRESSED_RG:   return GL_RG8;
+        case GL_COMPRESSED_RGB:  return GL_RGB8;
+        case GL_COMPRESSED_RGBA: return GL_RGBA8;
+        case GL_COMPRESSED_SRGB: return GL_SRGB8;
+        case GL_COMPRESSED_SRGB_ALPHA: return GL_SRGB8_ALPHA8;
         case GL_DEPTH_COMPONENT: return GL_DEPTH_COMPONENT24;
         case GL_DEPTH_STENCIL:   return GL_DEPTH24_STENCIL8;
         case GL_STENCIL_INDEX:   return GL_STENCIL_INDEX8;

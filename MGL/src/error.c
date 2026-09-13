@@ -62,6 +62,14 @@ static void debugReportError(GLMContext ctx, const char *func, GLenum error)
 
 void error_func(GLMContext ctx, const char *func, GLenum error)
 {
+    // Inside a compile or link, a failure is not a GL error. Keep the message
+    // in the log so it is still findable, but do not raise it.
+    if (ctx->error_suppress)
+    {
+        MGL_ERR("MGL shader build failed in %s: 0x%x\n", func, error);
+        return;
+    }
+
     // GL keeps only the first error until glGetError clears it, but an app that
     // never calls glGetError would then silence every later error in the log
     if (ctx->state.error == GL_NO_ERROR)

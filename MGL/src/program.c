@@ -605,6 +605,13 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
+    // Metal has no double. SPIRV-Cross carries every double as three floats
+    // that add up to it, which is close enough for GL's fp64 rules.
+    if (spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_FP64_MODE, 2) != SPVC_SUCCESS) {
+        MGL_ERR("MGL Error: spvc_compiler_options_set_uint(SPVC_COMPILER_OPTION_MSL_FP64_MODE) failed\n");
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
+
     // GL is happy for a fragment shader to write a vec3 into an RGBA target and
     // fills alpha in itself. Metal refuses the pipeline outright, so the output
     // gets padded out to four components here.
@@ -1165,6 +1172,10 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
     int stages_linked = 0;
 
+    // GL 4.6 section 7.3: glLinkProgram raises an error only for a bad program
+    // object. A stage that will not build sets LINK_STATUS false instead.
+    ctx->error_suppress++;
+
     for (int stage=0; stage<_MAX_SHADER_TYPES; stage++)
     {
         pptr->spirv[stage].msl_str = 0;
@@ -1209,6 +1220,8 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     } else {
         MGL_INFO("WARNING: Metal functions not initialized, skipping mtlBindProgram\n");
     }
+
+    ctx->error_suppress--;
 
     //ERROR_CHECK_RETURN(pptr->mtl_data, GL_INVALID_OPERATION);
 }

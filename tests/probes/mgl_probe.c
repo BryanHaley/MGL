@@ -45,6 +45,14 @@ extern void  glGenTransformFeedbacks(GLsizei, GLuint *);
 extern void  glBindTransformFeedback(GLenum, GLuint);
 extern void  glEnable(GLenum);
 extern void  glDisable(GLenum);
+extern void  glGenBuffers(GLsizei, GLuint *);
+extern void  glBindBuffer(GLenum, GLuint);
+extern void  glBufferData(GLenum, GLsizeiptr, const void *, GLenum);
+extern void  glBindBufferBase(GLenum, GLuint, GLuint);
+extern void  glGetBufferSubData(GLenum, GLintptr, GLsizeiptr, void *);
+extern void  glUseProgram(GLuint);
+extern void  glDispatchCompute(GLuint, GLuint, GLuint);
+extern void  glMemoryBarrier(GLbitfield);
 
 /* --- reporting ----------------------------------------------------------- */
 static int  g_gates;
@@ -226,8 +234,51 @@ static void phase4(void)
              "glUniform1i picks the texture unit");
     }
 
-    gate("ARB_gpu_shader_fp64 advertised", hasExt("GL_ARB_gpu_shader_fp64"),
-         "core since 4.0; lowering is built but not wired");
+    /* Advertising the string is not the criterion -- the arithmetic is. 1e-10
+       added to 1.0 vanishes in a 24-bit float and survives in a double, so a
+       result near 1.0 here can only come from real fp64. */
+    {
+        GLuint p = glCreateProgram(), c = glCreateShader(GL_COMPUTE_SHADER), b;
+        const char *src =
+            "#version 430\n"
+            "layout(local_size_x=1) in;\n"
+            "layout(std430, binding=0) buffer Out { float r; };\n"
+            "void main(){\n"
+            "  double a = 1.0LF;\n"
+            "  double b = a + 1.0e-10LF;\n"
+            "  r = float((b - a) * 1.0e10LF);\n"
+            "}\n";
+        GLint ok = 0;
+        float got = -1.0f, seed = -1.0f;
+
+        glShaderSource(c, 1, &src, NULL); glCompileShader(c);
+        glGetShaderiv(c, GL_COMPILE_STATUS, &ok);
+
+        if (ok)
+        {
+            glAttachShader(p, c); glLinkProgram(p);
+            glGetProgramiv(p, GL_LINK_STATUS, &ok);
+        }
+
+        if (ok)
+        {
+            glGenBuffers(1, &b);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, b);
+            glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float), &seed, GL_DYNAMIC_DRAW);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, b);
+
+            glUseProgram(p);
+            glDispatchCompute(1, 1, 1);
+            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(float), &got);
+            glUseProgram(0);
+        }
+
+        gate("ARB_gpu_shader_fp64 advertised", hasExt("GL_ARB_gpu_shader_fp64"),
+             "core since 4.0");
+        gate("doubles keep bits a float cannot", ok && got > 0.99f && got < 1.01f,
+             ok ? "1.0 + 1e-10 must not round back to 1.0" : "the shader would not compile");
+    }
 }
 
 /* --- phase 5: the features Metal has no answer for ----------------------- */

@@ -1338,6 +1338,13 @@ void mglClearNamedBufferSubData(GLMContext ctx, GLuint buffer, GLenum internalfo
 #pragma mark GL Buffer Map Functions
 static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsizeiptr length, GLbitfield access_flags);
 
+/* A read of buffer contents has to see everything already submitted. The CPU
+   copy is only current once the GPU is done writing it. */
+static void waitForGPUWrites(GLMContext ctx)
+{
+    ctx->mtl_funcs.mtlFlush(ctx, true);
+}
+
 void *mglMapBuffer(GLMContext ctx, GLenum target, GLenum access)
 {
     GLuint index;
@@ -1366,6 +1373,9 @@ void *mglMapBuffer(GLMContext ctx, GLenum target, GLenum access)
     {
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
+
+    if (access == GL_READ_ONLY || access == GL_READ_WRITE)
+        waitForGPUWrites(ctx);
 
     ptr->mapped = GL_TRUE;
     ptr->access = access;
@@ -1514,6 +1524,9 @@ static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsize
         // GL_MAP_PERSISTENT_BIT and GL_MAP_COHERENT_BIT need to be together
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
+
+    if ((access_flags & GL_MAP_READ_BIT) && !(access_flags & GL_MAP_UNSYNCHRONIZED_BIT))
+        waitForGPUWrites(ctx);
 
     ptr->access_flags = access_flags;
     ptr->mapped = GL_TRUE;
@@ -1850,6 +1863,8 @@ void mglGetBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizei
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
+    waitForGPUWrites(ctx);
+
     memcpy(data, (const uint8_t *)((uintptr_t)ptr->data.buffer_data) + (uintptr_t)offset, (size_t)size);
 }
 
@@ -1990,6 +2005,8 @@ void mglGetNamedBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GL
         return;
 
     ERROR_CHECK_RETURN(ptr->data.buffer_data, GL_INVALID_OPERATION);
+
+    waitForGPUWrites(ctx);
 
     memcpy(data, (void *)(ptr->data.buffer_data + offset), (size_t)size);
 }

@@ -525,8 +525,9 @@ void mglDepthRange(GLMContext ctx, GLdouble n, GLdouble f)
 
 void mglViewport(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    ERROR_CHECK_RETURN(width > 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(height > 0, GL_INVALID_VALUE);
+    // only a negative size is an error; zero is legal and the CTS uses it
+    ERROR_CHECK_RETURN(width >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(height >= 0, GL_INVALID_VALUE);
 
     ctx->state.viewport[0].x = (GLfloat)x;
     ctx->state.viewport[0].y = (GLfloat)y;

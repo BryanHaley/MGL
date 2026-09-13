@@ -1126,9 +1126,14 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         case MTLPixelFormatB5G6R5Unorm:
         case MTLPixelFormatBGR5A1Unorm:
         case MTLPixelFormatA1BGR5Unorm:
-            // 16-bit formats can cause issues on AGX
-            needsFormatConversion = YES;
-            pixelFormat = MTLPixelFormatRGBA8Unorm;
+            // Apple GPUs have these; only an Intel Mac needs the substitute.
+            // Swapping them out everywhere left the CPU copy holding 5/5/5/1
+            // data that readback then decoded as RGBA8.
+            if (![_device supportsFamily: MTLGPUFamilyApple1])
+            {
+                needsFormatConversion = YES;
+                pixelFormat = MTLPixelFormatRGBA8Unorm;
+            }
             break;
         case MTLPixelFormatPVRTC_RGBA_2BPP:
         case MTLPixelFormatPVRTC_RGBA_4BPP:
@@ -1176,7 +1181,15 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     // CONSERVATIVE: Always use private storage to avoid compression/caching conflicts
     tex_desc.storageMode = MTLStorageModePrivate;
 
-    if (is_array)
+    if (tex->target == GL_TEXTURE_1D_ARRAY)
+    {
+        // GL puts the layer count in height for a 1D array; Metal wants it in
+        // arrayLength and insists height is 1.
+        tex_desc.arrayLength = height ? height : 1;
+        tex_desc.height = 1;
+        tex_desc.depth = 1;
+    }
+    else if (is_array)
     {
         tex_desc.arrayLength = depth;
         tex_desc.depth = 1;
@@ -2956,7 +2969,20 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     id<MTLLibrary> library;
     __autoreleasing NSError *error = nil;
 
-    library = [_device newLibraryWithSource: [NSString stringWithUTF8String: str] options: nil error: &error];
+    // The fp64 emulation adds three floats to get one double. Fast math would
+    // reorder that and throw away the low bits it depends on.
+    MTLCompileOptions *opts = [MTLCompileOptions new];
+
+    if (@available(macOS 15.0, *)) {
+        opts.mathMode = MTLMathModeSafe;
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        opts.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+    }
+
+    library = [_device newLibraryWithSource: [NSString stringWithUTF8String: str] options: opts error: &error];
     if(!library) {
         MGL_NSERR(@"MGL ERROR: Failed to compile shader: %@ ", [error localizedDescription] );
         MGL_NSERR(@"MGL ERROR: Shader source: %s", str);
@@ -6366,63 +6392,7 @@ void mtlFlushBufferRange(GLMContext glm_ctx, Buffer *buf, GLintptr offset, GLsiz
 // Metal layouts we know how to decode; anything else fails the read cleanly.
 static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
 {
-    switch(f)
-    {
-        case MTLPixelFormatR8Unorm:         return MGL_NF_R8_UNORM;
-        case MTLPixelFormatRG8Unorm:        return MGL_NF_RG8_UNORM;
-        case MTLPixelFormatRGBA8Unorm:      return MGL_NF_RGBA8_UNORM;
-        case MTLPixelFormatBGRA8Unorm:      return MGL_NF_BGRA8_UNORM;
-        case MTLPixelFormatRGBA8Unorm_sRGB: return MGL_NF_RGBA8_UNORM_SRGB;
-        case MTLPixelFormatBGRA8Unorm_sRGB: return MGL_NF_BGRA8_UNORM_SRGB;
-        case MTLPixelFormatR8Snorm:         return MGL_NF_R8_SNORM;
-        case MTLPixelFormatRG8Snorm:        return MGL_NF_RG8_SNORM;
-        case MTLPixelFormatRGBA8Snorm:      return MGL_NF_RGBA8_SNORM;
-        case MTLPixelFormatR8Uint:          return MGL_NF_R8_UINT;
-        case MTLPixelFormatRG8Uint:         return MGL_NF_RG8_UINT;
-        case MTLPixelFormatRGBA8Uint:       return MGL_NF_RGBA8_UINT;
-        case MTLPixelFormatR8Sint:          return MGL_NF_R8_SINT;
-        case MTLPixelFormatRG8Sint:         return MGL_NF_RG8_SINT;
-        case MTLPixelFormatRGBA8Sint:       return MGL_NF_RGBA8_SINT;
-
-        case MTLPixelFormatR16Unorm:        return MGL_NF_R16_UNORM;
-        case MTLPixelFormatRG16Unorm:       return MGL_NF_RG16_UNORM;
-        case MTLPixelFormatRGBA16Unorm:     return MGL_NF_RGBA16_UNORM;
-        case MTLPixelFormatR16Snorm:        return MGL_NF_R16_SNORM;
-        case MTLPixelFormatRG16Snorm:       return MGL_NF_RG16_SNORM;
-        case MTLPixelFormatRGBA16Snorm:     return MGL_NF_RGBA16_SNORM;
-        case MTLPixelFormatR16Uint:         return MGL_NF_R16_UINT;
-        case MTLPixelFormatRG16Uint:        return MGL_NF_RG16_UINT;
-        case MTLPixelFormatRGBA16Uint:      return MGL_NF_RGBA16_UINT;
-        case MTLPixelFormatR16Sint:         return MGL_NF_R16_SINT;
-        case MTLPixelFormatRG16Sint:        return MGL_NF_RG16_SINT;
-        case MTLPixelFormatRGBA16Sint:      return MGL_NF_RGBA16_SINT;
-        case MTLPixelFormatR16Float:        return MGL_NF_R16_FLOAT;
-        case MTLPixelFormatRG16Float:       return MGL_NF_RG16_FLOAT;
-        case MTLPixelFormatRGBA16Float:     return MGL_NF_RGBA16_FLOAT;
-
-        case MTLPixelFormatR32Uint:         return MGL_NF_R32_UINT;
-        case MTLPixelFormatRG32Uint:        return MGL_NF_RG32_UINT;
-        case MTLPixelFormatRGBA32Uint:      return MGL_NF_RGBA32_UINT;
-        case MTLPixelFormatR32Sint:         return MGL_NF_R32_SINT;
-        case MTLPixelFormatRG32Sint:        return MGL_NF_RG32_SINT;
-        case MTLPixelFormatRGBA32Sint:      return MGL_NF_RGBA32_SINT;
-        case MTLPixelFormatR32Float:        return MGL_NF_R32_FLOAT;
-        case MTLPixelFormatRG32Float:       return MGL_NF_RG32_FLOAT;
-        case MTLPixelFormatRGBA32Float:     return MGL_NF_RGBA32_FLOAT;
-
-        case MTLPixelFormatRGB10A2Unorm:    return MGL_NF_RGB10A2_UNORM;
-        case MTLPixelFormatRGB10A2Uint:     return MGL_NF_RGB10A2_UINT;
-        case MTLPixelFormatRG11B10Float:    return MGL_NF_RG11B10_FLOAT;
-        case MTLPixelFormatRGB9E5Float:     return MGL_NF_RGB9E5_FLOAT;
-
-        case MTLPixelFormatDepth16Unorm:        return MGL_NF_DEPTH16_UNORM;
-        case MTLPixelFormatDepth32Float:        return MGL_NF_DEPTH32_FLOAT;
-        case MTLPixelFormatStencil8:            return MGL_NF_STENCIL8;
-        case MTLPixelFormatDepth32Float_Stencil8: return MGL_NF_DEPTH32_FLOAT_STENCIL8;
-        case MTLPixelFormatDepth24Unorm_Stencil8: return MGL_NF_DEPTH24_UNORM_STENCIL8;
-
-        default: return MGL_NF_UNKNOWN;
-    }
+    return mglNativeFormatForMTLFormat((GLuint)f);
 }
 
 // Picks the texture a read should come from: an attachment when an FBO is bound

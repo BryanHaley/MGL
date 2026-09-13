@@ -101,20 +101,28 @@ void mtlCopyImageSubData(GLMContext glm_ctx,
     bool srcIs3D = (srcTex->target == GL_TEXTURE_3D);
     bool dstIs3D = (dstTex->target == GL_TEXTURE_3D);
 
-    NSUInteger srcSlice = srcIs3D ? 0 : (NSUInteger)srcZ;
-    NSUInteger dstSlice = dstIs3D ? 0 : (NSUInteger)dstZ;
-    NSUInteger srcZOrigin = srcIs3D ? (NSUInteger)srcZ : 0;
-    NSUInteger dstZOrigin = dstIs3D ? (NSUInteger)dstZ : 0;
+    // sourceSize.depth only moves multiple images for a 3D texture. An array
+    // or cube face needs one call per layer, or only the first one is copied.
+    NSUInteger layers = (srcIs3D && dstIs3D) ? 1 : (NSUInteger)depth;
+    NSUInteger copyDepth = (srcIs3D && dstIs3D) ? (NSUInteger)depth : 1;
 
-    [blit copyFromTexture:srcMetal
-             sourceSlice:srcSlice
-             sourceLevel:(NSUInteger)srcLevel
-            sourceOrigin:MTLOriginMake((NSUInteger)srcX, (NSUInteger)srcY, srcZOrigin)
-              sourceSize:MTLSizeMake((NSUInteger)width, (NSUInteger)height, (NSUInteger)depth)
-               toTexture:dstMetal
-      destinationSlice:dstSlice
-      destinationLevel:(NSUInteger)dstLevel
-     destinationOrigin:MTLOriginMake((NSUInteger)dstX, (NSUInteger)dstY, dstZOrigin)];
+    for (NSUInteger i = 0; i < layers; i++)
+    {
+        NSUInteger srcSlice   = srcIs3D ? 0 : (NSUInteger)srcZ + i;
+        NSUInteger dstSlice   = dstIs3D ? 0 : (NSUInteger)dstZ + i;
+        NSUInteger srcZOrigin = srcIs3D ? (NSUInteger)srcZ + i : 0;
+        NSUInteger dstZOrigin = dstIs3D ? (NSUInteger)dstZ + i : 0;
+
+        [blit copyFromTexture:srcMetal
+                 sourceSlice:srcSlice
+                 sourceLevel:(NSUInteger)srcLevel
+                sourceOrigin:MTLOriginMake((NSUInteger)srcX, (NSUInteger)srcY, srcZOrigin)
+                  sourceSize:MTLSizeMake((NSUInteger)width, (NSUInteger)height, copyDepth)
+                   toTexture:dstMetal
+          destinationSlice:dstSlice
+          destinationLevel:(NSUInteger)dstLevel
+         destinationOrigin:MTLOriginMake((NSUInteger)dstX, (NSUInteger)dstY, dstZOrigin)];
+    }
 
     [blit endEncoding];
 }

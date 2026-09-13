@@ -3056,10 +3056,65 @@ void mglCopyTextureSubImage3D(GLMContext ctx, GLuint texture, GLint level, GLint
 
 // Readback works off the level's own size, and a level that was never
 // defined has nothing to hand back.
+// GL 4.6 section 8.11.4: the client format has to agree with the texture's
+// base internal format on the two things Metal cannot reinterpret -- whether
+// the values are integers, and whether they are depth or stencil.
+bool mglClientFormatIsInteger(GLenum format)
+{
+    switch (format)
+    {
+        case GL_RED_INTEGER:
+        case GL_GREEN_INTEGER:
+        case GL_BLUE_INTEGER:
+        case GL_RG_INTEGER:
+        case GL_RGB_INTEGER:
+        case GL_RGBA_INTEGER:
+        case GL_BGR_INTEGER:
+        case GL_BGRA_INTEGER:
+            return true;
+    }
+
+    return false;
+}
+
+bool mglReadbackFormatAgrees(GLenum internalformat, GLenum format)
+{
+    uint8_t kind = mglFormatKind(internalformat);
+    bool want_int = (kind == MGL_FMT_COLOR_INT || kind == MGL_FMT_COLOR_UINT);
+    bool is_depth = (kind == MGL_FMT_DEPTH || kind == MGL_FMT_DEPTH_STENCIL);
+    bool is_stencil = (kind == MGL_FMT_STENCIL || kind == MGL_FMT_DEPTH_STENCIL);
+
+    switch (format)
+    {
+        case GL_DEPTH_COMPONENT:  return is_depth;
+        case GL_STENCIL_INDEX:    return is_stencil;
+        case GL_DEPTH_STENCIL:    return kind == MGL_FMT_DEPTH_STENCIL;
+    }
+
+    if (is_depth || is_stencil)
+        return false;
+
+    return mglClientFormatIsInteger(format) == want_int;
+}
+
 static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum format, GLenum type, GLsizei bufSize, GLboolean check_size, void *pixels)
 {
     TextureLevel *lvl;
     size_t pixel_size, bytes_per_row;
+
+    // With a pixel pack buffer bound, the pointer is an offset into it, and a
+    // NULL pointer means offset zero rather than an error.
+    if (STATE(buffers[_PIXEL_PACK_BUFFER]))
+    {
+        Buffer *pbo = STATE(buffers[_PIXEL_PACK_BUFFER]);
+        uintptr_t offset = (uintptr_t)pixels;
+
+        ERROR_CHECK_RETURN_VALUE(pbo->mapped == GL_FALSE, GL_INVALID_OPERATION, false);
+        ERROR_CHECK_RETURN_VALUE(pbo->data.buffer_data, GL_INVALID_OPERATION, false);
+        ERROR_CHECK_RETURN_VALUE(offset <= (uintptr_t)pbo->size, GL_INVALID_OPERATION, false);
+
+        pixels = (void *)((uint8_t *)(uintptr_t)pbo->data.buffer_data + offset);
+    }
 
     ERROR_CHECK_RETURN_VALUE(pixels, GL_INVALID_VALUE, false);
     ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, false);
@@ -3073,6 +3128,9 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
     pixel_size = sizeForFormatType(format, type);
 
     ERROR_CHECK_RETURN_VALUE(pixel_size, GL_INVALID_ENUM, false);
+
+    ERROR_CHECK_RETURN_VALUE(mglReadbackFormatAgrees(tex->internalformat, format),
+                             GL_INVALID_OPERATION, false);
 
     lvl = &tex->faces[0].levels[level];
 

@@ -417,3 +417,92 @@ GPU_TEST(compute, interleaved_with_drawing)
     glDeleteProgram(gs);
     mgl_target_destroy(&t);
 }
+
+/* glGetBufferSubData is a blocking read: it has to show what the GPU already
+   wrote, without the application asking for glFinish first. MGL used to copy
+   its stale CPU side and hand back the seed values. */
+GPU_TEST(compute, readback_without_finish_sees_gpu_writes)
+{
+    GLuint prog = compute_program(WRITE_INDEX_CS);
+    CHECK(prog != 0);
+    if (!prog) return;
+
+    const GLuint count = 256;
+    GLuint *seed = calloc(count, sizeof(GLuint));
+    GLuint ssbo = 0;
+
+    for (GLuint i = 0; i < count; i++)
+        seed[i] = 0xDEADBEEFu;
+
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, count * sizeof(GLuint), seed, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+
+    glUseProgram(prog);
+    glDispatchCompute(count / 64, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    /* deliberately no glFinish */
+
+    GLuint *got = calloc(count, sizeof(GLuint));
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, count * sizeof(GLuint), got);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    GLuint wrong = 0;
+    for (GLuint i = 0; i < count; i++)
+        if (got[i] != i + 1000)
+            wrong++;
+
+    CHECK_EQ_INT(0, (int)wrong);
+
+    free(seed);
+    free(got);
+    glUseProgram(0);
+    glDeleteBuffers(1, &ssbo);
+    glDeleteProgram(prog);
+}
+
+/* Same rule for a mapped read. */
+GPU_TEST(compute, map_read_without_finish_sees_gpu_writes)
+{
+    GLuint prog = compute_program(WRITE_INDEX_CS);
+    CHECK(prog != 0);
+    if (!prog) return;
+
+    const GLuint count = 256;
+    GLuint *seed = calloc(count, sizeof(GLuint));
+    GLuint ssbo = 0;
+
+    for (GLuint i = 0; i < count; i++)
+        seed[i] = 0xDEADBEEFu;
+
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, count * sizeof(GLuint), seed, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+
+    glUseProgram(prog);
+    glDispatchCompute(count / 64, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    const GLuint *m = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
+                                       count * sizeof(GLuint), GL_MAP_READ_BIT);
+    CHECK(m != NULL);
+
+    if (m)
+    {
+        GLuint wrong = 0;
+
+        for (GLuint i = 0; i < count; i++)
+            if (m[i] != i + 1000)
+                wrong++;
+
+        CHECK_EQ_INT(0, (int)wrong);
+        glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+    }
+
+    free(seed);
+    glUseProgram(0);
+    glDeleteBuffers(1, &ssbo);
+    glDeleteProgram(prog);
+}

@@ -10,6 +10,9 @@
 
 #include "mgl.h"
 #include "mgl_log.h"
+#include "mgl_format_table.h"
+
+extern Renderbuffer *findRenderbuffer(GLMContext ctx, GLuint renderbuffer);
 
 // Forward declarations for transform feedback functions from program.c
 TransformFeedback *newTransformFeedback(GLMContext ctx, GLuint name);
@@ -171,27 +174,197 @@ static bool copyImageTargetValid(GLenum target)
 	return false;
 }
 
+// glCopyImageSubData names a texture or a renderbuffer, and they live in
+// different tables. A renderbuffer carries the texture it is backed by.
+static Texture *copyImageObject(GLMContext ctx, GLenum target, GLuint name)
+{
+	if (target == GL_RENDERBUFFER)
+	{
+		Renderbuffer *rbo = findRenderbuffer(ctx, name);
+
+		return rbo ? rbo->tex : NULL;
+	}
+
+	return findTexture(ctx, name);
+}
+
+// Two images are copy-compatible when they hold the same number of bits per
+// texel, or -- for compressed pairs -- the same block size. GL 4.6 table 8.22.
+static bool copyImageFormatsCompatible(GLenum a, GLenum b)
+{
+	const MGLFormatDesc *da = mglFormatDesc(a);
+	const MGLFormatDesc *db = mglFormatDesc(b);
+	bool ca, cb;
+
+	if (!da || !db)
+		return false;
+
+	if (a == b)
+		return true;
+
+	ca = mglFormatIsCompressed(a);
+	cb = mglFormatIsCompressed(b);
+
+	// a compressed image only copies to an uncompressed one of the same
+	// block size, and the block dimensions have to line up
+	if (ca != cb)
+	{
+		const MGLFormatDesc *cd = ca ? da : db;
+		const MGLFormatDesc *ud = ca ? db : da;
+
+		return cd->bytes_per_block == ud->bytes_per_block;
+	}
+
+	if (ca && cb)
+		return da->block_w == db->block_w && da->block_h == db->block_h &&
+		       da->bytes_per_block == db->bytes_per_block;
+
+	return da->bytes_per_block == db->bytes_per_block;
+}
+
+static GLuint copyImageLevelWidth(const Texture *t, GLint level)
+{
+	if (level < 0 || (GLuint)level >= t->mipmap_levels || !t->faces[0].levels)
+		return 0;
+
+	return t->faces[0].levels[level].width;
+}
+
+static GLuint copyImageLevelHeight(const Texture *t, GLint level)
+{
+	if (level < 0 || (GLuint)level >= t->mipmap_levels || !t->faces[0].levels)
+		return 0;
+
+	return t->faces[0].levels[level].height ? t->faces[0].levels[level].height : 1;
+}
+
+// How many slices or 3D samples the level has along z.
+static GLuint copyImageLevelDepth(const Texture *t, GLint level)
+{
+	switch (t->target)
+	{
+		case GL_TEXTURE_2D_ARRAY:
+		case GL_TEXTURE_CUBE_MAP_ARRAY:
+		case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+			return t->depth ? t->depth : 1;
+
+		case GL_TEXTURE_1D_ARRAY:
+			return t->height ? t->height : 1;
+
+		case GL_TEXTURE_CUBE_MAP:
+			return 6;
+
+		case GL_TEXTURE_3D:
+			if (level >= 0 && (GLuint)level < t->mipmap_levels && t->faces[0].levels)
+				return t->faces[0].levels[level].depth ? t->faces[0].levels[level].depth : 1;
+			return 1;
+	}
+
+	return 1;
+}
+
+static bool copyImageLevelExists(const Texture *t, GLint level)
+{
+	return level >= 0 && (GLuint)level < t->mipmap_levels &&
+	       t->faces[0].levels && t->faces[0].levels[level].width > 0;
+}
+
+// GL 4.6 section 8.17: every level the app has selected between BASE_LEVEL and
+// MAX_LEVEL has to exist, or the texture is incomplete and cannot be copied.
+static bool copyImageTexComplete(const Texture *t)
+{
+	GLuint base = t->params.base_level;
+	GLuint last = t->params.max_level;
+
+	if (t->mipmap_levels == 0 || !t->faces[0].levels)
+		return false;
+
+	if (base >= t->mipmap_levels)
+		return false;
+
+	if (last >= t->mipmap_levels)
+		last = t->mipmap_levels - 1;
+
+	for (GLuint l = base; l <= last; l++)
+		if (!copyImageLevelExists(t, (GLint)l))
+			return false;
+
+	return true;
+}
+
 void mglCopyImageSubData(GLMContext ctx, GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth)
 {
-	MGL_INFO("MGL: glCopyImageSubData src=%u dst=%u %dx%dx%d\n",
-	        srcName, dstName, srcWidth, srcHeight, srcDepth);
+	Texture *srcTex, *dstTex;
+	const MGLFormatDesc *sd;
 
 	ERROR_CHECK_RETURN(copyImageTargetValid(srcTarget), GL_INVALID_ENUM);
 	ERROR_CHECK_RETURN(copyImageTargetValid(dstTarget), GL_INVALID_ENUM);
 
-	// Find source and destination textures
-	Texture *srcTex = findTexture(ctx, srcName);
-	Texture *dstTex = findTexture(ctx, dstName);
+	srcTex = copyImageObject(ctx, srcTarget, srcName);
+	dstTex = copyImageObject(ctx, dstTarget, dstName);
 
 	ERROR_CHECK_RETURN(srcTex && dstTex, GL_INVALID_VALUE);
-	
-	if (!srcTex->mtl_data || !dstTex->mtl_data) {
-		MGL_ERR("MGL ERROR: CopyImageSubData - no Metal data src=%p dst=%p\n",
-		        srcTex->mtl_data, dstTex->mtl_data);
-		return;
+
+	ERROR_CHECK_RETURN(srcWidth >= 0 && srcHeight >= 0 && srcDepth >= 0, GL_INVALID_VALUE);
+	ERROR_CHECK_RETURN(srcX >= 0 && srcY >= 0 && srcZ >= 0, GL_INVALID_VALUE);
+	ERROR_CHECK_RETURN(dstX >= 0 && dstY >= 0 && dstZ >= 0, GL_INVALID_VALUE);
+
+	// a renderbuffer has one image and no mip chain
+	if (srcTarget == GL_RENDERBUFFER)
+		ERROR_CHECK_RETURN(srcLevel == 0, GL_INVALID_VALUE);
+	if (dstTarget == GL_RENDERBUFFER)
+		ERROR_CHECK_RETURN(dstLevel == 0, GL_INVALID_VALUE);
+
+	ERROR_CHECK_RETURN(copyImageLevelExists(srcTex, srcLevel), GL_INVALID_VALUE);
+	ERROR_CHECK_RETURN(copyImageLevelExists(dstTex, dstLevel), GL_INVALID_VALUE);
+
+	// an incomplete texture has nothing to copy. A renderbuffer has exactly
+	// one image, so completeness does not apply to it.
+	ERROR_CHECK_RETURN(srcTarget == GL_RENDERBUFFER || copyImageTexComplete(srcTex),
+	                   GL_INVALID_OPERATION);
+	ERROR_CHECK_RETURN(dstTarget == GL_RENDERBUFFER || copyImageTexComplete(dstTex),
+	                   GL_INVALID_OPERATION);
+
+	ERROR_CHECK_RETURN(srcTex->samples == dstTex->samples, GL_INVALID_OPERATION);
+
+	ERROR_CHECK_RETURN(copyImageFormatsCompatible(srcTex->internalformat,
+	                                              dstTex->internalformat), GL_INVALID_OPERATION);
+
+	// a compressed image is addressed in whole blocks
+	sd = mglFormatDesc(srcTex->internalformat);
+
+	if (sd && mglFormatIsCompressed(srcTex->internalformat) && sd->block_w > 1)
+	{
+		GLuint bw = sd->block_w, bh = sd->block_h;
+
+		ERROR_CHECK_RETURN(srcX % bw == 0 && srcY % bh == 0, GL_INVALID_VALUE);
+		ERROR_CHECK_RETURN(dstX % bw == 0 && dstY % bh == 0, GL_INVALID_VALUE);
+
+		// the tail of the image may be a partial block
+		ERROR_CHECK_RETURN(srcWidth % bw == 0 ||
+		                   (GLuint)(srcX + srcWidth) == copyImageLevelWidth(srcTex, srcLevel),
+		                   GL_INVALID_VALUE);
+		ERROR_CHECK_RETURN(srcHeight % bh == 0 ||
+		                   (GLuint)(srcY + srcHeight) == copyImageLevelHeight(srcTex, srcLevel),
+		                   GL_INVALID_VALUE);
 	}
-	
-	// Use Metal blit to copy texture regions
+
+	// neither region may run off the end of its image
+	ERROR_CHECK_RETURN((GLuint)(srcX + srcWidth)  <= copyImageLevelWidth(srcTex, srcLevel)  &&
+	                   (GLuint)(srcY + srcHeight) <= copyImageLevelHeight(srcTex, srcLevel) &&
+	                   (GLuint)(srcZ + srcDepth)  <= copyImageLevelDepth(srcTex, srcLevel),
+	                   GL_INVALID_VALUE);
+
+	ERROR_CHECK_RETURN((GLuint)(dstX + srcWidth)  <= copyImageLevelWidth(dstTex, dstLevel)  &&
+	                   (GLuint)(dstY + srcHeight) <= copyImageLevelHeight(dstTex, dstLevel) &&
+	                   (GLuint)(dstZ + srcDepth)  <= copyImageLevelDepth(dstTex, dstLevel),
+	                   GL_INVALID_VALUE);
+
+	if (srcWidth == 0 || srcHeight == 0 || srcDepth == 0)
+		return;
+
+	// The Metal textures are created on bind, which mtlCopyImageSubData does
+	// itself. Refusing here because mtl_data is still NULL rejected every copy.
 	ctx->mtl_funcs.mtlCopyImageSubData(ctx, srcTex, srcLevel, srcX, srcY, srcZ,
 	                                    dstTex, dstLevel, dstX, dstY, dstZ,
 	                                    srcWidth, srcHeight, srcDepth);

@@ -655,6 +655,7 @@ static const char * const mgl_extensions[] = {
     "GL_ARB_vertex_array_object",
     "GL_ARB_vertex_attrib_binding",
     "GL_ARB_vertex_attrib_64bit",
+    "GL_ARB_gpu_shader_fp64",
     "GL_ARB_vertex_buffer_object",
     "GL_ARB_uniform_buffer_object",
     "GL_ARB_shader_storage_buffer_object",

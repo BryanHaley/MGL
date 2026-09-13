@@ -256,6 +256,8 @@ GLuint mglNativeFormatBytesPerPixel(MGLNativeFormat fmt)
         case MGL_NF_R16_FLOAT:
         case MGL_NF_DEPTH16_UNORM:
         case MGL_NF_B5G6R5_UNORM:
+        case MGL_NF_A1BGR5_UNORM:
+        case MGL_NF_ABGR4_UNORM:
             return 2;
 
         case MGL_NF_RGBA8_UNORM: case MGL_NF_BGRA8_UNORM:
@@ -468,6 +470,28 @@ static GLboolean decode_native(const GLubyte *p, MGLNativeFormat fmt, MGLTexel *
             t->f[1] = unorm_to_float((v >> 5) & 0x3Fu, 6);
             t->f[2] = unorm_to_float(v & 0x1Fu, 5);
             t->f[3] = 1.0f;
+            return GL_TRUE;
+        }
+
+        case MGL_NF_A1BGR5_UNORM:
+        {
+            GLushort v; memcpy(&v, p, 2);
+            texel_zero(t);
+            t->f[0] = unorm_to_float(v & 0x1Fu, 5);
+            t->f[1] = unorm_to_float((v >> 5) & 0x1Fu, 5);
+            t->f[2] = unorm_to_float((v >> 10) & 0x1Fu, 5);
+            t->f[3] = unorm_to_float((v >> 15) & 0x1u, 1);
+            return GL_TRUE;
+        }
+
+        case MGL_NF_ABGR4_UNORM:
+        {
+            GLushort v; memcpy(&v, p, 2);
+            texel_zero(t);
+            t->f[0] = unorm_to_float(v & 0xFu, 4);
+            t->f[1] = unorm_to_float((v >> 4) & 0xFu, 4);
+            t->f[2] = unorm_to_float((v >> 8) & 0xFu, 4);
+            t->f[3] = unorm_to_float((v >> 12) & 0xFu, 4);
             return GL_TRUE;
         }
 
@@ -1192,6 +1216,20 @@ static GLboolean encode_native(GLubyte *d, MGLNativeFormat fmt, const MGLTexel *
                                 float_to_unorm(t->f[2], 5)));
             return GL_TRUE;
 
+        case MGL_NF_A1BGR5_UNORM:
+            wr16(d, (GLushort)((float_to_unorm(t->f[3], 1) << 15) |
+                               (float_to_unorm(t->f[2], 5) << 10) |
+                               (float_to_unorm(t->f[1], 5) << 5) |
+                                float_to_unorm(t->f[0], 5)));
+            return GL_TRUE;
+
+        case MGL_NF_ABGR4_UNORM:
+            wr16(d, (GLushort)((float_to_unorm(t->f[3], 4) << 12) |
+                               (float_to_unorm(t->f[2], 4) << 8) |
+                               (float_to_unorm(t->f[1], 4) << 4) |
+                                float_to_unorm(t->f[0], 4)));
+            return GL_TRUE;
+
         case MGL_NF_RGB10A2_UNORM:
             wr32(d, (float_to_unorm(t->f[3], 2) << 30) |
                     (float_to_unorm(t->f[2], 10) << 20) |
@@ -1222,8 +1260,58 @@ static GLboolean encode_native(GLubyte *d, MGLNativeFormat fmt, const MGLTexel *
             d[0] = (GLubyte)(t->u[1] > 255u ? 255u : t->u[1]);
             return GL_TRUE;
 
+        case MGL_NF_RGB9E5_FLOAT:
+        {
+            // one 5-bit exponent shared by all three channels, so it has to be
+            // the largest of them; see GL 4.6 table 8.5
+            const GLfloat maxval = 65408.0f;   /* (2^9-1)/2^9 * 2^(31-15) */
+            GLfloat c[3];
+            GLfloat biggest = 0.0f;
+            GLint e;
+            GLuint m[3];
+            int i;
+
+            for (i = 0; i < 3; i++)
+            {
+                c[i] = t->f[i] < 0.0f ? 0.0f : (t->f[i] > maxval ? maxval : t->f[i]);
+                if (c[i] > biggest) biggest = c[i];
+            }
+
+            e = biggest > 0.0f ? (GLint)floorf(log2f(biggest)) + 1 : -15;
+            if (e < -15) e = -15;
+            if (e > 16)  e = 16;
+
+            // one more step if rounding pushed the mantissa over
+            {
+                GLfloat s = ldexpf(1.0f, -(e - 9));
+                GLuint mx = (GLuint)(biggest * s + 0.5f);
+                if (mx == 512u) e++;
+            }
+
+            {
+                GLfloat s = ldexpf(1.0f, -(e - 9));
+                for (i = 0; i < 3; i++)
+                {
+                    GLuint v = (GLuint)(c[i] * s + 0.5f);
+                    m[i] = v > 511u ? 511u : v;
+                }
+            }
+
+            wr32(d, (((GLuint)(e + 15) & 0x1Fu) << 27) |
+                    ((m[2] & 0x1FFu) << 18) | ((m[1] & 0x1FFu) << 9) | (m[0] & 0x1FFu));
+            return GL_TRUE;
+        }
+
+        case MGL_NF_DEPTH24_UNORM_STENCIL8:
+            wr32(d, ((t->u[1] & 0xFFu) << 24) | (float_to_unorm(t->f[0], 24) & 0x00FFFFFFu));
+            return GL_TRUE;
+
+        case MGL_NF_DEPTH32_FLOAT_STENCIL8:
+            wrf(d, t->f[0]);
+            d[4] = (GLubyte)(t->u[1] > 255u ? 255u : t->u[1]);
+            return GL_TRUE;
+
         default:
-            // RGB9E5 and the packed depth/stencil pairs still have no encoder
             return GL_FALSE;
     }
 }
@@ -1457,9 +1545,11 @@ GLboolean mglConvertPixelsToNative(const void *src, size_t src_row_pitch, GLenum
 
 /* ---------- which native layout a GL internal format lands in ---------- */
 
-MGLNativeFormat mglNativeFormatForGLInternalFormat(GLenum internalformat)
+// One table, three callers. The renderer and the format table used to keep
+// their own copies of this and drift apart.
+MGLNativeFormat mglNativeFormatForMTLFormat(GLuint mtl_format)
 {
-    switch(mglFormatMetalFormat(internalformat))
+    switch(mtl_format)
     {
         case MTLPixelFormatR8Unorm:      return MGL_NF_R8_UNORM;
         case MTLPixelFormatRG8Unorm:     return MGL_NF_RG8_UNORM;
@@ -1504,6 +1594,9 @@ MGLNativeFormat mglNativeFormatForGLInternalFormat(GLenum internalformat)
         case MTLPixelFormatRGBA32Float:  return MGL_NF_RGBA32_FLOAT;
 
         case MTLPixelFormatB5G6R5Unorm:  return MGL_NF_B5G6R5_UNORM;
+        case MTLPixelFormatA1BGR5Unorm:  return MGL_NF_A1BGR5_UNORM;
+        case MTLPixelFormatBGR5A1Unorm:  return MGL_NF_A1BGR5_UNORM;
+        case MTLPixelFormatABGR4Unorm:   return MGL_NF_ABGR4_UNORM;
         case MTLPixelFormatRGB10A2Unorm: return MGL_NF_RGB10A2_UNORM;
         case MTLPixelFormatRGB10A2Uint:  return MGL_NF_RGB10A2_UINT;
         case MTLPixelFormatRG11B10Float: return MGL_NF_RG11B10_FLOAT;
@@ -1517,6 +1610,11 @@ MGLNativeFormat mglNativeFormatForGLInternalFormat(GLenum internalformat)
 
         default: return MGL_NF_UNKNOWN;
     }
+}
+
+MGLNativeFormat mglNativeFormatForGLInternalFormat(GLenum internalformat)
+{
+    return mglNativeFormatForMTLFormat((GLuint)mglFormatMetalFormat(internalformat));
 }
 
 // The one format/type pair that already matches a native layout byte for byte.

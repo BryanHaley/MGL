@@ -892,6 +892,9 @@ typedef struct GLMContextRec_t {
 
     GLMState    state;
     GLboolean   assert_on_error;
+    // A shader that will not compile is reported through COMPILE_STATUS and
+    // the info log, not as a GL error. Raised while a compile or link runs.
+    GLuint      error_suppress;
 
     PixelFormat pixel_format;
     PixelFormat depth_format;

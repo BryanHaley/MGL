@@ -191,6 +191,9 @@ uint8_t mglFormatKind(GLenum gl_internal_format);
 GLenum mglFormatSizedForBase(GLenum gl_internal_format);
 uint16_t mglFormatCaps(GLenum gl_internal_format);
 bool     mglFormatIsCompressed(GLenum gl_internal_format);
+/* readback format rules, GL 4.6 section 8.11.4 */
+bool     mglClientFormatIsInteger(GLenum format);
+bool     mglReadbackFormatAgrees(GLenum internalformat, GLenum format);
 size_t   mglFormatBytesPerRow(GLenum gl_internal_format, GLsizei width);
 size_t   mglFormatImageSize(GLenum gl_internal_format, GLsizei w, GLsizei h, GLsizei d);
 GLint    mglFormatComponentBits(GLenum gl_internal_format, GLenum component);

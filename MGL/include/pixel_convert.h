@@ -34,7 +34,7 @@ typedef enum {
     MGL_NF_R32_SINT, MGL_NF_RG32_SINT, MGL_NF_RGBA32_SINT,
     MGL_NF_R32_FLOAT, MGL_NF_RG32_FLOAT, MGL_NF_RGBA32_FLOAT,
 
-    MGL_NF_B5G6R5_UNORM,
+    MGL_NF_B5G6R5_UNORM, MGL_NF_A1BGR5_UNORM, MGL_NF_ABGR4_UNORM,
     MGL_NF_RGB10A2_UNORM, MGL_NF_RGB10A2_UINT,
     MGL_NF_RG11B10_FLOAT, MGL_NF_RGB9E5_FLOAT,
 
@@ -45,6 +45,7 @@ typedef enum {
     MGL_NF_COUNT
 } MGLNativeFormat;
 
+MGLNativeFormat mglNativeFormatForMTLFormat(GLuint mtl_format);
 GLuint    mglNativeFormatBytesPerPixel(MGLNativeFormat fmt);
 GLboolean mglNativeFormatIsInteger(MGLNativeFormat fmt);
 GLboolean mglNativeFormatIsDepth(MGLNativeFormat fmt);

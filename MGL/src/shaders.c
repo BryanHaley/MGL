@@ -493,6 +493,10 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         return;
     }
 
+    // GL 4.6 section 7.1: a shader that will not compile sets COMPILE_STATUS
+    // false and fills the info log. It does not raise a GL error.
+    ctx->error_suppress++;
+
     initGLSLInput(ctx, ptr->type, ptr->src, &glsl_input);
 
     glsl_shader = glslang_shader_create(&glsl_input);
@@ -505,6 +509,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         if (!ptr->log) {
             ptr->log = strdup("GLSL shader creation failed - insufficient memory or unsupported shader type");
         }
+        ctx->error_suppress--;
         return;
     }
 
@@ -575,6 +580,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 glslang_shader_get_info_log(glsl_shader),
                 glslang_shader_get_info_debug_log(glsl_shader));
 
+        ctx->error_suppress--;
         return;
     }
 
@@ -613,6 +619,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 glslang_shader_get_info_log(glsl_shader),
                 glslang_shader_get_info_debug_log(glsl_shader));
 
+        ctx->error_suppress--;
         return;
     }
 
@@ -621,6 +628,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     }
 
     ptr->compiled_glsl_shader = glsl_shader;
+    ctx->error_suppress--;
 }
 
 void mglGetShaderiv(GLMContext ctx, GLuint shader, GLenum pname, GLint *params)
