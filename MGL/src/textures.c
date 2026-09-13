@@ -842,10 +842,12 @@ bool checkTexLevelParams(GLMContext ctx, Texture *tex, GLint level, GLuint inter
             base_width = tex->width;
             base_height = tex->height;
 
+            // a level is max(1, floor(base >> level)) -- the chain bottoms out
+            // at 1, it does not run off to zero on the shorter axis first
             while(level--)
             {
-                base_width >>= 1;
-                base_height >>= 1;
+                base_width = base_width > 1 ? base_width >> 1 : 1;
+                base_height = base_height > 1 ? base_height >> 1 : 1;
             }
 
             if (width != base_width || height != base_height)
@@ -1411,9 +1413,35 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
             initBaseTexLevel(ctx, tex, internalformat, width, height, depth);
         }
     }
-    else if (checkTexLevelParams(ctx, tex, level, internalformat, width, height, depth, format, type) == false)
+    else
     {
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+        // Levels may be defined in any order. If this is the first one we have
+        // seen, size the chain from what the base level would have to be for
+        // this level to sit where it does.
+        if (tex->mipmap_levels == 0)
+        {
+            GLsizei base_w = width, base_h = height;
+
+            internalformat = mglFormatSizedForBase(internalformat ? internalformat
+                                                   : internalFormatForGLFormatType(format, type));
+
+            if (checkInternalFormatForMetal(ctx, internalformat) == false)
+            {
+                ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+            }
+
+            for (GLint l = 0; l < level; l++)
+            {
+                base_w = base_w > 0 ? base_w * 2 : 1;
+                base_h = base_h > 0 ? base_h * 2 : 1;
+            }
+
+            initBaseTexLevel(ctx, tex, internalformat, base_w, base_h, depth);
+        }
+        else if (checkTexLevelParams(ctx, tex, level, internalformat, width, height, depth, format, type) == false)
+        {
+            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+        }
     }
 
     if (STATE(buffers[_PIXEL_UNPACK_BUFFER]))
@@ -3052,6 +3080,12 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
     GLsizei height = lvl->height ? (GLsizei)lvl->height : 1;
     GLsizei depth = lvl->depth ? (GLsizei)lvl->depth : 1;
 
+    // an array keeps the same number of layers at every level
+    if (tex->target == GL_TEXTURE_2D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY)
+        depth = tex->depth ? (GLsizei)tex->depth : 1;
+    else if (tex->target == GL_TEXTURE_1D_ARRAY)
+        depth = tex->height ? (GLsizei)tex->height : 1;
+
     // GetTexImage honours the pack modes exactly like ReadPixels does
     bytes_per_row = mglPixelStoreRowPitch(&ctx->state.pack, width, pixel_size);
 
@@ -3063,10 +3097,22 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
         ERROR_CHECK_RETURN_VALUE(bytes_per_row * height * depth <= (size_t)bufSize, GL_INVALID_OPERATION, false);
     }
 
-    // mtlGetTexImage realises the Metal texture itself, uploading whatever
-    // the CPU side holds, so an image that never reached the GPU still reads back
-    ctx->mtl_funcs.mtlGetTexImage(ctx, tex, pixels, (GLuint)bytes_per_row, format, type,
-                                  0, 0, width, height, level, 0);
+    // An array or 3D level is more than one image, and GL wants them back to
+    // back. Reading only slice zero left the rest of the caller's buffer
+    // holding whatever was already in it.
+    size_t image_bytes = bytes_per_row * (size_t)height;
+
+    if (ctx->state.pack.image_height > 0)
+        image_bytes = bytes_per_row * (size_t)ctx->state.pack.image_height;
+
+    for (GLsizei slice = 0; slice < depth; slice++)
+    {
+        // mtlGetTexImage realises the Metal texture itself, uploading whatever
+        // the CPU side holds, so an image that never reached the GPU still reads back
+        ctx->mtl_funcs.mtlGetTexImage(ctx, tex, (GLubyte *)pixels + (size_t)slice * image_bytes,
+                                      (GLuint)bytes_per_row, format, type,
+                                      0, 0, width, height, level, slice);
+    }
 
     return true;
 }

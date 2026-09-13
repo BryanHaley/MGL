@@ -255,6 +255,7 @@ GLuint mglNativeFormatBytesPerPixel(MGLNativeFormat fmt)
         case MGL_NF_R16_UINT:  case MGL_NF_R16_SINT:
         case MGL_NF_R16_FLOAT:
         case MGL_NF_DEPTH16_UNORM:
+        case MGL_NF_B5G6R5_UNORM:
             return 2;
 
         case MGL_NF_RGBA8_UNORM: case MGL_NF_BGRA8_UNORM:
@@ -459,6 +460,17 @@ static GLboolean decode_native(const GLubyte *p, MGLNativeFormat fmt, MGLTexel *
             return GL_TRUE;
 
         /* packed */
+        case MGL_NF_B5G6R5_UNORM:
+        {
+            GLushort v; memcpy(&v, p, 2);
+            texel_zero(t);
+            t->f[0] = unorm_to_float((v >> 11) & 0x1Fu, 5);
+            t->f[1] = unorm_to_float((v >> 5) & 0x3Fu, 6);
+            t->f[2] = unorm_to_float(v & 0x1Fu, 5);
+            t->f[3] = 1.0f;
+            return GL_TRUE;
+        }
+
         case MGL_NF_RGB10A2_UNORM:
         {
             GLuint v = rd32(p);
@@ -1174,6 +1186,12 @@ static GLboolean encode_native(GLubyte *d, MGLNativeFormat fmt, const MGLTexel *
             for (k = 0; k < n; k++) wrf(d + 4*k, t->f[k]);
             return GL_TRUE;
 
+        case MGL_NF_B5G6R5_UNORM:
+            wr16(d, (GLushort)((float_to_unorm(t->f[0], 5) << 11) |
+                               (float_to_unorm(t->f[1], 6) << 5) |
+                                float_to_unorm(t->f[2], 5)));
+            return GL_TRUE;
+
         case MGL_NF_RGB10A2_UNORM:
             wr32(d, (float_to_unorm(t->f[3], 2) << 30) |
                     (float_to_unorm(t->f[2], 10) << 20) |
@@ -1485,6 +1503,7 @@ MGLNativeFormat mglNativeFormatForGLInternalFormat(GLenum internalformat)
         case MTLPixelFormatRG32Float:    return MGL_NF_RG32_FLOAT;
         case MTLPixelFormatRGBA32Float:  return MGL_NF_RGBA32_FLOAT;
 
+        case MTLPixelFormatB5G6R5Unorm:  return MGL_NF_B5G6R5_UNORM;
         case MTLPixelFormatRGB10A2Unorm: return MGL_NF_RGB10A2_UNORM;
         case MTLPixelFormatRGB10A2Uint:  return MGL_NF_RGB10A2_UINT;
         case MTLPixelFormatRG11B10Float: return MGL_NF_RG11B10_FLOAT;
