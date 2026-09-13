@@ -72,6 +72,16 @@ extern void  glFinish(void);
 extern void  glClear(GLbitfield);
 extern void  glClearColor(GLfloat, GLfloat, GLfloat, GLfloat);
 extern void  glGetTexParameteriv(GLenum, GLenum, GLint *);
+extern void  glTexStorage2D(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
+extern void  glReadPixels(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);
+extern void  glVertexAttribPointer(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *);
+extern void  glEnableVertexAttribArray(GLuint);
+extern void  glBlitFramebuffer(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+extern void  glPatchParameteri(GLenum, GLint);
+extern void  glDrawElements(GLenum, GLsizei, GLenum, const void *);
+extern void  glGetQueryObjectuiv(GLuint, GLenum, GLuint *);
+extern GLuint glGetSubroutineIndex(GLuint, GLenum, const GLchar *);
+extern void  glUniformSubroutinesuiv(GLenum, GLsizei, const GLuint *);
 
 /* --- reporting ----------------------------------------------------------- */
 static int  g_gates;
@@ -137,46 +147,95 @@ static int compiles(GLenum stage, const char *src)
     return ok;
 }
 
-/* A stage that compiles but cannot be linked into a program is not support.
-   This is the difference the roadmap's tessellation row kept getting wrong. */
-static int linksWithStage(GLenum stage, const char *src)
+/* ---- drawing, so a gate can ask what came out rather than what compiled --- */
+
+/* Builds a program out of whichever stages are given, links it, and returns 0
+   if any part of that failed. */
+static GLuint buildProgram(const char *vs, const char *tcs, const char *tes,
+                           const char *gs, const char *fs)
 {
+    static const struct { GLenum stage; int which; } slots[] = {
+        { GL_VERTEX_SHADER, 0 }, { 0x8E88 /* TESS_CONTROL */, 1 },
+        { 0x8E87 /* TESS_EVALUATION */, 2 }, { GL_GEOMETRY_SHADER, 3 },
+        { GL_FRAGMENT_SHADER, 4 },
+    };
+    const char *src[5] = { vs, tcs, tes, gs, fs };
     GLuint p = glCreateProgram();
-    GLuint v = glCreateShader(GL_VERTEX_SHADER);
-    GLuint f = glCreateShader(GL_FRAGMENT_SHADER);
-    GLuint e = glCreateShader(stage);
-    const char *vs = "#version 400\nvoid main(){gl_Position=vec4(0);}\n";
-    const char *fs = "#version 400\nout vec4 o;void main(){o=vec4(1);}\n";
     GLint ok = 0;
 
-    glShaderSource(v, 1, &vs, NULL);  glCompileShader(v);
-    glShaderSource(f, 1, &fs, NULL);  glCompileShader(f);
-    glShaderSource(e, 1, &src, NULL); glCompileShader(e);
-    glGetShaderiv(e, GL_COMPILE_STATUS, &ok);
+    for (unsigned i = 0; i < sizeof(slots) / sizeof(slots[0]); i++)
+    {
+        GLuint sh;
 
-    if (!ok)
-        return 0;
+        if (src[slots[i].which] == NULL)
+            continue;
 
-    glAttachShader(p, v); glAttachShader(p, e); glAttachShader(p, f);
+        sh = glCreateShader(slots[i].stage);
+        glShaderSource(sh, 1, &src[slots[i].which], NULL);
+        glCompileShader(sh);
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+
+        if (!ok)
+            return 0;
+
+        glAttachShader(p, sh);
+    }
+
     glLinkProgram(p);
     glGetProgramiv(p, GL_LINK_STATUS, &ok);
 
-    return ok;
+    return ok ? p : 0;
 }
 
-static int links(const char *vs, const char *fs)
+/* A 64x64 RGBA8 framebuffer with a red clear, so anything green in the
+   readback was drawn rather than left over. */
+static GLuint probeTarget(GLuint *tex_out)
 {
-    GLuint p = glCreateProgram(), v = glCreateShader(GL_VERTEX_SHADER), f = glCreateShader(GL_FRAGMENT_SHADER);
-    GLint ok = 0;
+    GLuint tex, fbo;
 
-    glShaderSource(v, 1, &vs, NULL); glCompileShader(v);
-    glShaderSource(f, 1, &fs, NULL); glCompileShader(f);
-    glAttachShader(p, v); glAttachShader(p, f);
-    glLinkProgram(p);
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 64, 64);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
 
-    return ok;
+    if (tex_out)
+        *tex_out = tex;
+
+    return fbo;
 }
+
+static void probeQuadVAO(void)
+{
+    static const GLfloat v[12] = { -1,-1, 1,-1, -1,1,  1,-1, 1,1, -1,1 };
+    GLuint vao, vbo;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+}
+
+/* Pixels that came out green, which is the colour every gate below draws. */
+static int greenPixels(void)
+{
+    static GLubyte px[64 * 64 * 4];
+    int n = 0;
+
+    memset(px, 0xAB, sizeof px);
+    glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, px);
+
+    for (int i = 0; i < 64 * 64; i++)
+        if (px[i * 4 + 1] > 200 && px[i * 4] < 60)
+            n++;
+
+    return n;
+}
+
 
 /* --- phase 4: the pixel path and the front end --------------------------- */
 static void phase4(void)
@@ -532,37 +591,239 @@ static void phase5(void)
     glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8, 16, 16, GL_TRUE);
     gate("multisample storage allocates", glGetError() == GL_NO_ERROR, NULL);
 
-    gate("multisample rasterisation",
-         limit(0x80A9 /* GL_SAMPLES */, &unhandled) > 0 && !unhandled,
-         "GL_SAMPLES > 0 on a multisampled target");
+    /* Rasterising multisampled means an edge that lands between samples comes
+       back as a blend. A driver that quietly renders single sampled reports
+       the same GL_SAMPLES and fails here. */
+    {
+        static const char *vs = "#version 410\nlayout(location=0) in vec2 p;void main(){gl_Position=vec4(p,0,1);}\n";
+        static const char *fs = "#version 410\nout vec4 o;void main(){o=vec4(0,1,0,1);}\n";
+        GLuint ms = 0, msfbo = 0, resolve = 0, rfbo = 0, prog;
+        GLint samples = 0;
+        int edge = 0;
 
-    gate("tessellation programs link", linksWithStage(0x8E88 /* TESS_CONTROL */,
-            "#version 400\nlayout(vertices=3) out;\n"
-            "void main(){gl_TessLevelOuter[0]=1.0;gl_out[gl_InvocationID].gl_Position=vec4(0);}\n"),
-         "the stage attached to a program, not just compiled");
+        glGenTextures(1, &ms);
+        glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, ms);
+        glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8, 64, 64, GL_TRUE);
+        glGenFramebuffers(1, &msfbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, msfbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D_MULTISAMPLE, ms, 0);
 
-    gate("geometry programs link", linksWithStage(GL_GEOMETRY_SHADER,
-            "#version 400\nlayout(points) in;\nlayout(points,max_vertices=1) out;\n"
-            "void main(){gl_Position=vec4(0);EmitVertex();}\n"),
-         "the stage attached to a program, not just compiled");
+        drain();
+        glGetIntegerv(0x80A9 /* GL_SAMPLES */, &samples);
 
-    glGenQueries(1, &q);
-    drain();
-    glBeginQuery(GL_SAMPLES_PASSED, q);
-    glEndQuery(GL_SAMPLES_PASSED);
-    gate("occlusion queries run", glGetError() == GL_NO_ERROR, "a result still has to be non-zero");
+        prog = buildProgram(vs, NULL, NULL, NULL, fs);
+
+        if (prog && samples > 1)
+        {
+            static const GLfloat tri[6] = { -1,-1, 1,-1, -1,1 };
+            GLuint vao, vbo;
+
+            glUseProgram(prog);
+            glGenVertexArrays(1, &vao);
+            glBindVertexArray(vao);
+            glGenBuffers(1, &vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+            glEnableVertexAttribArray(0);
+            glViewport(0, 0, 64, 64);
+            glClearColor(1, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+
+            rfbo = probeTarget(&resolve);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, msfbo);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rfbo);
+            glBlitFramebuffer(0, 0, 64, 64, 0, 0, 64, 64, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, rfbo);
+
+            {
+                static GLubyte px[64 * 64 * 4];
+
+                glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, px);
+
+                for (int i = 0; i < 64 * 64; i++)
+                    if (px[i * 4 + 1] > 20 && px[i * 4 + 1] < 235)
+                        edge++;
+            }
+        }
+
+        gate("multisample rasterisation", samples > 1 && edge > 8,
+             "an edge has to resolve to partial coverage, not to one sample");
+    }
+
+    /* Tessellation, drawn. A control shader with no evaluation shader is a
+       link error in GL, so the gate builds the pair and asks the tessellator
+       for two different subdivision levels of the same patch. */
+    {
+        static const char *vs = "#version 410\nlayout(location=0) in vec2 p;void main(){gl_Position=vec4(p,0,1);}\n";
+        static const char *tcs = "#version 410\nlayout(vertices=3) out;uniform float lvl;\n"
+            "void main(){gl_out[gl_InvocationID].gl_Position=gl_in[gl_InvocationID].gl_Position;\n"
+            "gl_TessLevelOuter[0]=lvl;gl_TessLevelOuter[1]=lvl;gl_TessLevelOuter[2]=lvl;gl_TessLevelInner[0]=lvl;}\n";
+        static const char *tes = "#version 410\nlayout(triangles, equal_spacing, ccw) in;\n"
+            "void main(){vec4 q=gl_TessCoord.x*gl_in[0].gl_Position+gl_TessCoord.y*gl_in[1].gl_Position"
+            "+gl_TessCoord.z*gl_in[2].gl_Position;\n"
+            "float s=0.30*sin(9.4248*gl_TessCoord.x)*sin(9.4248*gl_TessCoord.y);\n"
+            "gl_Position=vec4(q.xy*0.7+vec2(s,s),0,1);}\n";
+        static const char *fs = "#version 410\nout vec4 o;void main(){o=vec4(0,1,0,1);}\n";
+        GLuint prog = buildProgram(vs, tcs, tes, NULL, fs);
+        int flat = 0, fine = 0;
+
+        if (prog)
+        {
+            static const GLfloat tri[6] = { -1,-1, 1,-1, -1,1 };
+            GLuint vao, vbo;
+            GLint lvl;
+
+            probeTarget(NULL);
+            glUseProgram(prog);
+            lvl = glGetUniformLocation(prog, "lvl");
+            glGenVertexArrays(1, &vao);
+            glBindVertexArray(vao);
+            glGenBuffers(1, &vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+            glEnableVertexAttribArray(0);
+            glViewport(0, 0, 64, 64);
+            glPatchParameteri(0x8E72 /* GL_PATCH_VERTICES */, 3);
+
+            glUniform1f(lvl, 1.0f);
+            glClearColor(1, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(0x000E /* GL_PATCHES */, 0, 3);
+            flat = greenPixels();
+
+            glUniform1f(lvl, 16.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(0x000E, 0, 3);
+            fine = greenPixels();
+        }
+
+        gate("tessellation subdivides", prog && flat > 0 && fine > 0 && flat != fine,
+             "a higher tessellation level has to change the geometry");
+    }
+
+    /* Geometry, drawn. One point in, one quad out: nothing but a geometry
+       stage can turn two vertices into two filled squares. */
+    {
+        static const char *vs = "#version 410\nlayout(location=0) in vec2 p;\n"
+            "layout(location=0) out vec4 vcol;\n"
+            "void main(){gl_Position=vec4(p,0,1);vcol=vec4(0,1,0,1);}\n";
+        static const char *gs = "#version 410\nlayout(points) in;\n"
+            "layout(triangle_strip,max_vertices=4) out;\n"
+            "layout(location=0) in vec4 vcol[];\nlayout(location=0) out vec4 gcol;\n"
+            "void main(){vec4 c=gl_in[0].gl_Position;\n"
+            "for(int i=0;i<4;i++){gl_Position=c+vec4(float(i&1)*0.5-0.25,float(i>>1)*0.5-0.25,0,0);\n"
+            "gcol=vcol[0];EmitVertex();}EndPrimitive();}\n";
+        static const char *fs = "#version 410\nlayout(location=0) in vec4 gcol;out vec4 o;void main(){o=gcol;}\n";
+        GLuint prog = buildProgram(vs, NULL, NULL, gs, fs);
+        int drawn = 0;
+
+        if (prog)
+        {
+            static const GLfloat pts[4] = { 0, 0, 0.5f, 0.5f };
+            GLuint vao, vbo;
+
+            probeTarget(NULL);
+            glUseProgram(prog);
+            glGenVertexArrays(1, &vao);
+            glBindVertexArray(vao);
+            glGenBuffers(1, &vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBufferData(GL_ARRAY_BUFFER, sizeof pts, pts, GL_STATIC_DRAW);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+            glEnableVertexAttribArray(0);
+            glViewport(0, 0, 64, 64);
+            glClearColor(1, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_POINTS, 0, 2);
+            drawn = greenPixels();
+        }
+
+        gate("geometry shaders emit", prog && drawn > 400,
+             "two points have to come out as two filled quads");
+    }
+
+    /* An occlusion query that always answers zero is not an occlusion query. */
+    {
+        static const char *vs = "#version 410\nlayout(location=0) in vec2 p;void main(){gl_Position=vec4(p,0,1);}\n";
+        static const char *fs = "#version 410\nout vec4 o;void main(){o=vec4(0,1,0,1);}\n";
+        GLuint prog = buildProgram(vs, NULL, NULL, NULL, fs);
+        GLuint passed = 0;
+
+        if (prog)
+        {
+            probeTarget(NULL);
+            glUseProgram(prog);
+            probeQuadVAO();
+            glViewport(0, 0, 64, 64);
+            glClearColor(1, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+
+            glGenQueries(1, &q);
+            drain();
+            glBeginQuery(GL_SAMPLES_PASSED, q);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glEndQuery(GL_SAMPLES_PASSED);
+            glGetQueryObjectuiv(q, GL_QUERY_RESULT, &passed);
+        }
+
+        gate("occlusion queries count", passed == 64 * 64,
+             "a full screen quad covers every pixel exactly once");
+    }
 
     glGenTransformFeedbacks(1, &tf);
     drain();
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, tf);
     gate("transform feedback objects bind", glGetError() == GL_NO_ERROR, NULL);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
 
-    gate("subroutines link",
-         compiles(GL_FRAGMENT_SHADER,
-                  "#version 400\nsubroutine vec4 pick();\nsubroutine uniform pick which;\n"
-                  "subroutine(pick) vec4 red(){return vec4(1,0,0,1);}\n"
-                  "out vec4 o;void main(){o=which();}\n"),
-         "core since 4.0");
+    /* Subroutines, switched. Linking is not enough: the uniform has to pick
+       which function runs. */
+    {
+        static const char *vs = "#version 400\nlayout(location=0) in vec2 p;void main(){gl_Position=vec4(p,0,1);}\n";
+        static const char *fs = "#version 400\n"
+            "subroutine vec4 pick();\nsubroutine uniform pick which;\n"
+            "subroutine(pick) vec4 red(){return vec4(1,0,0,1);}\n"
+            "subroutine(pick) vec4 green(){return vec4(0,1,0,1);}\n"
+            "out vec4 o;void main(){o=which();}\n";
+        GLuint prog = buildProgram(vs, NULL, NULL, NULL, fs);
+        int as_red = -1, as_green = -1;
+
+        if (prog)
+        {
+            GLuint ir, ig;
+
+            probeTarget(NULL);
+            glUseProgram(prog);
+            probeQuadVAO();
+            glViewport(0, 0, 64, 64);
+
+            ir = glGetSubroutineIndex(prog, GL_FRAGMENT_SHADER, "red");
+            ig = glGetSubroutineIndex(prog, GL_FRAGMENT_SHADER, "green");
+
+            if (ir != 0xFFFFFFFFu && ig != 0xFFFFFFFFu)
+            {
+                glClearColor(0, 0, 1, 1);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glUniformSubroutinesuiv(GL_FRAGMENT_SHADER, 1, &ir);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                as_red = greenPixels();
+
+                glClear(GL_COLOR_BUFFER_BIT);
+                glUniformSubroutinesuiv(GL_FRAGMENT_SHADER, 1, &ig);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                as_green = greenPixels();
+            }
+        }
+
+        gate("subroutines select", as_red == 0 && as_green == 64 * 64,
+             "the subroutine uniform has to choose which function runs");
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 /* --- phase 6: the rest of the burndown ----------------------------------- */

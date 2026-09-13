@@ -1039,6 +1039,57 @@ static bool writeStructLeaf(GLMContext ctx, Program *pptr, SpirvResource *res,
     return true;
 }
 
+void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size);
+
+// Where a uniform of this name ended up, across every stage. Unlike
+// glGetUniformLocation this asks nothing about the program's link state, so
+// the driver can find its own uniforms while the link is still going on.
+GLint mglFindUniformByName(Program *pptr, const char *name)
+{
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &pptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        for (GLuint i = 0; i < list->count; i++)
+        {
+            SpirvResource *r = &list->list[i];
+
+            if (r->gl_type && r->name && r->location != MGL_NO_LOCATION &&
+                !strcmp(r->name, name))
+                return (GLint)r->location;
+        }
+    }
+
+    return -1;
+}
+
+// Look up the uniform the gl_NumSamples rewrite created. Called once per link;
+// -1 means the fragment shader never mentioned it.
+GLint mglFindNumSamplesLocation(Program *pptr)
+{
+    return mglFindUniformByName(pptr, MGL_NUM_SAMPLES_NAME);
+}
+
+// Write one int into a program's uniform storage without going through the
+// current-program checks; the driver's own uniforms are not the application's.
+void mglWriteProgramUniform(GLMContext ctx, Program *pptr, GLint location, GLint value)
+{
+    if (pptr == NULL || location < 0)
+        return;
+
+    programUniformWrite(ctx, pptr, location, &value, sizeof(GLint));
+}
+
+// GL's gl_NumSamples is the draw framebuffer's sample count, so it is written
+// at draw time rather than by the application.
+void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples)
+{
+    if (pptr == NULL || pptr->num_samples_loc < 0)
+        return;
+
+    programUniformWrite(ctx, pptr, pptr->num_samples_loc, &samples, sizeof(GLint));
+}
+
 void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size)
 {
     Buffer *buf;

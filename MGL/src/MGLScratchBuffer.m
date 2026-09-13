@@ -66,8 +66,12 @@ static NSUInteger bucketForLength(NSUInteger length)
     return self;
 }
 
+// The completion handler below returns buffers from whatever thread Metal
+// runs it on, so every touch of _free and _inFlight is under the same lock.
 - (id<MTLBuffer>) bufferOfLength: (NSUInteger) length
 {
+    @synchronized (self) {
+
     if (length == 0)
         length = 1;
 
@@ -96,15 +100,50 @@ static NSUInteger bucketForLength(NSUInteger length)
     [_inFlight addObject: buffer];
 
     return buffer;
+
+    }
+}
+
+// Takes a buffer for one specific command buffer and hands it back when that
+// one completes. recycleWhenComplete below ties every outstanding buffer to
+// whichever command buffer happens to be closing, which is wrong for work
+// taken part way through a draw: the draw's own buffers go back to the free
+// list while it is still encoding with them.
+- (id<MTLBuffer>) bufferOfLength: (NSUInteger) length
+                forCommandBuffer: (id<MTLCommandBuffer>) commandBuffer
+{
+    id<MTLBuffer> buffer = [self bufferOfLength: length];
+
+    if (buffer == nil || commandBuffer == nil)
+        return buffer;
+
+    @synchronized (self) { [_inFlight removeObject: buffer]; }
+
+    __weak MGLScratchBufferPool *weakSelf = self;
+
+    [commandBuffer addCompletedHandler: ^(id<MTLCommandBuffer> cb) {
+        (void)cb;
+
+        MGLScratchBufferPool *pool = weakSelf;
+
+        if (pool)
+            @synchronized (pool) { [pool returnBuffers: @[ buffer ]]; }
+    }];
+
+    return buffer;
 }
 
 - (void) recycleWhenComplete: (id<MTLCommandBuffer>) commandBuffer
 {
-    if ([_inFlight count] == 0)
-        return;
+    NSArray *taken;
 
-    NSArray *taken = [_inFlight copy];
-    [_inFlight removeAllObjects];
+    @synchronized (self) {
+        if ([_inFlight count] == 0)
+            return;
+
+        taken = [_inFlight copy];
+        [_inFlight removeAllObjects];
+    }
 
     if (commandBuffer == nil)
     {

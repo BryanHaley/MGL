@@ -472,6 +472,69 @@ static void rewriteBlockLayouts(char *src)
     }
 }
 
+// glslang drops gl_NumSamples when it is generating SPIR-V, because Vulkan has
+// no such built-in -- but it is core GLSL and the CTS leans on it. Rename it to
+// a plain uniform of the same length, which MGL writes at draw time.
+// Returns a new string when something changed, NULL when nothing did.
+static char *rewriteNumSamples(const char *src)
+{
+    static const char gl_name[] = "gl_NumSamples";
+    static const char my_name[] = MGL_NUM_SAMPLES_NAME;
+    static const char decl[] = "\nuniform int " MGL_NUM_SAMPLES_NAME ";\n";
+    const size_t n = sizeof(gl_name) - 1;
+    const char *p;
+    char *out, *q;
+    size_t hits = 0;
+
+    for (p = strstr(src, gl_name); p; p = strstr(p + n, gl_name))
+    {
+        char before = (p == src) ? ' ' : p[-1];
+
+        if (!isalnum((unsigned char)before) && before != '_' &&
+            !isalnum((unsigned char)p[n]) && p[n] != '_')
+            hits++;
+    }
+
+    if (hits == 0)
+        return NULL;
+
+    out = (char *)malloc(strlen(src) + sizeof(decl) + 1);
+
+    if (out == NULL)
+        return NULL;
+
+    strcpy(out, src);
+
+    for (q = strstr(out, gl_name); q; q = strstr(q + n, gl_name))
+    {
+        char before = (q == out) ? ' ' : q[-1];
+
+        if (!isalnum((unsigned char)before) && before != '_' &&
+            !isalnum((unsigned char)q[n]) && q[n] != '_')
+            memcpy(q, my_name, n);
+    }
+
+    // the declaration goes after #version, which the preprocessor keeps first
+    {
+        char *ins = strstr(out, "#version");
+
+        if (ins)
+        {
+            ins = strchr(ins, '\n');
+            ins = ins ? ins + 1 : out;
+        }
+        else
+        {
+            ins = out;
+        }
+
+        memmove(ins + sizeof(decl) - 1, ins, strlen(ins) + 1);
+        memcpy(ins, decl, sizeof(decl) - 1);
+    }
+
+    return out;
+}
+
 void mglCompileShader(GLMContext ctx, GLuint shader)
 {
     Shader *ptr;
@@ -497,7 +560,11 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     // false and fills the info log. It does not raise a GL error.
     ctx->error_suppress++;
 
-    initGLSLInput(ctx, ptr->type, ptr->src, &glsl_input);
+    // glslang will not take the subroutine keyword when it targets SPIR-V, so
+    // the source is rewritten into plain GLSL before it ever sees it.
+    char *desub = mglRewriteSubroutines(ptr->src, &ptr->subroutines);
+
+    initGLSLInput(ctx, ptr->type, desub ? desub : ptr->src, &glsl_input);
 
     glsl_shader = glslang_shader_create(&glsl_input);
     if (glsl_shader == NULL)
@@ -509,6 +576,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         if (!ptr->log) {
             ptr->log = strdup("GLSL shader creation failed - insufficient memory or unsupported shader type");
         }
+        free(desub);
         ctx->error_suppress--;
         return;
     }
@@ -540,6 +608,18 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
             if (fixed)
             {
                 rewriteBlockLayouts(fixed);
+
+                if (ptr->glm_type == _FRAGMENT_SHADER)
+                {
+                    char *numbered = rewriteNumSamples(fixed);
+
+                    if (numbered)
+                    {
+                        free(fixed);
+                        fixed = numbered;
+                    }
+                }
+
                 glslang_shader_set_preprocessed_code(glsl_shader, fixed);
                 free(fixed);
             }
@@ -580,6 +660,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 glslang_shader_get_info_log(glsl_shader),
                 glslang_shader_get_info_debug_log(glsl_shader));
 
+        free(desub);
         ctx->error_suppress--;
         return;
     }
@@ -619,6 +700,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 glslang_shader_get_info_log(glsl_shader),
                 glslang_shader_get_info_debug_log(glsl_shader));
 
+        free(desub);
         ctx->error_suppress--;
         return;
     }
@@ -628,6 +710,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     }
 
     ptr->compiled_glsl_shader = glsl_shader;
+    free(desub);
     ctx->error_suppress--;
 }
 
@@ -718,23 +801,33 @@ void mglGetShaderSource(GLMContext ctx, GLuint shader, GLsizei bufSize, GLsizei 
     ptr = findShader(ctx, shader);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
 
-    if (ptr->src)
+    // GL 4.6 section 7.1: at most bufSize characters are written, terminator
+    // included, and length is what was written without it. A shader that was
+    // never given source has none, which is an empty string and not a crash --
+    // this used to size the copy with strlen(ptr->log), and a shader with no
+    // log at all is the common case.
+    GLsizei n = 0;
+
+    if (ptr->src && bufSize > 0)
     {
-        if (length)
-        {
-            *length = (GLsizei)ptr->src_len;
-        }
+        n = (GLsizei)ptr->src_len;
 
-        if (source)
-        {
-            if (bufSize >= strlen(ptr->log))
-            {
-                memcpy(source, ptr->src, ptr->src_len);
-            }
-        }
+        if (n > bufSize - 1)
+            n = bufSize - 1;
     }
 
+    if (source && bufSize > 0)
+    {
+        if (n)
+            memcpy(source, ptr->src, (size_t)n);
+
+        source[n] = '\0';
+    }
+
+    if (length)
+        *length = n;
 }
 
 /* ---------- ARB_gl_spirv ---------- */

@@ -219,8 +219,35 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
         ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->mtl_data);
     }
 
+    // what the geometry, subroutine and transform feedback rewrites left here
+    mglFreeGeometryInfo(&ptr->geom);
+    mglFreeCaptureInfo(&ptr->xfb);
+
+    free(ptr->gs_passthrough.ir);
+    free(ptr->gs_passthrough.msl_str);
+    free(ptr->gs_passthrough.entry_point);
+
+    if (ptr->gs_passthrough.mtl_function)
+        CFRelease(ptr->gs_passthrough.mtl_function);
+
+    if (ptr->gs_passthrough.mtl_library)
+        CFRelease(ptr->gs_passthrough.mtl_library);
+
+    memset(&ptr->gs_passthrough, 0, sizeof(ptr->gs_passthrough));
+
+    for (GLsizei i = 0; i < ptr->xfb_varying_count; i++)
+        free(ptr->xfb_varyings[i]);
+
+    free(ptr->xfb_varyings);
+    ptr->xfb_varyings = NULL;
+    ptr->xfb_varying_count = 0;
+
     for(int i=0; i<_MAX_SHADER_TYPES; i++)
     {
+        mglFreeSubroutineInfo(&ptr->subroutines[i]);
+        free(ptr->subroutine_values[i]);
+        ptr->subroutine_values[i] = NULL;
+
         // CRITICAL FIX: Add NULL checks before all free/release operations to prevent double-frees
         if (ptr->spirv[i].ir) {
             free(ptr->spirv[i].ir);
@@ -1215,7 +1242,12 @@ static void addStructUniformLeaves(spvc_compiler compiler, Program *ptr, int sta
     }
 }
 
-char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
+// `sp` is where the SPIR-V comes from and where the entry point name is left;
+// it is ptr->spirv[stage] for a stage the application wrote, and somewhere else
+// for one MGL generated. `entry_override` names a generated stage, which has no
+// shader object to take a name from.
+char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp,
+                              const char *entry_override)
 {
     const SpvId *spirv;
     size_t word_count;
@@ -1232,8 +1264,11 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     size_t count;
     size_t i;
 
-    spirv = ptr->spirv[stage].ir;
-    word_count = ptr->spirv[stage].size;
+    if (sp == NULL)
+        sp = &ptr->spirv[stage];
+
+    spirv = sp->ir;
+    word_count = sp->size;
 
     // the second of these used to check spirv again rather than the size
     if (spirv == NULL || word_count == 0)
@@ -1322,6 +1357,102 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
+    // The buffers the geometry emulation uses have to sit above whatever the
+    // vertex descriptor and the uniform blocks are using, or the attribute
+    // fetch and the capture write end up in the same Metal slot.
+    // Same collision as the geometry buffers: the capture blocks must not land
+    // where the vertex descriptor is already fetching attributes.
+    if (stage == _VERTEX_SHADER && ptr->xfb_varying_count > 0)
+    {
+        for (int b = 0; b < MGL_XFB_MAX_BUFFERS; b++)
+        {
+            spvc_msl_resource_binding rb;
+
+            spvc_msl_resource_binding_init(&rb);
+            rb.stage = SpvExecutionModelVertex;
+            rb.desc_set = 1;
+            rb.binding = MGL_XFB_FIRST_BINDING + b;
+            rb.msl_buffer = MGL_XFB_FIRST_MSL_SLOT + b;
+
+            spvc_compiler_msl_add_resource_binding(compiler_msl, &rb);
+        }
+    }
+
+    if (ptr->shader_slots[_GEOMETRY_SHADER])
+    {
+        static const struct { unsigned binding, msl; } pins[] = {
+            { MGL_GS_IN_BINDING,    MGL_GS_IN_MSL_SLOT },
+            { MGL_GS_OUT_BINDING,   MGL_GS_OUT_MSL_SLOT },
+            { MGL_GS_INDEX_BINDING, MGL_GS_INDEX_MSL_SLOT },
+        };
+
+        for (size_t b = 0; b < sizeof(pins) / sizeof(pins[0]); b++)
+        {
+            spvc_msl_resource_binding rb;
+
+            spvc_msl_resource_binding_init(&rb);
+
+            // storage buffers were moved to their own descriptor set above
+            rb.stage = spvc_compiler_get_execution_model(compiler_msl);
+            rb.desc_set = 1;
+            rb.binding = pins[b].binding;
+            rb.msl_buffer = pins[b].msl;
+
+            spvc_compiler_msl_add_resource_binding(compiler_msl, &rb);
+        }
+    }
+
+    // With a geometry shader in the way, the vertex stage only fills a buffer.
+    // Metal wants a vertex function that rasterises nothing to return void,
+    // which is what this asks SPIRV-Cross for.
+    if (stage == _VERTEX_SHADER && ptr->shader_slots[_GEOMETRY_SHADER])
+        spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION, SPVC_TRUE);
+
+    // Tessellation. Metal has the tessellator but reaches it differently: the
+    // vertex and control stages run as compute and hand their results to the
+    // evaluation stage, which becomes the vertex function of the draw.
+    if (ptr->tess.active)
+    {
+        switch (stage)
+        {
+            case _VERTEX_SHADER:
+                spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_VERTEX_FOR_TESSELLATION, SPVC_TRUE);
+                spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_CAPTURE_OUTPUT_TO_BUFFER, SPVC_TRUE);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_OUTPUT_BUFFER_INDEX, MGL_TESS_VERTEX_OUT_INDEX);
+                break;
+
+            case _TESS_CONTROL_SHADER:
+                // triangle patches get a smaller factor struct than quads, and
+                // the control shader's SPIR-V never says which this is
+                if (ptr->tess.patch_kind)
+                    spvc_compiler_set_execution_mode(compiler_msl, (SpvExecutionMode)ptr->tess.patch_kind);
+
+                spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_MULTI_PATCH_WORKGROUP, SPVC_TRUE);
+                spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_CAPTURE_OUTPUT_TO_BUFFER, SPVC_TRUE);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_INPUT_BUFFER_INDEX, MGL_TESS_VERTEX_OUT_INDEX);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_OUTPUT_BUFFER_INDEX, MGL_TESS_CONTROL_OUT_INDEX);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_PATCH_OUTPUT_BUFFER_INDEX, MGL_TESS_PATCH_OUT_INDEX);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_TESS_FACTOR_OUTPUT_BUFFER_INDEX, MGL_TESS_LEVEL_INDEX);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_INDIRECT_PARAMS_BUFFER_INDEX, MGL_TESS_PARAMS_INDEX);
+                break;
+
+            case _TESS_EVALUATION_SHADER:
+                spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_RAW_BUFFER_TESE_INPUT, SPVC_TRUE);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_INPUT_BUFFER_INDEX, MGL_TESS_CONTROL_OUT_INDEX);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_PATCH_INPUT_BUFFER_INDEX, MGL_TESS_PATCH_OUT_INDEX);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_TESS_FACTOR_OUTPUT_BUFFER_INDEX, MGL_TESS_LEVEL_INDEX);
+                spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TESS_DOMAIN_ORIGIN_LOWER_LEFT,
+                                               ptr->tess.lower_left ? SPVC_TRUE : SPVC_FALSE);
+
+                // the evaluation shader's SPIR-V does not say how many control
+                // points a patch has; that is the control shader's business
+                if (ptr->tess.out_control_points)
+                    spvc_compiler_set_execution_mode_with_arguments(compiler_msl,
+                        SpvExecutionModeOutputVertices, ptr->tess.out_control_points, 0, 0);
+                break;
+        }
+    }
+
     //ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_GLSL_VERSION, 4.5) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_install_compiler_options(compiler_msl, options) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_install_compiler_options(compiler_msl, options) != SPVC_SUCCESS) {
@@ -1352,37 +1483,79 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     }
 
     
-    // create an entry point for metal based on the shader type and name
-    GLuint name;
-    char entry_point[128];
-    name = ptr->shader_slots[stage]->name;
-
-    SpvExecutionModel model = SpvExecutionModelVertex; // CRITICAL FIX: Initialize with safe default
-    switch(stage)
+    // What the domain looks like is in the execution modes, and the render
+    // pipeline has to be told the same thing Metal's tessellator will do.
+    if (ptr->tess.active)
     {
-        case _VERTEX_SHADER: model = SpvExecutionModelVertex; break;
-        case _TESS_CONTROL_SHADER: model = SpvExecutionModelTessellationControl; break;
-        case _TESS_EVALUATION_SHADER: model = SpvExecutionModelTessellationEvaluation; break;
-        case _GEOMETRY_SHADER: model = SpvExecutionModelGeometry; break;
-        case _FRAGMENT_SHADER: model = SpvExecutionModelFragment; break;
-        case _COMPUTE_SHADER: model = SpvExecutionModelGLCompute; break;
-        default: // CRITICAL FIX: Handle error gracefully instead of crashing
-            MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
-            STATE(error) = GL_INVALID_OPERATION;
-            return NULL;
+        const SpvExecutionMode *modes = NULL;
+        size_t mode_count = 0;
+
+        if (stage == _TESS_CONTROL_SHADER)
+            ptr->tess.out_control_points =
+                spvc_compiler_get_execution_mode_argument(compiler_msl, SpvExecutionModeOutputVertices);
+
+        if (spvc_compiler_get_execution_modes(compiler_msl, &modes, &mode_count) == SPVC_SUCCESS)
+        {
+            for (size_t m = 0; m < mode_count; m++)
+            {
+                switch (modes[m])
+                {
+                    case SpvExecutionModeTriangles:
+                    case SpvExecutionModeQuads:
+                    case SpvExecutionModeIsolines:
+                        if (stage == _TESS_EVALUATION_SHADER)
+                            ptr->tess.patch_kind = modes[m];
+                        break;
+
+                    case SpvExecutionModeSpacingEqual:
+                    case SpvExecutionModeSpacingFractionalEven:
+                    case SpvExecutionModeSpacingFractionalOdd:
+                        ptr->tess.partition = modes[m];
+                        break;
+
+                    case SpvExecutionModeVertexOrderCw:
+                    case SpvExecutionModeVertexOrderCcw:
+                        ptr->tess.winding = modes[m];
+                        break;
+
+                    case SpvExecutionModePointMode:
+                        ptr->tess.point_mode = GL_TRUE;
+                        break;
+
+                    default:
+                        break;
+                }
+            }
+        }
     }
 
-    switch(stage)
+    // create an entry point for metal based on the shader type and name
+    char entry_point[128];
+
+    // Taken from the module rather than from the GL stage: a geometry shader
+    // arrives here as a compute module, because Metal has no geometry stage.
+    SpvExecutionModel model = spvc_compiler_get_execution_model(compiler_msl);
+
+    if (entry_override)
     {
-        case _VERTEX_SHADER: snprintf(entry_point, sizeof(entry_point), "vertex_%d_main",name); break;
-        case _TESS_CONTROL_SHADER: snprintf(entry_point, sizeof(entry_point), "tess_control_%d_main",name); break;
-        case _TESS_EVALUATION_SHADER: snprintf(entry_point, sizeof(entry_point), "tess_evaluation_%d_main",name); break;
-        case _GEOMETRY_SHADER: snprintf(entry_point, sizeof(entry_point), "geometry_%d",name); break;
-        case _FRAGMENT_SHADER: snprintf(entry_point, sizeof(entry_point), "fragment_%d",name); break;
-        case _COMPUTE_SHADER: snprintf(entry_point, sizeof(entry_point), "compute_%d",name); break;
-        default: // CRITICAL FIX: Handle error gracefully instead of crashing
-        MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
-        STATE(error) = GL_INVALID_OPERATION;
+        snprintf(entry_point, sizeof(entry_point), "%s", entry_override);
+    }
+    else
+    {
+        GLuint name = ptr->shader_slots[stage]->name;
+
+        switch(stage)
+        {
+            case _VERTEX_SHADER: snprintf(entry_point, sizeof(entry_point), "vertex_%d_main",name); break;
+            case _TESS_CONTROL_SHADER: snprintf(entry_point, sizeof(entry_point), "tess_control_%d_main",name); break;
+            case _TESS_EVALUATION_SHADER: snprintf(entry_point, sizeof(entry_point), "tess_evaluation_%d_main",name); break;
+            case _GEOMETRY_SHADER: snprintf(entry_point, sizeof(entry_point), "geometry_%d",name); break;
+            case _FRAGMENT_SHADER: snprintf(entry_point, sizeof(entry_point), "fragment_%d",name); break;
+            case _COMPUTE_SHADER: snprintf(entry_point, sizeof(entry_point), "compute_%d",name); break;
+            default: // CRITICAL FIX: Handle error gracefully instead of crashing
+            MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
+            STATE(error) = GL_INVALID_OPERATION;
+        }
     }
 
     const char *cleansed_entry_point;
@@ -1401,8 +1574,11 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     }
 
     // set the entry point for metal
-    ptr->shader_slots[stage]->entry_point = strdup(entry_point);
-    ptr->spirv[stage].entry_point = strdup(entry_point);
+    if (entry_override == NULL)
+        ptr->shader_slots[stage]->entry_point = strdup(entry_point);
+
+    free(sp->entry_point);
+    sp->entry_point = strdup(entry_point);
 
     // compute shader
     if (stage == _COMPUTE_SHADER)
@@ -1833,7 +2009,311 @@ static void assignUniformLocations(Program *ptr)
     }
 }
 
-bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage)
+// SPIR-V says what the tessellation domain looks like in its OpExecutionMode
+// instructions. Both tessellation stages have to be read before either can be
+// turned into MSL: the control shader's factor layout depends on the domain,
+// which only the evaluation shader declares, and the evaluation shader needs
+// the control point count, which only the control shader declares.
+static void scanTessExecutionModes(Program *pptr, int stage)
+{
+    const unsigned *ir = pptr->spirv[stage].ir;
+    size_t words = pptr->spirv[stage].size;
+    size_t i = 5;   // past the SPIR-V header
+
+    if (ir == NULL || words <= 5)
+        return;
+
+    while (i < words)
+    {
+        unsigned len = ir[i] >> 16;
+        unsigned op = ir[i] & 0xFFFF;
+
+        if (len == 0)
+            break;
+
+        // 16 is OpExecutionMode; its second operand is the mode itself
+        if (op == 16 && len >= 3)
+        {
+            unsigned mode = ir[i + 2];
+
+            switch (mode)
+            {
+                case SpvExecutionModeTriangles:
+                case SpvExecutionModeQuads:
+                case SpvExecutionModeIsolines:
+                    if (stage == _TESS_EVALUATION_SHADER)
+                        pptr->tess.patch_kind = mode;
+                    break;
+
+                case SpvExecutionModeSpacingEqual:
+                case SpvExecutionModeSpacingFractionalEven:
+                case SpvExecutionModeSpacingFractionalOdd:
+                    pptr->tess.partition = mode;
+                    break;
+
+                case SpvExecutionModeVertexOrderCw:
+                case SpvExecutionModeVertexOrderCcw:
+                    pptr->tess.winding = mode;
+                    break;
+
+                case SpvExecutionModePointMode:
+                    pptr->tess.point_mode = GL_TRUE;
+                    break;
+
+                case SpvExecutionModeOutputVertices:
+                    if (stage == _TESS_CONTROL_SHADER && len >= 4)
+                        pptr->tess.out_control_points = ir[i + 3];
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        i += len;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Geometry shaders.
+//
+// geometry_shaders.c turned the stage into a compute shader and generated the
+// vertex shader that draws what it writes. Both are plain GLSL, so they go
+// through glslang here rather than through glCompileShader -- the application
+// never saw them and has no shader object for them.
+// ---------------------------------------------------------------------------
+
+void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t *input);
+
+// Compiles one generated source into SPIR-V and then MSL, filling `out`.
+static bool buildGeneratedStage(GLMContext ctx, Program *pptr, GLenum gl_type,
+                                int spirv_slot, const char *src, const char *entry)
+{
+    glslang_input_t input;
+    glslang_shader_t *shader;
+    glslang_program_t *prog;
+    glslang_stage_t stage;
+
+    initGLSLInput(ctx, gl_type, src, &input);
+    stage = input.stage;
+
+    shader = glslang_shader_create(&input);
+
+    if (shader == NULL)
+        return false;
+
+    glslang_shader_set_options(shader, GLSLANG_SHADER_VULKAN_RULES_RELAXED |
+                                       GLSLANG_SHADER_AUTO_MAP_LOCATIONS |
+                                       GLSLANG_SHADER_AUTO_MAP_BINDINGS);
+
+    if (!glslang_shader_preprocess(shader, &input) || !glslang_shader_parse(shader, &input))
+    {
+        MGL_ERR("MGL Error: generated %s shader would not compile:\n%s\n%s\n",
+                gl_type == GL_COMPUTE_SHADER ? "compute" : "vertex",
+                glslang_shader_get_info_log(shader), src);
+        glslang_shader_delete(shader);
+
+        return false;
+    }
+
+    prog = glslang_program_create();
+
+    if (prog == NULL)
+    {
+        glslang_shader_delete(shader);
+        return false;
+    }
+
+    glslang_program_add_shader(prog, shader);
+
+    if (!glslang_program_link(prog, GLSLANG_MSG_DEFAULT_BIT) || !glslang_program_map_io(prog))
+    {
+        MGL_ERR("MGL Error: generated shader would not link: %s\n",
+                glslang_program_get_info_log(prog));
+        glslang_program_delete(prog);
+        glslang_shader_delete(shader);
+
+        return false;
+    }
+
+    glslang_program_SPIRV_generate(prog, stage);
+
+    Spirv *sp = spirv_slot >= 0 ? &pptr->spirv[spirv_slot] : &pptr->gs_passthrough;
+
+    free(sp->ir);
+    free(sp->msl_str);
+    free(sp->entry_point);
+    sp->ir = NULL;
+    sp->msl_str = NULL;
+    sp->entry_point = NULL;
+
+    sp->stage = (GLuint)stage;
+    sp->size = glslang_program_SPIRV_get_size(prog);
+    sp->ir = (unsigned int *)malloc(sp->size * sizeof(unsigned));
+
+    if (sp->ir == NULL)
+    {
+        glslang_program_delete(prog);
+        glslang_shader_delete(shader);
+
+        return false;
+    }
+
+    glslang_program_SPIRV_get(prog, sp->ir);
+
+    // parseSPIRVShaderToMetal reads the shader slot for its entry point name,
+    // which a generated stage does not have, so it is compiled here instead
+    sp->msl_str = parseSPIRVShaderToMetal(ctx, pptr, spirv_slot >= 0 ? spirv_slot : _COMPUTE_SHADER,
+                                          sp, entry);
+
+    glslang_program_delete(prog);
+    glslang_shader_delete(shader);
+
+    if (sp->msl_str == NULL)
+        return false;
+
+    return true;
+}
+
+GLint mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name);
+
+// Rewrites the vertex stage to copy the recorded varyings into the feedback
+// buffers, and rebuilds it. Leaves capture off rather than wrong when the
+// shader records something MGL cannot lay out.
+static GLint mslSlotForName(Program *pptr, int stage, const char *name);
+
+static void linkTransformCapture(GLMContext ctx, Program *pptr)
+{
+    Shader *vs = pptr->shader_slots[_VERTEX_SHADER];
+    char entry[128];
+
+    mglFreeCaptureInfo(&pptr->xfb);
+
+    if (pptr->xfb_varying_count == 0 || vs == NULL || vs->src == NULL)
+        return;
+
+    // the stage that records is the last one before the rasteriser; MGL
+    // captures from the vertex stage, which is where it is when there is no
+    // tessellation or geometry stage in the way
+    if (pptr->tess.active || pptr->shader_slots[_GEOMETRY_SHADER])
+    {
+        MGL_INFO("MGL INFO: transform feedback past a tessellation or geometry "
+                 "stage is not captured yet\n");
+        return;
+    }
+
+    if (!mglBuildTransformCapture(vs->src, pptr->xfb_varyings, pptr->xfb_varying_count,
+                                  pptr->xfb_buffer_mode, &pptr->xfb))
+        return;
+
+    snprintf(entry, sizeof(entry), "vertex_%d_main", vs->name);
+
+    if (!buildGeneratedStage(ctx, pptr, GL_VERTEX_SHADER, _VERTEX_SHADER,
+                             pptr->xfb.rewritten_src, entry))
+    {
+        mglFreeCaptureInfo(&pptr->xfb);
+        return;
+    }
+
+    for (int b = 0; b < pptr->xfb.buffer_count; b++)
+    {
+        char name[64];
+
+        snprintf(name, sizeof(name), "MglXfbB%d", b);
+        pptr->xfb.buffer_slot[b] = mslSlotForName(pptr, _VERTEX_SHADER, name);
+    }
+}
+
+// The capture's own uniforms only have locations once the whole program has
+// been numbered, so this runs after assignUniformLocations rather than with
+// the rewrite above.
+static void resolveTransformCaptureUniforms(Program *pptr)
+{
+    if (pptr->xfb.rewritten_src == NULL)
+        return;
+
+    pptr->xfb.on_loc = mglFindUniformByName(pptr, "mglXfbOnU");
+    pptr->xfb.base_loc = mglFindUniformByName(pptr, "mglXfbBaseU");
+}
+
+// Where SPIRV-Cross put a generated storage block in a stage's Metal buffer
+// slots, or -1 when the shader turned out not to use it.
+static GLint mslSlotForName(Program *pptr, int stage, const char *name)
+{
+    SpirvResourceList *l = &pptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_BUFFER];
+
+    for (GLuint i = 0; i < l->count; i++)
+        if (l->list[i].name && !strcmp(l->list[i].name, name))
+            return (GLint)l->list[i].msl_index;
+
+    return -1;
+}
+
+// Builds the three pieces a geometry program needs: the vertex stage with its
+// capture, the geometry stage as compute, and the vertex stage that draws the
+// result. Returns false if any of them will not build.
+static bool linkGeometryProgram(GLMContext ctx, Program *pptr)
+{
+    Shader *gs = pptr->shader_slots[_GEOMETRY_SHADER];
+    Shader *vs = pptr->shader_slots[_VERTEX_SHADER];
+    char entry[128];
+    char *captured;
+    bool ok;
+
+    if (gs == NULL || gs->src == NULL)
+        return false;
+
+    mglFreeGeometryInfo(&pptr->geom);
+
+    if (!mglRewriteGeometryShader(gs->src, &pptr->geom))
+    {
+        MGL_ERR("MGL Error: geometry shader %u is not a shape MGL can rewrite\n", gs->name);
+        return false;
+    }
+
+    if (vs == NULL || vs->src == NULL)
+    {
+        MGL_ERR("MGL Error: a geometry shader needs a vertex shader to feed it\n");
+        return false;
+    }
+
+    // the vertex stage writes its output where the geometry stage will read it
+    captured = mglAddGeometryCapture(vs->src, &pptr->geom);
+
+    if (captured == NULL)
+        return false;
+
+    snprintf(entry, sizeof(entry), "vertex_%d_main", vs->name);
+    ok = buildGeneratedStage(ctx, pptr, GL_VERTEX_SHADER, _VERTEX_SHADER, captured, entry);
+    free(captured);
+
+    if (!ok)
+        return false;
+
+    snprintf(entry, sizeof(entry), "geometry_%d", gs->name);
+
+    if (!buildGeneratedStage(ctx, pptr, GL_COMPUTE_SHADER, _GEOMETRY_SHADER,
+                             pptr->geom.compute_src, entry))
+        return false;
+
+    snprintf(entry, sizeof(entry), "gs_passthrough_%d", pptr->name);
+
+    if (!buildGeneratedStage(ctx, pptr, GL_VERTEX_SHADER, -1,
+                             pptr->geom.passthrough_src, entry))
+        return false;
+
+    // find where each generated buffer ended up, so the draw can bind them
+    pptr->geom.vs_in_slot     = mslSlotForName(pptr, _VERTEX_SHADER, "MglGsInB");
+    pptr->geom.gs_in_slot     = mslSlotForName(pptr, _GEOMETRY_SHADER, "MglGsInB");
+    pptr->geom.gs_out_slot    = mslSlotForName(pptr, _GEOMETRY_SHADER, "MglGsOutB");
+    pptr->geom.gs_index_slot  = mslSlotForName(pptr, _GEOMETRY_SHADER, "MglGsIdxB");
+    pptr->geom.pass_out_slot  = mslSlotForName(pptr, _COMPUTE_SHADER, "MglGsOutB");
+
+    return pptr->geom.vs_in_slot >= 0 && pptr->geom.gs_in_slot >= 0 &&
+           pptr->geom.gs_out_slot >= 0 && pptr->geom.pass_out_slot >= 0;
+}
+
+bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool modes_only)
 {
     glslang_program_t *glsl_program;
     int err;
@@ -1941,9 +2421,16 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage)
     glslang_program_SPIRV_get(glsl_program, pptr->spirv[stage].ir);
     MGL_INFO("MGL DEBUG: SPIRV IR obtained\n");
 
+    if (modes_only)
+    {
+        scanTessExecutionModes(pptr, stage);
+
+        return true;
+    }
+
     // compile SPIRV to Metal
     MGL_INFO("MGL DEBUG: About to parse SPIRV to Metal\n");
-    pptr->spirv[stage].msl_str = parseSPIRVShaderToMetal(ctx, pptr, stage);
+    pptr->spirv[stage].msl_str = parseSPIRVShaderToMetal(ctx, pptr, stage, NULL, NULL);
     MGL_INFO("MGL DEBUG: SPIRV parsed to Metal\n");
     // ERROR_CHECK_RETURN_VALUE(pptr->spirv[stage].msl_str, GL_INVALID_OPERATION, false);
     if (pptr->spirv[stage].msl_str == NULL) {
@@ -1983,15 +2470,34 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     pptr->link_status = GL_TRUE;
     pptr->validate_status = GL_FALSE;
 
-    // Metal has no tessellator MGL can drive yet. Saying so here is the honest
-    // answer; linking such a program and then drawing nothing is not.
+    // GL 4.6 section 7.3: a program with one tessellation stage and not the
+    // other does not link. Both together are the tessellation pipeline.
+    memset(&pptr->tess, 0, sizeof(pptr->tess));
+
     if (pptr->shader_slots[_TESS_CONTROL_SHADER] || pptr->shader_slots[_TESS_EVALUATION_SHADER])
     {
-        pptr->link_status = GL_FALSE;
-        pptr->validate_status = GL_FALSE;
-        pptr->log = strdup("link failed: tessellation shaders are not supported by MGL");
+        // An evaluation shader on its own is legal -- the control stage is
+        // then fixed function, passing the patch through with the levels set
+        // by glPatchParameterfv. A control shader without one is not, unless
+        // the program is separable, which is allowed to hold a single stage.
+        if (pptr->shader_slots[_TESS_EVALUATION_SHADER] == NULL && !pptr->separable)
+        {
+            pptr->link_status = GL_FALSE;
+            pptr->validate_status = GL_FALSE;
+            pptr->log = strdup("link failed: a tessellation control shader needs an "
+                               "evaluation shader to go with it");
 
-        return;
+            return;
+        }
+
+        pptr->tess.active = pptr->shader_slots[_TESS_EVALUATION_SHADER] != NULL;
+        pptr->tess.has_control = pptr->shader_slots[_TESS_CONTROL_SHADER] != NULL;
+        pptr->tess.lower_left = (ctx->state.var.clip_origin == GL_LOWER_LEFT);
+
+        // a separable control shader has no evaluation stage here to take the
+        // domain from, so its own declaration is all there is
+        if (!pptr->tess.active && pptr->tess.has_control)
+            linkAndCompileProgramToMetal(ctx, pptr, _TESS_CONTROL_SHADER, true);
     }
 
     int stages_linked = 0;
@@ -2000,13 +2506,86 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     // object. A stage that will not build sets LINK_STATUS false instead.
     ctx->error_suppress++;
 
+    // A geometry shader never reaches Metal as one; it is rewritten into a
+    // compute pass with a generated vertex shader in front of the raster.
+    if (pptr->shader_slots[_GEOMETRY_SHADER])
+    {
+        if (linkGeometryProgram(ctx, pptr) == false)
+        {
+            pptr->link_status = GL_FALSE;
+            pptr->validate_status = GL_FALSE;
+
+            if (pptr->log == NULL)
+                pptr->log = strdup("link failed: the geometry shader could not be rewritten");
+
+            ctx->error_suppress--;
+
+            return;
+        }
+
+        // the fragment stage is the only one left that still builds normally
+        if (pptr->shader_slots[_FRAGMENT_SHADER] &&
+            linkAndCompileProgramToMetal(ctx, pptr, _FRAGMENT_SHADER, false) == false)
+            pptr->link_status = GL_FALSE;
+
+        assignUniformLocations(pptr);
+        pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
+
+        pptr->geom.prims_loc   = mglFindUniformByName(pptr, "mglGsPrimsU");
+        pptr->geom.indexed_loc = mglFindUniformByName(pptr, "mglGsIndexedU");
+        pptr->geom.first_loc   = mglFindUniformByName(pptr, "mglGsFirstU");
+        pptr->geom.stride_loc  = mglFindUniformByName(pptr, "mglGsStrideU");
+
+        if (pptr->link_status == GL_TRUE)
+        {
+            pptr->dirty_bits |= DIRTY_PROGRAM;
+
+            if (ctx->mtl_funcs.mtlBindProgram(ctx, pptr) == false)
+            {
+                pptr->link_status = GL_FALSE;
+
+                if (pptr->log == NULL)
+                    pptr->log = strdup("link failed: Metal rejected the generated MSL");
+            }
+        }
+
+        pptr->validate_status = pptr->link_status;
+        ctx->error_suppress--;
+
+        return;
+    }
+
+    if (pptr->tess.active)
+    {
+        if (pptr->tess.has_control)
+            linkAndCompileProgramToMetal(ctx, pptr, _TESS_CONTROL_SHADER, true);
+        else
+            // no control shader: the patch reaches the evaluation stage exactly
+            // as the application laid it out
+            pptr->tess.out_control_points = (GLuint)ctx->state.var.patch_vertices;
+
+        linkAndCompileProgramToMetal(ctx, pptr, _TESS_EVALUATION_SHADER, true);
+
+        // Metal cannot tessellate isolines at all. Refusing the link says so
+        // where the application can see it.
+        if (pptr->tess.patch_kind == SpvExecutionModeIsolines)
+        {
+            pptr->link_status = GL_FALSE;
+            pptr->validate_status = GL_FALSE;
+            pptr->log = strdup("link failed: Metal has no isoline tessellation");
+            ctx->error_suppress--;
+
+            return;
+        }
+    }
+
     for (int stage=0; stage<_MAX_SHADER_TYPES; stage++)
     {
         pptr->spirv[stage].msl_str = 0;
 
         if (pptr->shader_slots[stage])
         {
-            if (linkAndCompileProgramToMetal(ctx, pptr, stage) == false)
+            if (linkAndCompileProgramToMetal(ctx, pptr, stage, false) == false)
                 pptr->link_status = GL_FALSE;
             else
                 stages_linked++;
@@ -2017,7 +2596,18 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     if (stages_linked == 0)
         pptr->link_status = GL_FALSE;
 
+    // the subroutines the rewrite found belong to the program from here on
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        if (pptr->shader_slots[stage])
+            mglCopySubroutineInfo(&pptr->subroutines[stage], &pptr->shader_slots[stage]->subroutines);
+
+    linkTransformCapture(ctx, pptr);
+
     assignUniformLocations(pptr);
+
+    resolveTransformCaptureUniforms(pptr);
+
+    pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
 
     // Hand the MSL to Metal now rather than at the first draw. GL callers expect
     // shader problems at link time, and a program that only fails later reports
@@ -2356,6 +2946,37 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
                 params[0] = params[1] = params[2] = 0;
             }
             break;
+        // what the tessellation stages declared, read out of their SPIR-V
+        case GL_TESS_CONTROL_OUTPUT_VERTICES:
+            *params = (GLint)pptr->tess.out_control_points;
+            break;
+
+        case GL_TESS_GEN_MODE:
+            switch (pptr->tess.patch_kind)
+            {
+                case SpvExecutionModeQuads:     *params = GL_QUADS; break;
+                case SpvExecutionModeIsolines:  *params = GL_ISOLINES; break;
+                default:                        *params = GL_TRIANGLES; break;
+            }
+            break;
+
+        case GL_TESS_GEN_SPACING:
+            switch (pptr->tess.partition)
+            {
+                case SpvExecutionModeSpacingFractionalEven: *params = GL_FRACTIONAL_EVEN; break;
+                case SpvExecutionModeSpacingFractionalOdd:  *params = GL_FRACTIONAL_ODD; break;
+                default:                                    *params = GL_EQUAL; break;
+            }
+            break;
+
+        case GL_TESS_GEN_VERTEX_ORDER:
+            *params = pptr->tess.winding == SpvExecutionModeVertexOrderCw ? GL_CW : GL_CCW;
+            break;
+
+        case GL_TESS_GEN_POINT_MODE:
+            *params = pptr->tess.point_mode ? GL_TRUE : GL_FALSE;
+            break;
+
         default:
             MGL_INFO("mglGetProgramiv: unhandled pname 0x%x\n", pname);
             *params = 0;
@@ -2506,36 +3127,166 @@ bool validShaderType(GLenum shadertype)
     return false;
 }
 
-void mglGetActiveSubroutineUniformiv(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLenum pname, GLint *values)
+// ---------------------------------------------------------------------------
+// Subroutines. subroutines.c rewrote them out of the GLSL before glslang saw
+// it and left a record of what it found on the shader; these queries answer
+// from that record, and the uniform write lands in the int it generated.
+// ---------------------------------------------------------------------------
+
+GLuint glShaderTypeToGLMType(GLuint type);
+GLint mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name);
+void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size);
+
+static SubroutineInfo *stageSubroutines(Program *pptr, GLenum shadertype)
 {
-    Program *pptr = findProgram(ctx, program);
+    int stage = glShaderTypeToGLMType(shadertype);
 
-    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(values, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(validShaderType(shadertype), GL_INVALID_ENUM);
+    if (stage < 0 || stage >= _MAX_SHADER_TYPES)
+        return NULL;
 
-    // no active subroutine uniforms, so any index is out of range
-    ERROR_RETURN(GL_INVALID_VALUE);
+    // the program's own copy, since the shader it came from may be long gone
+    return &pptr->subroutines[stage];
 }
 
-void mglGetActiveSubroutineUniformName(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
+// GL counts one location per array element, so an array of two takes two.
+static GLuint subroutineLocationCount(const SubroutineInfo *si)
+{
+    GLuint n = 0;
+
+    for (GLuint i = 0; i < si->uniform_count; i++)
+        n += si->uniform_array_size[i] ? si->uniform_array_size[i] : 1;
+
+    return n;
+}
+
+// Which uniform a location belongs to, and which element of it.
+static int subroutineUniformAt(const SubroutineInfo *si, GLuint location, GLuint *element)
+{
+    GLuint at = 0;
+
+    for (GLuint i = 0; i < si->uniform_count; i++)
+    {
+        GLuint n = si->uniform_array_size[i] ? si->uniform_array_size[i] : 1;
+
+        if (location < at + n)
+        {
+            if (element)
+                *element = location - at;
+
+            return (int)i;
+        }
+
+        at += n;
+    }
+
+    return -1;
+}
+
+static GLint subroutineLocationOf(const SubroutineInfo *si, const char *name)
+{
+    GLuint at = 0;
+
+    for (GLuint i = 0; i < si->uniform_count; i++)
+    {
+        if (si->uniform_names[i] && !strcmp(si->uniform_names[i], name))
+            return (GLint)at;
+
+        at += si->uniform_array_size[i] ? si->uniform_array_size[i] : 1;
+    }
+
+    return -1;
+}
+
+void mglGetActiveSubroutineName(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
 {
     Program *pptr = findProgram(ctx, program);
+    SubroutineInfo *si;
 
     ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(validShaderType(shadertype), GL_INVALID_ENUM);
 
-    ERROR_RETURN(GL_INVALID_VALUE);
+    si = stageSubroutines(pptr, shadertype);
+
+    ERROR_CHECK_RETURN(si && index < si->fn_count, GL_INVALID_VALUE);
+
+    copyResourceName(si->fn_names[index], bufSize, length, name);
+}
+
+void mglGetActiveSubroutineUniformiv(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLenum pname, GLint *values)
+{
+    Program *pptr = findProgram(ctx, program);
+    SubroutineInfo *si;
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(values, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(validShaderType(shadertype), GL_INVALID_ENUM);
+
+    si = stageSubroutines(pptr, shadertype);
+
+    ERROR_CHECK_RETURN(si && index < si->uniform_count, GL_INVALID_VALUE);
+
+    switch (pname)
+    {
+        case GL_NUM_COMPATIBLE_SUBROUTINES:
+            values[0] = (GLint)si->uniform_compatible[index];
+            break;
+
+        case GL_COMPATIBLE_SUBROUTINES:
+            // MGL keeps one dispatcher per uniform and numbers every
+            // subroutine in the stage, so the compatible set is the set of
+            // functions that dispatcher switches on
+            for (GLuint i = 0, n = 0; i < si->fn_count; i++)
+                if (n < si->uniform_compatible[index])
+                    values[n++] = (GLint)i;
+            break;
+
+        case GL_UNIFORM_SIZE:
+            values[0] = (GLint)(si->uniform_array_size[index] ? si->uniform_array_size[index] : 1);
+            break;
+
+        case GL_UNIFORM_NAME_LENGTH:
+            values[0] = (GLint)strlen(si->uniform_names[index]) + 1;
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+}
+
+void mglGetActiveSubroutineUniformName(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
+{
+    Program *pptr = findProgram(ctx, program);
+    SubroutineInfo *si;
+
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(validShaderType(shadertype), GL_INVALID_ENUM);
+
+    si = stageSubroutines(pptr, shadertype);
+
+    ERROR_CHECK_RETURN(si && index < si->uniform_count, GL_INVALID_VALUE);
+
+    copyResourceName(si->uniform_names[index], bufSize, length, name);
 }
 
 GLuint mglGetSubroutineIndex(GLMContext ctx, GLuint program, GLenum shadertype, const GLchar *name)
 {
     Program *pptr = findProgram(ctx, program);
+    SubroutineInfo *si;
 
     ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_VALUE, GL_INVALID_INDEX);
     ERROR_CHECK_RETURN_VALUE(name, GL_INVALID_VALUE, GL_INVALID_INDEX);
     ERROR_CHECK_RETURN_VALUE(validShaderType(shadertype), GL_INVALID_ENUM, GL_INVALID_INDEX);
+
+    si = stageSubroutines(pptr, shadertype);
+
+    if (si == NULL)
+        return GL_INVALID_INDEX;
+
+    for (GLuint i = 0; i < si->fn_count; i++)
+        if (si->fn_names[i] && !strcmp(si->fn_names[i], name))
+            return i;
 
     return GL_INVALID_INDEX;
 }
@@ -2543,30 +3294,92 @@ GLuint mglGetSubroutineIndex(GLMContext ctx, GLuint program, GLenum shadertype, 
 GLint mglGetSubroutineUniformLocation(GLMContext ctx, GLuint program, GLenum shadertype, const GLchar *name)
 {
     Program *pptr = findProgram(ctx, program);
+    SubroutineInfo *si;
 
     ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_VALUE, -1);
     ERROR_CHECK_RETURN_VALUE(name, GL_INVALID_VALUE, -1);
     ERROR_CHECK_RETURN_VALUE(validShaderType(shadertype), GL_INVALID_ENUM, -1);
 
-    return -1;
+    si = stageSubroutines(pptr, shadertype);
+
+    return si ? subroutineLocationOf(si, name) : -1;
 }
 
 void mglGetUniformSubroutineuiv(GLMContext ctx, GLenum shadertype, GLint location, GLuint *params)
 {
-    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(ctx->state.program, GL_INVALID_OPERATION);
+    Program *pptr = ctx->state.program;
+    SubroutineInfo *si;
+    int stage;
 
-    // location can only be out of range when there are no subroutine uniforms
-    ERROR_RETURN(GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(validShaderType(shadertype), GL_INVALID_ENUM);
+
+    si = stageSubroutines(pptr, shadertype);
+    stage = glShaderTypeToGLMType(shadertype);
+
+    ERROR_CHECK_RETURN(si && location >= 0 &&
+                       (GLuint)location < subroutineLocationCount(si), GL_INVALID_VALUE);
+
+    params[0] = pptr->subroutine_values[stage]
+              ? pptr->subroutine_values[stage][location] : 0;
 }
 
 void mglUniformSubroutinesuiv(GLMContext ctx, GLenum shadertype, GLsizei count, const GLuint *indices)
 {
-    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(ctx->state.program, GL_INVALID_OPERATION);
+    Program *pptr = ctx->state.program;
+    SubroutineInfo *si;
+    int stage;
+    GLuint locations;
 
-    // count must equal the active subroutine uniform count, which is zero
-    ERROR_CHECK_RETURN(count == 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(validShaderType(shadertype), GL_INVALID_ENUM);
+
+    si = stageSubroutines(pptr, shadertype);
+    stage = glShaderTypeToGLMType(shadertype);
+    locations = si ? subroutineLocationCount(si) : 0;
+
+    ERROR_CHECK_RETURN((GLuint)count == locations, GL_INVALID_VALUE);
+
+    if (count == 0)
+        return;
+
+    ERROR_CHECK_RETURN(indices, GL_INVALID_VALUE);
+
+    for (GLsizei i = 0; i < count; i++)
+        ERROR_CHECK_RETURN(indices[i] < si->fn_count, GL_INVALID_VALUE);
+
+    if (pptr->subroutine_values[stage] == NULL)
+    {
+        pptr->subroutine_values[stage] = (GLuint *)calloc(locations, sizeof(GLuint));
+
+        ERROR_CHECK_RETURN(pptr->subroutine_values[stage], GL_OUT_OF_MEMORY);
+    }
+
+    for (GLsizei i = 0; i < count; i++)
+    {
+        GLuint element = 0;
+        int u = subroutineUniformAt(si, (GLuint)i, &element);
+        char sel[128];
+        GLint loc;
+
+        pptr->subroutine_values[stage][i] = indices[i];
+
+        if (u < 0)
+            continue;
+
+        snprintf(sel, sizeof(sel), "%s%s", si->uniform_names[u], MGL_SUBROUTINE_SUFFIX);
+
+        loc = mglGetUniformLocation(ctx, pptr->name, sel);
+
+        if (loc >= 0)
+        {
+            GLint v = (GLint)indices[i];
+
+            programUniformWrite(ctx, pptr, loc + (GLint)element, &v, sizeof(GLint));
+        }
+    }
 }
 
 /* ---------- program interface query ---------- */
@@ -2851,15 +3664,49 @@ void mglGetProgramStageiv(GLMContext ctx, GLuint program, GLenum shadertype, GLe
             ERROR_RETURN(GL_INVALID_ENUM);
     }
 
+    SubroutineInfo *si = stageSubroutines(ptr, shadertype);
+
     switch (pname)
     {
         case GL_ACTIVE_SUBROUTINES:
-        case GL_ACTIVE_SUBROUTINE_UNIFORMS:
-        case GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS:
-        case GL_ACTIVE_SUBROUTINE_MAX_LENGTH:
-        case GL_ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH:
-            *params = 0;
+            *params = si ? (GLint)si->fn_count : 0;
             break;
+
+        case GL_ACTIVE_SUBROUTINE_UNIFORMS:
+            *params = si ? (GLint)si->uniform_count : 0;
+            break;
+
+        case GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS:
+            *params = si ? (GLint)subroutineLocationCount(si) : 0;
+            break;
+
+        case GL_ACTIVE_SUBROUTINE_MAX_LENGTH:
+        {
+            GLint m = 0;
+
+            for (GLuint i = 0; si && i < si->fn_count; i++)
+            {
+                GLint n = (GLint)strlen(si->fn_names[i]) + 1;
+
+                if (n > m) m = n;
+            }
+
+            *params = m;
+        } break;
+
+        case GL_ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH:
+        {
+            GLint m = 0;
+
+            for (GLuint i = 0; si && i < si->uniform_count; i++)
+            {
+                GLint n = (GLint)strlen(si->uniform_names[i]) + 1;
+
+                if (n > m) m = n;
+            }
+
+            *params = m;
+        } break;
 
         default:
             ERROR_RETURN(GL_INVALID_ENUM);

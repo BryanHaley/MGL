@@ -9,20 +9,62 @@
 #include "mgl_test.h"
 #include "harness.h"
 
+/* GL 4.6 section 13.2.2: BeginTransformFeedback needs an active program that
+   records varyings and a buffer bound for them to go into. These tests are
+   about the state machine, so they set that much up and leave it bound. */
+static GLuint xfbReadyProgram(GLuint *buf_out)
+{
+    static const char *vs =
+        "#version 410\n"
+        "layout(location=0) in vec2 p;\n"
+        "out vec4 captured;\n"
+        "void main(){ captured = vec4(p,0,1); gl_Position = vec4(p,0,1); }\n";
+    static const char *fs =
+        "#version 410\n"
+        "out vec4 o;\n"
+        "void main(){ o = vec4(1); }\n";
+    static const char *varyings[] = { "captured" };
+    GLuint v = glCreateShader(GL_VERTEX_SHADER);
+    GLuint f = glCreateShader(GL_FRAGMENT_SHADER);
+    GLuint p = glCreateProgram();
+    GLuint b = 0;
+
+    glShaderSource(v, 1, &vs, NULL); glCompileShader(v);
+    glShaderSource(f, 1, &fs, NULL); glCompileShader(f);
+    glAttachShader(p, v); glAttachShader(p, f);
+    glTransformFeedbackVaryings(p, 1, varyings, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(p);
+    glUseProgram(p);
+
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, b);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 4096, NULL, GL_DYNAMIC_COPY);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, b);
+
+    mgl_drain_errors();
+
+    if (buf_out)
+        *buf_out = b;
+
+    return p;
+}
+
 /* ---------- transform feedback begin / end / pause / resume ---------- */
 
 GPU_TEST(query_xfb, begin_end_pause_resume)
 {
-    GLuint t = 0;
+    GLuint t = 0, buf = 0;
 
     glGenTransformFeedbacks(1, &t);
     CHECK(t != 0);
 
-    // begin with no xfb bound -> error
+    // nothing to record yet: no program, no varyings, no buffer
     glBeginTransformFeedback(GL_POINTS);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, t);
+    xfbReadyProgram(&buf);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
 
     // begin with a valid primitive mode
     glBeginTransformFeedback(GL_POINTS);
@@ -82,10 +124,12 @@ GPU_TEST(query_xfb, begin_end_pause_resume)
 
 GPU_TEST(query_xfb, begin_with_lines_and_triangles)
 {
-    GLuint t = 0;
+    GLuint t = 0, buf = 0;
 
     glGenTransformFeedbacks(1, &t);
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, t);
+    xfbReadyProgram(&buf);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
 
     // GL_LINES and GL_TRIANGLES are also valid per spec
     glBeginTransformFeedback(GL_LINES);
@@ -138,6 +182,13 @@ GPU_TEST(query_xfb, get_transform_feedbackiv)
 
     glGenTransformFeedbacks(1, &t);
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, t);
+
+    {
+        GLuint buf = 0;
+
+        xfbReadyProgram(&buf);
+        glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
+    }
 
     // default state: not active, not paused
     glGetTransformFeedbackiv(t, GL_TRANSFORM_FEEDBACK_ACTIVE, &v);

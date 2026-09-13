@@ -42,6 +42,9 @@
 
 /// Hand every buffer taken since the last call back once `commandBuffer`
 /// finishes on the GPU. Call this once per command buffer, before committing.
+- (id<MTLBuffer>) bufferOfLength: (NSUInteger) length
+                forCommandBuffer: (id<MTLCommandBuffer>) commandBuffer;
+
 - (void) recycleWhenComplete: (id<MTLCommandBuffer>) commandBuffer;
 
 /// Drop everything. For teardown and for recovering from a device reset.

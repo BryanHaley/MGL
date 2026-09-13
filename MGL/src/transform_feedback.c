@@ -76,11 +76,6 @@ void mglTransformFeedbackVaryings(GLMContext ctx, GLuint program, GLsizei count,
                        bufferMode == GL_SEPARATE_ATTRIBS, GL_INVALID_ENUM);
     ERROR_CHECK_RETURN(bufferMode != GL_SEPARATE_ATTRIBS || count <= MAX_TF_BUFFERS, GL_INVALID_VALUE);
 
-    xfb = ctx->state.transform_feedback;
-
-    if (xfb == NULL)
-        return;
-
     if (count > 0)
     {
         names = (char **)calloc((size_t)count, sizeof(char *));
@@ -103,23 +98,28 @@ void mglTransformFeedbackVaryings(GLMContext ctx, GLuint program, GLsizei count,
         }
     }
 
-    freeVaryings(xfb);
+    // GL 4.6 section 11.1.2.1: these belong to the program object and do not
+    // take effect until it is linked again. MGL used to hang them on whatever
+    // transform feedback object happened to be bound, so a program that set
+    // its varyings before binding one lost them.
+    for (GLsizei i = 0; i < prog->xfb_varying_count; i++)
+        free(prog->xfb_varyings[i]);
 
-    xfb->varyings = names;
-    xfb->varying_count = count;
-    xfb->buffer_mode = bufferMode;
+    free(prog->xfb_varyings);
+
+    prog->xfb_varyings = names;
+    prog->xfb_varying_count = count;
+    prog->xfb_buffer_mode = bufferMode;
 }
 
 void mglGetTransformFeedbackVarying(GLMContext ctx, GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name)
 {
     Program *prog = findProgram(ctx, program);
-    TransformFeedback *xfb = ctx->state.transform_feedback;
     GLsizei n;
 
     ERROR_CHECK_RETURN(prog, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(xfb, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(index < (GLuint)xfb->varying_count, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(index < (GLuint)prog->xfb_varying_count, GL_INVALID_VALUE);
 
     if (size)
         *size = 1;
@@ -134,12 +134,12 @@ void mglGetTransformFeedbackVarying(GLMContext ctx, GLuint program, GLuint index
     if (name == NULL || bufSize == 0)
         return;
 
-    n = (GLsizei)strlen(xfb->varyings[index]);
+    n = (GLsizei)strlen(prog->xfb_varyings[index]);
 
     if (n > bufSize - 1)
         n = bufSize - 1;
 
-    memcpy(name, xfb->varyings[index], (size_t)n);
+    memcpy(name, prog->xfb_varyings[index], (size_t)n);
     name[n] = '\0';
 
     if (length)

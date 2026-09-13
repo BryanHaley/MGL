@@ -155,14 +155,6 @@ bool validate_vao(GLMContext ctx, bool uses_elements)
 
 bool validate_program(GLMContext ctx)
 {
-    if (ctx->state.program) {
-        if (ctx->state.program->shader_slots[_GEOMETRY_SHADER])
-        {
-            MGL_ERR("MGL Error: validate_program: geometry shader present (unsupported)\n");
-            return false;
-        }
-    }
-    
     // Allow NULL program (MGLRenderer handles it by using cached pipeline or program pipeline)
     return true;
 }

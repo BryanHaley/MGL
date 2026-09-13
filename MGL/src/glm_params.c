@@ -131,7 +131,7 @@ void getMacOSDefaults(GLMContext glm_ctx)
     glGetIntegerv(GL_SMOOTH_LINE_WIDTH_RANGE,&glm_ctx->state.var.smooth_line_width_range);
     glGetIntegerv(GL_SMOOTH_LINE_WIDTH_GRANULARITY,&glm_ctx->state.var.smooth_line_width_granularity);
     glGetIntegerv(GL_ALIASED_LINE_WIDTH_RANGE,&glm_ctx->state.var.aliased_line_width_range);
-    glGetIntegerv(GL_SAMPLE_COVERAGE_VALUE,&glm_ctx->state.var.sample_coverage_value);
+    glGetFloatv(GL_SAMPLE_COVERAGE_VALUE,&glm_ctx->state.var.sample_coverage_value);
     glGetIntegerv(GL_SAMPLE_COVERAGE_INVERT,&glm_ctx->state.var.sample_coverage_invert);
     glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP,&glm_ctx->state.var.texture_binding_cube_map);
     glGetIntegerv(GL_MAX_CUBE_MAP_TEXTURE_SIZE,&glm_ctx->state.var.max_cube_map_texture_size);

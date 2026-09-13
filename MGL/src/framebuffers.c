@@ -185,6 +185,54 @@ void mglGenFramebuffers(GLMContext ctx, GLsizei n, GLuint *framebuffers)
     }
 }
 
+// GL_SAMPLES is whatever the attachments carry. An FBO with no attachments
+// falls back to the count set with glFramebufferParameteri, and the window's
+// framebuffer is single-sampled.
+GLsizei mglDrawFramebufferSamples(GLMContext ctx)
+{
+    Framebuffer *fbo = ctx->state.framebuffer;
+    Texture *tex;
+
+    if (fbo == NULL)
+        return 0;
+
+    for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+    {
+        if (fbo->color_attachments[i].texture == 0)
+            continue;
+
+        tex = fbo->color_attachments[i].textarget == GL_RENDERBUFFER
+                ? fbo->color_attachments[i].buf.rbo->tex
+                : fbo->color_attachments[i].buf.tex;
+
+        if (tex && tex->samples > 1)
+            return tex->samples;
+    }
+
+    if (fbo->depth.texture)
+    {
+        tex = fbo->depth.textarget == GL_RENDERBUFFER
+                ? fbo->depth.buf.rbo->tex : fbo->depth.buf.tex;
+
+        if (tex && tex->samples > 1)
+            return tex->samples;
+    }
+
+    if (fbo->stencil.texture)
+    {
+        tex = fbo->stencil.textarget == GL_RENDERBUFFER
+                ? fbo->stencil.buf.rbo->tex : fbo->stencil.buf.tex;
+
+        if (tex && tex->samples > 1)
+            return tex->samples;
+    }
+
+    if (fbo->color_attachment_bitfield == 0 && !fbo->depth.texture && !fbo->stencil.texture)
+        return fbo->default_samples;
+
+    return 0;
+}
+
 void mglBindFramebuffer(GLMContext ctx, GLenum target, GLuint framebuffer)
 {
     Framebuffer *ptr;

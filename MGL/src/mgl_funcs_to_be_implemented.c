@@ -64,9 +64,55 @@ void mglBeginTransformFeedback(GLMContext ctx, GLenum primitiveMode)
 		return;
 	}
 
+	// GL 4.6 section 13.2.2: capture needs somewhere to go. With no program,
+	// no recorded varyings, or no buffer on a binding point it would use,
+	// there is nothing to begin.
+	{
+		TransformFeedback *xfb = STATE(transform_feedback);
+		// With a pipeline bound instead of a program, the varyings belong to
+		// whichever program supplies the last stage before the rasteriser.
+		Program *prog = STATE(program);
+
+		if (prog == NULL && STATE(program_pipeline))
+		{
+			static const int order[] = { _GEOMETRY_SHADER, _TESS_EVALUATION_SHADER, _VERTEX_SHADER };
+
+			for (unsigned i = 0; i < sizeof(order) / sizeof(order[0]); i++)
+				if (STATE(program_pipeline)->stage_programs[order[i]])
+				{
+					prog = STATE(program_pipeline)->stage_programs[order[i]];
+					break;
+				}
+		}
+
+		GLsizei recorded = prog ? prog->xfb_varying_count : 0;
+		GLsizei needed = (prog && prog->xfb_buffer_mode == GL_SEPARATE_ATTRIBS) ? recorded : 1;
+
+		if (prog == NULL || recorded == 0)
+		{
+			STATE(error) = GL_INVALID_OPERATION;
+			return;
+		}
+
+		// glBindBufferBase records into the context's binding points and
+		// glTransformFeedbackBufferBase into the object's own; either one
+		// counts as a place for the capture to land.
+		BufferBaseTarget *bound = STATE(buffer_base)[_TRANSFORM_FEEDBACK_BUFFER].buffers;
+
+		for (GLsizei i = 0; i < needed && i < MAX_TF_BUFFERS; i++)
+			if (xfb->buffers[i].buf == NULL && bound[i].buf == NULL)
+			{
+				STATE(error) = GL_INVALID_OPERATION;
+				return;
+			}
+	}
+
 	STATE(transform_feedback)->active = GL_TRUE;
 	STATE(transform_feedback)->paused = GL_FALSE;
 	STATE(transform_feedback)->primitive_mode = primitiveMode;
+
+	// capture starts at the front of the buffers again
+	STATE(transform_feedback)->vertices_recorded = 0;
 }
 
 
@@ -88,19 +134,16 @@ void mglBindTransformFeedback(GLMContext ctx, GLenum target, GLuint id)
         return;
     }
 
-    if (id == 0)
+    // GL 4.6 section 13.2: name zero is the default transform feedback object.
+    // It is a real object that is always there, not the absence of one --
+    // treating it as NULL made glBeginTransformFeedback fail before any
+    // application had bound anything.
+    TransformFeedback *ptr = getTransformFeedback(ctx, id);
+
+    if (ptr)
     {
-        // Unbind transform feedback
-        STATE(transform_feedback) = NULL;
-    }
-    else
-    {
-        TransformFeedback *ptr = getTransformFeedback(ctx, id);
-        if (ptr)
-        {
-            ptr->target = target;
-            STATE(transform_feedback) = ptr;
-        }
+        ptr->target = target;
+        STATE(transform_feedback) = ptr;
     }
 }
 
@@ -486,15 +529,8 @@ void mglGenTransformFeedbacks(GLMContext ctx, GLsizei n, GLuint *ids)
 }
 
 
-void mglGetActiveSubroutineName(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
-{
-	ERROR_CHECK_RETURN(findProgram(ctx, program), GL_INVALID_VALUE);
-	ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
-	ERROR_CHECK_RETURN(validShaderType(shadertype), GL_INVALID_ENUM);
-
-	// MGL's linker captures no subroutines, so every index is out of range
-	ERROR_RETURN(GL_INVALID_VALUE);
-}
+// mglGetActiveSubroutineName now lives in program.c, with the rest of the
+// subroutine queries.
 
 
 

@@ -71,6 +71,14 @@ static bool targetAllowsStream(int t, GLuint index)
     return index == 0;
 }
 
+// The three targets Metal counts fragments for.
+static bool isOcclusionTarget(GLenum target)
+{
+    return target == GL_SAMPLES_PASSED ||
+           target == GL_ANY_SAMPLES_PASSED ||
+           target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE;
+}
+
 static GLuint64 hostTimeNS(void)
 {
     static mach_timebase_info_data_t timebase;
@@ -186,9 +194,14 @@ void mglBeginQueryIndexed(GLMContext ctx, GLenum target, GLuint index, GLuint id
     q->have_result = GL_FALSE;
     q->result = 0;
     q->visibility_offset = -1;
+    q->visibility_slots = 0;
     q->start_time = hostTimeNS();
 
     ctx->state.active_query[t][index] = q;
+
+    // a render encoder may already be open, in which case counting starts now
+    if (isOcclusionTarget(target) && ctx->mtl_funcs.mtlQueryBegin)
+        ctx->mtl_funcs.mtlQueryBegin(ctx, q);
 }
 
 void mglEndQueryIndexed(GLMContext ctx, GLenum target, GLuint index)
@@ -205,6 +218,9 @@ void mglEndQueryIndexed(GLMContext ctx, GLenum target, GLuint index)
 
     if (target == GL_TIME_ELAPSED)
         q->result = hostTimeNS() - q->start_time;
+
+    if (isOcclusionTarget(target) && ctx->mtl_funcs.mtlQueryEnd)
+        ctx->mtl_funcs.mtlQueryEnd(ctx, q);
 
     q->active = GL_FALSE;
     q->have_result = GL_TRUE;
@@ -293,7 +309,22 @@ static bool queryObjectValue(GLMContext ctx, GLuint id, GLenum pname, GLuint64 *
     {
         case GL_QUERY_RESULT:
         case GL_QUERY_RESULT_NO_WAIT:
+            // an occlusion count is written by the GPU, so the answer is not
+            // there until the work that wrote it has run
+            if (isOcclusionTarget(q->target) && q->visibility_offset >= 0)
+            {
+                if (pname == GL_QUERY_RESULT)
+                    ctx->mtl_funcs.mtlFlush(ctx, true);
+
+                ctx->mtl_funcs.mtlQueryResult(ctx, q);
+            }
+
             *out = q->result;
+
+            if (q->target == GL_ANY_SAMPLES_PASSED ||
+                q->target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE)
+                *out = *out ? GL_TRUE : GL_FALSE;
+
             return true;
 
         case GL_QUERY_RESULT_AVAILABLE:

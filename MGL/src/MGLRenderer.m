@@ -43,6 +43,7 @@
 #import "primitive_expand.h"
 #import "MGLKernels.h"
 #include "mgl_blit_msl.h"
+#include "spirv.h"
 #import "mgl_format_table.h"
 #import "pixel_convert.h"
 
@@ -164,6 +165,37 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     // glDispatchCompute calls share one encoder instead of building and tearing
     // down the world between each pair.
     id<MTLComputeCommandEncoder> _currentComputeEncoder;
+
+    // The vertex and tessellation control stages run as compute when a program
+    // tessellates, so they need compute pipelines of their own.
+    // A geometry shader runs as three passes: the vertex stage capturing into
+    // a buffer, the rewritten geometry stage as compute, and a generated
+    // vertex shader drawing what it produced.
+    id<MTLRenderPipelineState>  _gsCapturePipeline;
+    id<MTLComputePipelineState> _gsComputePipeline;
+    id<MTLRenderPipelineState>  _gsDrawPipeline;
+    void *_gsPipelineVertexFn;
+    void *_gsPipelineGeometryFn;
+    Framebuffer *_gsPipelineFramebuffer;
+
+    id<MTLComputePipelineState> _tessVertexPipeline;
+    id<MTLComputePipelineState> _tessVertexIndexedPipeline;
+    id<MTLComputePipelineState> _tessControlPipeline;
+    // The program pointer alone is not an identity: delete one and the next
+    // takes its address, and the cached pipelines would belong to the shader
+    // that is gone. The functions are rebuilt on every link, so they are.
+    void *_tessPipelineVertexFn;
+    void *_tessPipelineControlFn;
+    // set for the length of one indexed patch draw
+    id<MTLBuffer> _tessIndexBuffer;
+    size_t        _tessIndexOffset;
+    MTLIndexType  _tessIndexType;
+    bool          _tessIndexed;
+
+    // Metal counts fragments into a buffer rather than into a query object.
+    // One slot per encoder an occlusion query stays live across, summed later.
+    id<MTLBuffer> _visibilityBuffer;
+    GLuint        _visibilityNextSlot;
 
     GLuint _blitOperationComplete;
 
@@ -580,6 +612,18 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                     continue;
                 }
 
+                // The storage blocks MGL generated for itself are bound by the
+                // draw path rather than by the application, so there is no GL
+                // buffer to look up. Its own plain uniforms are ordinary.
+                if (spvc_type == SPVC_RESOURCE_TYPE_STORAGE_BUFFER &&
+                    mglResourceIsInternal(
+                        ctx->state.program->spirv_resources_list[stage][spvc_type].list[i].name))
+                {
+                    buffers_to_be_mapped--;
+                    RETURN_FALSE_ON_FAILURE(i < MAX_ATTRIBS);
+                    continue;
+                }
+
                 // A block declared as an instance array is one resource but
                 // several GL blocks, and SPIRV-Cross gives each element its own
                 // Metal slot. Binding only the first left the rest reading zero.
@@ -750,6 +794,21 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 
     if ([self mapGLBuffersToMTLBufferMap: &ctx->state.fragment_buffer_map_list stage:_FRAGMENT_SHADER] == false)
         return false;
+
+    if (ctx->state.program && ctx->state.program->tess.active)
+    {
+        if ([self mapGLBuffersToMTLBufferMap: &ctx->state.tess_control_buffer_map_list stage:_TESS_CONTROL_SHADER] == false)
+            return false;
+
+        if ([self mapGLBuffersToMTLBufferMap: &ctx->state.tess_eval_buffer_map_list stage:_TESS_EVALUATION_SHADER] == false)
+            return false;
+    }
+
+    if (mglProgramHasGeometry(ctx->state.program))
+    {
+        if ([self mapGLBuffersToMTLBufferMap: &ctx->state.geometry_buffer_map_list stage:_GEOMETRY_SHADER] == false)
+            return false;
+    }
 
     return true;
 }
@@ -1051,7 +1110,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         // mip chain; Metal has no separate type for it
         case GL_TEXTURE_RECTANGLE: tex_type = MTLTextureType2D; break;
         case GL_TEXTURE_2D_ARRAY: tex_type = MTLTextureType2DArray; is_array = true; break;
-        // case GL_TEXTURE_2D_MULTISAMPLE: tex_type = MTLTextureType2DMultisample; break;
+        case GL_TEXTURE_2D_MULTISAMPLE: tex_type = MTLTextureType2D; break;
 
         case GL_TEXTURE_CUBE_MAP:
             num_faces = 6;
@@ -1064,7 +1123,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
             break;
 
         case GL_TEXTURE_3D: tex_type = MTLTextureType3D; break;
-        // case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: tex_type = MTLTextureType2DMultisampleArray;  is_array = true; break;
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: tex_type = MTLTextureType2DArray; is_array = true; break;
         // case GL_TEXTURE_BUFFER: tex_type = MTLTextureTypeTextureBuffer; break;
 
         default:
@@ -1224,6 +1283,20 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         tex_desc.usage |= MTLTextureUsageRenderTarget;
     }
 
+    if (tex->samples > 1)
+    {
+        // A multisample surface is only ever drawn into, so it gets one level,
+        // the sample count GL asked for, and the render-target usage bit. A
+        // multisample renderbuffer arrives here as a plain 2D target, so the
+        // Metal type is promoted rather than read off tex->target.
+        tex_desc.textureType = tex_desc.arrayLength > 1
+                             ? MTLTextureType2DMultisampleArray
+                             : MTLTextureType2DMultisample;
+        tex_desc.sampleCount = tex->samples;
+        tex_desc.mipmapLevelCount = 1;
+        tex_desc.usage |= MTLTextureUsageRenderTarget;
+    }
+
     // CRITICAL FIX: Proper validation instead of assertions
     if (!tex_desc) {
         MGL_NSERR(@"MGL ERROR: Failed to create texture descriptor");
@@ -1233,6 +1306,24 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     if (tex->params.swizzled)
     {
         [self swizzleTexDesc:tex_desc forTex:tex];
+    }
+
+    // Metal asserts on a zero width or height instead of returning nil, so an
+    // incomplete GL texture has to be caught before it gets that far. Depth
+    // and array length are a different case: GL leaves them at zero for a
+    // plain 2D texture and Metal's own default is one, so they are corrected
+    // rather than refused.
+    if (tex_desc.depth == 0)
+        tex_desc.depth = 1;
+
+    if (tex_desc.arrayLength == 0)
+        tex_desc.arrayLength = 1;
+
+    if (tex_desc.width == 0 || tex_desc.height == 0)
+    {
+        MGL_NSERR(@"MGL ERROR: texture %u has a zero dimension (%lux%lu)",
+                  tex->name, (unsigned long)tex_desc.width, (unsigned long)tex_desc.height);
+        return NULL;
     }
 
     id<MTLTexture> texture;
@@ -1252,7 +1343,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         return NULL;
     }
 
-    if (tex->dirty_bits & DIRTY_TEXTURE_DATA)
+    if ((tex->dirty_bits & DIRTY_TEXTURE_DATA) && tex->samples <= 1)
     {
         MGL_NSDEBUG(@"MGL DEBUG: DIRTY_TEXTURE_DATA detected - attempting texture filling");
         MGL_NSDEBUG(@"MGL DEBUG: Texture details: target=0x%x, internalformat=0x%x, levels=%d",
@@ -2540,6 +2631,101 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 extern bool isColorAttachment(GLMContext ctx, GLuint attachment);
 extern FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum attachment);
 
+static bool mtlFormatIsDepth(MTLPixelFormat f)
+{
+    return f == MTLPixelFormatDepth16Unorm || f == MTLPixelFormatDepth32Float ||
+           f == MTLPixelFormatDepth24Unorm_Stencil8 ||
+           f == MTLPixelFormatDepth32Float_Stencil8;
+}
+
+static bool mtlFormatIsStencil(MTLPixelFormat f)
+{
+    return f == MTLPixelFormatStencil8 ||
+           f == MTLPixelFormatDepth24Unorm_Stencil8 ||
+           f == MTLPixelFormatDepth32Float_Stencil8 ||
+           f == MTLPixelFormatX32_Stencil8 || f == MTLPixelFormatX24_Stencil8;
+}
+
+// Metal resolves a multisample texture by ending a render pass on it, so a
+// blit out of a multisampled framebuffer runs an empty pass first and copies
+// from the single-sample result.
+- (id<MTLTexture>) resolveMultisample: (id<MTLTexture>) src
+{
+    if (src == nil || src.sampleCount <= 1)
+        return src;
+
+    MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
+    desc.textureType = src.arrayLength > 1 ? MTLTextureType2DArray : MTLTextureType2D;
+    desc.pixelFormat = src.pixelFormat;
+    desc.width = src.width;
+    desc.height = src.height;
+    desc.arrayLength = src.arrayLength;
+    desc.mipmapLevelCount = 1;
+    desc.storageMode = MTLStorageModePrivate;
+    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+
+    id<MTLTexture> dst = [_device newTextureWithDescriptor: desc];
+
+    if (dst == nil)
+        return nil;
+
+    [self endRenderEncoding];
+    [self endComputeEncoding];
+
+    if ([self liveCommandBuffer] == nil)
+        return nil;
+
+    bool is_depth = mtlFormatIsDepth(src.pixelFormat);
+    bool is_stencil = mtlFormatIsStencil(src.pixelFormat);
+
+    for (NSUInteger slice = 0; slice < src.arrayLength; slice++)
+    {
+        MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+
+        if (is_depth)
+        {
+            pass.depthAttachment.texture = src;
+            pass.depthAttachment.slice = slice;
+            pass.depthAttachment.resolveTexture = dst;
+            pass.depthAttachment.resolveSlice = slice;
+            pass.depthAttachment.loadAction = MTLLoadActionLoad;
+            pass.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+            pass.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+        }
+
+        if (is_stencil)
+        {
+            pass.stencilAttachment.texture = src;
+            pass.stencilAttachment.slice = slice;
+            pass.stencilAttachment.resolveTexture = dst;
+            pass.stencilAttachment.resolveSlice = slice;
+            pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+            pass.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
+            pass.stencilAttachment.stencilResolveFilter = MTLMultisampleStencilResolveFilterSample0;
+        }
+
+        if (!is_depth && !is_stencil)
+        {
+            pass.colorAttachments[0].texture = src;
+            pass.colorAttachments[0].slice = slice;
+            pass.colorAttachments[0].resolveTexture = dst;
+            pass.colorAttachments[0].resolveSlice = slice;
+            pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+        }
+
+        id<MTLRenderCommandEncoder> enc =
+            [_currentCommandBuffer renderCommandEncoderWithDescriptor: pass];
+
+        if (enc == nil)
+            return nil;
+
+        [enc endEncoding];
+    }
+
+    return dst;
+}
+
 -(void)mtlBlitFramebuffer:(GLMContext)glm_ctx srcX0:(size_t)srcX0 srcY0:(size_t)srcY0 srcX1:(size_t)srcX1 srcY1:(size_t)srcY1 dstX0:(size_t)dstX0 dstY0:(size_t)dstY0 dstX1:(size_t)dstX1 dstY1:(size_t)dstY1 mask:(size_t)mask filter:(GLuint)filter
 {
     Framebuffer * readfbo, * drawfbo;
@@ -2610,6 +2796,19 @@ extern FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum 
         return;
     }
 
+
+    // GL blits out of a multisampled framebuffer by resolving; everything
+    // downstream then deals with an ordinary single-sample texture.
+    if (readtexid.sampleCount > 1)
+    {
+        readtexid = [self resolveMultisample: readtexid];
+
+        if (readtexid == nil)
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
+    }
 
     // A plain copy needs matching formats and a destination that is not
     // framebuffer-only; the window is neither, so draw it instead.
@@ -3057,11 +3256,53 @@ static GLuint packedSwizzle(const TextureParameter *p)
     return library;
 }
 
+// Turns one stage's MSL into a Metal function, or leaves it alone when it has
+// already been built.
+- (bool) buildStageFunction: (Spirv *) sp
+{
+    if (sp->msl_str == NULL || sp->entry_point == NULL || sp->mtl_library)
+        return true;
+
+    id<MTLLibrary> library = [self compileShader: sp->msl_str];
+
+    if (!library)
+    {
+        MGL_NSERR(@"MGL ERROR: failed to compile MSL for entry point '%s'", sp->entry_point);
+        return false;
+    }
+
+    id<MTLFunction> function = [library newFunctionWithName:
+        [NSString stringWithUTF8String: sp->entry_point]];
+
+    if (!function)
+    {
+        MGL_NSERR(@"MGL ERROR: entry point '%s' missing from its library", sp->entry_point);
+        return false;
+    }
+
+    sp->mtl_library = (void *)CFBridgingRetain(library);
+    sp->mtl_function = (void *)CFBridgingRetain(function);
+
+    return true;
+}
+
 -(bool)bindMTLProgram:(Program *)ptr
 {
     // the program owns these, so it survives deleting its shaders
     if (ptr->dirty_bits & DIRTY_PROGRAM)
     {
+        if (ptr->gs_passthrough.mtl_library)
+        {
+            CFBridgingRelease(ptr->gs_passthrough.mtl_library);
+            ptr->gs_passthrough.mtl_library = NULL;
+        }
+
+        if (ptr->gs_passthrough.mtl_function)
+        {
+            CFBridgingRelease(ptr->gs_passthrough.mtl_function);
+            ptr->gs_passthrough.mtl_function = NULL;
+        }
+
         for(int i=_VERTEX_SHADER; i<_MAX_SHADER_TYPES; i++)
         {
             if (ptr->spirv[i].mtl_library)
@@ -3109,7 +3350,8 @@ static GLuint packedSwizzle(const TextureParameter *p)
         ptr->spirv[i].mtl_function = (void *)CFBridgingRetain(function);
     }
 
-    return true;
+    // the generated vertex shader a geometry program draws with
+    return [self buildStageFunction: &ptr->gs_passthrough];
 }
 
 #pragma mark draw buffers
@@ -3423,6 +3665,8 @@ static GLuint packedSwizzle(const TextureParameter *p)
 
     _renderPassDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
     MTL_CHECK_RETURN_FALSE(_renderPassDescriptor, GL_OUT_OF_MEMORY);
+
+    _renderPassDescriptor.visibilityResultBuffer = [self visibilityBuffer];
 
     if (ctx->state.framebuffer)
     {
@@ -3772,6 +4016,8 @@ static GLuint packedSwizzle(const TextureParameter *p)
         return false;
     }
     _currentRenderEncoder.label = @"GL Render Encoder";
+
+    [self beginOcclusionCountingOnEncoder];
 
 
     // apply all state that isn't included in a renderPassDescriptor into the render encoder
@@ -4437,6 +4683,835 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     }
 }
 
+// what a Metal indexed draw reads from
+typedef struct {
+    id<MTLBuffer> buffer;
+    NSUInteger    offset;   // where the converted range starts
+    NSUInteger    scale;    // bytes per index here over bytes per index in GL
+    MTLIndexType  type;
+} MGLIndexSource;
+
+// ---------------------------------------------------------------------------
+// Transform feedback.
+//
+// The capture itself is done by the shader, which program.c rewrote to write
+// the recorded varyings into storage blocks. All that is left here is to put
+// the application's buffers where the shader expects them and to count what
+// the draw recorded.
+// ---------------------------------------------------------------------------
+
+// Vertices a draw of `count` in this mode records, which is the primitive
+// count times the vertices a primitive of the feedback mode has.
+static GLuint xfbVerticesRecorded(GLenum mode, GLsizei count)
+{
+    switch (mode)
+    {
+        case GL_POINTS:                 return count;
+        case GL_LINES:                  return count - (count % 2);
+        case GL_LINE_STRIP:             return count > 1 ? (count - 1) * 2 : 0;
+        case GL_LINE_LOOP:              return count > 1 ? count * 2 : 0;
+        case GL_TRIANGLES:              return count - (count % 3);
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:           return count > 2 ? (count - 2) * 3 : 0;
+        default:                        return count;
+    }
+}
+
+// Whether the shader records on this draw is a uniform, and uniform values are
+// handed to the encoder when the buffers are bound -- so this has to run before
+// the state is processed, not with the buffer binding below.
+- (void) updateTransformFeedbackUniforms: (GLint) first
+{
+    Program *program = ctx->state.program;
+    TransformFeedback *xfb = ctx->state.transform_feedback;
+    bool on;
+
+    if (program == NULL || program->xfb.rewritten_src == NULL)
+        return;
+
+    on = xfb && xfb->active && !xfb->paused;
+
+    mglWriteProgramUniform(ctx, program, program->xfb.on_loc, on ? 1 : 0);
+    mglWriteProgramUniform(ctx, program, program->xfb.base_loc, first > 0 ? first : 0);
+}
+
+// Primitives this draw makes, for the queries that count them.
+static GLuint drawPrimitiveCount(GLenum mode, GLsizei count)
+{
+    switch (mode)
+    {
+        case GL_LINES:              return count / 2;
+        case GL_LINE_STRIP:         return count > 1 ? count - 1 : 0;
+        case GL_LINE_LOOP:          return count > 1 ? count : 0;
+        case GL_TRIANGLES:          return count / 3;
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:       return count > 2 ? count - 2 : 0;
+        case GL_LINES_ADJACENCY:    return count / 4;
+        case GL_TRIANGLES_ADJACENCY: return count / 6;
+        default:                    return count;   // GL_POINTS and patches
+    }
+}
+
+// GL_PRIMITIVES_GENERATED counts what the pipeline produced; the transform
+// feedback counters only count while it is recording.
+- (void) countDrawnPrimitives: (GLenum) mode count: (GLsizei) count instances: (GLsizei) instances
+{
+    TransformFeedback *xfb = ctx->state.transform_feedback;
+    GLuint prims = drawPrimitiveCount(mode, count) * (instances > 0 ? instances : 1);
+    bool recording = xfb && xfb->active && !xfb->paused;
+
+    for (int t = 0; t < _MAX_QUERY_TARGETS; t++)
+        for (int i = 0; i < MAX_QUERY_STREAMS; i++)
+        {
+            Query *q = ctx->state.active_query[t][i];
+
+            if (q == NULL)
+                continue;
+
+            if (q->target == GL_PRIMITIVES_GENERATED)
+                q->result += prims;
+            else if (recording &&
+                     (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN ||
+                      q->target == GL_TRANSFORM_FEEDBACK_OVERFLOW))
+                q->result += (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) ? prims : 0;
+        }
+}
+
+// Binds the feedback buffers where the rewritten shader reads them, and tells
+// it whether it is recording at all. Returns the vertices this draw will add.
+- (GLuint) setUpTransformFeedback: (GLenum) mode count: (GLsizei) count first: (GLint) first
+{
+    Program *program = ctx->state.program;
+    TransformFeedback *xfb = ctx->state.transform_feedback;
+    bool on;
+
+    if (program == NULL || program->xfb.rewritten_src == NULL)
+        return 0;
+
+    on = xfb && xfb->active && !xfb->paused;
+
+    if (!on || _currentRenderEncoder == nil)
+        return 0;
+
+    for (int b = 0; b < program->xfb.buffer_count; b++)
+    {
+        BufferBaseTarget *slot = &ctx->state.buffer_base[_TRANSFORM_FEEDBACK_BUFFER].buffers[b];
+        Buffer *buf = xfb->buffers[b].buf ? xfb->buffers[b].buf : slot->buf;
+        GLintptr offset = xfb->buffers[b].buf ? xfb->buffers[b].offset : slot->offset;
+
+        if (buf == NULL || program->xfb.buffer_slot[b] < 0)
+            continue;
+
+        if (buf->data.mtl_data == NULL)
+            [self bindMTLBuffer: buf];
+
+        if (buf->data.mtl_data == NULL)
+            continue;
+
+        // the shader appends where the last draw left off
+        [_currentRenderEncoder setVertexBuffer: (__bridge id<MTLBuffer>)(buf->data.mtl_data)
+                                        offset: offset + xfb->vertices_recorded * [self xfbStrideFor: program buffer: b]
+                                       atIndex: program->xfb.buffer_slot[b]];
+    }
+
+    return xfbVerticesRecorded(mode, count);
+}
+
+// Bytes one recorded vertex takes in this buffer.
+- (NSUInteger) xfbStrideFor: (Program *) program buffer: (int) b
+{
+    if (program->xfb.separate)
+        return (NSUInteger)program->xfb.components[b] * 4;
+
+    return (NSUInteger)program->xfb.stride_words * 4;
+}
+
+// ---------------------------------------------------------------------------
+// Geometry shaders.
+//
+// Metal has no geometry stage, so program.c rewrote the shader into a compute
+// kernel with a generated vertex shader in front of the rasteriser. Running it
+// is three passes: capture the vertex stage into a buffer, expand it, draw.
+// ---------------------------------------------------------------------------
+
+// How many primitives a draw of `count` vertices in this mode makes, and how
+// far apart consecutive primitives start. A strip overlaps, so its step is one.
+static GLuint gsPrimitiveCount(GLenum mode, GLsizei count, GLint *stride)
+{
+    switch (mode)
+    {
+        case GL_LINES:                   *stride = 2; return count / 2;
+        case GL_LINES_ADJACENCY:         *stride = 4; return count / 4;
+        case GL_TRIANGLES:               *stride = 3; return count / 3;
+        case GL_TRIANGLES_ADJACENCY:     *stride = 6; return count / 6;
+        case GL_LINE_STRIP:              *stride = 1; return count > 1 ? count - 1 : 0;
+        case GL_LINE_STRIP_ADJACENCY:    *stride = 1; return count > 3 ? count - 3 : 0;
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:            *stride = 1; return count > 2 ? count - 2 : 0;
+        case GL_TRIANGLE_STRIP_ADJACENCY: *stride = 2; return count > 5 ? (count - 4) / 2 : 0;
+        default:                         *stride = 1; return count;   // GL_POINTS
+    }
+}
+
+static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
+{
+    switch (prim)
+    {
+        case GL_LINE_STRIP:     return MTLPrimitiveTypeLine;
+        case GL_TRIANGLE_STRIP: return MTLPrimitiveTypeTriangle;
+        default:                return MTLPrimitiveTypePoint;
+    }
+}
+
+- (bool) buildGeometryPipelines: (Program *) program
+{
+    id<MTLFunction> vfn = (__bridge id<MTLFunction>)(program->spirv[_VERTEX_SHADER].mtl_function);
+    id<MTLFunction> gfn = (__bridge id<MTLFunction>)(program->spirv[_GEOMETRY_SHADER].mtl_function);
+    id<MTLFunction> pfn = (__bridge id<MTLFunction>)(program->gs_passthrough.mtl_function);
+    id<MTLFunction> ffn = (__bridge id<MTLFunction>)(program->spirv[_FRAGMENT_SHADER].mtl_function);
+
+    if (_gsPipelineVertexFn == program->spirv[_VERTEX_SHADER].mtl_function &&
+        _gsPipelineGeometryFn == program->spirv[_GEOMETRY_SHADER].mtl_function &&
+        _gsPipelineFramebuffer == ctx->state.framebuffer &&
+        _gsCapturePipeline && _gsComputePipeline && _gsDrawPipeline)
+        return true;
+
+    if (vfn == nil || gfn == nil || pfn == nil)
+    {
+        MGL_NSERR(@"MGL ERROR: geometry program %u is missing a generated stage", program->name);
+        return false;
+    }
+
+    MTLVertexDescriptor *vd = [self generateVertexDescriptor];
+
+    if (vd == nil)
+        return false;
+
+    NSError *err = nil;
+
+    // ---- the capture pass: the vertex stage, writing but not drawing ----
+    MTLRenderPipelineDescriptor *cap = [[MTLRenderPipelineDescriptor alloc] init];
+
+    cap.label = @"GS Vertex Capture";
+    cap.vertexFunction = vfn;
+    cap.vertexDescriptor = vd;
+    cap.rasterizationEnabled = NO;
+
+    _gsCapturePipeline = [_device newRenderPipelineStateWithDescriptor: cap error: &err];
+
+    if (_gsCapturePipeline == nil)
+    {
+        MGL_NSERR(@"MGL ERROR: geometry capture pipeline failed: %@", err);
+        return false;
+    }
+
+    // ---- the geometry stage, as compute ----
+    _gsComputePipeline = [_device newComputePipelineStateWithFunction: gfn error: &err];
+
+    if (_gsComputePipeline == nil)
+    {
+        MGL_NSERR(@"MGL ERROR: geometry compute pipeline failed: %@", err);
+        return false;
+    }
+
+    // ---- the draw pass: the generated vertex shader plus the real fragment ----
+    MTLRenderPipelineDescriptor *draw = [self generatePipelineDescriptor];
+
+    if (draw == nil)
+        return false;
+
+    draw.label = @"GS Draw";
+    draw.vertexFunction = pfn;
+    draw.fragmentFunction = ffn;
+    draw.vertexDescriptor = nil;
+    draw.inputPrimitiveTopology = MTLPrimitiveTopologyClassUnspecified;
+
+    // the usual pipeline block was skipped for this program, and the write
+    // masks it keeps start out closed
+    [self updateBlendStateCache];
+    [self bindBlendStateToPipelineStateDescriptor: draw];
+
+    _gsDrawPipeline = [_device newRenderPipelineStateWithDescriptor: draw error: &err];
+
+    if (_gsDrawPipeline == nil)
+    {
+        MGL_NSERR(@"MGL ERROR: geometry draw pipeline failed: %@", err);
+        return false;
+    }
+
+    _gsPipelineVertexFn = program->spirv[_VERTEX_SHADER].mtl_function;
+    _gsPipelineGeometryFn = program->spirv[_GEOMETRY_SHADER].mtl_function;
+    _gsPipelineFramebuffer = ctx->state.framebuffer;
+
+    return true;
+}
+
+// Runs the three passes and issues the draw. Returns false when this draw does
+// not belong to a geometry program, which is the caller's signal to go on.
+- (bool) drawGeometry: (GLenum) mode
+                count: (GLsizei) count
+                first: (GLint) first
+            instances: (GLsizei) instances
+              indices: (MGLIndexSource *) src
+{
+    Program *program = ctx->state.program;
+
+    if (!mglProgramHasGeometry(program))
+        return false;
+
+    GeometryInfo *gi = &program->geom;
+    GLint stride = 1;
+    GLuint prims = gsPrimitiveCount(mode, count, &stride);
+
+    if (prims == 0 || gi->compute_src == NULL)
+        return true;
+
+    if (instances < 1)
+        instances = 1;
+
+    if ([self buildGeometryPipelines: program] == false)
+        return true;
+
+    // Metal's indexed stage-in and this kernel both want 32 bit indices, so a
+    // narrower element buffer is drawn in order instead.
+    bool indexed = src != NULL && src->buffer != nil && src->type == MTLIndexTypeUInt32;
+
+    // as above: take the command buffer before the scratch, or the scratch
+    // this draw is about to use goes back into the pool
+    if ([self liveCommandBuffer] == nil)
+        return true;
+
+    NSUInteger in_verts = (NSUInteger)(first > 0 ? first : 0) + (NSUInteger)count;
+    NSUInteger slots = (NSUInteger)prims * (NSUInteger)gi->invocations * (NSUInteger)instances;
+
+    id<MTLBuffer> in_buf = [_scratchPool bufferOfLength: in_verts * (NSUInteger)gi->in_stride
+                                      forCommandBuffer: _currentCommandBuffer];
+    id<MTLBuffer> out_buf = [_scratchPool bufferOfLength:
+                                slots * (NSUInteger)gi->slot_capacity * (NSUInteger)gi->out_stride
+                                       forCommandBuffer: _currentCommandBuffer];
+
+    if (in_buf == nil || out_buf == nil)
+    {
+        MGL_NSERR(@"MGL ERROR: could not allocate geometry scratch");
+        return true;
+    }
+
+    // a slot the shader never writes has to read as invalid, not as whatever
+    // the recycled buffer happened to hold
+    {
+        id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
+
+        if (blit == nil)
+            return true;
+
+        [blit fillBuffer: out_buf range: NSMakeRange(0, out_buf.length) value: 0];
+        [blit endEncoding];
+    }
+
+    // the numbers the compute pass needs are ordinary uniforms of its own
+    {
+        GLint v;
+
+        v = (GLint)prims;   mglWriteProgramUniform(ctx, program, gi->prims_loc, v);
+        v = indexed ? 1 : 0; mglWriteProgramUniform(ctx, program, gi->indexed_loc, v);
+        v = first;          mglWriteProgramUniform(ctx, program, gi->first_loc, v);
+        v = stride;         mglWriteProgramUniform(ctx, program, gi->stride_loc, v);
+    }
+
+    // ---- pass one: the vertex stage, capturing ----
+    if (_currentRenderEncoder == nil && [self newRenderEncoder] == false)
+        return true;
+
+    [_currentRenderEncoder setRenderPipelineState: _gsCapturePipeline];
+    [self bindVertexBuffersToCurrentRenderEncoder];
+    [_currentRenderEncoder setVertexBuffer: in_buf offset: 0 atIndex: gi->vs_in_slot];
+    [_currentRenderEncoder drawPrimitives: MTLPrimitiveTypePoint
+                              vertexStart: first > 0 ? first : 0
+                              vertexCount: count];
+
+    // ---- pass two: the geometry stage ----
+    id<MTLComputeCommandEncoder> enc = [self liveComputeEncoder];
+
+    if (enc == nil)
+        return true;
+
+    [enc setComputePipelineState: _gsComputePipeline];
+    [self bindTessBuffers: &ctx->state.geometry_buffer_map_list toComputeEncoder: enc];
+    [enc setBuffer: in_buf offset: 0 atIndex: gi->gs_in_slot];
+    [enc setBuffer: out_buf offset: 0 atIndex: gi->gs_out_slot];
+
+    if (gi->gs_index_slot >= 0)
+        [enc setBuffer: indexed ? src->buffer : in_buf
+                offset: indexed ? src->offset : 0
+               atIndex: gi->gs_index_slot];
+
+    [enc dispatchThreads: MTLSizeMake(slots, 1, 1)
+   threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+
+    [self endComputeEncoding];
+
+    // ---- pass three: draw what came out ----
+    if (_currentRenderEncoder == nil && [self newRenderEncoder] == false)
+        return true;
+
+    [_currentRenderEncoder setRenderPipelineState: _gsDrawPipeline];
+    [self bindFragmentBuffersToCurrentRenderEncoder];
+    [self bindTexturesToCurrentRenderEncoder];
+    [_currentRenderEncoder setVertexBuffer: out_buf offset: 0 atIndex: gi->pass_out_slot];
+    [_currentRenderEncoder drawPrimitives: gsOutputPrimitive(gi->out_primitive)
+                              vertexStart: 0
+                              vertexCount: slots * (NSUInteger)gi->slot_capacity];
+
+    return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// Tessellation.
+//
+// Metal has the tessellator but reaches it from the other end: there is no
+// control shader stage, so the vertex and control shaders run as compute and
+// leave their results in buffers, and the evaluation shader becomes the vertex
+// function of an ordinary draw that the tessellator feeds.
+// ---------------------------------------------------------------------------
+
+// SPIRV-Cross packs a stage's outputs into a struct whose size MGL cannot see
+// from here, so every captured vertex gets the most GL allows it to write.
+#define MGL_TESS_BYTES_PER_VERTEX  (4 * 4 * MAX_ATTRIBS)
+
+// The vertex kernel reads its attributes through [[stage_in]], which on a
+// compute pipeline is described by this rather than by a vertex descriptor.
+- (MTLStageInputOutputDescriptor *) stageInputFromVertexDescriptor: (MTLVertexDescriptor *) vd
+                                                          indexed: (bool) indexed
+{
+    MTLStageInputOutputDescriptor *si = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
+
+    if (indexed)
+    {
+        si.indexType = MTLIndexTypeUInt32;
+        si.indexBufferIndex = MGL_TESS_INDEX_INDEX;
+    }
+
+    for (int i = 0; i < ctx->state.max_vertex_attribs; i++)
+    {
+        if (vd.attributes[i].format == MTLVertexFormatInvalid)
+            continue;
+
+        si.attributes[i].format = (MTLAttributeFormat)vd.attributes[i].format;
+        si.attributes[i].offset = vd.attributes[i].offset;
+        si.attributes[i].bufferIndex = vd.attributes[i].bufferIndex;
+    }
+
+    for (int i = 0; i < 31; i++)
+    {
+        if (vd.layouts[i].stride == 0)
+            continue;
+
+        si.layouts[i].stride = vd.layouts[i].stride;
+
+        // A constant attribute has a step rate of zero in the vertex world;
+        // in a kernel that means "read element zero", which is a stride of
+        // nothing rather than a step function.
+        if (vd.layouts[i].stepFunction == MTLVertexStepFunctionConstant)
+        {
+            si.layouts[i].stepFunction = MTLStepFunctionConstant;
+            si.layouts[i].stepRate = 0;
+        }
+        else
+        {
+            si.layouts[i].stepRate = vd.layouts[i].stepRate ? vd.layouts[i].stepRate : 1;
+
+            if (vd.layouts[i].stepFunction == MTLVertexStepFunctionPerInstance)
+                si.layouts[i].stepFunction = MTLStepFunctionThreadPositionInGridY;
+            else
+                si.layouts[i].stepFunction = indexed
+                    ? MTLStepFunctionThreadPositionInGridXIndexed
+                    : MTLStepFunctionThreadPositionInGridX;
+        }
+    }
+
+    return si;
+}
+
+// The vertex kernel wants what the vertex stage would have had: its uniform
+// buffers and the vertex attribute buffers behind [[stage_in]].
+- (void) bindTessBuffers: (BufferMapList *) list toComputeEncoder: (id<MTLComputeCommandEncoder>) enc
+{
+    for (int i = 0; i < list->count; i++)
+    {
+        BufferMap *map = &list->buffers[i];
+        Buffer *ptr = map->buf;
+
+        if (ptr == NULL)
+            continue;
+
+        if (ptr->data.mtl_data == NULL)
+            [self bindMTLBuffer: ptr];
+
+        if (ptr->data.mtl_data == NULL)
+            continue;
+
+        [enc setBuffer: (__bridge id<MTLBuffer>)(ptr->data.mtl_data)
+                offset: map->offset
+               atIndex: map->buffer_base_index];
+    }
+}
+
+- (void) bindTessVertexBuffersToComputeEncoder: (id<MTLComputeCommandEncoder>) enc
+{
+    GLfloat constants[MAX_ATTRIBS * 4];
+
+    for (int i = 0; i < MAX_ATTRIBS; i++)
+        memcpy(&constants[i * 4], ctx->state.attrib_constant[i].v.f, 16);
+
+    [enc setBytes: constants
+           length: MGL_CONSTANT_ATTRIB_STRIDE
+          atIndex: MGL_CONSTANT_ATTRIB_BUFFER_INDEX];
+
+    [self bindTessBuffers: &ctx->state.vertex_buffer_map_list toComputeEncoder: enc];
+}
+
+// glDrawElements into a tessellating program: the vertex kernel fetches its
+// attributes through the element buffer instead of straight off the grid.
+- (bool) drawTessellatedIndexed: (GLsizei) count
+                          first: (GLint) first
+                      instances: (GLsizei) instances
+                           from: (MGLIndexSource *) src
+{
+    bool handled;
+
+    if (ctx->state.program == NULL || !ctx->state.program->tess.active)
+        return false;
+
+    // Metal's indexed stage-in reads 32 bit indices only, so a narrower
+    // element buffer falls back to drawing the patches unindexed.
+    if (src->type != MTLIndexTypeUInt32)
+    {
+        MGL_NSINFO(@"MGL INFO: indexed patches need 32 bit indices; drawing in order");
+        return [self drawTessellated: count first: first instances: instances];
+    }
+
+    _tessIndexBuffer = src->buffer;
+    _tessIndexOffset = src->offset;
+    _tessIndexType = src->type;
+    _tessIndexed = true;
+
+    handled = [self drawTessellated: count first: first instances: instances];
+
+    _tessIndexed = false;
+    _tessIndexBuffer = nil;
+
+    return handled;
+}
+
+// True when this draw belongs to a tessellating program, in which case it has
+// already been issued by the time this returns.
+- (bool) drawTessellated: (GLsizei) count first: (GLint) first instances: (GLsizei) instances
+{
+    GLuint patches = 0;
+
+    if (ctx->state.program == NULL || !ctx->state.program->tess.active)
+        return false;
+
+    if ([self runTessellationForCount: count first: first instances: instances patches: &patches] == false)
+        return true;
+
+    @try {
+        [_currentRenderEncoder drawPatches: ctx->state.program->tess.out_control_points
+                                patchStart: 0
+                                patchCount: patches
+                          patchIndexBuffer: nil
+                    patchIndexBufferOffset: 0
+                             instanceCount: 1
+                              baseInstance: 0];
+    } @catch (NSException *exception) {
+        MGL_NSERR(@"MGL ERROR: drawPatches failed: %@", exception);
+    }
+
+    return true;
+}
+
+// With no control shader the tessellation levels are context state, so they
+// are written straight into the factor buffer as halves.
+- (void) writeDefaultTessLevels: (id<MTLBuffer>) levels patches: (GLuint) patches
+{
+    bool triangles = ctx->state.program->tess.patch_kind == SpvExecutionModeTriangles;
+    const GLfloat *outer = ctx->state.var.patch_default_outer;
+    const GLfloat *inner = ctx->state.var.patch_default_inner;
+    uint16_t *dst = (uint16_t *)levels.contents;
+    int edges = triangles ? 3 : 4;
+    int inners = triangles ? 1 : 2;
+
+    if (dst == NULL)
+        return;
+
+    for (GLuint p = 0; p < patches; p++)
+    {
+        uint16_t *slot = dst + (size_t)p * (edges + inners);
+
+        for (int e = 0; e < edges; e++)
+            slot[e] = mglFloatToHalf(outer[e]);
+
+        for (int i = 0; i < inners; i++)
+            slot[edges + i] = mglFloatToHalf(inner[i]);
+    }
+}
+
+// The evaluation stage is the draw's vertex function, so its uniforms are the
+// render encoder's vertex buffers -- not the vertex shader's, which went to the
+// compute pass instead.
+- (void) bindTessBuffersToRenderEncoder
+{
+    BufferMapList *list = &ctx->state.tess_eval_buffer_map_list;
+
+    for (int i = 0; i < list->count; i++)
+    {
+        BufferMap *map = &list->buffers[i];
+        Buffer *ptr = map->buf;
+
+        if (ptr == NULL)
+            continue;
+
+        if (ptr->data.mtl_data == NULL)
+            [self bindMTLBuffer: ptr];
+
+        if (ptr->data.mtl_data == NULL)
+            continue;
+
+        [_currentRenderEncoder setVertexBuffer: (__bridge id<MTLBuffer>)(ptr->data.mtl_data)
+                                        offset: map->offset
+                                       atIndex: map->buffer_base_index];
+    }
+}
+
+- (bool) buildTessComputePipelines: (Program *) program
+{
+    id<MTLFunction> vfn = (__bridge id<MTLFunction>)(program->spirv[_VERTEX_SHADER].mtl_function);
+    id<MTLFunction> cfn = (__bridge id<MTLFunction>)(program->spirv[_TESS_CONTROL_SHADER].mtl_function);
+
+    if (_tessPipelineVertexFn == program->spirv[_VERTEX_SHADER].mtl_function &&
+        _tessPipelineControlFn == program->spirv[_TESS_CONTROL_SHADER].mtl_function &&
+        _tessVertexPipeline && (!program->tess.has_control || _tessControlPipeline))
+        return true;
+
+    if (vfn == nil || (program->tess.has_control && cfn == nil))
+    {
+        MGL_NSERR(@"MGL ERROR: tessellating program %u is missing a compute stage", program->name);
+        return false;
+    }
+
+    MTLVertexDescriptor *vd = [self generateVertexDescriptor];
+
+    if (vd == nil)
+        return false;
+
+    NSError *err = nil;
+    MTLComputePipelineDescriptor *vdesc = [[MTLComputePipelineDescriptor alloc] init];
+
+    vdesc.computeFunction = vfn;
+    vdesc.stageInputDescriptor = [self stageInputFromVertexDescriptor: vd indexed: false];
+
+    _tessVertexPipeline = [_device newComputePipelineStateWithDescriptor: vdesc
+                                                                options: MTLPipelineOptionNone
+                                                             reflection: nil
+                                                                  error: &err];
+
+    if (_tessVertexPipeline == nil)
+    {
+        MGL_NSERR(@"MGL ERROR: vertex-as-compute pipeline failed: %@", err);
+        return false;
+    }
+
+    // glDrawElements needs the same kernel fetching through an index buffer,
+    // which is a different stage-in description and so a different pipeline
+    MTLComputePipelineDescriptor *idesc = [[MTLComputePipelineDescriptor alloc] init];
+
+    idesc.computeFunction = vfn;
+    idesc.stageInputDescriptor = [self stageInputFromVertexDescriptor: vd indexed: true];
+
+    _tessVertexIndexedPipeline = [_device newComputePipelineStateWithDescriptor: idesc
+                                                                       options: MTLPipelineOptionNone
+                                                                    reflection: nil
+                                                                         error: &err];
+
+    if (_tessVertexIndexedPipeline == nil)
+        MGL_NSINFO(@"MGL INFO: indexed vertex-as-compute pipeline unavailable: %@", err);
+
+    _tessControlPipeline = nil;
+
+    if (program->tess.has_control)
+    {
+        _tessControlPipeline = [_device newComputePipelineStateWithFunction: cfn error: &err];
+
+        if (_tessControlPipeline == nil)
+        {
+            MGL_NSERR(@"MGL ERROR: tessellation control pipeline failed: %@", err);
+            return false;
+        }
+    }
+
+    _tessPipelineVertexFn = program->spirv[_VERTEX_SHADER].mtl_function;
+    _tessPipelineControlFn = program->spirv[_TESS_CONTROL_SHADER].mtl_function;
+
+    return true;
+}
+
+// Runs the two compute passes and leaves the render encoder set up to draw the
+// patches they produced. Returns false when the draw cannot go ahead.
+- (bool) runTessellationForCount: (GLsizei) count
+                           first: (GLint) first
+                       instances: (GLsizei) instances
+                          patches: (GLuint *) out_patches
+{
+    Program *program = ctx->state.program;
+    GLint in_cp = ctx->state.var.patch_vertices;
+    GLuint out_cp = program->tess.out_control_points;
+
+    if (in_cp < 1 || out_cp < 1)
+    {
+        MGL_NSERR(@"MGL ERROR: tessellation needs a patch size, got in %d out %u", in_cp, out_cp);
+        return false;
+    }
+
+    if (instances < 1)
+        instances = 1;
+
+    GLuint patches = ((GLuint)count / (GLuint)in_cp) * (GLuint)instances;
+
+    if (patches == 0)
+        return false;
+
+    *out_patches = patches;
+
+    if ([self buildTessComputePipelines: program] == false)
+        return false;
+
+    // The pool hands its buffers back when the command buffer they were taken
+    // for completes, so the command buffer has to exist first -- otherwise
+    // asking for one mid-draw recycles what this draw is still using.
+    id<MTLComputeCommandEncoder> enc = [self liveComputeEncoder];
+
+    if (enc == nil)
+        return false;
+
+    size_t vtx_bytes = (size_t)count * instances * MGL_TESS_BYTES_PER_VERTEX;
+    size_t ctl_bytes = (size_t)patches * out_cp * MGL_TESS_BYTES_PER_VERTEX;
+    size_t patch_bytes = (size_t)patches * MGL_TESS_BYTES_PER_VERTEX;
+    size_t level_bytes = (size_t)patches * sizeof(MTLQuadTessellationFactorsHalf);
+
+    id<MTLBuffer> vtx_out = [_scratchPool bufferOfLength: vtx_bytes forCommandBuffer: _currentCommandBuffer];
+    id<MTLBuffer> ctl_out = [_scratchPool bufferOfLength: ctl_bytes forCommandBuffer: _currentCommandBuffer];
+    id<MTLBuffer> patch_out = [_scratchPool bufferOfLength: patch_bytes forCommandBuffer: _currentCommandBuffer];
+    id<MTLBuffer> levels = [_scratchPool bufferOfLength: level_bytes forCommandBuffer: _currentCommandBuffer];
+
+    if (!vtx_out || !ctl_out || !patch_out || !levels)
+    {
+        MGL_NSERR(@"MGL ERROR: could not allocate tessellation scratch");
+        return false;
+    }
+
+    // A recycled factor buffer still holds the last draw's levels, and a
+    // tessellation that silently reuses them is indistinguishable from one
+    // that worked, so start from nothing.
+    memset(levels.contents, 0, level_bytes);
+
+    // the control shader reads how big a patch is and how many there are
+    uint32_t params[2] = { (uint32_t)in_cp, patches };
+
+    // ---- the vertex stage, as compute ----
+    bool indexed = _tessIndexed && _tessVertexIndexedPipeline != nil;
+
+    [enc setComputePipelineState: indexed ? _tessVertexIndexedPipeline : _tessVertexPipeline];
+    [self bindTessVertexBuffersToComputeEncoder: enc];
+    [enc setBuffer: vtx_out offset: 0 atIndex: MGL_TESS_VERTEX_OUT_INDEX];
+
+    if (indexed)
+        [enc setBuffer: _tessIndexBuffer offset: _tessIndexOffset atIndex: MGL_TESS_INDEX_INDEX];
+
+    // [[stage_in]] on a kernel fetches nothing until it is told which slice of
+    // the vertex buffers to read, which is where the first vertex comes in.
+    [enc setStageInRegion: MTLRegionMake2D((NSUInteger)(first > 0 ? first : 0), 0,
+                                           (NSUInteger)count, (NSUInteger)instances)];
+
+    [enc dispatchThreads: MTLSizeMake((NSUInteger)count, (NSUInteger)instances, 1)
+  threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+
+    // ---- the control stage, as compute ----
+    if (program->tess.has_control)
+    {
+        // A fresh encoder rather than a second pipeline on the same one. The
+        // vertex kernel binds the vertex attribute buffers over the same low
+        // slots the control kernel reads its uniforms from, and nothing in
+        // Metal says a rebind has to be visible to a later dispatch on the
+        // same encoder once the pipeline has changed underneath it.
+        [self endComputeEncoding];
+
+        enc = [self liveComputeEncoder];
+
+        if (enc == nil)
+            return false;
+
+        [enc setComputePipelineState: _tessControlPipeline];
+            [self bindTessBuffers: &ctx->state.tess_control_buffer_map_list toComputeEncoder: enc];
+        [enc setBuffer: vtx_out offset: 0 atIndex: MGL_TESS_VERTEX_OUT_INDEX];
+        [enc setBuffer: ctl_out offset: 0 atIndex: MGL_TESS_CONTROL_OUT_INDEX];
+        [enc setBuffer: patch_out offset: 0 atIndex: MGL_TESS_PATCH_OUT_INDEX];
+        [enc setBuffer: levels offset: 0 atIndex: MGL_TESS_LEVEL_INDEX];
+        [enc setBytes: params length: sizeof(params) atIndex: MGL_TESS_PARAMS_INDEX];
+        [enc dispatchThreads: MTLSizeMake((NSUInteger)patches * out_cp, 1, 1)
+      threadsPerThreadgroup: MTLSizeMake(out_cp, 1, 1)];
+    }
+    else
+    {
+        // no control shader, so the vertex output is already the patch and the
+        // levels come from glPatchParameterfv
+        ctl_out = vtx_out;
+        [self writeDefaultTessLevels: levels patches: patches];
+    }
+
+    [self endComputeEncoding];
+
+    // the render encoder went away with the compute pass, so rebuild it and
+    // point it at what the compute stages wrote
+    if (_currentRenderEncoder == nil)
+    {
+        if ([self newRenderEncoder] == false)
+            return false;
+    }
+
+    // a fresh encoder carries none of the state processGLState set up
+    if (_pipelineState == nil)
+        return false;
+
+    [_currentRenderEncoder setRenderPipelineState: _pipelineState];
+    [self bindTessBuffersToRenderEncoder];
+
+    [_currentRenderEncoder setVertexBuffer: ctl_out offset: 0 atIndex: MGL_TESS_CONTROL_OUT_INDEX];
+    [_currentRenderEncoder setVertexBuffer: patch_out offset: 0 atIndex: MGL_TESS_PATCH_OUT_INDEX];
+    [_currentRenderEncoder setVertexBuffer: levels offset: 0 atIndex: MGL_TESS_LEVEL_INDEX];
+    [_currentRenderEncoder setTessellationFactorBuffer: levels offset: 0 instanceStride: 0];
+
+    return true;
+}
+
+// SPIR-V and Metal name the same three spacings and two windings differently.
+static MTLTessellationPartitionMode mtlPartitionForSpv(GLuint mode)
+{
+    switch (mode)
+    {
+        case SpvExecutionModeSpacingFractionalEven: return MTLTessellationPartitionModeFractionalEven;
+        case SpvExecutionModeSpacingFractionalOdd:  return MTLTessellationPartitionModeFractionalOdd;
+        default:                                    return MTLTessellationPartitionModeInteger;
+    }
+}
+
+// Reversed, because MGL hands Metal a flipped clip space.
+static MTLWinding mtlWindingForSpv(GLuint mode)
+{
+    return mode == SpvExecutionModeVertexOrderCw ? MTLWindingCounterClockwise
+                                                 : MTLWindingClockwise;
+}
+
 -(MTLRenderPipelineDescriptor *)generatePipelineDescriptor
 {
     MTLRenderPipelineDescriptor *pipelineStateDescriptor;
@@ -4479,8 +5554,47 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     pipelineStateDescriptor.label = @"GLSL Pipeline";
     pipelineStateDescriptor.vertexFunction = vertexFunction;
     pipelineStateDescriptor.fragmentFunction = fragmentFunction;
-    pipelineStateDescriptor.inputPrimitiveTopology =
-        _drawTopology ? _drawTopology : MTLPrimitiveTopologyClassTriangle;
+    if (program->tess.active)
+    {
+        pipelineStateDescriptor.maxTessellationFactor = 64;
+        pipelineStateDescriptor.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        pipelineStateDescriptor.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+        pipelineStateDescriptor.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+        pipelineStateDescriptor.tessellationPartitionMode = mtlPartitionForSpv(program->tess.partition);
+        pipelineStateDescriptor.tessellationOutputWindingOrder = mtlWindingForSpv(program->tess.winding);
+    }
+    else
+    {
+        pipelineStateDescriptor.inputPrimitiveTopology =
+            _drawTopology ? _drawTopology : MTLPrimitiveTopologyClassTriangle;
+    }
+
+    // A tessellating program rasterises from its evaluation stage: that is the
+    // Metal vertex function, and the tessellator feeds it.
+    if (program->tess.active)
+    {
+        vertexFunction = (__bridge id<MTLFunction>)(program->spirv[_TESS_EVALUATION_SHADER].mtl_function);
+
+        if (!vertexFunction)
+        {
+            MGL_NSERR(@"MGL ERROR: program %u has no tessellation evaluation stage", program->name);
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            return NULL;
+        }
+
+        pipelineStateDescriptor.vertexFunction = vertexFunction;
+    }
+
+    // The pipeline has to agree with the attachments about how many samples
+    // there are, or Metal refuses it.
+    GLsizei fbo_samples = mglDrawFramebufferSamples(ctx);
+
+    if (fbo_samples > 1)
+    {
+        pipelineStateDescriptor.rasterSampleCount = fbo_samples;
+        pipelineStateDescriptor.alphaToCoverageEnabled = ctx->state.caps.sample_alpha_to_coverage;
+        pipelineStateDescriptor.alphaToOneEnabled = ctx->state.caps.sample_alpha_to_one;
+    }
 
     if (ctx->state.framebuffer)
     {
@@ -4842,6 +5956,93 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 }
 
 // A blit encoder, with whatever else was open closed first.
+// Metal writes a fragment count into a buffer at an offset the encoder picks,
+// and the count belongs to that encoder alone -- so a GL query that outlives
+// one encoder takes a fresh slot each time and adds them up at the end.
+- (id<MTLBuffer>) visibilityBuffer
+{
+    if (_visibilityBuffer == nil)
+    {
+        _visibilityBuffer = [_device newBufferWithLength: MGL_VISIBILITY_SLOTS * 8
+                                                 options: MTLResourceStorageModeShared];
+        _visibilityBuffer.label = @"GL Occlusion Counters";
+    }
+
+    return _visibilityBuffer;
+}
+
+- (Query *) activeOcclusionQuery
+{
+    for (int t = 0; t < _MAX_QUERY_TARGETS; t++)
+    {
+        Query *q = ctx->state.active_query[t][0];
+
+        if (q == NULL)
+            continue;
+
+        if (q->target == GL_SAMPLES_PASSED ||
+            q->target == GL_ANY_SAMPLES_PASSED ||
+            q->target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE)
+            return q;
+    }
+
+    return NULL;
+}
+
+- (void) beginOcclusionCountingOnEncoder
+{
+    Query *q = [self activeOcclusionQuery];
+
+    if (q == NULL || _currentRenderEncoder == nil)
+        return;
+
+    if (_visibilityNextSlot >= MGL_VISIBILITY_SLOTS)
+    {
+        MGL_NSERR(@"MGL WARNING: out of occlusion counter slots, query %u will undercount", q->name);
+        return;
+    }
+
+    GLuint slot = _visibilityNextSlot++;
+
+    ((uint64_t *)[self visibilityBuffer].contents)[slot] = 0;
+
+    if (q->visibility_offset < 0)
+    {
+        q->visibility_offset = (GLint)slot;
+        q->visibility_slots = 1;
+    }
+    else
+    {
+        q->visibility_slots++;
+    }
+
+    [_currentRenderEncoder setVisibilityResultMode: MTLVisibilityResultModeCounting
+                                            offset: slot * 8];
+}
+
+- (void) endOcclusionCountingOnEncoder
+{
+    if (_currentRenderEncoder)
+        [_currentRenderEncoder setVisibilityResultMode: MTLVisibilityResultModeDisabled
+                                                offset: 0];
+}
+
+// Called once the GPU has caught up: adds the slots this query collected into
+// its GL result and hands the slots back.
+- (void) collectOcclusionQuery: (Query *) q
+{
+    if (q == NULL || q->visibility_offset < 0 || _visibilityBuffer == nil)
+        return;
+
+    const uint64_t *counts = (const uint64_t *)_visibilityBuffer.contents;
+
+    for (GLint i = 0; i < q->visibility_slots; i++)
+        q->result += counts[q->visibility_offset + i];
+
+    q->visibility_offset = -1;
+    q->visibility_slots = 0;
+}
+
 - (id<MTLBlitCommandEncoder>) newBlitEncoder
 {
     [self endComputeEncoding];
@@ -4981,7 +6182,18 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     }
 
     //logDirtyBits(ctx);
-    
+
+    // gl_NumSamples belongs to the framebuffer, not the application, so its
+    // uniform is written here rather than by a glUniform call.
+    if (draw_command && ctx->state.program)
+    {
+        // GL_SAMPLES is 0 on a single-sampled framebuffer, but gl_NumSamples
+        // counts the samples there are, which is one.
+        GLsizei n = mglDrawFramebufferSamples(ctx);
+
+        mglWriteNumSamples(ctx, ctx->state.program, n > 1 ? n : 1);
+    }
+
     // since a clear is embedded into a render encoder
     if (VAO() == NULL)
     {
@@ -5182,8 +6394,14 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
             ctx->state.dirty_bits &= ~DIRTY_RENDER_STATE;
         }
 
-        // blend and write masks live in the pipeline descriptor
-        if (dirty_on_entry & (DIRTY_PROGRAM | DIRTY_VAO | DIRTY_FBO | DIRTY_ALPHA_STATE | DIRTY_RENDER_STATE | DIRTY_STATE))
+        // blend and write masks live in the pipeline descriptor. A geometry
+        // program builds its own three pipelines at draw time instead; this
+        // one would pair the capture vertex stage, which rasterises nothing,
+        // with a fragment shader, and Metal refuses that combination.
+        bool gs_program = mglProgramHasGeometry(ctx->state.program);
+
+        if (!gs_program &&
+            (dirty_on_entry & (DIRTY_PROGRAM | DIRTY_VAO | DIRTY_FBO | DIRTY_ALPHA_STATE | DIRTY_RENDER_STATE | DIRTY_STATE)))
         {
             // create pipeline descriptor
             MTLRenderPipelineDescriptor *pipelineStateDescriptor;
@@ -5207,7 +6425,10 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
             [self bindBlendStateToPipelineStateDescriptor: pipelineStateDescriptor];
 
-            pipelineStateDescriptor.vertexDescriptor = vertexDescriptor;
+            // A tessellation evaluation shader reads control points out of a
+            // buffer, so the pipeline has no vertex descriptor at all.
+            if (!(ctx->state.program && ctx->state.program->tess.active))
+                pipelineStateDescriptor.vertexDescriptor = vertexDescriptor;
 
             // PROPER AGX VIRTUALIZATION COMPATIBILITY: Fix root cause while maintaining Metal functionality
             NSError *error;
@@ -5342,7 +6563,8 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     }
 
     // Create a render command encoder.
-    [_currentRenderEncoder setRenderPipelineState: _pipelineState];
+    if (_pipelineState && !mglProgramHasGeometry(ctx->state.program))
+        [_currentRenderEncoder setRenderPipelineState: _pipelineState];
 
     return true;
 }
@@ -6249,6 +7471,21 @@ void mtlLabelObject (GLMContext glm_ctx, GLenum identifier, GLuint name, const c
     [self flushCommandBuffer: finish];
 }
 
+void mtlQueryBegin (GLMContext glm_ctx, Query *q)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj beginOcclusionCountingOnEncoder];
+}
+
+void mtlQueryEnd (GLMContext glm_ctx, Query *q)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj endOcclusionCountingOnEncoder];
+}
+
+void mtlQueryResult (GLMContext glm_ctx, Query *q)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj collectOcclusionQuery: q];
+}
+
 void mtlFlush (GLMContext glm_ctx, bool finish)
 {
     // Call the Objective-C method using Objective-C syntax
@@ -7028,13 +8265,6 @@ Buffer *getIndirectBuffer(GLMContext ctx)
     return gl_indirect_buffer;
 }
 
-// what a Metal indexed draw reads from
-typedef struct {
-    id<MTLBuffer> buffer;
-    NSUInteger    offset;   // where the converted range starts
-    NSUInteger    scale;    // bytes per index here over bytes per index in GL
-    MTLIndexType  type;
-} MGLIndexSource;
 
 // Metal has no 8-bit index type and only restarts on 0xFFFF / 0xFFFFFFFF.
 // A draw whose indices are bytes, or whose restart index is anything else,
@@ -7150,6 +8380,8 @@ typedef struct {
         return; // Early return to prevent crash
     }
 
+    [self updateTransformFeedbackUniforms: first];
+    [self countDrawnPrimitives: mode count: count instances: 1];
     [self setDrawTopologyForMode: mode];
     if ([self processGLState: true] == false) {
         MGL_NSERR(@"MGL ERROR: mtlDrawArrays - processGLState failed, aborting");
@@ -7161,6 +8393,15 @@ typedef struct {
         MGL_NSERR(@"MGL ERROR: mtlDrawArrays - No current render encoder, aborting");
         return;
     }
+
+    ctx->state.transform_feedback->vertices_recorded +=
+        [self setUpTransformFeedback: mode count: count first: first];
+
+    if ([self drawGeometry: mode count: count first: first instances: 1 indices: NULL])
+        return;
+
+    if ([self drawTessellated: count first: first instances: 1])
+        return;
 
     if ([self expandDraw:mode count:count type:0 indices:NULL instanceCount:1 baseVertex:first baseInstance:0])
         return;
@@ -7215,8 +8456,19 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self updateTransformFeedbackUniforms: 0];
+    [self countDrawnPrimitives: mode count: count instances: 1];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    ctx->state.transform_feedback->vertices_recorded +=
+        [self setUpTransformFeedback: mode count: count first: 0];
+
+    if ([self drawGeometry: mode count: count first: 0 instances: 1 indices: &src])
+        return;
+
+    if ([self drawTessellatedIndexed: count first: 0 instances: 1 from: &src])
+        return;
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:0 baseInstance:0])
         return;
@@ -7252,6 +8504,12 @@ void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
+    if ([self drawGeometry: mode count: count first: 0 instances: 1 indices: &src])
+        return;
+
+    if ([self drawTessellatedIndexed: count first: 0 instances: 1 from: &src])
+        return;
+
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:0 baseInstance:0])
         return;
 
@@ -7282,8 +8540,19 @@ void mtlDrawRangeElements(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint 
 {
     MTLPrimitiveType primitiveType;
 
+    [self updateTransformFeedbackUniforms: first];
+    [self countDrawnPrimitives: mode count: count instances: 1];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    ctx->state.transform_feedback->vertices_recorded +=
+        [self setUpTransformFeedback: mode count: count first: first];
+
+    if ([self drawGeometry: mode count: count first: first instances: instancecount indices: NULL])
+        return;
+
+    if ([self drawTessellated: count first: first instances: instancecount])
+        return;
 
     if ([self expandDraw:mode count:count type:0 indices:NULL instanceCount:instancecount baseVertex:first baseInstance:0])
         return;
@@ -7311,6 +8580,12 @@ void mtlDrawArraysInstanced(GLMContext glm_ctx, GLenum mode, GLint first, GLsize
 
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    if ([self drawGeometry: mode count: count first: 0 instances: instancecount indices: &src])
+        return;
+
+    if ([self drawTessellatedIndexed: count first: 0 instances: instancecount from: &src])
+        return;
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:instancecount baseVertex:0 baseInstance:0])
         return;
@@ -7350,6 +8625,12 @@ void mtlDrawElementsInstanced(GLMContext glm_ctx, GLenum mode, GLsizei count, GL
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
+    if ([self drawGeometry: mode count: count first: basevertex instances: 1 indices: &src])
+        return;
+
+    if ([self drawTessellatedIndexed: count first: basevertex instances: 1 from: &src])
+        return;
+
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:basevertex baseInstance:0])
         return;
 
@@ -7381,6 +8662,12 @@ void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, G
 
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    if ([self drawGeometry: mode count: count first: basevertex instances: 1 indices: &src])
+        return;
+
+    if ([self drawTessellatedIndexed: count first: basevertex instances: 1 from: &src])
+        return;
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:basevertex baseInstance:0])
         return;
@@ -7418,6 +8705,12 @@ void mtlDrawRangeElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLuint star
 
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    if ([self drawGeometry: mode count: count first: basevertex instances: instancecount indices: &src])
+        return;
+
+    if ([self drawTessellatedIndexed: count first: basevertex instances: instancecount from: &src])
+        return;
 
     if ([self expandDraw:mode count:(GLsizei)count type:type indices:indices instanceCount:instancecount baseVertex:basevertex baseInstance:0])
         return;
@@ -7848,6 +9141,9 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
     glm_ctx->mtl_funcs.mtlPushDebugGroup = mtlPushDebugGroup;
     glm_ctx->mtl_funcs.mtlPopDebugGroup = mtlPopDebugGroup;
     glm_ctx->mtl_funcs.mtlLabelObject = mtlLabelObject;
+    glm_ctx->mtl_funcs.mtlQueryBegin = mtlQueryBegin;
+    glm_ctx->mtl_funcs.mtlQueryEnd = mtlQueryEnd;
+    glm_ctx->mtl_funcs.mtlQueryResult = mtlQueryResult;
     glm_ctx->mtl_funcs.mtlFlush = mtlFlush;
     glm_ctx->mtl_funcs.mtlSwapBuffers = mtlSwapBuffers;
     glm_ctx->mtl_funcs.mtlClearBuffer = mtlClearBuffer;

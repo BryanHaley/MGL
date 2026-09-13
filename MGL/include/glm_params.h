@@ -248,7 +248,7 @@ typedef struct GLMParams_t {
     GLuint aliased_line_width_range;
     GLuint aliased_point_size_range;
     GLuint active_texture;
-    GLuint sample_coverage_value;
+    GLfloat sample_coverage_value;
     GLuint sample_coverage_invert;
     GLuint texture_binding_cube_map;
     GLuint max_cube_map_texture_size;

@@ -21,6 +21,7 @@
 #ifndef glm_context_h
 #define glm_context_h
 
+#include <string.h>
 #include <stdio.h>
 #include <assert.h>
 
@@ -423,6 +424,97 @@ typedef struct VertexArray_t {
     void *mtl_data;
 } VertexArray;
 
+// The buffers the geometry emulation uses, high enough not to collide with
+// the storage buffers a shader declares for itself.
+#define MGL_GS_IN_BINDING     12
+#define MGL_GS_OUT_BINDING    13
+#define MGL_GS_INDEX_BINDING  14
+
+// and where they are pinned in Metal's buffer slots, above everything the
+// vertex descriptor and the uniform blocks use
+#define MGL_GS_IN_MSL_SLOT    27
+#define MGL_GS_OUT_MSL_SLOT   28
+#define MGL_GS_INDEX_MSL_SLOT 29
+
+// Transform feedback writes through storage blocks of its own, starting here.
+#define MGL_XFB_FIRST_BINDING 16
+#define MGL_XFB_MAX_BUFFERS   4
+#define MGL_XFB_FIRST_MSL_SLOT 22
+
+// What the transform feedback rewrite produced and how it laid the capture out.
+typedef struct CaptureInfo_t {
+    char   *rewritten_src;
+    GLint   varying_count;
+    GLint   components[MGL_XFB_MAX_BUFFERS];
+    GLint   stride_words;      // interleaved only; zero when separate
+    GLint   buffer_count;
+    GLboolean separate;
+    // where the rewrite's own uniforms and buffers ended up
+    GLint   on_loc, base_loc;
+    GLint   buffer_slot[MGL_XFB_MAX_BUFFERS];
+} CaptureInfo;
+
+bool mglBuildTransformCapture(const char *src, char *const *varyings, GLsizei count,
+                              GLenum buffer_mode, CaptureInfo *ci);
+void mglFreeCaptureInfo(CaptureInfo *ci);
+
+// What a geometry shader turned into, and what it needs to run.
+typedef struct GeometryInfo_t {
+    GLenum in_primitive;            // points / lines / triangles (+ adjacency)
+    GLenum out_primitive;           // points / line_strip / triangle_strip
+    GLint  max_vertices;
+    GLint  invocations;
+    GLint  in_vertices;             // vertices per input primitive
+    GLint  out_vertices_per_primitive;
+    GLint  slot_capacity;           // vertices one invocation may write
+    char  *compute_src;             // the geometry shader, as a compute shader
+    char  *passthrough_src;         // the vertex shader that draws its output
+    char  *capture_decl;            // what the real vertex shader gains
+    GLint  in_stride;               // bytes one captured vertex takes
+    GLint  out_stride;              // bytes one emitted vertex takes
+    // where each generated buffer landed in Metal, per stage that uses it
+    GLint  vs_in_slot;
+    GLint  gs_in_slot, gs_out_slot, gs_index_slot;
+    GLint  pass_out_slot;
+    // the three numbers the compute pass is told about this draw
+    GLint  prims_loc, indexed_loc, first_loc, stride_loc;
+} GeometryInfo;
+
+// Names MGL generates for its own use, which GL must not see and the buffer
+// mapping must not try to find a GL object for.
+static inline bool mglResourceIsInternal(const char *name)
+{
+    return name && (!strncmp(name, "Mgl", 3) || !strncmp(name, "mgl", 3));
+}
+
+bool  mglRewriteGeometryShader(const char *src, GeometryInfo *gi);
+char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi);
+void  mglFreeGeometryInfo(GeometryInfo *gi);
+
+// What a subroutine uniform turns into: an int selector named NAME__mglsr,
+// and for arrays a dispatch function named NAME__mglcall taking the index.
+// How many the rewrite can hold; GL's floor is 256 and 1024.
+#define MAX_SUB_FNS_LIMIT     256
+#define MAX_SUB_UNIFORM_LIMIT 1024
+
+#define MGL_SUBROUTINE_SUFFIX "_mglsr"
+#define MGL_SUBROUTINE_CALL   "__mglcall"
+#define MGL_SUBROUTINE_INDEX  "mglsrIndex"
+
+// What the rewrite found, so glGetSubroutineIndex and friends can answer.
+typedef struct SubroutineInfo_t {
+    char   **fn_names;           // every subroutine function in this stage
+    GLuint   fn_count;
+    char   **uniform_names;      // every subroutine uniform in this stage
+    GLuint  *uniform_array_size;
+    GLuint  *uniform_compatible; // how many functions each one accepts
+    GLuint   uniform_count;
+} SubroutineInfo;
+
+char *mglRewriteSubroutines(const char *src, SubroutineInfo *info);
+void  mglFreeSubroutineInfo(SubroutineInfo *info);
+bool  mglCopySubroutineInfo(SubroutineInfo *dst, const SubroutineInfo *src);
+
 typedef struct Shader_t {
     GLuint dirty_bits;
     GLuint name;
@@ -444,6 +536,8 @@ typedef struct Shader_t {
     void *spirv_binary;
     GLsizei spirv_binary_length;
     GLboolean specialized;
+    // what the subroutine rewrite found, empty when the source had none
+    SubroutineInfo subroutines;
 } Shader;
 
 typedef struct Spirv_t {
@@ -457,6 +551,28 @@ typedef struct Spirv_t {
 } Spirv;
 
 #define MGL_NO_LOCATION ((GLuint)-1)
+
+// Metal buffer slots the tessellation plumbing owns. They sit at the top of
+// the 31 a stage gets, out of the way of the vertex and uniform buffers.
+#define MGL_TESS_VERTEX_OUT_INDEX   30   // vertex-as-compute -> tess control
+#define MGL_TESS_CONTROL_OUT_INDEX  29   // tess control -> tess eval, per vertex
+#define MGL_TESS_PATCH_OUT_INDEX    28   // tess control -> tess eval, per patch
+#define MGL_TESS_LEVEL_INDEX        27   // the tessellation factors
+#define MGL_TESS_PARAMS_INDEX       26   // patch size and patch count
+#define MGL_TESS_INDEX_INDEX        25   // the element buffer, for indexed patches
+
+// What the tessellation stages said about the domain, read back out of the
+// SPIR-V at link time so the render pipeline can be built to match.
+typedef struct TessInfo_t {
+    GLboolean active;
+    GLboolean has_control;         // false when the control stage is fixed function
+    GLuint    patch_kind;          // SpvExecutionModeTriangles / Quads / Isolines
+    GLuint    partition;           // SpvExecutionModeSpacingEqual / Fractional*
+    GLuint    winding;             // SpvExecutionModeVertexOrderCw / Ccw
+    GLboolean point_mode;
+    GLboolean lower_left;
+    GLuint    out_control_points;  // vertices the control shader emits per patch
+} TessInfo;
 
 typedef struct SpirvResource_t {
     GLuint  _id;
@@ -533,13 +649,40 @@ typedef struct Program_t {
     UniformConstants uniform_constants;
     GLboolean separable;
     GLboolean binary_retrievable_hint;
+    // where the rewritten gl_NumSamples lives, or -1 when the shader never asked
+    GLint num_samples_loc;
+    // the subroutine index chosen per subroutine uniform location, per stage
+    GLuint *subroutine_values[_MAX_SHADER_TYPES];
+    // what the subroutine rewrite found, copied at link so the program keeps
+    // it after its shaders are detached
+    SubroutineInfo subroutines[_MAX_SHADER_TYPES];
+    // GL keeps the recorded varyings on the program, not on the transform
+    // feedback object, and they take effect at the next link
+    char   **xfb_varyings;
+    GLsizei  xfb_varying_count;
+    GLenum   xfb_buffer_mode;
+    CaptureInfo xfb;
+    TessInfo tess;
+    // a geometry shader becomes a compute pass plus a generated vertex shader
+    GeometryInfo geom;
+    Spirv gs_passthrough;
 } Program;
+
+// True once a program has linked a geometry stage. An application may detach
+// its shaders after linking, so the attachment is not the thing to ask.
+static inline bool mglProgramHasGeometry(const Program *p)
+{
+    return p && p->geom.compute_src != NULL;
+}
 
 typedef struct ProgramPipeline_t {
     GLuint name;
     GLboolean validated;
     Program *stage_programs[_MAX_SHADER_TYPES];  // Programs attached to each stage
 } ProgramPipeline;
+
+// How many render encoders' worth of occlusion counting a frame can hold.
+#define MGL_VISIBILITY_SLOTS 256
 
 #define MAX_QUERY_STREAMS 4
 
@@ -563,8 +706,9 @@ typedef struct Query_t {
     GLboolean active;
     GLboolean have_result;
     GLuint64 result;
-    // slot in the renderer's visibility buffer while occlusion counting
+    // slots in the renderer's visibility buffer while occlusion counting
     GLint visibility_offset;
+    GLint visibility_slots;
     GLuint64 start_time;
 } Query;
 
@@ -603,6 +747,8 @@ typedef struct TransformFeedback_t {
     char **varyings;
     GLsizei varying_count;
     GLenum buffer_mode;
+    // where the next draw appends, in vertices
+    GLuint vertices_recorded;
 } TransformFeedback;
 
 typedef struct Renderbuffer_t {
@@ -680,6 +826,27 @@ typedef struct PixelStore_t {
 size_t mglPixelStoreRowPitch(const PixelStore *ps, GLsizei width, GLuint pixel_size);
 size_t mglPixelStoreSkipBytes(const PixelStore *ps, GLsizei height, GLuint pixel_size, size_t row_pitch);
 size_t mglPixelStoreSkipBytes2D(const PixelStore *ps, GLuint pixel_size, size_t row_pitch);
+
+// gl_NumSamples reaches the shader as an ordinary uniform of this name, which
+// is deliberately the same length as gl_NumSamples so the rename is in place.
+#define MGL_NUM_SAMPLES_NAME "mglNumSamples"
+
+// The two targets whose storage holds more than one sample per pixel.
+static inline bool mglTargetIsMultisample(GLenum target)
+{
+    return target == GL_TEXTURE_2D_MULTISAMPLE ||
+           target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
+// Samples in the framebuffer GL is drawing to; 0 when it is single-sampled.
+GLsizei mglDrawFramebufferSamples(GLMContext ctx);
+
+TransformFeedback *getTransformFeedback(GLMContext ctx, GLuint name);
+
+GLint mglFindNumSamplesLocation(Program *pptr);
+GLint mglFindUniformByName(Program *pptr, const char *name);
+void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples);
+void mglWriteProgramUniform(GLMContext ctx, Program *pptr, GLint location, GLint value);
 
 
 enum {
@@ -803,6 +970,11 @@ typedef struct {
     BufferMapList vertex_buffer_map_list;
     BufferMapList fragment_buffer_map_list;
     BufferMapList compute_buffer_map_list;
+    // the tessellation stages have their own uniforms, and the control stage
+    // runs as compute while the evaluation stage is the draw's vertex function
+    BufferMapList tess_control_buffer_map_list;
+    BufferMapList tess_eval_buffer_map_list;
+    BufferMapList geometry_buffer_map_list;
 
     // enable / disable caps
     GLMCaps     caps;
@@ -836,6 +1008,12 @@ struct GLMMetalFuncs {
     void (*mtlPushDebugGroup)(GLMContext glm_ctx, const char *name);
     void (*mtlPopDebugGroup)(GLMContext glm_ctx);
     void (*mtlLabelObject)(GLMContext glm_ctx, GLenum identifier, GLuint name, const char *label);
+
+    // occlusion counting: start on whatever encoder is live, stop it, and
+    // add up what the GPU wrote once it has finished
+    void (*mtlQueryBegin)(GLMContext glm_ctx, Query *q);
+    void (*mtlQueryEnd)(GLMContext glm_ctx, Query *q);
+    void (*mtlQueryResult)(GLMContext glm_ctx, Query *q);
 
     void (*mtlFlush)(GLMContext glm_ctx, bool finish);
     void (*mtlSwapBuffers)(GLMContext glm_ctx);

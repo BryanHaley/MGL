@@ -566,6 +566,9 @@ GLboolean mglIsEnabled(GLMContext ctx, GLenum cap)
         case GL_POLYGON_OFFSET_POINT: RET_CAP(polygon_offset_point);
         case GL_PROGRAM_POINT_SIZE: RET_CAP(program_point_size);
         case GL_PRIMITIVE_RESTART: RET_CAP(primitive_restart);
+        case GL_PRIMITIVE_RESTART_FIXED_INDEX: RET_CAP(primitive_restart_fixed_index);
+        case GL_RASTERIZER_DISCARD: RET_CAP(rasterizer_discard);
+        case GL_SAMPLE_SHADING: RET_CAP(sample_shading);
         case GL_SAMPLE_ALPHA_TO_COVERAGE: RET_CAP(sample_alpha_to_coverage);
         case GL_SAMPLE_ALPHA_TO_ONE: RET_CAP(sample_alpha_to_one);
         case GL_SAMPLE_COVERAGE: RET_CAP(sample_coverage);

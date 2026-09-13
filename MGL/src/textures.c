@@ -1283,6 +1283,13 @@ bool unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, GLen
     dst = (GLubyte *)dst_data;
 
     ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, false);
+
+    // A level with no storage has nowhere for this to go. The bounds check
+    // below only runs when data_size is known, so without this a level that
+    // was never allocated wrote through a null pointer.
+    ERROR_CHECK_RETURN_VALUE(dst, GL_INVALID_OPERATION, false);
+    ERROR_CHECK_RETURN_VALUE(tex->faces[face].levels[level].data_size, GL_INVALID_OPERATION, false);
+
     dst_pitch = tex->faces[face].levels[level].pitch;
     assert(dst_pitch);
 
@@ -3992,16 +3999,15 @@ void mglGetTexParameterIuiv(GLMContext ctx, GLenum target, GLenum pname, GLuint 
 
 void mglSampleCoverage(GLMContext ctx, GLfloat value, GLboolean invert)
 {
-    // GL defines no error here, so there is none to raise. What there is to
-    // say is that nothing happens: MGL never rasterises multisampled, and
-    // glm_params.h keeps the coverage value as an integer, so the fraction
-    // has nowhere to live either
+    // GL defines no error here. The fraction turns into a sample mask at draw
+    // time, which is the only form Metal has for it.
     if (value < 0.0f) value = 0.0f;
     if (value > 1.0f) value = 1.0f;
 
+    STATE_VAR(sample_coverage_value) = value;
     STATE_VAR(sample_coverage_invert) = invert ? GL_TRUE : GL_FALSE;
 
-    MGL_ERR("MGL Warning: glSampleCoverage(%f): MGL does not rasterise multisampled, coverage is ignored\n", value);
+    STATE(dirty_bits) |= DIRTY_STATE | DIRTY_RENDER_STATE;
 }
 
 
