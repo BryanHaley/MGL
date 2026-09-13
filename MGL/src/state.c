@@ -52,7 +52,7 @@ void mglDisable(GLMContext ctx, GLenum cap)
 
     switch(cap)
     {
-        case GL_BLEND: DISABLE_CAP(blend);
+        case GL_BLEND: ctx->state.caps.use_blend_i = false; DISABLE_CAP(blend);
         case GL_LINE_SMOOTH: DISABLE_CAP(line_smooth);
         case GL_POLYGON_SMOOTH: DISABLE_CAP(polygon_smooth);
         case GL_CULL_FACE: DISABLE_CAP(cull_face);
@@ -104,7 +104,7 @@ void mglEnable(GLMContext ctx, GLenum cap)
 
     switch(cap)
     {
-        case GL_BLEND: ENABLE_CAP(blend);
+        case GL_BLEND: ctx->state.caps.use_blend_i = false; ENABLE_CAP(blend);
         case GL_LINE_SMOOTH: ENABLE_CAP(line_smooth);
         case GL_POLYGON_SMOOTH: ENABLE_CAP(polygon_smooth);
         case GL_CULL_FACE: ENABLE_CAP(cull_face);
@@ -581,57 +581,92 @@ GLboolean mglIsEnabled(GLMContext ctx, GLenum cap)
     return false;
 }
 
+// GL 4.6 table 17.2: BLEND and SCISSOR_TEST are the capabilities that take an
+// index. Everything else is glEnable's business.
+static bool setIndexedCap(GLMContext ctx, GLenum target, GLuint index, bool on)
+{
+    switch (target)
+    {
+        case GL_BLEND:
+            ERROR_CHECK_RETURN_VALUE(index < MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE, true);
+
+            // the first per-buffer call takes over from the single enable
+            if (!ctx->state.caps.use_blend_i)
+            {
+                for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+                    ctx->state.caps.blend_i[i] = ctx->state.caps.blend;
+
+                ctx->state.caps.use_blend_i = true;
+            }
+
+            ctx->state.caps.blend_i[index] = on;
+            ctx->state.dirty_bits |= DIRTY_ALPHA_STATE;
+            return true;
+
+        case GL_SCISSOR_TEST:
+            ERROR_CHECK_RETURN_VALUE(index < MAX_VIEWPORTS, GL_INVALID_VALUE, true);
+
+            // MGL rasterises through one scissor rectangle, so only the first
+            // viewport's enable has anywhere to go
+            if (index == 0)
+            {
+                ctx->state.caps.scissor_test = on;
+                ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+            }
+            return true;
+
+        case GL_CLIP_DISTANCE0: case GL_CLIP_DISTANCE1:
+        case GL_CLIP_DISTANCE2: case GL_CLIP_DISTANCE3:
+        case GL_CLIP_DISTANCE4: case GL_CLIP_DISTANCE5:
+        case GL_CLIP_DISTANCE6: case GL_CLIP_DISTANCE7:
+            ERROR_CHECK_RETURN_VALUE(index < MAX_CLIP_DISTANCES, GL_INVALID_VALUE, true);
+
+            ctx->state.caps.clip_distances[index] = on;
+            ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
+            return true;
+    }
+
+    return false;
+}
+
 void mglEnablei(GLMContext ctx, GLenum target, GLuint index)
 {
-    if (target >= GL_CLIP_DISTANCE0 &&
-        target <= GL_CLIP_DISTANCE7)
-    {
-        if (index < MAX_CLIP_DISTANCES)
-        {
-            ctx->state.caps.clip_distances[index] = true;
-
-            ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
-
-            return;
-        }
-
-        ERROR_RETURN(GL_INVALID_VALUE);
-    }
+    if (setIndexedCap(ctx, target, index, true))
+        return;
 
     ERROR_RETURN(GL_INVALID_ENUM);
 }
 
 void mglDisablei(GLMContext ctx, GLenum target, GLuint index)
 {
-    if (target >= GL_CLIP_DISTANCE0 &&
-        target <= GL_CLIP_DISTANCE7)
-    {
-        if (index < MAX_CLIP_DISTANCES)
-        {
-            ctx->state.caps.clip_distances[index] = false;
-
-            ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
-
-            return;
-        }
-
-        ERROR_RETURN(GL_INVALID_VALUE);
-    }
+    if (setIndexedCap(ctx, target, index, false))
+        return;
 
     ERROR_RETURN(GL_INVALID_ENUM);
 }
 
 GLboolean mglIsEnabledi(GLMContext ctx, GLenum target, GLuint index)
 {
-    if (target >= GL_CLIP_DISTANCE0 &&
-        target <= GL_CLIP_DISTANCE7)
+    switch (target)
     {
-        if (index < MAX_CLIP_DISTANCES)
-        {
-            return ctx->state.caps.clip_distances[index];
-        }
+        case GL_BLEND:
+            ERROR_CHECK_RETURN_VALUE(index < MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE, false);
 
-        ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
+            return ctx->state.caps.use_blend_i ? ctx->state.caps.blend_i[index]
+                                               : ctx->state.caps.blend;
+
+        case GL_SCISSOR_TEST:
+            ERROR_CHECK_RETURN_VALUE(index < MAX_VIEWPORTS, GL_INVALID_VALUE, false);
+
+            return ctx->state.caps.scissor_test;
+
+        case GL_CLIP_DISTANCE0: case GL_CLIP_DISTANCE1:
+        case GL_CLIP_DISTANCE2: case GL_CLIP_DISTANCE3:
+        case GL_CLIP_DISTANCE4: case GL_CLIP_DISTANCE5:
+        case GL_CLIP_DISTANCE6: case GL_CLIP_DISTANCE7:
+            ERROR_CHECK_RETURN_VALUE(index < MAX_CLIP_DISTANCES, GL_INVALID_VALUE, false);
+
+            return ctx->state.caps.clip_distances[index];
     }
 
     ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);

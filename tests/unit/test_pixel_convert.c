@@ -427,17 +427,35 @@ TEST(convert, stencil_index_reads_stencil_channel)
     CHECK_EQ_UINT(dst, 0x2Au);
 }
 
-TEST(convert, srgb_source_is_linearised)
+TEST(convert, srgb_source_is_returned_as_stored)
 {
-    // 0.5 in sRGB is well below 0.5 linear
+    // This test used to demand the opposite. GL 4.6 section 8.11.4 hands back
+    // what the texture holds; the sRGB decode belongs to sampling, and the
+    // upload path never encoded, so decoding on the way out made every round
+    // trip through an sRGB format come back dark. packed_pixels caught it.
     unsigned char src[4] = { 128, 128, 128, 255 };
     float dst[4] = { 0 };
 
     CHECK(mglConvertPixels(src, 4, MGL_NF_RGBA8_UNORM_SRGB,
                            dst, sizeof dst, GL_RGBA, GL_FLOAT, 1, 1, GL_FALSE));
 
-    CHECK_NEAR(dst[0], 0.2158, 0.005);
-    CHECK_NEAR(dst[3], 1.0, 0.0);       // alpha stays linear
+    CHECK_NEAR(dst[0], 128.0f / 255.0f, 0.005);
+    CHECK_NEAR(dst[3], 1.0, 0.0);
+}
+
+/* And what goes in comes back out unchanged. */
+TEST(convert, srgb_round_trips_unchanged)
+{
+    unsigned char src[4] = { 36, 128, 200, 255 };
+    unsigned char dst[4] = { 0 };
+
+    CHECK(mglConvertPixels(src, 4, MGL_NF_RGBA8_UNORM_SRGB,
+                           dst, sizeof dst, GL_RGBA, GL_UNSIGNED_BYTE, 1, 1, GL_FALSE));
+
+    CHECK_EQ_UINT(36u,  dst[0]);
+    CHECK_EQ_UINT(128u, dst[1]);
+    CHECK_EQ_UINT(200u, dst[2]);
+    CHECK_EQ_UINT(255u, dst[3]);
 }
 
 TEST(convert, float16_source)
@@ -612,4 +630,35 @@ TEST(half, exact_tie_rounds_to_even)
 
     CHECK_EQ_UINT(mglFloatToHalf(a.f), 0x3C00u);
     CHECK_EQ_UINT(mglFloatToHalf(b.f), 0x3C02u);
+}
+
+/* A 32-bit component is normalised for a non-integer format, exactly as the
+   8 and 16 bit ones are. decode_plain handed the raw value on, so every
+   GL_UNSIGNED_INT upload saturated to white. */
+TEST(convert, unsigned_int_client_data_is_normalised)
+{
+    unsigned int src[4] = { 613566756u, 2147483647u, 0u, 4294967295u };
+    unsigned char dst[4] = { 0 };
+
+    CHECK(mglConvertPixelsToNative(src, sizeof src, GL_RGBA, GL_UNSIGNED_INT,
+                                   dst, sizeof dst, MGL_NF_RGBA8_UNORM, 1, 1));
+
+    CHECK_EQ_UINT(36u,  dst[0]);    /* 1/7 */
+    CHECK_EQ_UINT(128u, dst[1]);    /* 1/2 */
+    CHECK_EQ_UINT(0u,   dst[2]);
+    CHECK_EQ_UINT(255u, dst[3]);
+}
+
+TEST(convert, signed_int_client_data_is_normalised)
+{
+    int src[4] = { 536870911, 0, -2147483647, 2147483647 };
+    unsigned char dst[4] = { 0 };
+
+    CHECK(mglConvertPixelsToNative(src, sizeof src, GL_RGBA, GL_INT,
+                                   dst, sizeof dst, MGL_NF_RGBA8_UNORM, 1, 1));
+
+    CHECK_EQ_UINT(64u,  dst[0]);    /* 0.25 */
+    CHECK_EQ_UINT(0u,   dst[1]);
+    CHECK_EQ_UINT(0u,   dst[2]);    /* -1 clamps */
+    CHECK_EQ_UINT(255u, dst[3]);
 }

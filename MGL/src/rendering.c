@@ -27,6 +27,7 @@
 
 #include "mgl.h"
 #include "mgl_format_table.h"
+#include "pixel_convert.h"
 
 #include "pixel_utils.h"
 #include "glm_context.h"
@@ -41,10 +42,14 @@ void mglClear(GLMContext ctx, GLbitfield mask)
     }
 
     ctx->state.clear_bitmask = mask;
+    ctx->state.clear_framebuffer = ctx->state.framebuffer;
 
     // Do it now. Deferring means a second glClear overwrites the first, and the
     // clear colour and scissor get sampled whenever the pass happens to be built
-    // rather than at the point of the call.
+    // rather than at the point of the call. DIRTY_STATE is what makes the
+    // renderer open a pass when there is nothing else to draw.
+    ctx->state.dirty_bits |= DIRTY_STATE;
+
     if (ctx->mtl_funcs.mtlClearBuffer)
         ctx->mtl_funcs.mtlClearBuffer(ctx, 0, mask);
 }
@@ -110,6 +115,8 @@ static bool clearDefaultFramebuffer(GLMContext ctx, GLenum buffer, GLint drawbuf
     }
 
     ctx->state.clear_bitmask = mask;
+    ctx->state.clear_framebuffer = ctx->state.framebuffer;
+    ctx->state.dirty_bits |= DIRTY_STATE;
 
     if (ctx->mtl_funcs.mtlClearBuffer)
         ctx->mtl_funcs.mtlClearBuffer(ctx, 0, mask);
@@ -456,6 +463,11 @@ void mglPixelStoref(GLMContext ctx, GLenum pname, GLfloat param)
     mglPixelStorei(ctx, pname, (GLint)param);
 }
 
+static bool fboAttachmentPresent(const FBOAttachment *att)
+{
+    return att && (att->buf.tex != NULL || att->buf.rbo != NULL);
+}
+
 void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void *pixels)
 {
     GLuint pixel_size;
@@ -467,7 +479,11 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
         ERROR_RETURN(GL_INVALID_ENUM);
     }
 
-    // the read buffer decides which client formats are legal here
+    // the read buffer decides which client formats are legal here -- except a
+    // depth or stencil read, which comes from its own attachment and ignores
+    // whichever colour buffer READ_BUFFER names
+    if (format != GL_DEPTH_COMPONENT && format != GL_DEPTH_STENCIL &&
+        format != GL_STENCIL_INDEX)
     {
         Framebuffer *fbo = ctx->state.readbuffer;
         GLenum src_format = 0;
@@ -493,9 +509,9 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
 
         if (src_format)
             ERROR_CHECK_RETURN(mglReadbackFormatAgrees(src_format, format), GL_INVALID_OPERATION);
-
-        ERROR_CHECK_RETURN(mglFormatTypeAgrees(format, type), GL_INVALID_OPERATION);
     }
+
+    ERROR_CHECK_RETURN(mglFormatTypeAgrees(format, type), GL_INVALID_OPERATION);
 
     // ERROR_CHECK_RETURN(width > 0, GL_INVALID_ENUM);
     if (width < 0) {
@@ -542,17 +558,26 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
 
     switch(format)
     {
+        // a user framebuffer brings its own depth and stencil; only the default
+        // one answers to the context's formats
         case GL_STENCIL_INDEX:
-            ERROR_CHECK_RETURN(ctx->stencil_format.mtl_pixel_format > 0, GL_INVALID_OPERATION);
+            ERROR_CHECK_RETURN(ctx->state.readbuffer
+                               ? fboAttachmentPresent(&ctx->state.readbuffer->stencil)
+                               : ctx->stencil_format.mtl_pixel_format > 0, GL_INVALID_OPERATION);
             break;
 
         case GL_DEPTH_COMPONENT:
-            ERROR_CHECK_RETURN(ctx->depth_format.mtl_pixel_format > 0, GL_INVALID_OPERATION);
+            ERROR_CHECK_RETURN(ctx->state.readbuffer
+                               ? fboAttachmentPresent(&ctx->state.readbuffer->depth)
+                               : ctx->depth_format.mtl_pixel_format > 0, GL_INVALID_OPERATION);
             break;
 
         case GL_DEPTH_STENCIL:
-            ERROR_CHECK_RETURN((ctx->depth_format.mtl_pixel_format > 0) ||
-                               (ctx->stencil_format.mtl_pixel_format > 0), GL_INVALID_OPERATION);
+            ERROR_CHECK_RETURN(ctx->state.readbuffer
+                               ? (fboAttachmentPresent(&ctx->state.readbuffer->depth) ||
+                                  fboAttachmentPresent(&ctx->state.readbuffer->stencil))
+                               : ((ctx->depth_format.mtl_pixel_format > 0) ||
+                                  (ctx->stencil_format.mtl_pixel_format > 0)), GL_INVALID_OPERATION);
             switch(type)
             {
                 case GL_UNSIGNED_INT_24_8:
@@ -569,34 +594,9 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
             break;
     }
 
-    switch(type)
-    {
-        case GL_UNSIGNED_BYTE_3_3_2:
-        case GL_UNSIGNED_BYTE_2_3_3_REV:
-        case GL_UNSIGNED_SHORT_5_6_5:
-        case GL_UNSIGNED_SHORT_5_6_5_REV:
-            // ERROR_CHECK_RETURN(format == GL_RGB || format == GL_BGR, GL_INVALID_OPERATION);
-            if (!(format == GL_RGB || format == GL_BGR)) {
-                MGL_ERR("MGL Error: mglReadPixels: invalid format for type (format=0x%x type=0x%x)\n", format, type);
-                ERROR_RETURN(GL_INVALID_OPERATION);
-            }
-            break;
-
-        case GL_UNSIGNED_SHORT_4_4_4_4:
-        case GL_UNSIGNED_SHORT_4_4_4_4_REV:
-        case GL_UNSIGNED_SHORT_5_5_5_1:
-        case GL_UNSIGNED_SHORT_1_5_5_5_REV:
-        case GL_UNSIGNED_INT_8_8_8_8:
-        case GL_UNSIGNED_INT_8_8_8_8_REV:
-        case GL_UNSIGNED_INT_10_10_10_2:
-        case GL_UNSIGNED_INT_2_10_10_10_REV:
-            // ERROR_CHECK_RETURN(format == GL_RGBA || format == GL_BGRA, GL_INVALID_OPERATION);
-            if (!(format == GL_RGBA || format == GL_BGRA)) {
-                MGL_ERR("MGL Error: mglReadPixels: invalid format for type (format=0x%x type=0x%x)\n", format, type);
-                ERROR_RETURN(GL_INVALID_OPERATION);
-            }
-            break;
-    }
+    // the packed types name their client formats in table 8.5, which
+    // mglFormatTypeAgrees above already applies -- including the _INTEGER
+    // spellings a second, stricter switch here used to reject
 
     if (STATE(buffers[_PIXEL_PACK_BUFFER]))
     {
@@ -649,9 +649,12 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
     }
 
     // the renderer converts straight into the caller's buffer
-    pixels = (GLubyte *)pixels + mglPixelStoreSkipBytes(&ctx->state.pack, height, pixel_size, pitch);
+    pixels = (GLubyte *)pixels + mglPixelStoreSkipBytes2D(&ctx->state.pack, pixel_size, pitch);
 
     ctx->mtl_funcs.mtlReadPixels(ctx, pixels, pitch, format, type, x, y, width, height);
+
+    if (ctx->state.pack.swap_bytes)
+        mglSwapPixelBytes(pixels, pitch, format, type, width, height);
 }
 
 

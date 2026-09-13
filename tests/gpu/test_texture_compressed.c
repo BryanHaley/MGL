@@ -349,3 +349,130 @@ GPU_TEST(texture_compressed, bc4_decodes_when_sampled)
     glDeleteTextures(1, &t);
     mgl_target_destroy(&target);
 }
+
+/* GL reads a compressed texture back through glGetTexImage as plain pixels.
+   MGL used to refuse outright, so every RGTC readback in the CTS errored. */
+GPU_TEST(texture_compressed, rgtc_reads_back_as_plain_pixels)
+{
+    const GLsizei w = 8, h = 8;
+    GLubyte src[8 * 8], got[8 * 8];
+    GLuint tex = 0;
+    int worst = 0;
+
+    for (GLsizei y = 0; y < h; y++)
+        for (GLsizei x = 0; x < w; x++)
+            src[y * w + x] = (GLubyte)(x * 32);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    mgl_drain_errors();
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RED_RGTC1, w, h, 0,
+                 GL_RED, GL_UNSIGNED_BYTE, src);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    memset(got, 0xAB, sizeof got);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, got);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    /* BC4 keeps a 4x4 block to eight levels between two endpoints, so a
+       horizontal ramp comes back close but not exact */
+    for (GLsizei i = 0; i < w * h; i++)
+    {
+        int d = (int)got[i] - (int)src[i];
+
+        if (d < 0) d = -d;
+        if (d > worst) worst = d;
+    }
+
+    CHECK_MSG(worst <= 16, "worst texel is off by %d", worst);
+
+    glDeleteTextures(1, &tex);
+}
+
+GPU_TEST(texture_compressed, signed_rgtc2_reads_back_as_plain_pixels)
+{
+    const GLsizei w = 8, h = 4;
+    GLbyte src[8 * 4 * 2], got[8 * 4 * 2];
+    GLuint tex = 0;
+    int worst = 0;
+
+    for (GLsizei y = 0; y < h; y++)
+        for (GLsizei x = 0; x < w; x++)
+        {
+            src[(y * w + x) * 2 + 0] = (GLbyte)(-120 + x * 30);
+            src[(y * w + x) * 2 + 1] = (GLbyte)(100 - y * 40);
+        }
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    mgl_drain_errors();
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_SIGNED_RG_RGTC2, w, h, 0,
+                 GL_RG, GL_BYTE, src);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    memset(got, 0xAB, sizeof got);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RG, GL_BYTE, got);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    for (GLsizei i = 0; i < w * h * 2; i++)
+    {
+        int d = (int)got[i] - (int)src[i];
+
+        if (d < 0) d = -d;
+        if (d > worst) worst = d;
+    }
+
+    CHECK_MSG(worst <= 16, "worst texel is off by %d", worst);
+
+    glDeleteTextures(1, &tex);
+}
+
+/* glTexStorage2D names a compressed internal format and no client format at
+   all. Sizing that through the uncompressed path failed, so the level was
+   never allocated and every glCompressedTexSubImage2D into it was refused --
+   which is how a glTF scene full of BC5 and BC7 textures loaded nothing. */
+GPU_TEST(texture_compressed, immutable_storage_takes_compressed_formats)
+{
+    static const struct { GLenum fmt; const char *name; } cases[] = {
+        { GL_COMPRESSED_RG_RGTC2,               "GL_COMPRESSED_RG_RGTC2" },
+        { GL_COMPRESSED_RGBA_BPTC_UNORM,        "GL_COMPRESSED_RGBA_BPTC_UNORM" },
+        { GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM,  "GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM" },
+    };
+    const GLsizei w = 16, h = 16;
+    const GLsizei blocks = (w / 4) * (h / 4);
+    GLubyte src[16 * 16], got[16 * 16];
+
+    for (GLsizei i = 0; i < (GLsizei)sizeof src; i++)
+        src[i] = (GLubyte)(i * 7);
+
+    for (int c = 0; c < 3; c++)
+    {
+        GLuint tex = 0;
+        GLint bytes = blocks * 16;
+
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        mgl_drain_errors();
+
+        glTexStorage2D(GL_TEXTURE_2D, 3, cases[c].fmt, w, h);
+        CHECK_MSG(mgl_drain_errors() == GL_NO_ERROR, "storage for %s", cases[c].name);
+
+        glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, cases[c].fmt, bytes, src);
+        CHECK_MSG(mgl_drain_errors() == GL_NO_ERROR, "sub-image for %s", cases[c].name);
+
+        memset(got, 0, sizeof got);
+        glGetCompressedTexImage(GL_TEXTURE_2D, 0, got);
+        CHECK_MSG(mgl_drain_errors() == GL_NO_ERROR, "readback for %s", cases[c].name);
+        CHECK_MSG(memcmp(src, got, (size_t)bytes) == 0, "%s did not round trip", cases[c].name);
+
+        glDeleteTextures(1, &tex);
+    }
+}

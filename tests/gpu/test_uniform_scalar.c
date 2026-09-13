@@ -705,3 +705,268 @@ GPU_TEST(uniform_scalar, subroutine_uniforms_not_supported)
     glUseProgram(p);
     glDeleteProgram(p);
 }
+
+/* A uniform the shader never reads gets no Metal slot. MGL used to fall back
+   to the SPIR-V binding, which is zero for all of them, so setting an unused
+   uniform landed on whichever one really owns slot zero. */
+GPU_TEST(uniform_scalar, setting_an_unused_uniform_leaves_the_others_alone)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "uniform int ui_zero, ui_one, ui_two, ui_three, ui_four, ui_five, ui_six;\n"
+        "uniform int ui_last;\n"
+        "flat out ivec4 v;\n"
+        "void main() {\n"
+        "    vec2 p[4] = vec2[4](vec2(-1,-1), vec2(3,-1), vec2(-1,3), vec2(3,3));\n"
+        "    gl_Position = vec4(p[gl_VertexID & 3], 0.0, 1.0);\n"
+        "    v = ivec4(ui_zero, ui_one, ui_six, ui_last);\n"
+        "}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "flat in ivec4 v;\n"
+        "layout(location = 0) out ivec4 frag;\n"
+        "void main() { frag = v; }\n";
+    static const char *names[8] = {
+        "ui_zero", "ui_one", "ui_two", "ui_three",
+        "ui_four", "ui_five", "ui_six", "ui_last"
+    };
+    static const GLint vals[8] = { 0, 1, 2, 3, 4, 5, 6, 101 };
+
+    MGLTestTarget t;
+    GLuint prog, vao, vbo;
+    GLint got[4 * 4 * 4];
+    char log[512] = { 0 };
+
+    if (!mgl_target_create(&t, 4, 4, GL_RGBA32I, 0))
+        return;
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    vao = mgl_fullscreen_quad(&vbo);
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+    glBindVertexArray(vao);
+
+    for (int i = 0; i < 8; i++)
+        glUniform1i(glGetUniformLocation(prog, names[i]), vals[i]);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glFinish();
+
+    glBindTexture(GL_TEXTURE_2D, t.color);
+    memset(got, 0xAB, sizeof got);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_INT, got);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    CHECK_EQ_INT(0,   got[0]);
+    CHECK_EQ_INT(1,   got[1]);
+    CHECK_EQ_INT(6,   got[2]);
+    CHECK_EQ_INT(101, got[3]);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+/* GL numbers uniform locations across the whole program. MGL took them from
+   each stage's SPIR-V, where the linker had left every unlocated uniform at
+   zero, so a vertex uniform and a fragment uniform shared one buffer. */
+GPU_TEST(uniform_scalar, a_vertex_and_a_fragment_uniform_get_different_locations)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "uniform float u_shift;\n"
+        "void main() {\n"
+        "    vec2 p[4] = vec2[4](vec2(-1,-1), vec2(3,-1), vec2(-1,3), vec2(3,3));\n"
+        "    gl_Position = vec4(p[gl_VertexID & 3] + vec2(0.0, u_shift), 0.0, 1.0);\n"
+        "}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "uniform vec4 u_color;\n"
+        "layout(location = 0) out vec4 frag;\n"
+        "void main() { frag = u_color; }\n";
+
+    MGLTestTarget t;
+    GLuint prog, vao, vbo;
+    GLint lshift, lcolor;
+    unsigned char *px, rgba[4];
+    char log[512] = { 0 };
+
+    if (!mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+        return;
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    lshift = glGetUniformLocation(prog, "u_shift");
+    lcolor = glGetUniformLocation(prog, "u_color");
+    CHECK(lshift >= 0);
+    CHECK(lcolor >= 0);
+    CHECK_MSG(lshift != lcolor, "both uniforms report location %d", lshift);
+
+    vao = mgl_fullscreen_quad(&vbo);
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+    glBindVertexArray(vao);
+
+    glUniform1f(lshift, 0.0f);
+    glUniform4f(lcolor, 0.25f, 0.5f, 0.75f, 1.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    px = mgl_read_rgba8(&t);
+    CHECK(px != NULL);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 4, 4, rgba);
+        CHECK_EQ_UINT(64u,  rgba[0]);
+        CHECK_EQ_UINT(128u, rgba[1]);
+        CHECK_EQ_UINT(191u, rgba[2]);
+        free(px);
+    }
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+/* Two draws in one pass with different uniform values must not share one. */
+GPU_TEST(uniform_scalar, a_uniform_changed_between_draws_reaches_the_second)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "void main() {\n"
+        "    vec2 p[4] = vec2[4](vec2(-1,-1), vec2(3,-1), vec2(-1,3), vec2(3,3));\n"
+        "    gl_Position = vec4(p[gl_VertexID & 3], 0.0, 1.0);\n"
+        "}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "uniform vec4 u_color;\n"
+        "layout(location = 0) out vec4 frag;\n"
+        "void main() { frag = u_color; }\n";
+
+    MGLTestTarget t;
+    GLuint prog, vao, vbo;
+    GLint loc;
+    unsigned char *px, rgba[4];
+    char log[512] = { 0 };
+
+    if (!mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+        return;
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    vao = mgl_fullscreen_quad(&vbo);
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+    glBindVertexArray(vao);
+    loc = glGetUniformLocation(prog, "u_color");
+
+    glUniform4f(loc, 0.0f, 1.0f, 0.0f, 1.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glUniform4f(loc, 1.0f, 1.0f, 0.0f, 1.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    px = mgl_read_rgba8(&t);
+    CHECK(px != NULL);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 4, 4, rgba);
+        CHECK_EQ_UINT(255u, rgba[0]);
+        CHECK_EQ_UINT(255u, rgba[1]);
+        CHECK_EQ_UINT(0u,   rgba[2]);
+        free(px);
+    }
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+/* "uniform S s;" is one Metal buffer but many GL uniforms. MGL saw only the
+   struct, so glGetUniformLocation("s.a") returned -1 and nothing could be set. */
+GPU_TEST(uniform_scalar, a_struct_uniform_exposes_its_members)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "void main() {\n"
+        "    vec2 p[4] = vec2[4](vec2(-1,-1), vec2(3,-1), vec2(-1,3), vec2(3,3));\n"
+        "    gl_Position = vec4(p[gl_VertexID & 3], 0.0, 1.0);\n"
+        "}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "struct S { int a; int b[3]; int c; };\n"
+        "uniform S s;\n"
+        "layout(location = 0) out ivec4 frag;\n"
+        "void main() { frag = ivec4(s.a, s.b[0], s.b[2], s.c); }\n";
+
+    MGLTestTarget t;
+    GLuint prog, vao, vbo;
+    GLint la, lb0, lb1, lb2, lc, lb;
+    GLint got[4 * 4 * 4];
+    char log[512] = { 0 };
+
+    if (!mgl_target_create(&t, 4, 4, GL_RGBA32I, 0))
+        return;
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    la  = glGetUniformLocation(prog, "s.a");
+    lb  = glGetUniformLocation(prog, "s.b");
+    lb0 = glGetUniformLocation(prog, "s.b[0]");
+    lb1 = glGetUniformLocation(prog, "s.b[1]");
+    lb2 = glGetUniformLocation(prog, "s.b[2]");
+    lc  = glGetUniformLocation(prog, "s.c");
+
+    CHECK(la >= 0);
+    CHECK(lb0 >= 0);
+    CHECK(lc >= 0);
+    /* the array's own name and its element zero are the same location */
+    CHECK_EQ_INT(lb0, lb);
+    CHECK_EQ_INT(lb0 + 1, lb1);
+    CHECK_EQ_INT(lb0 + 2, lb2);
+    /* the struct itself is not a uniform */
+    CHECK_EQ_INT(-1, glGetUniformLocation(prog, "s"));
+
+    vao = mgl_fullscreen_quad(&vbo);
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+    glBindVertexArray(vao);
+
+    glUniform1i(la,  11);
+    glUniform1i(lb0, 22);
+    glUniform1i(lb1, 33);
+    glUniform1i(lb2, 44);
+    glUniform1i(lc,  55);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glFinish();
+
+    glBindTexture(GL_TEXTURE_2D, t.color);
+    memset(got, 0xAB, sizeof got);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_INT, got);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    CHECK_EQ_INT(11, got[0]);
+    CHECK_EQ_INT(22, got[1]);
+    CHECK_EQ_INT(44, got[2]);
+    CHECK_EQ_INT(55, got[3]);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

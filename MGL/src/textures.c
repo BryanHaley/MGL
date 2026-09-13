@@ -1183,7 +1183,8 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
         case GL_UNSIGNED_BYTE_2_3_3_REV:
         case GL_UNSIGNED_SHORT_5_6_5:
         case GL_UNSIGNED_SHORT_5_6_5_REV:
-            ERROR_CHECK_RETURN_VALUE(format == GL_RGB,GL_INVALID_OPERATION, false);
+            ERROR_CHECK_RETURN_VALUE(format == GL_RGB || format == GL_RGB_INTEGER,
+                                     GL_INVALID_OPERATION, false);
             break;
 
         case GL_UNSIGNED_SHORT_4_4_4_4:
@@ -1233,16 +1234,17 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
 
         switch (kind)
         {
+            // Depth and depth-stencil storage take either client format:
+            // depth data goes into a depth-stencil texture, and a packed
+            // depth-stencil upload fills a depth one. GL_STENCIL_INDEX is not
+            // an upload format for either.
             case MGL_FMT_DEPTH:
-                ERROR_CHECK_RETURN_VALUE(fmt_depth, GL_INVALID_OPERATION, false);
+            case MGL_FMT_DEPTH_STENCIL:
+                ERROR_CHECK_RETURN_VALUE(fmt_depth || fmt_ds, GL_INVALID_OPERATION, false);
                 break;
 
             case MGL_FMT_STENCIL:
                 ERROR_CHECK_RETURN_VALUE(fmt_stencil, GL_INVALID_OPERATION, false);
-                break;
-
-            case MGL_FMT_DEPTH_STENCIL:
-                ERROR_CHECK_RETURN_VALUE(fmt_ds, GL_INVALID_OPERATION, false);
                 break;
 
             case MGL_FMT_COLOR_INT:
@@ -1250,6 +1252,8 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
                 ERROR_CHECK_RETURN_VALUE(fmt_int, GL_INVALID_OPERATION, false);
                 break;
 
+            // a compressed colour format is not an integer format either
+            case MGL_FMT_COMPRESSED:
             case MGL_FMT_COLOR_FLOAT:
                 ERROR_CHECK_RETURN_VALUE(!fmt_int && !fmt_depth && !fmt_stencil && !fmt_ds,
                                          GL_INVALID_OPERATION, false);
@@ -1332,6 +1336,24 @@ bool unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, GLen
         }
     }
 
+    // UNPACK_SWAP_BYTES reverses the client bytes before they are read
+    GLubyte *swapped = NULL;
+
+    if (ctx->state.unpack.swap_bytes && src_pitch && rows)
+    {
+        size_t bytes = src_pitch * rows * (depth ? depth : 1);
+
+        swapped = (GLubyte *)malloc(bytes);
+
+        if (swapped)
+        {
+            memcpy(swapped, src, bytes);
+            mglSwapPixelBytes(swapped, src_pitch, format, type,
+                              (GLsizei)width, (GLsizei)(rows * (depth ? depth : 1)));
+            src = swapped;
+        }
+    }
+
     for (size_t z = 0; z < (depth ? depth : 1); z++)
     {
         GLubyte *slice = dst + z * slice_pitch;
@@ -1348,9 +1370,12 @@ bool unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, GLen
         {
             MGL_ERR("MGL Error: unpackTexture: conversion from 0x%x/0x%x into 0x%x failed\n",
                     format, type, tex->internalformat);
+            free(swapped);
             ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
         }
     }
+
+    free(swapped);
 
     return true;
 }
@@ -1358,6 +1383,126 @@ bool unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, GLen
 #pragma mark texImage 1D/2D/3D
 // Forward declaration
 bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, void *pixels);
+
+// Compress client pixels into an RGTC level and store the blocks, so that a
+// compressed internal format behaves the way the specification says rather
+// than refusing the upload.
+static bool compressUploadedTexLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level,
+                                     GLenum internalformat, GLsizei width, GLsizei height,
+                                     GLsizei depth, GLenum format, GLenum type, const void *pixels)
+{
+    size_t image_size, src_pitch, alloc;
+    vm_address_t data;
+    GLubyte *blocks;
+
+    if (level == 0)
+    {
+        if (tex->mipmap_levels == 0)
+        {
+            initBaseTexLevel(ctx, tex, internalformat, width, height, depth);
+        }
+        else if (width != (GLsizei)tex->width || height != (GLsizei)tex->height ||
+                 internalformat != tex->internalformat)
+        {
+            invalidateTexture(ctx, tex);
+            initBaseTexLevel(ctx, tex, internalformat, width, height, depth);
+        }
+    }
+
+    ERROR_CHECK_RETURN_VALUE(tex->faces[face].levels, GL_OUT_OF_MEMORY, false);
+    ERROR_CHECK_RETURN_VALUE(level >= 0 && (GLuint)level < tex->mipmap_levels, GL_INVALID_VALUE, false);
+
+    image_size = mglFormatImageSize(internalformat, width, height, depth ? depth : 1);
+    ERROR_CHECK_RETURN_VALUE(image_size, GL_INVALID_VALUE, false);
+
+    src_pitch = mglPixelStoreRowPitch(&ctx->state.unpack, width, sizeForFormatType(format, type));
+
+    alloc = page_size_align(image_size);
+
+    if (vm_allocate(mach_task_self(), &data, alloc, VM_FLAGS_ANYWHERE) != KERN_SUCCESS)
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, false);
+
+    blocks = (GLubyte *)data;
+
+    if (mglCompressToRGTC((const GLubyte *)pixels, src_pitch, format, type,
+                          blocks, internalformat, width, height) == GL_FALSE)
+    {
+        vm_deallocate(mach_task_self(), data, alloc);
+        MGL_ERR("MGL Error: no conversion from 0x%x/0x%x into compressed 0x%x\n",
+                format, type, internalformat);
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+    }
+
+    {
+        TextureLevel *lvl = &tex->faces[face].levels[level];
+
+        if (lvl->complete && lvl->data)
+            vm_deallocate(mach_task_self(), lvl->data, lvl->data_size);
+
+        lvl->width = width;
+        lvl->height = height;
+        lvl->depth = depth;
+        lvl->pitch = mglFormatBytesPerRow(internalformat, width);
+        lvl->data = data;
+        lvl->data_size = alloc;
+        lvl->mtl_format = mtlFormatForGLInternalFormat(internalformat);
+        lvl->complete = true;
+    }
+
+    tex->num_levels = MAX(tex->num_levels, level + 1);
+    tex->dirty_bits |= DIRTY_TEXTURE_DATA;
+    STATE(dirty_bits) |= DIRTY_TEX;
+
+    return true;
+}
+
+// One compressed level's worth of block storage. glTexStorage and
+// glCompressedTexImage both land here; only the latter has data to copy in.
+static bool allocCompressedLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level,
+                                 GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth)
+{
+    size_t pitch, rows, slices, alloc_size;
+    vm_address_t texture_data;
+    kern_return_t err;
+    TextureLevel *lvl;
+
+    ERROR_CHECK_RETURN_VALUE(tex->faces[face].levels, GL_OUT_OF_MEMORY, false);
+    ERROR_CHECK_RETURN_VALUE(level >= 0 && (GLuint)level < tex->mipmap_levels, GL_INVALID_VALUE, false);
+
+    pitch = mglFormatBytesPerRow(internalformat, width);
+    ERROR_CHECK_RETURN_VALUE(pitch, GL_INVALID_ENUM, false);
+
+    // Blocks only fill every fourth row, but compressedTexSubLevel and the
+    // uploader both step this level a pixel row at a time -- so the allocation
+    // has to be as tall as the level, the same as glCompressedTexImage's.
+    rows = (size_t)(height > 0 ? height : 1);
+    slices = depth > 0 ? (size_t)depth : 1;
+    alloc_size = page_size_align(pitch * rows * slices);
+
+    lvl = &tex->faces[face].levels[level];
+
+    if (lvl->complete && lvl->data)
+        vm_deallocate(mach_task_self(), lvl->data, lvl->data_size);
+
+    err = vm_allocate((vm_map_t)mach_task_self(), &texture_data, alloc_size, VM_FLAGS_ANYWHERE);
+
+    if (err != 0 || texture_data == 0)
+        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, false);
+
+    tex->num_levels = MAX(tex->num_levels, (GLuint)level + 1);
+    lvl->width = width;
+    lvl->height = height;
+    lvl->depth = depth;
+    lvl->pitch = pitch;
+    lvl->data = texture_data;
+    lvl->data_size = alloc_size;
+    lvl->complete = true;
+
+    tex->dirty_bits |= DIRTY_TEXTURE_LEVEL | DIRTY_TEXTURE_DATA;
+    STATE(dirty_bits) |= DIRTY_TEX;
+
+    return true;
+}
 
 bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLboolean is_array, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, void *pixels, GLboolean proxy)
 {
@@ -1479,6 +1624,24 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
     size_t texture_size;
     size_t src_pitch;
 
+    // GL 4.6 section 8.5 lets an application hand uncompressed pixels to a
+    // compressed internal format and expects the driver to compress them.
+    {
+        GLuint rgtc_channels = 0;
+        GLboolean rgtc_signed = GL_FALSE;
+
+        if (pixels && mglFormatIsRGTC(internalformat, &rgtc_channels, &rgtc_signed))
+            return compressUploadedTexLevel(ctx, tex, face, level, internalformat,
+                                            width, height, depth, format, type, pixels);
+    }
+
+    // glTexStorage* names a compressed internal format and no client format at
+    // all. Sizing that through the uncompressed path fails, so the level never
+    // got allocated and every glCompressedTexSubImage into it was refused.
+    if (mglFormatIsCompressed(internalformat))
+        return allocCompressedLevel(ctx, tex, face, level, internalformat,
+                                    width, height, depth);
+
     pixel_size = sizeForInternalFormat(internalformat, format, type);
     ERROR_CHECK_RETURN_VALUE(pixel_size, GL_INVALID_ENUM, false);
 
@@ -1586,7 +1749,10 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
             }
 
             pixels = (const GLubyte *)pixels +
-                     mglPixelStoreSkipBytes(&ctx->state.unpack, height, src_pixel_size, src_pitch);
+                     ((depth > 1 || tex->target == GL_TEXTURE_3D || tex->target == GL_TEXTURE_2D_ARRAY ||
+                       tex->target == GL_TEXTURE_1D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY)
+                      ? mglPixelStoreSkipBytes(&ctx->state.unpack, height, src_pixel_size, src_pitch)
+                      : mglPixelStoreSkipBytes2D(&ctx->state.unpack, src_pixel_size, src_pitch));
 
             if (unpackTexture(ctx, tex, face, level, format, type, (void *)pixels, (void *)texture_data, src_pitch, 0, 0, 0, width, height, depth) == false)
                 return false;
@@ -1843,7 +2009,10 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
         }
 
         pixels = (GLubyte *)pixels +
-                 mglPixelStoreSkipBytes(&ctx->state.unpack, height, src_pixel_size, src_pitch);
+                 ((depth > 1 || tex->target == GL_TEXTURE_3D || tex->target == GL_TEXTURE_2D_ARRAY ||
+                   tex->target == GL_TEXTURE_1D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY)
+                  ? mglPixelStoreSkipBytes(&ctx->state.unpack, height, src_pixel_size, src_pitch)
+                  : mglPixelStoreSkipBytes2D(&ctx->state.unpack, src_pixel_size, src_pitch));
     }
 
     void *texture_data;
@@ -2557,6 +2726,11 @@ static bool compressedTexLevel(GLMContext ctx, Texture *tex, GLuint face, GLint 
     }
 
     pitch = mglFormatBytesPerRow(internalformat, width);
+
+    if (pitch == 0)
+        MGL_ERR("MGL Error: %s: no row size for compressed format 0x%x at %dx%dx%d level %d\n",
+                __FUNCTION__, internalformat, width, height, depth, level);
+
     ERROR_CHECK_RETURN_VALUE(pitch, GL_INVALID_ENUM, false);
 
     rows = height > 0 ? (size_t)height : 1;
@@ -3126,8 +3300,16 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
     ERROR_CHECK_RETURN_VALUE((GLuint)level < tex->mipmap_levels, GL_INVALID_VALUE, false);
     ERROR_CHECK_RETURN_VALUE(texLevelDefined(tex, 0, level), GL_INVALID_OPERATION, false);
 
-    // a compressed level has no format/type readback; GetCompressedTexImage does that
-    ERROR_CHECK_RETURN_VALUE(mglFormatIsCompressed(tex->internalformat) == false, GL_INVALID_OPERATION, false);
+    // GL reads a compressed texture back as plain pixels; only the formats MGL
+    // can unpack are supported, the rest still need GetCompressedTexImage
+    if (mglFormatIsCompressed(tex->internalformat))
+    {
+        GLuint rgtc_channels = 0;
+        GLboolean rgtc_signed = GL_FALSE;
+
+        ERROR_CHECK_RETURN_VALUE(mglFormatIsRGTC(tex->internalformat, &rgtc_channels, &rgtc_signed),
+                                 GL_INVALID_OPERATION, false);
+    }
 
     pixel_size = sizeForFormatType(format, type);
 
@@ -3157,7 +3339,12 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
     // GetTexImage honours the pack modes exactly like ReadPixels does
     bytes_per_row = mglPixelStoreRowPitch(&ctx->state.pack, width, pixel_size);
 
-    pixels = (GLubyte *)pixels + mglPixelStoreSkipBytes(&ctx->state.pack, height, pixel_size, bytes_per_row);
+    // SKIP_IMAGES only counts for a target that holds more than one image
+    if (tex->target == GL_TEXTURE_3D || tex->target == GL_TEXTURE_2D_ARRAY ||
+        tex->target == GL_TEXTURE_1D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY)
+        pixels = (GLubyte *)pixels + mglPixelStoreSkipBytes(&ctx->state.pack, height, pixel_size, bytes_per_row);
+    else
+        pixels = (GLubyte *)pixels + mglPixelStoreSkipBytes2D(&ctx->state.pack, pixel_size, bytes_per_row);
 
     if (check_size)
     {
@@ -3173,6 +3360,41 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
     if (ctx->state.pack.image_height > 0)
         image_bytes = bytes_per_row * (size_t)ctx->state.pack.image_height;
 
+    // A compressed level is unpacked from MGL's own copy: the Metal texture
+    // holds blocks, and a blit would hand back blocks too.
+    if (mglFormatIsCompressed(tex->internalformat))
+    {
+        MGLNativeFormat nf = mglRGTCNativeFormat(tex->internalformat);
+        GLuint channels = 0;
+        GLboolean is_signed = GL_FALSE;
+        size_t plain_pitch;
+        GLubyte *plain;
+        bool ok;
+
+        mglFormatIsRGTC(tex->internalformat, &channels, &is_signed);
+
+        plain_pitch = (size_t)width * channels;
+        plain = (GLubyte *)calloc(plain_pitch ? plain_pitch : 1, (size_t)(height ? height : 1));
+
+        ERROR_CHECK_RETURN_VALUE(plain, GL_OUT_OF_MEMORY, false);
+
+        ok = mglDecompressRGTC((const void *)lvl->data, tex->internalformat,
+                               width, height, plain, plain_pitch) == GL_TRUE;
+
+        if (ok)
+            ok = mglConvertPixels(plain, plain_pitch, nf, pixels, (GLuint)bytes_per_row,
+                                  format, type, width, height, GL_FALSE) == GL_TRUE;
+
+        free(plain);
+
+        ERROR_CHECK_RETURN_VALUE(ok, GL_INVALID_OPERATION, false);
+
+        if (ctx->state.pack.swap_bytes)
+            mglSwapPixelBytes(pixels, (GLuint)bytes_per_row, format, type, width, height);
+
+        return true;
+    }
+
     for (GLsizei slice = 0; slice < depth; slice++)
     {
         // mtlGetTexImage realises the Metal texture itself, uploading whatever
@@ -3180,6 +3402,10 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
         ctx->mtl_funcs.mtlGetTexImage(ctx, tex, (GLubyte *)pixels + (size_t)slice * image_bytes,
                                       (GLuint)bytes_per_row, format, type,
                                       0, 0, width, height, level, slice);
+
+        if (ctx->state.pack.swap_bytes)
+            mglSwapPixelBytes((GLubyte *)pixels + (size_t)slice * image_bytes,
+                              bytes_per_row, format, type, width, height);
     }
 
     return true;

@@ -522,11 +522,6 @@ static void swizzle_case(int after_first_use)
     {
         glDrawArrays(GL_TRIANGLES, 0, 3);   /* sample once with the default */
 
-        /* The flush is load-bearing, and that is a separate bug: a texture
-           state change between two draws inside one render pass is not seen,
-           because nothing re-binds the texture on the open encoder. */
-        glFinish();
-
         set_swizzle();
     }
 
@@ -549,5 +544,70 @@ static void swizzle_case(int after_first_use)
     glDeleteVertexArrays(1, &vao);
     glDeleteFramebuffers(1, &fb);
     glDeleteTextures(1, &rt);
+    glDeleteTextures(1, &tex);
+}
+
+/* Only those six enums name a swizzle source. Anything else is INVALID_ENUM,
+   and MGL used to take whatever it was handed. */
+GPU_TEST(tex_sampler_params, swizzle_rejects_values_that_are_not_channels)
+{
+    static const GLenum pnames[4] = {
+        GL_TEXTURE_SWIZZLE_R, GL_TEXTURE_SWIZZLE_G,
+        GL_TEXTURE_SWIZZLE_B, GL_TEXTURE_SWIZZLE_A
+    };
+    static const GLint bad[4] = { GL_DEPTH_COMPONENT, GL_RGB, -1, 2 };
+    static const GLint good[6] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE };
+    GLuint tex = 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    mgl_drain_errors();
+
+    for (int i = 0; i < 4; i++)
+    {
+        for (int j = 0; j < 6; j++)
+        {
+            glTexParameteri(GL_TEXTURE_2D, pnames[i], good[j]);
+            CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+        }
+
+        for (int j = 0; j < 4; j++)
+        {
+            glTexParameteri(GL_TEXTURE_2D, pnames[i], bad[j]);
+            CHECK_EQ_UINT(GL_INVALID_ENUM, mgl_drain_errors());
+        }
+    }
+
+    for (int i = 0; i < 4; i++)
+    {
+        for (int j = 0; j < 4; j++)
+        {
+            GLint param[4] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA };
+
+            param[i] = bad[j];
+            glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, param);
+            CHECK_EQ_UINT(GL_INVALID_ENUM, mgl_drain_errors());
+        }
+    }
+
+    /* a rejected value must not have landed */
+    {
+        GLint sw[4] = { 0, 0, 0, 0 };
+        GLint defaults[4] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA };
+
+        glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, defaults);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_ZERO);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, -1);
+        CHECK_EQ_UINT(GL_INVALID_ENUM, mgl_drain_errors());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_RED);
+        mgl_drain_errors();
+
+        glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, sw);
+        CHECK_EQ_UINT((unsigned)GL_RED,   (unsigned)sw[0]);
+        CHECK_EQ_UINT((unsigned)GL_GREEN, (unsigned)sw[1]);
+        CHECK_EQ_UINT((unsigned)GL_BLUE,  (unsigned)sw[2]);
+        CHECK_EQ_UINT((unsigned)GL_ALPHA, (unsigned)sw[3]);
+    }
+
     glDeleteTextures(1, &tex);
 }

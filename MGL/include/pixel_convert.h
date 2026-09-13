@@ -46,6 +46,18 @@ typedef enum {
 } MGLNativeFormat;
 
 MGLNativeFormat mglNativeFormatForMTLFormat(GLuint mtl_format);
+/* GL lets an app upload uncompressed pixels into a compressed format. */
+/* GL 4.6 table 8.1: PACK/UNPACK_SWAP_BYTES */
+void mglSwapPixelBytes(void *data, size_t row_pitch, GLenum format, GLenum type,
+                       GLsizei width, GLsizei height);
+GLboolean mglFormatIsRGTC(GLenum internalformat, GLuint *channels, GLboolean *is_signed);
+// unpacks RGTC blocks into plain R8/RG8 texels, for glGetTexImage
+GLboolean mglDecompressRGTC(const void *src, GLenum internalformat,
+                            GLsizei width, GLsizei height,
+                            void *dst, size_t dst_row_pitch);
+MGLNativeFormat mglRGTCNativeFormat(GLenum internalformat);
+GLboolean mglCompressToRGTC(const void *src, size_t src_row_pitch, GLenum format, GLenum type,
+                            void *dst, GLenum internalformat, GLsizei width, GLsizei height);
 GLuint    mglNativeFormatBytesPerPixel(MGLNativeFormat fmt);
 GLboolean mglNativeFormatIsInteger(MGLNativeFormat fmt);
 GLboolean mglNativeFormatIsDepth(MGLNativeFormat fmt);

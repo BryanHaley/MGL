@@ -456,6 +456,8 @@ typedef struct Spirv_t {
     void *mtl_library;
 } Spirv;
 
+#define MGL_NO_LOCATION ((GLuint)-1)
+
 typedef struct SpirvResource_t {
     GLuint  _id;
     GLuint  base_type_id;
@@ -463,6 +465,10 @@ typedef struct SpirvResource_t {
     const char *name;
     GLuint  set;
     GLuint  binding;
+    // a block declared as an instance array is one SPIR-V resource but several
+    // GL blocks, each with its own binding; NULL unless array_size > 1
+    GLuint  *element_binding;
+    // MGL_NO_LOCATION until the linker numbers it across the whole program
     GLuint  location;
     GLuint  msl_index;      // the [[buffer(n)]] / [[texture(n)]] slot SPIRV-Cross gave it
     GLenum  gl_type;        // GL_FLOAT_VEC4 and friends, recorded at link time
@@ -673,6 +679,7 @@ typedef struct PixelStore_t {
    the alignment, and the skip_* modes move where the data starts. */
 size_t mglPixelStoreRowPitch(const PixelStore *ps, GLsizei width, GLuint pixel_size);
 size_t mglPixelStoreSkipBytes(const PixelStore *ps, GLsizei height, GLuint pixel_size, size_t row_pitch);
+size_t mglPixelStoreSkipBytes2D(const PixelStore *ps, GLuint pixel_size, size_t row_pitch);
 
 
 enum {
@@ -718,6 +725,10 @@ typedef struct {
 
     // clear request clear_bitmask from glClear to Metal
     GLbitfield  clear_bitmask;
+
+    // the framebuffer glClear was called against; a clear that could not be
+    // encoded then must not land on whatever is bound later
+    struct Framebuffer_t *clear_framebuffer;
 
     // opengl state
 

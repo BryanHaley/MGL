@@ -144,3 +144,64 @@ GPU_TEST(uniform_type, writing_the_wrong_width_is_not_yet_rejected)
 
     glDeleteProgram(prog);
 }
+
+/* GL hands a bool uniform four bytes per component and Metal's bool is one,
+   so a bvec read three zeroes out of the first int and compared false. */
+GPU_TEST(uniform_type, bool_uniforms_reach_the_shader)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "void main() {\n"
+        "    vec2 p[4] = vec2[4](vec2(-1,-1), vec2(3,-1), vec2(-1,3), vec2(3,3));\n"
+        "    gl_Position = vec4(p[gl_VertexID & 3], 0.0, 1.0);\n"
+        "}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "uniform bool b1;\n"
+        "uniform bvec3 b3;\n"
+        "layout(location = 0) out vec4 frag;\n"
+        "void main() {\n"
+        "    frag = vec4(b1 ? 1.0 : 0.0, b3.x ? 1.0 : 0.0, b3.y ? 1.0 : 0.0, b3.z ? 1.0 : 0.0);\n"
+        "}\n";
+
+    MGLTestTarget t;
+    GLuint prog, vao, vbo;
+    const GLint v3[3] = { 0, 1, 1 };
+    unsigned char *px, rgba[4];
+    char log[512] = { 0 };
+
+    if (!mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+        return;
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    vao = mgl_fullscreen_quad(&vbo);
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+    glBindVertexArray(vao);
+
+    glUniform1i(glGetUniformLocation(prog, "b1"), 1);
+    glUniform3iv(glGetUniformLocation(prog, "b3"), 1, v3);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    px = mgl_read_rgba8(&t);
+    CHECK(px != NULL);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 4, 4, rgba);
+        CHECK_EQ_UINT(255u, rgba[0]);
+        CHECK_EQ_UINT(0u,   rgba[1]);
+        CHECK_EQ_UINT(255u, rgba[2]);
+        CHECK_EQ_UINT(255u, rgba[3]);
+        free(px);
+    }
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

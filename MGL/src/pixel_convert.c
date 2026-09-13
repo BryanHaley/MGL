@@ -46,7 +46,7 @@ static GLfloat unorm_to_float(GLuint v, GLuint bits)
 
 static GLfloat snorm_to_float(GLint v, GLuint bits)
 {
-    GLint max = (GLint)((1u << (bits - 1)) - 1u);
+    GLint max = (bits >= 32) ? 0x7FFFFFFF : (GLint)((1u << (bits - 1)) - 1u);
     GLfloat f = (GLfloat)v / (GLfloat)max;
 
     return f < -1.0f ? -1.0f : f;
@@ -357,15 +357,17 @@ static GLboolean decode_native(const GLubyte *p, MGLNativeFormat fmt, MGLTexel *
             t->f[3] = unorm_to_float(p[3], 8);
             return GL_TRUE;
 
+        // GL 4.6 section 8.11.4: a readback returns what is stored. The sRGB
+        // decode belongs to sampling, and the encoder never applied one, so
+        // decoding here turned every round trip through an sRGB format dark.
         case MGL_NF_RGBA8_UNORM_SRGB:
-            for (k = 0; k < 3; k++) t->f[k] = srgb_to_linear(unorm_to_float(p[k], 8));
-            t->f[3] = unorm_to_float(p[3], 8);
+            for (k = 0; k < 4; k++) t->f[k] = unorm_to_float(p[k], 8);
             return GL_TRUE;
 
         case MGL_NF_BGRA8_UNORM_SRGB:
-            t->f[0] = srgb_to_linear(unorm_to_float(p[2], 8));
-            t->f[1] = srgb_to_linear(unorm_to_float(p[1], 8));
-            t->f[2] = srgb_to_linear(unorm_to_float(p[0], 8));
+            t->f[0] = unorm_to_float(p[2], 8);
+            t->f[1] = unorm_to_float(p[1], 8);
+            t->f[2] = unorm_to_float(p[0], 8);
             t->f[3] = unorm_to_float(p[3], 8);
             return GL_TRUE;
 
@@ -473,14 +475,16 @@ static GLboolean decode_native(const GLubyte *p, MGLNativeFormat fmt, MGLTexel *
             return GL_TRUE;
         }
 
+        // Metal lists the components of a packed format from the low bits up,
+        // so A1BGR5 has red at the top -- the same place GL's 5_5_5_1 puts it.
         case MGL_NF_A1BGR5_UNORM:
         {
             GLushort v; memcpy(&v, p, 2);
             texel_zero(t);
-            t->f[0] = unorm_to_float(v & 0x1Fu, 5);
-            t->f[1] = unorm_to_float((v >> 5) & 0x1Fu, 5);
-            t->f[2] = unorm_to_float((v >> 10) & 0x1Fu, 5);
-            t->f[3] = unorm_to_float((v >> 15) & 0x1u, 1);
+            t->f[0] = unorm_to_float((v >> 11) & 0x1Fu, 5);
+            t->f[1] = unorm_to_float((v >> 6) & 0x1Fu, 5);
+            t->f[2] = unorm_to_float((v >> 1) & 0x1Fu, 5);
+            t->f[3] = unorm_to_float(v & 0x1u, 1);
             return GL_TRUE;
         }
 
@@ -488,10 +492,10 @@ static GLboolean decode_native(const GLubyte *p, MGLNativeFormat fmt, MGLTexel *
         {
             GLushort v; memcpy(&v, p, 2);
             texel_zero(t);
-            t->f[0] = unorm_to_float(v & 0xFu, 4);
-            t->f[1] = unorm_to_float((v >> 4) & 0xFu, 4);
-            t->f[2] = unorm_to_float((v >> 8) & 0xFu, 4);
-            t->f[3] = unorm_to_float((v >> 12) & 0xFu, 4);
+            t->f[0] = unorm_to_float((v >> 12) & 0xFu, 4);
+            t->f[1] = unorm_to_float((v >> 8) & 0xFu, 4);
+            t->f[2] = unorm_to_float((v >> 4) & 0xFu, 4);
+            t->f[3] = unorm_to_float(v & 0xFu, 4);
             return GL_TRUE;
         }
 
@@ -712,6 +716,13 @@ static void select_components(const MGLTexel *t, GLenum format, GLfloat *fo, GLi
     #undef TAKE
 }
 
+// A packed field holds fewer bits than the integer it is given, and GL clamps
+// to what fits rather than dropping the high bits.
+static GLuint clamp_field(GLuint v, GLuint max)
+{
+    return v > max ? max : v;
+}
+
 static GLboolean encode_packed(GLubyte *d, GLenum format, GLenum type, const MGLTexel *t)
 {
     GLuint comps = mglComponentsForFormat(format);
@@ -721,6 +732,112 @@ static GLboolean encode_packed(GLubyte *d, GLenum format, GLenum type, const MGL
     GLuint v;
 
     if (bgr) { GLfloat tmp = r; r = b; b = tmp; }
+
+    // An integer client format carries raw integers in the packed fields, not
+    // normalised values. Packing them through float_to_unorm made every
+    // integer readback through a packed type come back as 0 or saturated.
+    if (format_is_integer(format))
+    {
+        GLuint ui[4];
+        GLuint k;
+
+        for (k = 0; k < 4; k++)
+            ui[k] = t->is_sint ? (t->i[k] < 0 ? 0u : (GLuint)t->i[k]) : t->u[k];
+
+        if (bgr) { GLuint tmp = ui[0]; ui[0] = ui[2]; ui[2] = tmp; }
+
+        switch(type)
+        {
+            case GL_UNSIGNED_BYTE_3_3_2:
+                if (comps != 3) return GL_FALSE;
+                d[0] = (GLubyte)(((clamp_field(ui[0], 0x7u)) << 5) | ((clamp_field(ui[1], 0x7u)) << 2) | (clamp_field(ui[2], 0x3u)));
+                return GL_TRUE;
+
+            case GL_UNSIGNED_BYTE_2_3_3_REV:
+                if (comps != 3) return GL_FALSE;
+                d[0] = (GLubyte)(((clamp_field(ui[2], 0x3u)) << 6) | ((clamp_field(ui[1], 0x7u)) << 3) | (clamp_field(ui[0], 0x7u)));
+                return GL_TRUE;
+
+            case GL_UNSIGNED_SHORT_5_6_5:
+            {
+                GLushort sv;
+                if (comps != 3) return GL_FALSE;
+                sv = (GLushort)(((clamp_field(ui[0], 0x1Fu)) << 11) | ((clamp_field(ui[1], 0x3Fu)) << 5) | (clamp_field(ui[2], 0x1Fu)));
+                memcpy(d, &sv, 2); return GL_TRUE;
+            }
+
+            case GL_UNSIGNED_SHORT_5_6_5_REV:
+            {
+                GLushort sv;
+                if (comps != 3) return GL_FALSE;
+                sv = (GLushort)(((clamp_field(ui[2], 0x1Fu)) << 11) | ((clamp_field(ui[1], 0x3Fu)) << 5) | (clamp_field(ui[0], 0x1Fu)));
+                memcpy(d, &sv, 2); return GL_TRUE;
+            }
+
+            case GL_UNSIGNED_SHORT_4_4_4_4:
+            {
+                GLushort sv;
+                if (comps != 4) return GL_FALSE;
+                sv = (GLushort)(((clamp_field(ui[0], 0xFu)) << 12) | ((clamp_field(ui[1], 0xFu)) << 8) |
+                                ((clamp_field(ui[2], 0xFu)) << 4)  | (clamp_field(ui[3], 0xFu)));
+                memcpy(d, &sv, 2); return GL_TRUE;
+            }
+
+            case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+            {
+                GLushort sv;
+                if (comps != 4) return GL_FALSE;
+                sv = (GLushort)(((clamp_field(ui[3], 0xFu)) << 12) | ((clamp_field(ui[2], 0xFu)) << 8) |
+                                ((clamp_field(ui[1], 0xFu)) << 4)  | (clamp_field(ui[0], 0xFu)));
+                memcpy(d, &sv, 2); return GL_TRUE;
+            }
+
+            case GL_UNSIGNED_SHORT_5_5_5_1:
+            {
+                GLushort sv;
+                if (comps != 4) return GL_FALSE;
+                sv = (GLushort)(((clamp_field(ui[0], 0x1Fu)) << 11) | ((clamp_field(ui[1], 0x1Fu)) << 6) |
+                                ((clamp_field(ui[2], 0x1Fu)) << 1)  | (clamp_field(ui[3], 0x1u)));
+                memcpy(d, &sv, 2); return GL_TRUE;
+            }
+
+            case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+            {
+                GLushort sv;
+                if (comps != 4) return GL_FALSE;
+                sv = (GLushort)(((clamp_field(ui[3], 0x1u)) << 15) | ((clamp_field(ui[2], 0x1Fu)) << 10) |
+                                ((clamp_field(ui[1], 0x1Fu)) << 5)  | (clamp_field(ui[0], 0x1Fu)));
+                memcpy(d, &sv, 2); return GL_TRUE;
+            }
+
+            case GL_UNSIGNED_INT_8_8_8_8:
+                if (comps != 4) return GL_FALSE;
+                v = ((clamp_field(ui[0], 0xFFu)) << 24) | ((clamp_field(ui[1], 0xFFu)) << 16) |
+                    ((clamp_field(ui[2], 0xFFu)) << 8)  | (clamp_field(ui[3], 0xFFu));
+                memcpy(d, &v, 4); return GL_TRUE;
+
+            case GL_UNSIGNED_INT_8_8_8_8_REV:
+                if (comps != 4) return GL_FALSE;
+                v = ((clamp_field(ui[3], 0xFFu)) << 24) | ((clamp_field(ui[2], 0xFFu)) << 16) |
+                    ((clamp_field(ui[1], 0xFFu)) << 8)  | (clamp_field(ui[0], 0xFFu));
+                memcpy(d, &v, 4); return GL_TRUE;
+
+            case GL_UNSIGNED_INT_10_10_10_2:
+                if (comps != 4) return GL_FALSE;
+                v = ((clamp_field(ui[0], 0x3FFu)) << 22) | ((clamp_field(ui[1], 0x3FFu)) << 12) |
+                    ((clamp_field(ui[2], 0x3FFu)) << 2)  | (clamp_field(ui[3], 0x3u));
+                memcpy(d, &v, 4); return GL_TRUE;
+
+            case GL_UNSIGNED_INT_2_10_10_10_REV:
+                if (comps != 4) return GL_FALSE;
+                v = ((clamp_field(ui[3], 0x3u)) << 30) | ((clamp_field(ui[2], 0x3FFu)) << 20) |
+                    ((clamp_field(ui[1], 0x3FFu)) << 10) | (clamp_field(ui[0], 0x3FFu));
+                memcpy(d, &v, 4); return GL_TRUE;
+
+            default:
+                return GL_FALSE;
+        }
+    }
 
     switch(type)
     {
@@ -1055,14 +1172,17 @@ static GLboolean decode_plain(const GLubyte *s, GLenum format, GLenum type, MGLT
                 fv[k] = is_int ? (GLfloat)iv[k] : snorm_to_float(iv[k], 16);
                 break;
 
+            // 32 bit components are normalised for a non-integer format just
+            // like the 8 and 16 bit ones. Handing the raw value on saturated
+            // every GL_UNSIGNED_INT upload to white.
             case GL_UNSIGNED_INT:
                 uv[k] = rd32(p); iv[k] = (GLint)uv[k];
-                fv[k] = (GLfloat)uv[k];
+                fv[k] = is_int ? (GLfloat)uv[k] : unorm_to_float(uv[k], 32);
                 break;
 
             case GL_INT:
                 iv[k] = (GLint)rd32(p); uv[k] = (GLuint)iv[k];
-                fv[k] = (GLfloat)iv[k];
+                fv[k] = is_int ? (GLfloat)iv[k] : snorm_to_float(iv[k], 32);
                 break;
 
             case GL_HALF_FLOAT:
@@ -1217,17 +1337,17 @@ static GLboolean encode_native(GLubyte *d, MGLNativeFormat fmt, const MGLTexel *
             return GL_TRUE;
 
         case MGL_NF_A1BGR5_UNORM:
-            wr16(d, (GLushort)((float_to_unorm(t->f[3], 1) << 15) |
-                               (float_to_unorm(t->f[2], 5) << 10) |
-                               (float_to_unorm(t->f[1], 5) << 5) |
-                                float_to_unorm(t->f[0], 5)));
+            wr16(d, (GLushort)((float_to_unorm(t->f[0], 5) << 11) |
+                               (float_to_unorm(t->f[1], 5) << 6) |
+                               (float_to_unorm(t->f[2], 5) << 1) |
+                                float_to_unorm(t->f[3], 1)));
             return GL_TRUE;
 
         case MGL_NF_ABGR4_UNORM:
-            wr16(d, (GLushort)((float_to_unorm(t->f[3], 4) << 12) |
-                               (float_to_unorm(t->f[2], 4) << 8) |
-                               (float_to_unorm(t->f[1], 4) << 4) |
-                                float_to_unorm(t->f[0], 4)));
+            wr16(d, (GLushort)((float_to_unorm(t->f[0], 4) << 12) |
+                               (float_to_unorm(t->f[1], 4) << 8) |
+                               (float_to_unorm(t->f[2], 4) << 4) |
+                                float_to_unorm(t->f[3], 4)));
             return GL_TRUE;
 
         case MGL_NF_RGB10A2_UNORM:
@@ -1683,4 +1803,391 @@ GLboolean mglUploadNeedsNoConversion(GLenum internalformat, GLenum format, GLenu
         return GL_FALSE;
 
     return (format == want_format && type == want_type) ? GL_TRUE : GL_FALSE;
+}
+
+/* ---------------------------------------------------------------- */
+/*  RGTC compression                                                 */
+/* ---------------------------------------------------------------- */
+
+// GL lets an application hand uncompressed pixels to a compressed internal
+// format and expects the driver to compress them. RGTC is one 4x4 block of one
+// channel in 8 bytes: two endpoints and sixteen 3-bit indices.
+static void encodeRGTCBlockUnsigned(const GLubyte *src, GLuint count, GLubyte *out)
+{
+    GLubyte lo = 255, hi = 0;
+    GLuint i;
+
+    for (i = 0; i < count; i++)
+    {
+        if (src[i] < lo) lo = src[i];
+        if (src[i] > hi) hi = src[i];
+    }
+
+    if (count == 0) { lo = 0; hi = 0; }
+
+    out[0] = hi;
+    out[1] = lo;
+
+    // hi > lo selects the eight-value mode: six interpolated steps between them
+    {
+        GLuint64 bits = 0;
+        GLint range = (GLint)hi - (GLint)lo;
+
+        for (i = 0; i < 16; i++)
+        {
+            GLuint idx = 0;
+
+            if (i < count && range > 0)
+            {
+                GLint t = (((GLint)src[i] - (GLint)lo) * 14 + range) / (2 * range); /* 0..7 */
+
+                if (t > 7) t = 7;
+                if (t < 0) t = 0;
+
+                // block layout: 0 is hi, 1 is lo, 2..7 walk from hi down to lo
+                idx = (t == 7) ? 0u : (t == 0 ? 1u : (GLuint)(8 - t));
+            }
+            else if (i < count)
+            {
+                idx = 0;   // flat block, every texel is the endpoint
+            }
+
+            bits |= ((GLuint64)(idx & 0x7u)) << (3 * i);
+        }
+
+        for (i = 0; i < 6; i++)
+            out[2 + i] = (GLubyte)((bits >> (8 * i)) & 0xFFu);
+    }
+}
+
+static void encodeRGTCBlockSigned(const GLbyte *src, GLuint count, GLubyte *out)
+{
+    GLbyte lo = 127, hi = -127;
+    GLuint i;
+
+    for (i = 0; i < count; i++)
+    {
+        GLbyte v = src[i] == -128 ? -127 : src[i];
+
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+    }
+
+    if (count == 0) { lo = 0; hi = 0; }
+
+    out[0] = (GLubyte)hi;
+    out[1] = (GLubyte)lo;
+
+    {
+        GLuint64 bits = 0;
+        GLint range = (GLint)hi - (GLint)lo;
+
+        for (i = 0; i < 16; i++)
+        {
+            GLuint idx = 0;
+
+            if (i < count && range > 0)
+            {
+                GLbyte v = src[i] == -128 ? -127 : src[i];
+                GLint t = (((GLint)v - (GLint)lo) * 14 + range) / (2 * range);
+
+                if (t > 7) t = 7;
+                if (t < 0) t = 0;
+
+                idx = (t == 7) ? 0u : (t == 0 ? 1u : (GLuint)(8 - t));
+            }
+
+            bits |= ((GLuint64)(idx & 0x7u)) << (3 * i);
+        }
+
+        for (i = 0; i < 6; i++)
+            out[2 + i] = (GLubyte)((bits >> (8 * i)) & 0xFFu);
+    }
+}
+
+// How many channels the format keeps, and whether they are signed.
+GLboolean mglFormatIsRGTC(GLenum internalformat, GLuint *channels, GLboolean *is_signed)
+{
+    switch (internalformat)
+    {
+        case GL_COMPRESSED_RED_RGTC1:        *channels = 1; *is_signed = GL_FALSE; return GL_TRUE;
+        case GL_COMPRESSED_SIGNED_RED_RGTC1: *channels = 1; *is_signed = GL_TRUE;  return GL_TRUE;
+        case GL_COMPRESSED_RG_RGTC2:         *channels = 2; *is_signed = GL_FALSE; return GL_TRUE;
+        case GL_COMPRESSED_SIGNED_RG_RGTC2:  *channels = 2; *is_signed = GL_TRUE;  return GL_TRUE;
+    }
+
+    return GL_FALSE;
+}
+
+GLboolean mglCompressToRGTC(const void *src, size_t src_row_pitch, GLenum format, GLenum type,
+                            void *dst, GLenum internalformat, GLsizei width, GLsizei height)
+{
+    GLuint channels = 0;
+    GLboolean is_signed = GL_FALSE;
+    GLubyte *out = (GLubyte *)dst;
+    GLsizei bx, by;
+
+    if (!src || !dst || width < 0 || height < 0)
+        return GL_FALSE;
+
+    if (!mglFormatIsRGTC(internalformat, &channels, &is_signed))
+        return GL_FALSE;
+
+    for (by = 0; by < height; by += 4)
+    {
+        for (bx = 0; bx < width; bx += 4)
+        {
+            GLubyte chan[2][16];
+            GLuint count = 0;
+            GLsizei y, x;
+            GLuint c;
+
+            for (y = by; y < by + 4 && y < height; y++)
+                for (x = bx; x < bx + 4 && x < width; x++)
+                {
+                    const GLubyte *p = (const GLubyte *)src + (size_t)y * src_row_pitch
+                                     + (size_t)x * mglPackedPixelSize(format, type);
+                    MGLTexel t;
+                    GLboolean got = packed_type_size(type) ? decode_packed(p, format, type, &t)
+                                                           : decode_plain(p, format, type, &t);
+
+                    if (!got)
+                        return GL_FALSE;
+
+                    for (c = 0; c < channels; c++)
+                    {
+                        GLfloat v = t.f[c];
+
+                        if (is_signed)
+                        {
+                            GLint s = (GLint)(v * 127.0f + (v < 0.0f ? -0.5f : 0.5f));
+
+                            if (s > 127) s = 127;
+                            if (s < -127) s = -127;
+
+                            chan[c][count] = (GLubyte)(GLbyte)s;
+                        }
+                        else
+                        {
+                            GLfloat cl = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+
+                            chan[c][count] = (GLubyte)(cl * 255.0f + 0.5f);
+                        }
+                    }
+
+                    count++;
+                }
+
+            for (c = 0; c < channels; c++)
+            {
+                if (is_signed)
+                    encodeRGTCBlockSigned((const GLbyte *)chan[c], count, out);
+                else
+                    encodeRGTCBlockUnsigned(chan[c], count, out);
+
+                out += 8;
+            }
+        }
+    }
+
+    return GL_TRUE;
+}
+
+/* ---------------------------------------------------------------- */
+/*  SWAP_BYTES                                                       */
+/* ---------------------------------------------------------------- */
+
+// GL 4.6 table 8.1: SWAP_BYTES reverses the bytes of each component for the
+// two and four byte types, and of the whole word for a packed type. It has no
+// effect on single byte components. MGL recorded the flag and ignored it.
+void mglSwapPixelBytes(void *data, size_t row_pitch, GLenum format, GLenum type,
+                       GLsizei width, GLsizei height)
+{
+    GLuint unit = packed_type_size(type);
+    GLuint per_pixel;
+    GLsizei row, i;
+
+    if (!data || width <= 0 || height <= 0)
+        return;
+
+    if (unit == 0)
+    {
+        // a plain type: every component is swapped on its own
+        switch (type)
+        {
+            case GL_UNSIGNED_SHORT: case GL_SHORT: case GL_HALF_FLOAT: unit = 2; break;
+            case GL_UNSIGNED_INT:   case GL_INT:   case GL_FLOAT:      unit = 4; break;
+            default: return;   /* byte-sized components are unaffected */
+        }
+
+        per_pixel = numComponentsForFormat(format);
+    }
+    else
+    {
+        per_pixel = 1;
+    }
+
+    if (unit < 2)
+        return;
+
+    for (row = 0; row < height; row++)
+    {
+        GLubyte *p = (GLubyte *)data + (size_t)row * row_pitch;
+
+        for (i = 0; i < width * (GLsizei)per_pixel; i++)
+        {
+            GLubyte *w = p + (size_t)i * unit;
+            GLuint a = 0, b = unit - 1;
+
+            while (a < b)
+            {
+                GLubyte t = w[a];
+
+                w[a] = w[b];
+                w[b] = t;
+                a++;
+                b--;
+            }
+        }
+    }
+}
+
+// RGTC keeps two endpoints and sixteen 3-bit selectors per 4x4 block. GL lets
+// glGetTexImage read a compressed texture back as plain pixels, so the blocks
+// have to be unpacked on the way out.
+static void decodeRGTCBlockUnsigned(const GLubyte *blk, GLubyte out[16])
+{
+    GLubyte pal[8];
+    GLuint64 bits = 0;
+    int i;
+
+    pal[0] = blk[0];
+    pal[1] = blk[1];
+
+    if (pal[0] > pal[1])
+    {
+        for (i = 2; i < 8; i++)
+            pal[i] = (GLubyte)(((8 - i) * pal[0] + (i - 1) * pal[1]) / 7);
+    }
+    else
+    {
+        for (i = 2; i < 6; i++)
+            pal[i] = (GLubyte)(((6 - i) * pal[0] + (i - 1) * pal[1]) / 5);
+
+        pal[6] = 0;
+        pal[7] = 255;
+    }
+
+    for (i = 0; i < 6; i++)
+        bits |= (GLuint64)blk[2 + i] << (8 * i);
+
+    for (i = 0; i < 16; i++)
+        out[i] = pal[(bits >> (3 * i)) & 0x7u];
+}
+
+static void decodeRGTCBlockSigned(const GLubyte *blk, GLbyte out[16])
+{
+    GLbyte pal[8];
+    GLuint64 bits = 0;
+    int i;
+    int e0 = (GLbyte)blk[0];
+    int e1 = (GLbyte)blk[1];
+
+    // -128 is not representable as a snorm value, so it reads as -127
+    if (e0 == -128) e0 = -127;
+    if (e1 == -128) e1 = -127;
+
+    pal[0] = (GLbyte)e0;
+    pal[1] = (GLbyte)e1;
+
+    if (e0 > e1)
+    {
+        for (i = 2; i < 8; i++)
+            pal[i] = (GLbyte)(((8 - i) * e0 + (i - 1) * e1) / 7);
+    }
+    else
+    {
+        for (i = 2; i < 6; i++)
+            pal[i] = (GLbyte)(((6 - i) * e0 + (i - 1) * e1) / 5);
+
+        pal[6] = -127;
+        pal[7] = 127;
+    }
+
+    for (i = 0; i < 6; i++)
+        bits |= (GLuint64)blk[2 + i] << (8 * i);
+
+    for (i = 0; i < 16; i++)
+        out[i] = pal[(bits >> (3 * i)) & 0x7u];
+}
+
+GLboolean mglDecompressRGTC(const void *src, GLenum internalformat,
+                            GLsizei width, GLsizei height,
+                            void *dst, size_t dst_row_pitch)
+{
+    GLuint channels = 0;
+    GLboolean is_signed = GL_FALSE;
+    const GLubyte *blocks = (const GLubyte *)src;
+    GLsizei bx, by;
+
+    if (!src || !dst || width < 0 || height < 0)
+        return GL_FALSE;
+
+    if (!mglFormatIsRGTC(internalformat, &channels, &is_signed))
+        return GL_FALSE;
+
+    for (by = 0; by < height; by += 4)
+    {
+        for (bx = 0; bx < width; bx += 4)
+        {
+            for (GLuint c = 0; c < channels; c++)
+            {
+                GLubyte texels[16];
+
+                if (is_signed)
+                    decodeRGTCBlockSigned(blocks, (GLbyte *)texels);
+                else
+                    decodeRGTCBlockUnsigned(blocks, texels);
+
+                blocks += 8;
+
+                for (int y = 0; y < 4; y++)
+                {
+                    GLsizei ty = by + y;
+
+                    if (ty >= height)
+                        break;
+
+                    for (int x = 0; x < 4; x++)
+                    {
+                        GLsizei tx = bx + x;
+                        GLubyte *row;
+
+                        if (tx >= width)
+                            break;
+
+                        row = (GLubyte *)dst + (size_t)ty * dst_row_pitch;
+                        row[(size_t)tx * channels + c] = texels[y * 4 + x];
+                    }
+                }
+            }
+        }
+    }
+
+    return GL_TRUE;
+}
+
+// The uncompressed layout an RGTC format unpacks into.
+MGLNativeFormat mglRGTCNativeFormat(GLenum internalformat)
+{
+    GLuint channels = 0;
+    GLboolean is_signed = GL_FALSE;
+
+    if (!mglFormatIsRGTC(internalformat, &channels, &is_signed))
+        return MGL_NF_UNKNOWN;
+
+    if (channels == 1)
+        return is_signed ? MGL_NF_R8_SNORM : MGL_NF_R8_UNORM;
+
+    return is_signed ? MGL_NF_RG8_SNORM : MGL_NF_RG8_UNORM;
 }

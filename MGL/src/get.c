@@ -258,7 +258,25 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x0C23: RET_TYPE_VAR_COUNT(type, color_writemask[0], 4); break; // GL_COLOR_WRITEMASK
 
         case 0x0D33: RET_TYPE_VAR(type, max_texture_size); break; // GL_MAX_TEXTURE_SIZE
-        case 0x0D3A: RET_TYPE_VAR(type, max_viewport_dims); break; // GL_MAX_VIEWPORT_DIMS
+        // GL_MAX_VIEWPORT_DIMS is two values, not one; the second was left at 0
+        case 0x0D3A:
+        {
+            GLuint d = ctx->state.var.max_viewport_dims ? ctx->state.var.max_viewport_dims : 16384;
+
+            for (int i = 0; i < 2; i++)
+            {
+                switch(type) {
+                    case kBool:   *((GLboolean *)data) = d ? GL_TRUE : GL_FALSE; break;
+                    case kInt:    *((GLint *)data)     = (GLint)d;    break;
+                    case kFloat:  *((GLfloat *)data)   = (GLfloat)d;  break;
+                    case kDouble: *((GLdouble *)data)  = (GLdouble)d; break;
+                }
+
+                data += (type == kBool) ? 1 : (type == kDouble ? 8 : 4);
+            }
+
+            break;
+        }
         case 0x0D50: RET_TYPE_VAR(type, subpixel_bits); break; // GL_SUBPIXEL_BITS
         case 0x0B00: RET_TYPE_VAR(type, current_color); break; // GL_CURRENT_COLOR
         case 0x0B01: RET_TYPE_VAR(type, current_index); break; // GL_CURRENT_INDEX

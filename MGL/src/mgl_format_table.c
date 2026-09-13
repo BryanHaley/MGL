@@ -384,7 +384,7 @@ static const MGLFormatDesc gl_table[] = {
     { GL_SRGB8,     _INV, MTLPixelFormatRGBA8Unorm_sRGB, 1,1, 4, _CF, {8,8,8,0,0,0}, _BRGB, GL_RGB,  GL_UNSIGNED_BYTE,  true,  true,  true,  "GL_SRGB8" },
     { GL_RGB8I,     _INV, MTLPixelFormatRGBA8Sint,    1,1, 4, _CI, {8,8,8,0,0,0},  _BRGB, GL_RGB_INTEGER,  GL_BYTE,       false, true,  false, "GL_RGB8I" },
     { GL_RGB8UI,    _INV, MTLPixelFormatRGBA8Uint,    1,1, 4, _CU, {8,8,8,0,0,0},  _BRGB, GL_RGB_INTEGER,  GL_UNSIGNED_BYTE, false, true, false, "GL_RGB8UI" },
-    { GL_RGB10,     _INV, MTLPixelFormatRGBA8Unorm,   1,1, 4, _CF, {10,10,10,0,0,0}, _BRGB, GL_RGB, GL_UNSIGNED_BYTE,   false, true,  true,  "GL_RGB10" },
+    { GL_RGB10,     _INV, MTLPixelFormatRGB10A2Unorm, 1,1, 4, _CF, {10,10,10,0,0,0}, _BRGB, GL_RGB, GL_UNSIGNED_SHORT,   false, true,  true,  "GL_RGB10" },
     { GL_RGB12,     _INV, MTLPixelFormatRGBA8Unorm,   1,1, 4, _CF, {12,12,12,0,0,0}, _BRGB, GL_RGB, GL_UNSIGNED_BYTE,   false, true,  true,  "GL_RGB12" },
     { GL_RGB16,     _INV, MTLPixelFormatRGBA16Unorm,  1,1, 8, _CF, {16,16,16,0,0,0}, _BRGB, GL_RGB, GL_UNSIGNED_SHORT,  false, true,  true,  "GL_RGB16" },
     { GL_RGB16_SNORM,_INV, MTLPixelFormatRGBA16Snorm, 1,1, 8, _CF, {16,16,16,0,0,0}, _BRGB, GL_RGB, GL_SHORT,           false, true,  true,  "GL_RGB16_SNORM" },
@@ -715,19 +715,22 @@ bool mglFormatTypeAgrees(GLenum format, GLenum type)
 
     switch (type)
     {
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+        case GL_UNSIGNED_INT_5_9_9_9_REV:
+            return format == GL_RGB;
+
         case GL_UNSIGNED_BYTE_3_3_2:
         case GL_UNSIGNED_BYTE_2_3_3_REV:
         case GL_UNSIGNED_SHORT_5_6_5:
         case GL_UNSIGNED_SHORT_5_6_5_REV:
-        case GL_UNSIGNED_INT_10F_11F_11F_REV:
-        case GL_UNSIGNED_INT_5_9_9_9_REV:
-            return format == GL_RGB;
+            return format == GL_RGB || format == GL_RGB_INTEGER;
 
         case GL_UNSIGNED_SHORT_4_4_4_4:
         case GL_UNSIGNED_SHORT_4_4_4_4_REV:
         case GL_UNSIGNED_SHORT_5_5_5_1:
         case GL_UNSIGNED_SHORT_1_5_5_5_REV:
-            return format == GL_RGBA || format == GL_BGRA;
+            return format == GL_RGBA || format == GL_BGRA ||
+                   format == GL_RGBA_INTEGER || format == GL_BGRA_INTEGER;
 
         case GL_UNSIGNED_INT_8_8_8_8:
         case GL_UNSIGNED_INT_8_8_8_8_REV:

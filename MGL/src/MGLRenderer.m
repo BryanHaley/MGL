@@ -155,6 +155,9 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
 
     id<MTLRenderCommandEncoder> _currentRenderEncoder;
     Framebuffer *_encoderFramebuffer;   // which framebuffer _currentRenderEncoder writes to
+    // FRONT and BACK are one surface here, so a read has to come from
+    // whichever texture the last default-framebuffer pass drew into
+    id<MTLTexture> _lastDefaultTarget;
 
     // Metal allows one encoder at a time on a command buffer, so this and
     // _currentRenderEncoder are never both live. Keeping it open lets a run of
@@ -568,30 +571,57 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                 else
                     spirv_binding = [self getProgramBinding:stage type:spvc_type index: i];
 
-                buf = buffers[spirv_binding].buf;
-
-                // a uniform the app never set is not an error in GL
-                if (buf == NULL && spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT)
-                    buf = programUniformDefaultBuffer(ctx, ctx->state.program, spirv_binding);
-
-                if (buf)
+                // a plain uniform the shader never reads has no Metal slot
+                if (spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT &&
+                    [self getProgramMSLIndex:stage type:spvc_type index: i] < 0)
                 {
-                    buffer_map->buffers[buffer_map->count].attribute_mask = 0; // non attribute.. no bits set
-                    buffer_map->buffers[buffer_map->count].buffer_base_index =
-                        [self getProgramMSLIndex:stage type:spvc_type index: i];
-                    buffer_map->buffers[buffer_map->count].buf = buf;
-                    buffer_map->buffers[buffer_map->count].offset = buffers[spirv_binding].offset;
-                    buffer_map->buffers[buffer_map->count].gl_buffer_type = (GLubyte)gl_buffer_type;
-                    buffer_map->count++;
                     buffers_to_be_mapped--;
-                    
-                    //DEBUG_PRINT("Found buffer type: %s buffer_base_index: %d\n", mapped_types[type].name, spirv_binding);
+                    RETURN_FALSE_ON_FAILURE(i < MAX_ATTRIBS);
+                    continue;
                 }
-                else
-                {
-                    ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
 
-                    return false;
+                // A block declared as an instance array is one resource but
+                // several GL blocks, and SPIRV-Cross gives each element its own
+                // Metal slot. Binding only the first left the rest reading zero.
+                {
+                    SpirvResource *res =
+                        &ctx->state.program->spirv_resources_list[stage][spvc_type].list[i];
+                    GLint instances = (spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_BUFFER &&
+                                       res->array_size > 1 && res->element_binding)
+                                      ? res->array_size : 1;
+                    GLuint base_slot = (GLuint)[self getProgramMSLIndex:stage type:spvc_type index: i];
+
+                    for (GLint e = 0; e < instances; e++)
+                    {
+                        GLuint slot_binding = (instances > 1) ? res->element_binding[e] : spirv_binding;
+
+                        buf = buffers[slot_binding].buf;
+
+                        // a uniform the app never set is not an error in GL
+                        if (buf == NULL && spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT)
+                            buf = programUniformDefaultBuffer(ctx, ctx->state.program, slot_binding);
+
+                        // an unbound element of a block array is the app's
+                        // problem, not a reason to drop the whole draw
+                        if (buf == NULL && instances > 1)
+                            continue;
+
+                        if (buf == NULL)
+                        {
+                            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+
+                            return false;
+                        }
+
+                        buffer_map->buffers[buffer_map->count].attribute_mask = 0; // non attribute.. no bits set
+                        buffer_map->buffers[buffer_map->count].buffer_base_index = base_slot + (GLuint)e;
+                        buffer_map->buffers[buffer_map->count].buf = buf;
+                        buffer_map->buffers[buffer_map->count].offset = buffers[slot_binding].offset;
+                        buffer_map->buffers[buffer_map->count].gl_buffer_type = (GLubyte)gl_buffer_type;
+                        buffer_map->count++;
+                    }
+
+                    buffers_to_be_mapped--;
                 }
 
                 // endless loop
@@ -2390,12 +2420,14 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     return sampler;
 }
 
-- (bool) bindTexturesToCurrentRenderEncoder
+// A vertex shader may sample too -- GL has had vertex texture fetch since 2.0,
+// and the whole texture_swizzle suite reads the same texture from both stages.
+- (bool) bindTexturesForStage: (int) stage
 {
     GLuint count;
 
     // iterate shader storage buffers
-    count = [self getProgramBindingCount: _FRAGMENT_SHADER type: SPVC_RESOURCE_TYPE_SAMPLED_IMAGE];
+    count = [self getProgramBindingCount: stage type: SPVC_RESOURCE_TYPE_SAMPLED_IMAGE];
     if (count)
     {
         int textures_to_be_mapped = count;
@@ -2410,7 +2442,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
             GLuint spirv_binding;
             Texture *ptr;
 
-            spirv_binding = [self getProgramTexUnit:_FRAGMENT_SHADER type:SPVC_RESOURCE_TYPE_SAMPLED_IMAGE index: i];
+            spirv_binding = [self getProgramTexUnit:stage type:SPVC_RESOURCE_TYPE_SAMPLED_IMAGE index: i];
 
             ptr = STATE(active_textures[spirv_binding]);
 
@@ -2476,8 +2508,16 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
                     continue;
                 }
 
-                [_currentRenderEncoder setFragmentTexture:texture atIndex:spirv_binding];
-                [_currentRenderEncoder setFragmentSamplerState:sampler atIndex:spirv_binding];
+                if (stage == _VERTEX_SHADER)
+                {
+                    [_currentRenderEncoder setVertexTexture:texture atIndex:spirv_binding];
+                    [_currentRenderEncoder setVertexSamplerState:sampler atIndex:spirv_binding];
+                }
+                else
+                {
+                    [_currentRenderEncoder setFragmentTexture:texture atIndex:spirv_binding];
+                    [_currentRenderEncoder setFragmentSamplerState:sampler atIndex:spirv_binding];
+                }
 
                 textures_to_be_mapped--;
             }
@@ -2485,6 +2525,14 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     }
 
     return true;
+}
+
+- (bool) bindTexturesToCurrentRenderEncoder
+{
+    if ([self bindTexturesForStage: _VERTEX_SHADER] == false)
+        return false;
+
+    return [self bindTexturesForStage: _FRAGMENT_SHADER];
 }
 
 #pragma mark framebuffers
@@ -3115,18 +3163,24 @@ static GLuint packedSwizzle(const TextureParameter *p)
     return texture;
 }
 
-- (bool) checkDrawBufferSize:(GLuint) index;
+// True when the draw buffer still matches the view. The caller drops and
+// remakes the buffers when it does not -- it used to have the test the wrong
+// way round, so every pass on the default framebuffer threw away the colour
+// and depth it had just drawn.
+- (bool) drawBufferSizeMatches:(GLuint) index;
 {
-    NSRect frame;
     NSSize size;
 
-    frame = [_view frame];
-    size = frame.size;
+    // nothing made yet, so nothing to throw away
+    if (_drawBuffers[index].drawbuffer == nil)
+        return true;
 
-    if (size.width != _drawBuffers[index].width)
+    size = [_layer frame].size;
+
+    if ((GLuint)size.width != _drawBuffers[index].width)
         return false;
 
-    if (size.height != _drawBuffers[index].height)
+    if ((GLuint)size.height != _drawBuffers[index].height)
         return false;
 
     return true;
@@ -3272,6 +3326,17 @@ static GLuint packedSwizzle(const TextureParameter *p)
             vy = vy + vh;
             vh = -vh;
         }
+        else
+        {
+            // GL counts viewport rows from the bottom of the target, Metal from
+            // the top. Without this a partial viewport drew at the wrong end of
+            // the default framebuffer -- glViewport(0,0,256,256) landed in the
+            // top 256 rows and readback, which does flip, found nothing.
+            GLfloat th = (GLfloat)_renderPassDescriptor.renderTargetHeight;
+
+            if (th > 0.0f)
+                vy = th - (vy + vh);
+        }
 
         [_currentRenderEncoder setViewport:(MTLViewport){vx, vy, vw, vh,
                                             ctx->state.depth_range[0].znear, ctx->state.depth_range[0].zfar}];
@@ -3346,6 +3411,7 @@ static GLuint packedSwizzle(const TextureParameter *p)
 
         [self syncLayerSize];
             _drawable = [_layer nextDrawable];
+
 
         // late init of gl scissor box on attachment to window system
         NSRect frame;
@@ -3425,9 +3491,20 @@ static GLuint packedSwizzle(const TextureParameter *p)
         GLuint mgl_drawbuffer;
         id<MTLTexture> texture, depth_texture, stencil_texture;
         
-        switch(ctx->state.draw_buffer)
+        // The default framebuffer keeps its own draw buffer; state.draw_buffer
+        // may still hold whatever the last bound FBO selected.
+        GLenum want_buffer = ctx->state.framebuffer ? ctx->state.draw_buffer
+                                                    : STATE(default_draw_buffer);
+
+        if (want_buffer == 0)
+            want_buffer = GL_BACK;
+
+        switch(want_buffer)
         {
             case GL_FRONT: mgl_drawbuffer = _FRONT; break;
+            // the default framebuffer has one colour surface, so attachment 0
+            // and BACK name the same thing
+            case GL_COLOR_ATTACHMENT0:
             case GL_BACK: mgl_drawbuffer = _BACK; break;
             case GL_FRONT_LEFT: mgl_drawbuffer = _FRONT_LEFT; break;
             case GL_FRONT_RIGHT: mgl_drawbuffer = _FRONT_RIGHT; break;
@@ -3439,14 +3516,14 @@ static GLuint packedSwizzle(const TextureParameter *p)
                 DEBUG_PRINT("MGL: draw_buffer is GL_NONE, falling back to FRONT\n");
                 break;
             default:
-                DEBUG_PRINT("MGL: Unknown draw_buffer value: 0x%x, falling back to FRONT\n", ctx->state.draw_buffer);
+                DEBUG_PRINT("MGL: Unknown draw_buffer value: 0x%x, falling back to FRONT\n", want_buffer);
                 mgl_drawbuffer = _FRONT; // fallback to front instead of crashing
                 // // CRITICAL FIX: Handle assertion gracefully instead of crashing
             MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
             return nil; // Don't crash, handle gracefully
         }
 
-        if([self checkDrawBufferSize:mgl_drawbuffer])
+        if(![self drawBufferSizeMatches:mgl_drawbuffer])
         {
             _drawBuffers[mgl_drawbuffer].drawbuffer = NULL;
             _drawBuffers[mgl_drawbuffer].depthbuffer = NULL;
@@ -3488,7 +3565,11 @@ static GLuint packedSwizzle(const TextureParameter *p)
         {
             texture = [self newDrawBuffer: ctx->pixel_format.mtl_pixel_format isDepthStencil:false];
             _drawBuffers[mgl_drawbuffer].drawbuffer = texture;
+            _drawBuffers[mgl_drawbuffer].width = (GLuint)texture.width;
+            _drawBuffers[mgl_drawbuffer].height = (GLuint)texture.height;
         }
+
+        _lastDefaultTarget = texture;
 
         // attach depth
         if (ctx->depth_format.mtl_pixel_format &&
@@ -3527,6 +3608,12 @@ static GLuint packedSwizzle(const TextureParameter *p)
         _renderPassDescriptor.renderTargetWidth = texture.width;
         _renderPassDescriptor.renderTargetHeight = texture.height;
     }
+
+    // A clear that could not be encoded when it was issued belongs to the
+    // framebuffer bound at the time. Letting it ride to the next pass wiped
+    // whatever was bound later -- a texture the app had only just uploaded.
+    if (ctx->state.clear_bitmask && ctx->state.clear_framebuffer != ctx->state.framebuffer)
+        ctx->state.clear_bitmask = 0;
 
     // A load action always covers the whole attachment, so a clipped scissor
     // has to be done with a draw after the encoder exists.
@@ -3685,6 +3772,7 @@ static GLuint packedSwizzle(const TextureParameter *p)
         return false;
     }
     _currentRenderEncoder.label = @"GL Render Encoder";
+
 
     // apply all state that isn't included in a renderPassDescriptor into the render encoder
     [self updateCurrentRenderEncoder];
@@ -4665,7 +4753,9 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     {
         if (pipelineStateDescriptor.colorAttachments[i].pixelFormat != MTLPixelFormatInvalid)
         {
-            pipelineStateDescriptor.colorAttachments[i].blendingEnabled = ctx->state.caps.blend;
+            pipelineStateDescriptor.colorAttachments[i].blendingEnabled =
+                ctx->state.caps.use_blend_i ? ctx->state.caps.blend_i[i]
+                                            : ctx->state.caps.blend;
 
             pipelineStateDescriptor.colorAttachments[i].sourceRGBBlendFactor = _src_blend_rgb_factor[i];
             pipelineStateDescriptor.colorAttachments[i].destinationRGBBlendFactor = _dst_blend_rgb_factor[i];
@@ -5228,17 +5318,22 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
         //assert(ctx->state.dirty_bits == 0);
     }
 
-    // a uniform write changes data behind a binding that's already set
+    // a uniform write changes data behind a binding that's already set. Ask
+    // both stages before rebinding either: binding the vertex stage clears the
+    // dirty bits, and a buffer both stages read would then look clean.
     if (_currentRenderEncoder != nil)
     {
-        if( [self checkForDirtyBufferData: &ctx->state.vertex_buffer_map_list])
+        bool vertex_dirty = [self checkForDirtyBufferData: &ctx->state.vertex_buffer_map_list];
+        bool fragment_dirty = [self checkForDirtyBufferData: &ctx->state.fragment_buffer_map_list];
+
+        if (vertex_dirty)
         {
             RETURN_FALSE_ON_FAILURE([self updateDirtyBaseBufferList: &ctx->state.vertex_buffer_map_list]);
 
             RETURN_FALSE_ON_FAILURE([self bindVertexBuffersToCurrentRenderEncoder]);
         }
 
-        if( [self checkForDirtyBufferData: &ctx->state.fragment_buffer_map_list])
+        if (fragment_dirty)
         {
             RETURN_FALSE_ON_FAILURE([self updateDirtyBaseBufferList: &ctx->state.fragment_buffer_map_list]);
 
@@ -6492,9 +6587,28 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
             return nil;
     }
 
+    // Read the surface the draw actually went to. newRenderEncoder sends FRONT
+    // to the drawable and everything else to a buffer it creates, so preferring
+    // the drawable here read a texture nothing had drawn into.
+    int slot = _BACK;
+
+    switch(rb)
+    {
+        case GL_FRONT: case GL_FRONT_LEFT: slot = _FRONT; break;
+        case GL_FRONT_RIGHT: slot = _FRONT_RIGHT; break;
+        case GL_BACK_LEFT: slot = _BACK_LEFT; break;
+        case GL_BACK_RIGHT: slot = _BACK_RIGHT; break;
+        default: slot = _BACK; break;
+    }
+
+    (void)slot;
+
+    // whatever the last pass drew into is the one surface this context has
+    if (_lastDefaultTarget != nil)
+        return _lastDefaultTarget;
+
     // Don't ask the layer for a drawable here. Headless never presents, so the
-    // pool runs dry and nextDrawable blocks. Read whatever the last render pass
-    // used, or the cached back buffer.
+    // pool runs dry and nextDrawable blocks.
     if (_drawable != nil)
         return _drawable.texture;
 
@@ -6526,6 +6640,8 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
     [self endRenderEncoding];
 
     id<MTLTexture> src = [self readSourceTexture: glm_ctx forFormat: format];
+
+
 
     if (src == nil)
         return;
@@ -6582,7 +6698,9 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
    destinationBytesPerRow: staging_pitch
  destinationBytesPerImage: staging_size];
 
-    if ([src storageMode] == MTLStorageModeManaged)
+    // the staging buffer is Shared, and synchronizeResource is only legal on
+    // Managed -- Metal's validation layer asserts on it
+    if ([staging storageMode] == MTLStorageModeManaged)
         [blit synchronizeResource: staging];
 
     [blit endEncoding];
@@ -7841,8 +7959,9 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     MGLRenderer *renderer = [[MGLRenderer alloc] init];
     assert (renderer);
 
-    // Create a dummy NSView for headless rendering
-    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(100, 100, 100, 100)];
+    // The default framebuffer has to be as big as the viewport MGL reports, or
+    // a caller that trusts GL_VIEWPORT reads back memory nothing drew into.
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1024, 768)];
     assert (view);
     [view setWantsLayer:YES];
 
@@ -7861,7 +7980,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     if (bounds.size.width < 1.0 || bounds.size.height < 1.0)
         return;
 
-    CGFloat scale = [_view window] ? [[_view window] backingScaleFactor] : [_layer contentsScale];
+    CGFloat scale = [_view window] ? [[_view window] backingScaleFactor] : 1.0;
 
     if (scale < 1.0)
         scale = 1.0;
@@ -8058,8 +8177,10 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     if (bounds.size.width < 1.0 || bounds.size.height < 1.0)
         bounds = CGRectMake(0, 0, 1, 1);
 
-    CGFloat scaleFactor = [view window] ? [[view window] backingScaleFactor]
-                                        : [[NSScreen mainScreen] backingScaleFactor];
+    // A view with no window is headless: there is no screen to scale for, and
+    // a 2x drawable makes GL's pixel coordinates disagree with Metal's.
+    CGFloat scaleFactor = [view window] ? [[view window] backingScaleFactor] : 1.0;
+
     if (scaleFactor < 1.0)
         scaleFactor = 1.0;
 

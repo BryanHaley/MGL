@@ -53,8 +53,26 @@ static Texture *dsaTex(GLMContext ctx, GLuint texture)
 
 #pragma mark set params
 // Metal only needs a swizzled view when the channels are not the identity.
+// GL names only these six as swizzle sources; anything else is an error
+static bool swizzleValueIsLegal(GLint v)
+{
+    switch (v)
+    {
+        case GL_RED:
+        case GL_GREEN:
+        case GL_BLUE:
+        case GL_ALPHA:
+        case GL_ZERO:
+        case GL_ONE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static void refreshSwizzled(TextureParameter *tex_params)
 {
+
     tex_params->swizzled = (tex_params->swizzle_r != GL_RED)   ||
                            (tex_params->swizzle_g != GL_GREEN) ||
                            (tex_params->swizzle_b != GL_BLUE)  ||
@@ -158,21 +176,25 @@ bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, con
             break;
 
         case GL_TEXTURE_SWIZZLE_R:
+            ERROR_CHECK_RETURN_VALUE(swizzleValueIsLegal(*param), GL_INVALID_ENUM, false);
             tex_params->swizzle_r = *param;
             refreshSwizzled(tex_params);
             break;
 
         case GL_TEXTURE_SWIZZLE_G:
+            ERROR_CHECK_RETURN_VALUE(swizzleValueIsLegal(*param), GL_INVALID_ENUM, false);
             tex_params->swizzle_g = *param;
             refreshSwizzled(tex_params);
             break;
 
         case GL_TEXTURE_SWIZZLE_B:
+            ERROR_CHECK_RETURN_VALUE(swizzleValueIsLegal(*param), GL_INVALID_ENUM, false);
             tex_params->swizzle_b = *param;
             refreshSwizzled(tex_params);
             break;
 
         case GL_TEXTURE_SWIZZLE_A:
+            ERROR_CHECK_RETURN_VALUE(swizzleValueIsLegal(*param), GL_INVALID_ENUM, false);
             tex_params->swizzle_a = *param;
             refreshSwizzled(tex_params);
             break;
@@ -207,6 +229,8 @@ bool setTexParamsi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, c
             break;
 
         case GL_TEXTURE_SWIZZLE_RGBA:
+            for (int i = 0; i < 4; i++)
+                ERROR_CHECK_RETURN_VALUE(swizzleValueIsLegal(params[i]), GL_INVALID_ENUM, false);
             tex_params->swizzle_r = params[0];
             tex_params->swizzle_g = params[1];
             tex_params->swizzle_b = params[2];
@@ -294,6 +318,8 @@ bool setTexParamsf(GLMContext ctx, TextureParameter *tex_params, GLenum pname, c
             break;
 
         case GL_TEXTURE_SWIZZLE_RGBA:
+            for (int i = 0; i < 4; i++)
+                ERROR_CHECK_RETURN_VALUE(swizzleValueIsLegal((GLint)params[i]), GL_INVALID_ENUM, false);
             tex_params->swizzle_r = (GLint)params[0];
             tex_params->swizzle_g = (GLint)params[1];
             tex_params->swizzle_b = (GLint)params[2];
@@ -551,12 +577,22 @@ static void setTexParamiv(GLMContext ctx, Texture *tex, GLenum pname, const GLin
     if (setTexParamsi(ctx, &tex->params, pname, params))
     {
         tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+        // the draw path only rebinds textures when the context says so, so a
+        // change between two draws in one pass was invisible until a flush
+        ctx->state.dirty_bits |= DIRTY_TEX;
 
         return;
     }
 
     if (setParam(ctx, &tex->params, pname, *params, (GLfloat)*params))
+    {
+        // a single-valued parameter is still state the sampler and the swizzle
+        // are built from, so the next draw has to rebind
+        tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+        ctx->state.dirty_bits |= DIRTY_TEX;
+
         return;
+    }
 
     ERROR_RETURN(GL_INVALID_ENUM);
 }
@@ -566,12 +602,22 @@ static void setTexParamfv(GLMContext ctx, Texture *tex, GLenum pname, const GLfl
     if (setTexParamsf(ctx, &tex->params, pname, params))
     {
         tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+        // the draw path only rebinds textures when the context says so, so a
+        // change between two draws in one pass was invisible until a flush
+        ctx->state.dirty_bits |= DIRTY_TEX;
 
         return;
     }
 
     if (setParam(ctx, &tex->params, pname, 0, *params))
+    {
+        // a single-valued parameter is still state the sampler and the swizzle
+        // are built from, so the next draw has to rebind
+        tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+        ctx->state.dirty_bits |= DIRTY_TEX;
+
         return;
+    }
 
     ERROR_RETURN(GL_INVALID_ENUM);
 }
@@ -635,6 +681,9 @@ void mglTexParameterIiv(GLMContext ctx, GLenum target, GLenum pname, const GLint
     if (setTexParamsIiv(ctx, &tex->params, pname, params))
     {
         tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+        // the draw path only rebinds textures when the context says so, so a
+        // change between two draws in one pass was invisible until a flush
+        ctx->state.dirty_bits |= DIRTY_TEX;
 
         return;
     }
@@ -656,6 +705,9 @@ void mglTexParameterIuiv(GLMContext ctx, GLenum target, GLenum pname, const GLui
     if (setTexParamsIuiv(ctx, &tex->params, pname, params))
     {
         tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+        // the draw path only rebinds textures when the context says so, so a
+        // change between two draws in one pass was invisible until a flush
+        ctx->state.dirty_bits |= DIRTY_TEX;
 
         return;
     }
@@ -721,6 +773,9 @@ void mglTextureParameterIiv(GLMContext ctx, GLuint texture, GLenum pname, const 
     if (setTexParamsIiv(ctx, &tex->params, pname, params))
     {
         tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+        // the draw path only rebinds textures when the context says so, so a
+        // change between two draws in one pass was invisible until a flush
+        ctx->state.dirty_bits |= DIRTY_TEX;
 
         return;
     }
@@ -742,6 +797,9 @@ void mglTextureParameterIuiv(GLMContext ctx, GLuint texture, GLenum pname, const
     if (setTexParamsIuiv(ctx, &tex->params, pname, params))
     {
         tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
+        // the draw path only rebinds textures when the context says so, so a
+        // change between two draws in one pass was invisible until a flush
+        ctx->state.dirty_bits |= DIRTY_TEX;
 
         return;
     }

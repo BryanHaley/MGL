@@ -56,6 +56,22 @@ extern void  glMemoryBarrier(GLbitfield);
 extern void  glTexImage3D(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
 extern void  glTexParameteri(GLenum, GLenum, GLint);
 extern void  glDeleteTextures(GLsizei, const GLuint *);
+extern void  glGenVertexArrays(GLsizei, GLuint *);
+extern void  glBindVertexArray(GLuint);
+extern void  glGenFramebuffers(GLsizei, GLuint *);
+extern void  glBindFramebuffer(GLenum, GLuint);
+extern void  glFramebufferTexture2D(GLenum, GLenum, GLenum, GLuint, GLint);
+extern void  glViewport(GLint, GLint, GLsizei, GLsizei);
+extern void  glDrawArrays(GLenum, GLint, GLsizei);
+extern void  glUniform1i(GLint, GLint);
+extern void  glUniform1f(GLint, GLfloat);
+extern void  glUniform4f(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
+extern void  glUniformBlockBinding(GLuint, GLuint, GLuint);
+extern void  glActiveTexture(GLenum);
+extern void  glFinish(void);
+extern void  glClear(GLbitfield);
+extern void  glClearColor(GLfloat, GLfloat, GLfloat, GLfloat);
+extern void  glGetTexParameteriv(GLenum, GLenum, GLint *);
 
 /* --- reporting ----------------------------------------------------------- */
 static int  g_gates;
@@ -286,6 +302,173 @@ static void phase4(void)
         gate("rectangle textures round trip", glGetError() == GL_NO_ERROR && bad == 0,
              "core since 3.1");
         glDeleteTextures(1, &tex);
+    }
+
+
+    /* Textures reached the fragment stage only, so every vertex fetch read
+       black -- and a plain uniform took its location from its own stage, so a
+       vertex and a fragment uniform shared one buffer. Both show up in one
+       draw. */
+    {
+        static const char *VS =
+            "#version 330 core\n"
+            "uniform sampler2D s;\n"
+            "uniform float u_shift;\n"
+            "flat out vec4 v;\n"
+            "void main(){\n"
+            "  vec2 p[4]=vec2[4](vec2(-1,-1),vec2(3,-1),vec2(-1,3),vec2(3,3));\n"
+            "  v = texelFetch(s, ivec2(0), 0);\n"
+            "  gl_Position = vec4(p[gl_VertexID & 3] + vec2(0.0, u_shift), 0.0, 1.0);\n"
+            "}\n";
+        static const char *FS =
+            "#version 330 core\n"
+            "flat in vec4 v;\n"
+            "uniform vec4 u_color;\n"
+            "layout(location=0) out vec4 o;\n"
+            "void main(){ o = vec4(v.rgb, u_color.a); }\n";
+        GLubyte texel[4] = { 10, 60, 120, 255 };
+        GLubyte got[4 * 4 * 4];
+        GLuint vao, src, dst, fbo, p = glCreateProgram();
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER), fs = glCreateShader(GL_FRAGMENT_SHADER);
+        GLint ok = 0, lshift, lcolor;
+
+        glGenVertexArrays(1, &vao); glBindVertexArray(vao);
+        glShaderSource(vs, 1, &VS, NULL); glCompileShader(vs);
+        glShaderSource(fs, 1, &FS, NULL); glCompileShader(fs);
+        glAttachShader(p, vs); glAttachShader(p, fs); glLinkProgram(p);
+        glGetProgramiv(p, GL_LINK_STATUS, &ok);
+
+        glGenTextures(1, &src);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, src);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texel);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+        glGenTextures(1, &dst);
+        glBindTexture(GL_TEXTURE_2D, dst);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst, 0);
+        glViewport(0, 0, 4, 4);
+
+        glUseProgram(p);
+        lshift = glGetUniformLocation(p, "u_shift");
+        lcolor = glGetUniformLocation(p, "u_color");
+        glUniform1i(glGetUniformLocation(p, "s"), 0);
+        glUniform1f(lshift, 0.0f);
+        glUniform4f(lcolor, 0.0f, 0.0f, 0.0f, 1.0f);
+        glBindTexture(GL_TEXTURE_2D, src);
+        drain();
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glFinish();
+        glBindTexture(GL_TEXTURE_2D, dst);
+        memset(got, 0, sizeof got);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+
+        gate("vertex shaders can sample a texture",
+             got[0] == 10 && got[1] == 60 && got[2] == 120,
+             "texelFetch from the vertex stage");
+        gate("uniform locations are per program, not per stage",
+             ok && lshift >= 0 && lcolor >= 0 && lshift != lcolor,
+             "a vertex and a fragment uniform must not share one");
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteTextures(1, &src);
+        glDeleteTextures(1, &dst);
+    }
+
+    /* A block declared as an instance array is several GL blocks. */
+    {
+        static const char *VS =
+            "#version 330 core\n"
+            "layout(std140) uniform B { vec4 v; } b[3];\n"
+            "void main(){ gl_Position = b[0].v + b[1].v + b[2].v; }\n";
+        GLuint p = glCreateProgram(), vs = glCreateShader(GL_VERTEX_SHADER);
+        GLuint i0, i1, i2;
+        GLint ok = 0;
+
+        glShaderSource(vs, 1, &VS, NULL); glCompileShader(vs);
+        glAttachShader(p, vs); glLinkProgram(p);
+        glGetProgramiv(p, GL_LINK_STATUS, &ok);
+
+        i0 = glGetUniformBlockIndex(p, "B[0]");
+        i1 = glGetUniformBlockIndex(p, "B[1]");
+        i2 = glGetUniformBlockIndex(p, "B[2]");
+
+        gate("block instance arrays are separate blocks",
+             ok && i0 != 0xFFFFFFFFu && i1 != 0xFFFFFFFFu && i2 != 0xFFFFFFFFu &&
+             i0 != i1 && i1 != i2,
+             "B[0], B[1] and B[2] each get an index and a binding");
+    }
+
+    /* "uniform S s;" is one Metal buffer and many GL uniforms. */
+    {
+        static const char *FS =
+            "#version 330 core\n"
+            "struct S { int a; int b[3]; int c; };\n"
+            "uniform S s;\n"
+            "layout(location=0) out ivec4 o;\n"
+            "void main(){ o = ivec4(s.a, s.b[0], s.b[2], s.c); }\n";
+        static const char *VS =
+            "#version 330 core\n"
+            "void main(){ gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+        GLuint p = glCreateProgram();
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER), fs = glCreateShader(GL_FRAGMENT_SHADER);
+        GLint ok = 0, la, lb0, lb2, lc;
+
+        glShaderSource(vs, 1, &VS, NULL); glCompileShader(vs);
+        glShaderSource(fs, 1, &FS, NULL); glCompileShader(fs);
+        glAttachShader(p, vs); glAttachShader(p, fs); glLinkProgram(p);
+        glGetProgramiv(p, GL_LINK_STATUS, &ok);
+
+        la  = glGetUniformLocation(p, "s.a");
+        lb0 = glGetUniformLocation(p, "s.b[0]");
+        lb2 = glGetUniformLocation(p, "s.b[2]");
+        lc  = glGetUniformLocation(p, "s.c");
+
+        gate("struct uniforms expose their members",
+             ok && la >= 0 && lb0 >= 0 && lc >= 0 && lb2 == lb0 + 2,
+             "s.a, s.b[0], s.b[2] and s.c each get a location");
+    }
+
+    /* glGetTexImage reads a compressed texture back as plain pixels. */
+    {
+        GLubyte src[8 * 8], got[8 * 8];
+        GLuint t;
+        int worst = 0, i;
+
+        for (i = 0; i < 64; i++)
+            src[i] = (GLubyte)((i % 8) * 32);
+
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        drain();
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RED_RGTC1, 8, 8, 0,
+                     GL_RED, GL_UNSIGNED_BYTE, src);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        memset(got, 0xAB, sizeof got);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, got);
+
+        for (i = 0; i < 64; i++)
+        {
+            int d = (int)got[i] - (int)src[i];
+
+            if (d < 0) d = -d;
+            if (d > worst) worst = d;
+        }
+
+        gate("compressed textures read back uncompressed",
+             glGetError() == GL_NO_ERROR && worst <= 16,
+             "glGetTexImage decompresses RGTC");
+        glDeleteTextures(1, &t);
     }
 
     /* Advertising the string is not the criterion -- the arithmetic is. 1e-10

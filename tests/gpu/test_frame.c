@@ -420,3 +420,198 @@ GPU_TEST(frame, three_pass_chain_carries_its_values)
     mgl_target_destroy(&b);
     mgl_target_destroy(&c);
 }
+
+/* A partial viewport on the default framebuffer drew at the wrong end of it:
+   glViewport counts rows from the bottom, Metal from the top, and only the
+   FBO path was converting. Readback, which does flip, then found nothing. */
+GPU_TEST(frame, partial_viewport_on_the_default_framebuffer)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "void main(){vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));"
+        "gl_Position=vec4(p[gl_VertexID],0,1);}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "out vec4 o;void main(){o=vec4(1.0,0.0,0.5,1.0);}\n";
+
+    GLuint v = glCreateShader(GL_VERTEX_SHADER);
+    GLuint f = glCreateShader(GL_FRAGMENT_SHADER);
+    GLuint p = glCreateProgram();
+    GLuint vao = 0;
+    GLint ok = 0;
+    GLubyte px[64 * 64 * 4];
+
+    glShaderSource(v, 1, &VS, NULL); glCompileShader(v);
+    glShaderSource(f, 1, &FS, NULL); glCompileShader(f);
+    glAttachShader(p, v); glAttachShader(p, f);
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK_EQ_INT(GL_TRUE, ok);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDrawBuffer(GL_BACK);
+
+    /* whatever ran before must not decide where this lands */
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glDisable(GL_RASTERIZER_DISCARD);
+    glDisable(GL_SAMPLE_COVERAGE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_TRUE);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glFrontFace(GL_CCW);
+    glScissor(0, 0, 1024, 768);
+    glDepthRange(0.0, 1.0);
+    mgl_drain_errors();
+
+    glViewport(0, 0, 64, 64);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(p);
+    mgl_drain_errors();
+
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    glFinish();
+
+    memset(px, 0xAB, sizeof px);
+    glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    /* the bottom-left 64x64 is where glViewport put it */
+    CHECK_EQ_INT(0xFF, px[0]);
+    CHECK_EQ_INT(0x00, px[1]);
+    CHECK_EQ_INT(0x80, px[2]);
+
+    {
+        size_t c = ((size_t)32 * 64 + 32) * 4;
+
+        CHECK_EQ_INT(0xFF, px[c]);
+        CHECK_EQ_INT(0x80, px[c + 2]);
+    }
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    glDeleteProgram(p);
+}
+
+/* A glClear the renderer could not encode at the time stayed pending and was
+   applied to the next framebuffer bound -- which wiped a texture the app had
+   only just uploaded. */
+GPU_TEST(frame, a_pending_clear_does_not_wipe_the_next_framebuffer)
+{
+    const GLsizei w = 7, h = 3;
+    GLubyte src[7 * 3], got[7 * 3 * 4];
+    GLuint tex = 0, fbo = 0;
+    int bad = 0;
+
+    for (GLsizei y = 0; y < h; y++)
+        for (GLsizei x = 0; x < w; x++)
+            src[y * w + x] = (GLubyte)(x * 255 / w);
+
+    /* clear the default framebuffer before anything else is set up */
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, src);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    mgl_drain_errors();
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    CHECK_EQ_UINT(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    memset(got, 0xAB, sizeof got);
+    glReadPixels(0, 0, w, h, GL_RED, GL_UNSIGNED_BYTE, got);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    for (GLsizei i = 0; i < w * h; i++)
+        if (got[i] != src[i])
+            bad++;
+
+    CHECK_MSG(bad == 0, "%d of %d texels were cleared away", bad, w * h);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+}
+
+/* The default framebuffer never had a depth attachment: the sized formats the
+   context asks for were missing from the GL-to-Metal format switch, so it
+   silently came up with none and nothing on screen was ever depth tested. */
+GPU_TEST(frame, the_default_framebuffer_depth_tests)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "uniform float u_z;\n"
+        "void main() {\n"
+        "    vec2 p[4] = vec2[4](vec2(-1,-1), vec2(3,-1), vec2(-1,3), vec2(3,3));\n"
+        "    gl_Position = vec4(p[gl_VertexID & 3], u_z, 1.0);\n"
+        "}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "uniform vec4 u_color;\n"
+        "layout(location = 0) out vec4 frag;\n"
+        "void main() { frag = u_color; }\n";
+
+    GLuint prog, vao, vbo;
+    GLint lz, lc;
+    GLubyte px[4] = { 0, 0, 0, 0 };
+    char log[512] = { 0 };
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 64, 64);
+    glUseProgram(prog);
+    glBindVertexArray(vao);
+    lz = glGetUniformLocation(prog, "u_z");
+    lc = glGetUniformLocation(prog, "u_color");
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glDepthMask(GL_TRUE);
+    glClearDepth(1.0);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    /* near first, then far: the far one must be rejected */
+    glUniform1f(lz, -1.0f);
+    glUniform4f(lc, 0.0f, 0.0f, 1.0f, 1.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glFinish();
+
+    glUniform1f(lz, 0.5f);
+    glUniform4f(lc, 1.0f, 0.0f, 0.0f, 1.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glFinish();
+
+    glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+    CHECK_EQ_UINT(0u,   px[0]);
+    CHECK_EQ_UINT(0u,   px[1]);
+    CHECK_EQ_UINT(255u, px[2]);
+
+    glDisable(GL_DEPTH_TEST);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+}

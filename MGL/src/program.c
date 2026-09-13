@@ -33,6 +33,34 @@
 #include "buffers.h"
 #include "mgl_log.h"
 
+// A block declared in two stages is one block to GL. Shared with uniforms.c's
+// enumeration so a member's block index matches the block queries.
+bool programResourceSeenEarlier(Program *ptr, int res_type, int stage, GLuint b)
+{
+    const char *name = ptr->spirv_resources_list[stage][res_type].list[b].name;
+
+    if (!name)
+        return false;
+
+    for (int prev = _VERTEX_SHADER; prev <= stage; prev++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[prev][res_type];
+        GLuint limit = (prev == stage) ? b : list->count;
+
+        for (GLuint k = 0; k < limit; k++)
+            if (list->list[k].name && !strcmp(list->list[k].name, name))
+                return true;
+    }
+
+    return false;
+}
+
+bool programBlockSeenEarlier(Program *ptr, int stage, GLuint b)
+{
+    return programResourceSeenEarlier(ptr, SPVC_RESOURCE_TYPE_UNIFORM_BUFFER, stage, b);
+}
+
+
 // Program Pipeline management
 ProgramPipeline *newProgramPipeline(GLMContext ctx, GLuint pipeline)
 {
@@ -513,6 +541,680 @@ static GLenum glTypeFromSpirv(spvc_compiler compiler, spvc_type_id type_id, GLin
 }
 
 
+// glslang lowers a bool in a uniform block to uint, because SPIR-V gives bools
+// no memory layout. The GLSL source is the only place the real type survives,
+// so look the member up there before reporting a type.
+static bool scanDeclSaysBool(const char *src, const char *keyword, const char *block,
+                             const char *member, int *vecsize)
+{
+    const char *p = src;
+    size_t blen = block ? strlen(block) : 0;
+    size_t klen = strlen(keyword);
+
+    *vecsize = 1;
+
+    if (!src || !member || !member[0])
+        return false;
+
+    while ((p = strstr(p, keyword)) != NULL)
+    {
+        const char *open, *close, *q;
+
+        p += klen;
+
+        // the block name, if we were given one, has to be the next word
+        if (blen)
+        {
+            const char *w = p;
+
+            while (*w == ' ' || *w == '\t' || *w == '\n' || *w == '\r') w++;
+
+            if (strncmp(w, block, blen) != 0)
+                continue;
+        }
+
+        open = strchr(p, '{');
+        if (!open)
+            break;
+
+        close = strchr(open, '}');
+        if (!close)
+            break;
+
+        for (q = open; q < close; q++)
+        {
+            int n = 0;
+
+            if (!strncmp(q, "bool", 4) && (q == open + 1 || !isalnum((unsigned char)q[-1])))
+                n = 1;
+            else if (!strncmp(q, "bvec", 4) && q[4] >= '2' && q[4] <= '4')
+                n = q[4] - '0';
+            else
+                continue;
+
+            {
+                const char *r = q + (n == 1 ? 4 : 5);
+                size_t mlen = strlen(member);
+
+                // every identifier up to the semicolon shares this type
+                while (r < close && *r != ';')
+                {
+                    while (r < close && !isalnum((unsigned char)*r) && *r != '_') r++;
+
+                    if (r < close && !strncmp(r, member, mlen) &&
+                        !isalnum((unsigned char)r[mlen]) && r[mlen] != '_')
+                    {
+                        *vecsize = n;
+                        return true;
+                    }
+
+                    while (r < close && (isalnum((unsigned char)*r) || *r == '_')) r++;
+
+                    if (r < close && *r != ',' && *r != ';')
+                        break;
+
+                    if (r < close && *r == ',') r++;
+                }
+            }
+
+            q += 4;
+        }
+
+        p = close;
+    }
+
+    return false;
+}
+
+// A bool member may be declared in the block itself or in a struct the block
+// uses, so look in both before giving up and calling it a uint.
+// glslang hands every default block uniform a location decoration of its own,
+// numbered per stage, so the vertex and fragment stages both start at zero.
+// Only a layout(location=) the source actually wrote is binding on GL, so look
+// for that and let the linker number the rest.
+static GLint explicitUniformLocation(const char *src, const char *name)
+{
+    size_t nlen = name ? strlen(name) : 0;
+    const char *p = src;
+
+    if (!src || !nlen)
+        return -1;
+
+    while ((p = strstr(p, name)) != NULL)
+    {
+        const char *stmt = p;
+        const char *q;
+        bool has_layout = false, has_uniform = false, has_location = false;
+        const char *loc = NULL;
+
+        if ((p != src && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) ||
+            isalnum((unsigned char)p[nlen]) || p[nlen] == '_')
+        {
+            p += nlen;
+            continue;
+        }
+
+        while (stmt > src && stmt[-1] != ';' && stmt[-1] != '}' && stmt[-1] != '{')
+            stmt--;
+
+        for (q = stmt; q < p; q++)
+        {
+            if (!strncmp(q, "layout", 6))   has_layout = true;
+            if (!strncmp(q, "uniform", 7))  has_uniform = true;
+            if (!strncmp(q, "location", 8)) { has_location = true; loc = q; }
+        }
+
+        if (has_layout && has_uniform && has_location && loc)
+        {
+            q = loc + 8;
+
+            while (q < p && *q != '=') q++;
+
+            if (q < p)
+            {
+                q++;
+                while (q < p && (*q == ' ' || *q == '\t')) q++;
+                if (q < p && isdigit((unsigned char)*q))
+                    return (GLint)strtol(q, NULL, 10);
+            }
+        }
+
+        p += nlen;
+    }
+
+    return -1;
+}
+
+static bool sourceSaysBool(const char *src, const char *owner, const char *member, int *vecsize)
+{
+    if (scanDeclSaysBool(src, "uniform", owner, member, vecsize))
+        return true;
+
+    return scanDeclSaysBool(src, "struct", owner, member, vecsize);
+}
+
+static GLenum boolTypeForVecSize(int n)
+{
+    switch (n)
+    {
+        case 2: return GL_BOOL_VEC2;
+        case 3: return GL_BOOL_VEC3;
+        case 4: return GL_BOOL_VEC4;
+    }
+
+    return GL_BOOL;
+}
+
+// GL 4.6 section 7.3.1: a struct inside a uniform block is not a uniform of
+// its own; its leaves are, named "Block.s.leaf". Walk down to them.
+// How many leaves a struct flattens into, so the list can be sized for them.
+static GLuint countBlockLeaves(spvc_compiler compiler, spvc_type st, unsigned depth)
+{
+    unsigned members = spvc_type_get_num_member_types(st);
+    GLuint n = 0;
+
+    if (depth > 8)
+        return 0;
+
+    for (unsigned m = 0; m < members; m++)
+    {
+        spvc_type mt = spvc_compiler_get_type_handle(compiler, spvc_type_get_member_type(st, m));
+
+        if (!mt)
+            continue;
+
+        if (spvc_type_get_basetype(mt) == SPVC_BASETYPE_STRUCT)
+        {
+            spvc_type et = (spvc_type_get_num_array_dimensions(mt) > 0)
+                         ? spvc_compiler_get_type_handle(compiler, spvc_type_get_base_type_id(mt))
+                         : mt;
+            GLuint elems = 1;
+
+            if (spvc_type_get_num_array_dimensions(mt) > 0)
+            {
+                unsigned dim = spvc_type_get_array_dimension(mt, 0);
+
+                elems = dim ? dim : 1;
+            }
+
+            if (et)
+                n += elems * countBlockLeaves(compiler, et, depth + 1);
+        }
+        else
+            n++;
+    }
+
+    return n;
+}
+
+static void flattenBlockMembers(spvc_compiler compiler, Program *ptr, int stage,
+                                spvc_type st, spvc_type_id st_id,
+                                const char *prefix, unsigned depth,
+                                GLint block_index, GLint base_offset,
+                                GLuint *out, GLuint total)
+{
+    unsigned members = spvc_type_get_num_member_types(st);
+
+    if (depth > 8)
+        return;
+
+    for (unsigned m = 0; m < members && *out < total; m++)
+    {
+        spvc_type_id mtid = spvc_type_get_member_type(st, m);
+        spvc_type mt = spvc_compiler_get_type_handle(compiler, mtid);
+        const char *mname = spvc_compiler_get_member_name(compiler, st_id, m);
+        char name[512];
+        unsigned off = 0, astride = 0, mstride = 0;
+        GLint asize = 1;
+        GLenum gl_type;
+
+        if (!mt)
+            continue;
+
+        if (prefix && prefix[0])
+            snprintf(name, sizeof name, "%s.%s", prefix, mname ? mname : "");
+        else
+            snprintf(name, sizeof name, "%s", mname ? mname : "");
+
+        if (spvc_type_get_basetype(mt) == SPVC_BASETYPE_STRUCT)
+        {
+            // The array type carries no member names; its element type does.
+            spvc_type_id etid = (spvc_type_get_num_array_dimensions(mt) > 0)
+                              ? spvc_type_get_base_type_id(mt) : mtid;
+            spvc_type et = spvc_compiler_get_type_handle(compiler, etid);
+            unsigned sub = 0;
+            GLint here = (spvc_compiler_type_struct_member_offset(compiler, st, m, &sub) == SPVC_SUCCESS)
+                       ? base_offset + (GLint)sub : base_offset;
+            GLint elems = 1, stride = 0;
+            bool is_array = spvc_type_get_num_array_dimensions(mt) > 0;
+
+            if (!et)
+                continue;
+
+            if (is_array)
+            {
+                unsigned dim = spvc_type_get_array_dimension(mt, 0);
+                unsigned as = 0;
+
+                elems = dim ? (GLint)dim : 1;
+
+                if (spvc_compiler_type_struct_member_array_stride(compiler, st, m, &as) == SPVC_SUCCESS)
+                    stride = (GLint)as;
+            }
+
+            // GL enumerates every element of an array of structures
+            for (GLint e = 0; e < elems && *out < total; e++)
+            {
+                char child[512];
+
+                // an array of one is still an array: GL names it "l[0].mA"
+                if (is_array)
+                    snprintf(child, sizeof child, "%s[%d]", name, e);
+                else
+                    snprintf(child, sizeof child, "%s", name);
+
+                flattenBlockMembers(compiler, ptr, stage, et, etid, child, depth + 1,
+                                    block_index, here + e * stride, out, total);
+            }
+
+            continue;
+        }
+
+        gl_type = glTypeFromSpirv(compiler, mtid, &asize);
+
+        if (gl_type == 0)
+            continue;
+
+        // a uint that the source declared bool is a bool to GL
+        if (gl_type == GL_UNSIGNED_INT || gl_type == GL_UNSIGNED_INT_VEC2 ||
+            gl_type == GL_UNSIGNED_INT_VEC3 || gl_type == GL_UNSIGNED_INT_VEC4)
+        {
+            Shader *sh = ptr->shader_slots[stage];
+            int n = 1;
+
+            // scope the search to the declaration this member belongs to:
+            // the same short name turns up in several structs
+            const char *owner = spvc_compiler_get_name(compiler, (SpvId)st_id);
+
+            if (sh && sh->src && mname && sourceSaysBool(sh->src, owner, mname, &n))
+                gl_type = boolTypeForVecSize(n);
+        }
+
+        // GL names an array member "g[0]" even when the array holds one
+        // element, and reports its size as that count
+        if (spvc_type_get_num_array_dimensions(mt) > 0)
+        {
+            size_t l = strlen(name);
+
+            if (l + 4 < sizeof name)
+                snprintf(name + l, sizeof name - l, "[0]");
+        }
+
+        // a block declared in two stages is still one set of uniforms
+        for (int prev = _VERTEX_SHADER; prev <= stage; prev++)
+        {
+            SpirvResourceList *pl = &ptr->block_uniforms[prev];
+            GLuint limit = (prev == stage) ? *out : pl->count;
+
+            for (GLuint k = 0; k < limit; k++)
+                if (pl->list[k].name && !strcmp(pl->list[k].name, name))
+                    return;
+        }
+
+        {
+            SpirvResource *dst = &ptr->block_uniforms[stage].list[*out];
+
+            dst->type_id = mtid;
+            dst->gl_type = gl_type;
+            dst->array_size = asize;
+            dst->name = strdup(name);
+            dst->block_index = block_index;
+            dst->offset = (spvc_compiler_type_struct_member_offset(compiler, st, m, &off) == SPVC_SUCCESS)
+                        ? base_offset + (GLint)off : -1;
+            dst->array_stride = (spvc_compiler_type_struct_member_array_stride(compiler, st, m, &astride) == SPVC_SUCCESS)
+                        ? (GLint)astride : 0;
+            dst->matrix_stride = (spvc_compiler_type_struct_member_matrix_stride(compiler, st, m, &mstride) == SPVC_SUCCESS)
+                        ? (GLint)mstride : 0;
+            dst->is_row_major = spvc_compiler_has_member_decoration(compiler, st_id, m, SpvDecorationRowMajor)
+                        ? GL_TRUE : GL_FALSE;
+        }
+
+        (*out)++;
+    }
+}
+
+
+
+
+/* ---- plain struct uniforms ---------------------------------------------
+ *
+ * "uniform S s;" is one SPIR-V variable and one Metal buffer, but GL calls
+ * every leaf inside it an active uniform of its own, with its own location.
+ * SPIRV-Cross emits the struct with Metal's ordinary C layout and no Offset
+ * decorations, so the offsets have to be worked out the same way Metal does.
+ */
+static void mslTypeLayout(spvc_compiler compiler, spvc_type_id tid,
+                          unsigned *out_size, unsigned *out_align, unsigned depth);
+
+static unsigned mslScalarSize(spvc_basetype bt)
+{
+    switch (bt)
+    {
+        case SPVC_BASETYPE_BOOLEAN: return 1;
+        case SPVC_BASETYPE_INT8:
+        case SPVC_BASETYPE_UINT8:   return 1;
+        case SPVC_BASETYPE_INT16:
+        case SPVC_BASETYPE_UINT16:
+        case SPVC_BASETYPE_FP16:    return 2;
+        case SPVC_BASETYPE_INT64:
+        case SPVC_BASETYPE_UINT64:
+        case SPVC_BASETYPE_FP64:    return 8;
+        default:                    return 4;
+    }
+}
+
+static void mslTypeLayout(spvc_compiler compiler, spvc_type_id tid,
+                          unsigned *out_size, unsigned *out_align, unsigned depth)
+{
+    spvc_type t = spvc_compiler_get_type_handle(compiler, tid);
+    unsigned size = 4, align = 4;
+
+    *out_size = 0;
+    *out_align = 1;
+
+    if (!t || depth > 8)
+        return;
+
+    if (spvc_type_get_basetype(t) == SPVC_BASETYPE_STRUCT)
+    {
+        unsigned members = spvc_type_get_num_member_types(t);
+        unsigned offset = 0;
+
+        align = 1;
+
+        for (unsigned m = 0; m < members; m++)
+        {
+            unsigned ms = 0, ma = 1;
+
+            mslTypeLayout(compiler, spvc_type_get_member_type(t, m), &ms, &ma, depth + 1);
+
+            if (ma > align) align = ma;
+
+            offset = (offset + ma - 1) & ~(ma - 1);
+            offset += ms;
+        }
+
+        size = (offset + align - 1) & ~(align - 1);
+    }
+    else
+    {
+        unsigned scalar = mslScalarSize(spvc_type_get_basetype(t));
+        unsigned vec = spvc_type_get_vector_size(t);
+        unsigned cols = spvc_type_get_columns(t);
+        unsigned col_size, col_align;
+
+        if (vec == 0) vec = 1;
+        if (cols == 0) cols = 1;
+
+        // Metal pads a three component vector out to four
+        col_size = scalar * (vec == 3 ? 4 : vec);
+        col_align = col_size;
+
+        size = col_size * cols;
+        align = col_align;
+    }
+
+    // an array multiplies the element, which is already a multiple of its own
+    // alignment
+    {
+        unsigned dims = spvc_type_get_num_array_dimensions(t);
+
+        for (unsigned d = 0; d < dims; d++)
+        {
+            unsigned n = spvc_type_get_array_dimension(t, d);
+
+            size *= (n ? n : 1);
+        }
+    }
+
+    *out_size = size;
+    *out_align = align;
+}
+
+static GLuint countStructLeaves(spvc_compiler compiler, spvc_type st, unsigned depth)
+{
+    unsigned members = spvc_type_get_num_member_types(st);
+    GLuint n = 0;
+
+    if (depth > 8)
+        return 0;
+
+    for (unsigned m = 0; m < members; m++)
+    {
+        spvc_type mt = spvc_compiler_get_type_handle(compiler, spvc_type_get_member_type(st, m));
+
+        if (!mt)
+            continue;
+
+        if (spvc_type_get_basetype(mt) == SPVC_BASETYPE_STRUCT)
+        {
+            spvc_type et = (spvc_type_get_num_array_dimensions(mt) > 0)
+                         ? spvc_compiler_get_type_handle(compiler, spvc_type_get_base_type_id(mt))
+                         : mt;
+            GLuint elems = 1;
+
+            if (spvc_type_get_num_array_dimensions(mt) > 0)
+            {
+                unsigned dim = spvc_type_get_array_dimension(mt, 0);
+
+                elems = dim ? dim : 1;
+            }
+
+            if (et)
+                n += elems * countStructLeaves(compiler, et, depth + 1);
+        }
+        else
+            n++;
+    }
+
+    return n;
+}
+
+typedef struct {
+    char     name[256];
+    GLenum   gl_type;
+    GLint    array_size;
+    GLint    array_stride;
+    GLint    offset;
+} MGLStructLeaf;
+
+static void flattenStructLeaves(spvc_compiler compiler, Program *ptr, int stage,
+                                spvc_type st, spvc_type_id st_id, const char *prefix,
+                                unsigned depth, GLint base_offset,
+                                MGLStructLeaf *out, GLuint *count, GLuint max)
+{
+    unsigned members = spvc_type_get_num_member_types(st);
+    unsigned offset = 0;
+
+    if (depth > 8)
+        return;
+
+    for (unsigned m = 0; m < members && *count < max; m++)
+    {
+        spvc_type_id mtid = spvc_type_get_member_type(st, m);
+        spvc_type mt = spvc_compiler_get_type_handle(compiler, mtid);
+        const char *mname = spvc_compiler_get_member_name(compiler, st_id, m);
+        unsigned ms = 0, ma = 1;
+        char name[256];
+
+        if (!mt)
+            continue;
+
+        mslTypeLayout(compiler, mtid, &ms, &ma, 0);
+        offset = (offset + ma - 1) & ~(ma - 1);
+
+        if (prefix && prefix[0])
+            snprintf(name, sizeof name, "%s.%s", prefix, mname ? mname : "");
+        else
+            snprintf(name, sizeof name, "%s", mname ? mname : "");
+
+        if (spvc_type_get_basetype(mt) == SPVC_BASETYPE_STRUCT)
+        {
+            bool is_array = spvc_type_get_num_array_dimensions(mt) > 0;
+            spvc_type_id etid = is_array ? spvc_type_get_base_type_id(mt) : mtid;
+            spvc_type et = spvc_compiler_get_type_handle(compiler, etid);
+            GLint elems = 1;
+            unsigned es = 0, ea = 1;
+
+            if (et)
+            {
+                mslTypeLayout(compiler, etid, &es, &ea, 0);
+
+                if (is_array)
+                {
+                    unsigned dim = spvc_type_get_array_dimension(mt, 0);
+
+                    elems = dim ? (GLint)dim : 1;
+                }
+
+                for (GLint e = 0; e < elems && *count < max; e++)
+                {
+                    char child[256];
+
+                    if (is_array)
+                        snprintf(child, sizeof child, "%s[%d]", name, e);
+                    else
+                        snprintf(child, sizeof child, "%s", name);
+
+                    flattenStructLeaves(compiler, ptr, stage, et, etid, child, depth + 1,
+                                        base_offset + (GLint)offset + e * (GLint)es,
+                                        out, count, max);
+                }
+            }
+
+            offset += ms;
+            continue;
+        }
+
+        {
+            GLint asize = 1;
+            GLenum gl_type = glTypeFromSpirv(compiler, mtid, &asize);
+            unsigned stride = ms;
+
+            if (gl_type == 0)
+            {
+                offset += ms;
+                continue;
+            }
+
+            if (asize > 1 || spvc_type_get_num_array_dimensions(mt) > 0)
+            {
+                stride = (asize > 0) ? ms / (unsigned)asize : ms;
+
+                if (strlen(name) + 4 < sizeof name)
+                    strcat(name, "[0]");
+            }
+
+            // a uint the source declared bool is a bool to GL
+            if (gl_type == GL_UNSIGNED_INT || gl_type == GL_UNSIGNED_INT_VEC2 ||
+                gl_type == GL_UNSIGNED_INT_VEC3 || gl_type == GL_UNSIGNED_INT_VEC4)
+            {
+                Shader *sh = ptr->shader_slots[stage];
+                int n = 1;
+                const char *owner = spvc_compiler_get_name(compiler, (SpvId)st_id);
+
+                if (sh && sh->src && mname && sourceSaysBool(sh->src, owner, mname, &n))
+                    gl_type = boolTypeForVecSize(n);
+            }
+
+            snprintf(out[*count].name, sizeof out[*count].name, "%s", name);
+            out[*count].gl_type = gl_type;
+            out[*count].array_size = asize > 0 ? asize : 1;
+            out[*count].array_stride = (GLint)stride;
+            out[*count].offset = base_offset + (GLint)offset;
+            (*count)++;
+        }
+
+        offset += ms;
+    }
+}
+
+// Append the leaves of every plain struct uniform to the stage's resource list.
+// Each keeps the owner's location in binding so a write knows which buffer it
+// belongs to, and msl_index stays MGL_NO_LOCATION so the renderer does not try
+// to bind a buffer for it.
+static void addStructUniformLeaves(spvc_compiler compiler, Program *ptr, int stage)
+{
+    SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+    GLuint original = list->count;
+
+    for (GLuint i = 0; i < original; i++)
+    {
+        spvc_type t = spvc_compiler_get_type_handle(compiler, list->list[i].type_id);
+        spvc_type_id st_id;
+        spvc_type st;
+        MGLStructLeaf *leaves;
+        GLuint n = 0, total;
+        unsigned ssize = 0, salign = 1;
+        SpirvResource *grown;
+
+        if (!t || spvc_type_get_basetype(t) != SPVC_BASETYPE_STRUCT)
+            continue;
+
+        st_id = list->list[i].base_type_id;
+        st = spvc_compiler_get_type_handle(compiler, st_id);
+
+        if (!st)
+            continue;
+
+        total = countStructLeaves(compiler, st, 0);
+
+        if (total == 0 || total > 512)
+            continue;
+
+        leaves = (MGLStructLeaf *)calloc(total, sizeof(MGLStructLeaf));
+
+        if (!leaves)
+            continue;
+
+        flattenStructLeaves(compiler, ptr, stage, st, st_id, list->list[i].name,
+                            0, 0, leaves, &n, total);
+
+        mslTypeLayout(compiler, list->list[i].type_id, &ssize, &salign, 0);
+
+        grown = (SpirvResource *)realloc(list->list, (list->count + n) * sizeof(SpirvResource));
+
+        if (!grown)
+        {
+            free(leaves);
+            continue;
+        }
+
+        list->list = grown;
+
+        for (GLuint k = 0; k < n; k++)
+        {
+            SpirvResource *dst = &list->list[list->count];
+
+            memset(dst, 0, sizeof *dst);
+            dst->name = strdup(leaves[k].name);
+            dst->gl_type = leaves[k].gl_type;
+            dst->array_size = leaves[k].array_size;
+            dst->array_stride = leaves[k].array_stride;
+            dst->offset = leaves[k].offset;
+            dst->block_index = -1;
+            dst->block_size = (GLint)ssize;
+            dst->binding = list->list[i].location;   // filled in once locations are numbered
+            dst->location = MGL_NO_LOCATION;
+            dst->msl_index = MGL_NO_LOCATION;
+            dst->_id = list->list[i]._id;
+            list->count++;
+        }
+
+        free(leaves);
+    }
+}
+
 char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
 {
     const SpvId *spirv;
@@ -830,7 +1532,17 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
             ptr->spirv_resources_list[stage][res_type].list[i].name = strdup(list[i].name);
             ptr->spirv_resources_list[stage][res_type].list[i].set = spvc_compiler_get_decoration(compiler_msl, list[i].id, SpvDecorationDescriptorSet);
             ptr->spirv_resources_list[stage][res_type].list[i].binding = spvc_compiler_get_decoration(compiler_msl, list[i].id, SpvDecorationBinding);
-            ptr->spirv_resources_list[stage][res_type].list[i].location = spvc_compiler_get_decoration(compiler_msl, list[i].id, SpvDecorationLocation);
+            if (res_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT)
+            {
+                Shader *sh = ptr->shader_slots[stage];
+                GLint explicit_loc = (sh && sh->src)
+                                   ? explicitUniformLocation(sh->src, list[i].name) : -1;
+
+                ptr->spirv_resources_list[stage][res_type].list[i].location =
+                    (explicit_loc >= 0) ? (GLuint)explicit_loc : MGL_NO_LOCATION;
+            }
+            else
+                ptr->spirv_resources_list[stage][res_type].list[i].location = spvc_compiler_get_decoration(compiler_msl, list[i].id, SpvDecorationLocation);
             // GL reads the texture unit out of the sampler uniform's value.
             // The binding the shader declared (or glslang handed out) is only
             // the starting value; glUniform1i replaces it.
@@ -842,6 +1554,20 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
             if (res_type == SPVC_RESOURCE_TYPE_UNIFORM_BUFFER ||
                 res_type == SPVC_RESOURCE_TYPE_STORAGE_BUFFER)
             {
+                // "uniform Block { ... } b[3];" is three blocks to GL, named
+                // Block[0] through Block[2].
+                spvc_type var_type = spvc_compiler_get_type_handle(compiler_msl, list[i].type_id);
+
+                ptr->spirv_resources_list[stage][res_type].list[i].array_size = 1;
+
+                if (var_type && spvc_type_get_num_array_dimensions(var_type) == 1)
+                {
+                    unsigned n = (unsigned)spvc_type_get_array_dimension(var_type, 0);
+
+                    if (n > 1)
+                        ptr->spirv_resources_list[stage][res_type].list[i].array_size = (GLint)n;
+                }
+
                 spvc_type block_type = spvc_compiler_get_type_handle(compiler_msl, list[i].base_type_id);
                 size_t block_size = 0;
 
@@ -899,14 +1625,45 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         {
             unsigned idx = spvc_compiler_msl_get_automatic_resource_binding(compiler_msl, rlist->list[i]._id);
 
-            rlist->list[i].msl_index = (idx == (unsigned)-1) ? rlist->list[i].binding : idx;
+            // A plain uniform the emitted MSL never reads gets no slot. Falling
+            // back to its SPIR-V binding handed every one of them slot 0, so
+            // setting an unused uniform overwrote whichever one lives there.
+            if (idx == (unsigned)-1 && res_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT)
+                rlist->list[i].msl_index = (GLuint)-1;
+            else
+                rlist->list[i].msl_index = (idx == (unsigned)-1) ? rlist->list[i].binding : idx;
 
             rlist->list[i].gl_type = glTypeFromSpirv(compiler_msl, rlist->list[i].type_id,
                                                      &rlist->list[i].array_size);
             rlist->list[i].block_index = -1;
             rlist->list[i].offset = -1;
+
+            // A block declared as an instance array is one SPIR-V resource but
+            // several GL blocks. Each gets its own binding, and SPIRV-Cross
+            // gives each its own Metal buffer slot running on from the first.
+            if (res_type == SPVC_RESOURCE_TYPE_UNIFORM_BUFFER)
+            {
+                spvc_type rt = spvc_compiler_get_type_handle(compiler_msl, rlist->list[i].type_id);
+
+                // even a one element array is an array to GL: the block is
+                // named "Block[0]", not "Block"
+                if (rt && spvc_type_get_num_array_dimensions(rt) > 0)
+                {
+                    GLint n = rlist->list[i].array_size > 0 ? rlist->list[i].array_size : 1;
+
+                    free(rlist->list[i].element_binding);
+                    rlist->list[i].element_binding = (GLuint *)calloc((size_t)n, sizeof(GLuint));
+
+                    if (rlist->list[i].element_binding)
+                        for (GLint e = 0; e < n; e++)
+                            rlist->list[i].element_binding[e] = rlist->list[i].binding + (GLuint)e;
+                }
+            }
         }
     }
+
+    // a plain uniform of struct type is one buffer but many GL uniforms
+    addStructUniformLeaves(compiler_msl, ptr, stage);
 
     // GL treats the members of a uniform block as active uniforms of their own,
     // with offsets and strides the app needs to lay its buffer out. Collect them.
@@ -915,13 +1672,27 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         GLuint total = 0;
         GLuint block_base = 0;
 
-        // uniformBlockAt numbers blocks across every stage, so members have to
-        // point at the same global index the block queries use
+        // uniformBlockAt numbers unique block names across every stage, so
+        // members have to point at the same global index the block queries use
         for (int prev = _VERTEX_SHADER; prev < stage; prev++)
-            block_base += ptr->spirv_resources_list[prev][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER].count;
+        {
+            SpirvResourceList *pl = &ptr->spirv_resources_list[prev][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER];
+
+            // an instance array is several GL blocks, so it takes that many
+            // indices -- members used to point at the wrong block entirely
+            for (GLuint pb = 0; pb < pl->count; pb++)
+                if (!programBlockSeenEarlier(ptr, prev, pb))
+                    block_base += (pl->list[pb].array_size > 1) ? (GLuint)pl->list[pb].array_size : 1;
+        }
 
         for (GLuint b = 0; b < blocks->count; b++)
-            total += (GLuint)(blocks->list[b].member_count > 0 ? blocks->list[b].member_count : 0);
+        {
+            spvc_type bt = spvc_compiler_get_type_handle(compiler_msl, blocks->list[b].base_type_id);
+
+            // a struct member flattens into its leaves, so count those
+            total += bt ? countBlockLeaves(compiler_msl, bt, 0)
+                        : (GLuint)(blocks->list[b].member_count > 0 ? blocks->list[b].member_count : 0);
+        }
 
         ptr->block_uniforms[stage].count = 0;
         ptr->block_uniforms[stage].list = (SpirvResource *)calloc(total ? total : 1, sizeof(SpirvResource));
@@ -930,6 +1701,8 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
         {
             GLuint out = 0;
 
+            GLuint local = 0;
+
             for (GLuint b = 0; b < blocks->count; b++)
             {
                 spvc_type bt = spvc_compiler_get_type_handle(compiler_msl, blocks->list[b].base_type_id);
@@ -937,51 +1710,24 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
                 if (!bt)
                     continue;
 
-                unsigned members = spvc_type_get_num_member_types(bt);
+                // a block already seen in an earlier stage keeps that index
+                if (programBlockSeenEarlier(ptr, stage, b))
+                    continue;
 
-                for (unsigned m = 0; m < members && out < total; m++)
                 {
-                    SpirvResource *dst = &ptr->block_uniforms[stage].list[out];
-                    const char *mname = spvc_compiler_get_member_name(compiler_msl, blocks->list[b].base_type_id, m);
-                    unsigned off = 0, astride = 0, mstride = 0;
-                    bool already = false;
+                    const char *block_name = spvc_compiler_get_name(compiler_msl, (SpvId)blocks->list[b].base_type_id);
+                    const char *inst_name = spvc_compiler_get_name(compiler_msl, (SpvId)blocks->list[b]._id);
+                    bool has_instance = inst_name && inst_name[0] &&
+                                        !(block_name && !strcmp(inst_name, block_name));
+                    const char *prefix = (has_instance && block_name && block_name[0]) ? block_name : NULL;
 
-                    // a block declared in two stages is still one set of uniforms
-                    for (int prev = _VERTEX_SHADER; prev < stage && !already; prev++)
-                        for (GLuint k = 0; k < ptr->block_uniforms[prev].count; k++)
-                            if (ptr->block_uniforms[prev].list[k].name && mname &&
-                                !strcmp(ptr->block_uniforms[prev].list[k].name, mname))
-                            {
-                                already = true;
-                                break;
-                            }
-
-                    if (already)
-                        continue;
-
-                    dst->type_id = spvc_type_get_member_type(bt, m);
-                    dst->gl_type = glTypeFromSpirv(compiler_msl, dst->type_id, &dst->array_size);
-
-                    // A nested struct has no GL type of its own -- GL flattens
-                    // those into their leaves, which this does not do yet. List
-                    // it and callers get a type nothing can name.
-                    if (dst->gl_type == 0)
-                        continue;
-
-                    dst->name = strdup(mname ? mname : "");
-                    dst->block_index = (GLint)(block_base + b);
-
-                    dst->offset = (spvc_compiler_type_struct_member_offset(compiler_msl, bt, m, &off) == SPVC_SUCCESS)
-                                ? (GLint)off : -1;
-                    dst->array_stride = (spvc_compiler_type_struct_member_array_stride(compiler_msl, bt, m, &astride) == SPVC_SUCCESS)
-                                ? (GLint)astride : 0;
-                    dst->matrix_stride = (spvc_compiler_type_struct_member_matrix_stride(compiler_msl, bt, m, &mstride) == SPVC_SUCCESS)
-                                ? (GLint)mstride : 0;
-                    dst->is_row_major = spvc_compiler_has_member_decoration(compiler_msl, blocks->list[b].base_type_id, m, SpvDecorationRowMajor)
-                                ? GL_TRUE : GL_FALSE;
-
-                    out++;
+                    flattenBlockMembers(compiler_msl, ptr, stage, bt,
+                                        (spvc_type_id)blocks->list[b].base_type_id,
+                                        prefix, 0, (GLint)(block_base + local), 0,
+                                        &out, total);
                 }
+
+                local += (blocks->list[b].array_size > 1) ? (GLuint)blocks->list[b].array_size : 1;
             }
 
             ptr->block_uniforms[stage].count = out;
@@ -1007,6 +1753,84 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage)
     spvc_context_destroy(context);
 
     return str_ret;
+}
+
+
+// GL locations are per program, not per stage. Give every plain uniform the
+// linker left unlocated one of its own, and let the same name in two stages
+// share a location the way GL says it must.
+static void assignUniformLocations(Program *ptr)
+{
+    GLuint next = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        for (GLuint i = 0; i < list->count; i++)
+            if (list->list[i].location != MGL_NO_LOCATION && list->list[i].location + 1 > next)
+                next = list->list[i].location + 1;
+    }
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        for (GLuint i = 0; i < list->count; i++)
+        {
+            bool shared = false;
+
+            // A struct is not a GL uniform -- only its leaves are -- but it
+            // still owns the Metal buffer they all live in, and the renderer
+            // keys that off a location.
+            if (list->list[i].location != MGL_NO_LOCATION)
+                continue;
+
+            for (int prev = _VERTEX_SHADER; prev <= stage && !shared; prev++)
+            {
+                SpirvResourceList *pl = &ptr->spirv_resources_list[prev][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+                GLuint limit = (prev == stage) ? i : pl->count;
+
+                for (GLuint k = 0; k < limit; k++)
+                    if (pl->list[k].name && list->list[i].name &&
+                        !strcmp(pl->list[k].name, list->list[i].name) &&
+                        pl->list[k].location != MGL_NO_LOCATION)
+                    {
+                        list->list[i].location = pl->list[k].location;
+                        shared = true;
+                        break;
+                    }
+            }
+
+            if (!shared)
+            {
+                GLint n = list->list[i].array_size > 1 ? list->list[i].array_size : 1;
+
+                list->list[i].location = next;
+                next += (GLuint)n;
+            }
+        }
+    }
+
+    // a struct leaf writes into the buffer its owner holds, so it needs the
+    // owner's location once that is settled
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        for (GLuint i = 0; i < list->count; i++)
+        {
+            if (list->list[i].offset < 0)
+                continue;
+
+            for (GLuint k = 0; k < list->count; k++)
+                if (list->list[k].offset < 0 && list->list[k]._id == list->list[i]._id)
+                {
+                    list->list[i].binding = list->list[k].location;
+                    break;
+                }
+        }
+    }
 }
 
 bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage)
@@ -1192,6 +2016,8 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     // a program with no stage, or one whose stage failed, did not link
     if (stages_linked == 0)
         pptr->link_status = GL_FALSE;
+
+    assignUniformLocations(pptr);
 
     // Hand the MSL to Metal now rather than at the first draw. GL callers expect
     // shader problems at link time, and a program that only fails later reports
@@ -1411,7 +2237,26 @@ static int programResourceCount(Program *ptr, int res_type)
     int n = 0;
 
     for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
-        n += ptr->spirv_resources_list[stage][res_type].count;
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][res_type];
+
+        for (GLuint i = 0; i < list->count; i++)
+        {
+            // the same block or buffer named in two stages is one resource
+            if (res_type == SPVC_RESOURCE_TYPE_UNIFORM_BUFFER ||
+                res_type == SPVC_RESOURCE_TYPE_STORAGE_BUFFER)
+            {
+                if (programResourceSeenEarlier(ptr, res_type, stage, i))
+                    continue;
+
+                // an instance array is one block per element
+                n += list->list[i].array_size > 1 ? list->list[i].array_size : 1;
+                continue;
+            }
+
+            n++;
+        }
+    }
 
     return n;
 }

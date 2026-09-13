@@ -82,6 +82,10 @@ GLuint numComponentsForFormat(GLenum format)
     {
         case GL_RED:
         case GL_RED_INTEGER:
+        case GL_GREEN:
+        case GL_BLUE:
+        case GL_GREEN_INTEGER:
+        case GL_BLUE_INTEGER:
         case GL_STENCIL_INDEX:
         case GL_DEPTH_COMPONENT:
         case GL_DEPTH_STENCIL:
@@ -383,6 +387,11 @@ GLboolean validFormat(GLuint format)
         case GL_BGR_INTEGER:
         case GL_RGBA_INTEGER:
         case GL_BGRA_INTEGER:
+        // table 8.3 lists the single-channel selectors too
+        case GL_GREEN:
+        case GL_BLUE:
+        case GL_GREEN_INTEGER:
+        case GL_BLUE_INTEGER:
         case GL_STENCIL_INDEX:
         case GL_DEPTH_COMPONENT:
         case GL_DEPTH_STENCIL:
@@ -722,6 +731,29 @@ MTLPixelFormat mtlFormatForGLInternalFormat(GLenum internal_format)
 }
 MTLPixelFormat mtlPixelFormatForGLFormatType(GLenum gl_format, GLenum gl_type)
 {
+    // The depth and stencil formats a context asks for are sized internal
+    // formats, which this switch never listed -- so the default framebuffer
+    // came up with no depth or stencil attachment at all and nothing was ever
+    // depth tested. The format table already knows them.
+    switch (gl_format)
+    {
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32:
+        case GL_DEPTH_COMPONENT32F:
+        case GL_DEPTH24_STENCIL8:
+        case GL_DEPTH32F_STENCIL8:
+        case GL_STENCIL_INDEX8:
+        {
+            uint16_t mtl = mglFormatMetalFormat(gl_format);
+
+            return (mtl == MTLPixelFormatInvalid) ? 0 : (MTLPixelFormat)mtl;
+        }
+
+        default:
+            break;
+    }
+
     switch(gl_type)
     {
         case GL_UNSIGNED_BYTE:
@@ -879,6 +911,18 @@ size_t mglPixelStoreRowPitch(const PixelStore *ps, GLsizei width, GLuint pixel_s
         bytes = (bytes + align - 1) & ~(align - 1);
 
     return bytes;
+}
+
+// SKIP_IMAGES and IMAGE_HEIGHT only mean anything to a command that moves more
+// than one image. glReadPixels and a 2D texture read one, and adding the image
+// skip there walked the caller's buffer past where it wrote.
+size_t mglPixelStoreSkipBytes2D(const PixelStore *ps, GLuint pixel_size, size_t row_pitch)
+{
+    if (!ps)
+        return 0;
+
+    return (size_t)(ps->skip_pixels > 0 ? ps->skip_pixels : 0) * pixel_size
+         + (size_t)(ps->skip_rows > 0 ? ps->skip_rows : 0) * row_pitch;
 }
 
 size_t mglPixelStoreSkipBytes(const PixelStore *ps, GLsizei height, GLuint pixel_size, size_t row_pitch)

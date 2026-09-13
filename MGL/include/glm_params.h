@@ -84,6 +84,12 @@ typedef struct GLMCaps_t {
 
     // local enables
     GLboolean use_color_mask[MAX_COLOR_ATTACHMENTS];
+
+    // glEnablei(GL_BLEND, i) turns blending on for one draw buffer. use_blend_i
+    // says the application has taken that per-buffer control; until it does,
+    // every attachment follows the single blend enable above.
+    GLboolean use_blend_i;
+    GLboolean blend_i[MAX_COLOR_ATTACHMENTS];
 } GLMCaps;
 
 typedef struct GLMParams_t {

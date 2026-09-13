@@ -34,6 +34,23 @@
 
 static int opaqueCount(Program *ptr);
 static SpirvResource *opaqueAt(Program *ptr, GLuint index);
+// "u[0]" and "u" name the same uniform
+static bool mglUniformBaseNameIs(const char *stored, const char *base)
+{
+    size_t sl;
+
+    if (!stored || !base)
+        return false;
+
+    sl = strlen(stored);
+
+    if (sl >= 3 && !strcmp(stored + sl - 3, "[0]"))
+        sl -= 3;
+
+    return sl == strlen(base) && !strncmp(stored, base, sl);
+}
+
+
 static GLint opaqueLocBase(Program *ptr);
 
 GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
@@ -59,21 +76,42 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
         return -1;
     }
 
-    for (int stage=_VERTEX_SHADER; stage<_MAX_SHADER_TYPES; stage++)
     {
-        int count;
+        // "u[3]" names the fourth element of an array uniform, whose location
+        // is the array's plus three
+        char base[256];
+        GLint element = 0;
+        size_t len = strlen(name);
+        const char *open = (len && name[len - 1] == ']') ? strrchr(name, '[') : NULL;
 
-        count = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].count;
+        snprintf(base, sizeof base, "%s", name);
 
-        for (int i=0; i<count; i++)
+        if (open && open != name)
         {
-            const char *str = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].list[i].name;
+            element = (GLint)strtol(open + 1, NULL, 10);
+            snprintf(base, sizeof base, "%.*s", (int)(open - name), name);
+        }
 
-            if (!strcmp(str, name))
+        for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        {
+            SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+            for (GLuint i = 0; i < list->count; i++)
             {
-                // plain uniforms are keyed by layout location; binding is
-                // always 0 for them
-                return ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].list[i].location;
+                SpirvResource *r = &list->list[i];
+                GLint n;
+
+                // a struct is not a uniform; only the leaves inside it are
+                if (r->gl_type == 0 || r->name == NULL || r->location == MGL_NO_LOCATION)
+                    continue;
+
+                if (!strcmp(r->name, name))
+                    return (GLint)r->location;
+
+                n = r->array_size > 1 ? r->array_size : 1;
+
+                if (element >= 0 && element < n && mglUniformBaseNameIs(r->name, base))
+                    return (GLint)r->location + element;
             }
         }
     }
@@ -169,12 +207,50 @@ SpirvResource *mglOpaqueUniformByLocation(Program *ptr, GLint location)
 
 // Walks every plain uniform the linker saw, across all stages, in a stable order.
 // index is what glGetUniformIndices and friends hand back.
+// A plain uniform of struct type is not itself a GL uniform -- its leaves are,
+// and they sit in the same list.
+static bool uniformIsStructOwner(const SpirvResource *r)
+{
+    return r->gl_type == 0 && r->offset < 0;
+}
+
+static GLuint plainUniformCount(Program *ptr, int stage)
+{
+    SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+    GLuint n = 0;
+
+    for (GLuint i = 0; i < list->count; i++)
+        if (!uniformIsStructOwner(&list->list[i]))
+            n++;
+
+    return n;
+}
+
+static SpirvResource *plainUniformAt(Program *ptr, int stage, GLuint index)
+{
+    SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+    GLuint n = 0;
+
+    for (GLuint i = 0; i < list->count; i++)
+    {
+        if (uniformIsStructOwner(&list->list[i]))
+            continue;
+
+        if (n == index)
+            return &list->list[i];
+
+        n++;
+    }
+
+    return NULL;
+}
+
 static int uniformCount(Program *ptr)
 {
     int n = 0;
 
     for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
-        n += ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].count;
+        n += plainUniformCount(ptr, stage);
 
     for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
         n += ptr->block_uniforms[stage].count;
@@ -188,12 +264,12 @@ static SpirvResource *uniformAt(Program *ptr, GLuint index)
 
     for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
     {
-        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+        GLuint n = plainUniformCount(ptr, stage);
 
-        if (index < seen + list->count)
-            return &list->list[index - seen];
+        if (index < seen + n)
+            return plainUniformAt(ptr, stage, index - seen);
 
-        seen += list->count;
+        seen += n;
     }
 
     for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
@@ -209,19 +285,41 @@ static SpirvResource *uniformAt(Program *ptr, GLuint index)
     return opaqueAt(ptr, index - seen);
 }
 
+// GL 4.6 section 7.3.1: an array uniform is named with "[0]" on the end, and
+// either spelling finds it. Compare with the suffix ignored on both sides.
+static bool uniformNameMatches(const char *stored, const char *want)
+{
+    size_t sl, wl;
+
+    if (!stored || !want)
+        return false;
+
+    sl = strlen(stored);
+    wl = strlen(want);
+
+    if (sl >= 3 && !strcmp(stored + sl - 3, "[0]")) sl -= 3;
+    if (wl >= 3 && !strcmp(want + wl - 3, "[0]"))   wl -= 3;
+
+    return sl == wl && !strncmp(stored, want, sl);
+}
+
 static int uniformIndexByName(Program *ptr, const char *name)
 {
     GLuint seen = 0;
 
     for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
     {
-        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+        GLuint n = plainUniformCount(ptr, stage);
 
-        for (GLuint i = 0; i < list->count; i++)
-            if (!strcmp(list->list[i].name, name))
+        for (GLuint i = 0; i < n; i++)
+        {
+            SpirvResource *r = plainUniformAt(ptr, stage, i);
+
+            if (r && uniformNameMatches(r->name, name))
                 return (int)(seen + i);
+        }
 
-        seen += list->count;
+        seen += n;
     }
 
     // a name may also be a member of a uniform block
@@ -230,7 +328,7 @@ static int uniformIndexByName(Program *ptr, const char *name)
         SpirvResourceList *list = &ptr->block_uniforms[stage];
 
         for (GLuint i = 0; i < list->count; i++)
-            if (list->list[i].name && !strcmp(list->list[i].name, name))
+            if (uniformNameMatches(list->list[i].name, name))
                 return (int)(seen + i);
 
         seen += list->count;
@@ -243,7 +341,7 @@ static int uniformIndexByName(Program *ptr, const char *name)
         {
             SpirvResource *res = opaqueAt(ptr, (GLuint)i);
 
-            if (res && res->name && !strcmp(res->name, name))
+            if (res && uniformNameMatches(res->name, name))
                 return (int)(seen + i);
         }
     }
@@ -251,17 +349,58 @@ static int uniformIndexByName(Program *ptr, const char *name)
     return -1;
 }
 
+// A block declared in two stages is one block to GL, not two. Counting it
+// twice made every later block's index disagree with its own name.
+static bool blockSeenEarlier(Program *ptr, int stage, GLuint b)
+{
+    const char *name = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER].list[b].name;
+
+    if (!name)
+        return false;
+
+    for (int prev = _VERTEX_SHADER; prev <= stage; prev++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[prev][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER];
+        GLuint limit = (prev == stage) ? b : list->count;
+
+        for (GLuint k = 0; k < limit; k++)
+            if (list->list[k].name && !strcmp(list->list[k].name, name))
+                return true;
+    }
+
+    return false;
+}
+
+// "uniform Block { ... } b[3];" is three blocks to GL, one per element.
+// A block declared as an array is several GL blocks, even when the array has
+// one element -- GL names that one "Block[0]".
+static GLint blockInstances(const SpirvResource *r)
+{
+    if (!r->element_binding)
+        return 1;
+
+    return r->array_size > 1 ? r->array_size : 1;
+}
+
 static int uniformBlockCount(Program *ptr)
 {
     int n = 0;
 
     for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
-        n += ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER].count;
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER];
+
+        for (GLuint b = 0; b < list->count; b++)
+            if (!blockSeenEarlier(ptr, stage, b))
+                n += blockInstances(&list->list[b]);
+    }
 
     return n;
 }
 
-static SpirvResource *uniformBlockAt(Program *ptr, GLuint index)
+// The resource holding block `index`, and which element of an instance array
+// it is. element is -1 when the block is not an array.
+static SpirvResource *uniformBlockAtElement(Program *ptr, GLuint index, GLint *element)
 {
     GLuint seen = 0;
 
@@ -269,13 +408,51 @@ static SpirvResource *uniformBlockAt(Program *ptr, GLuint index)
     {
         SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER];
 
-        if (index < seen + list->count)
-            return &list->list[index - seen];
+        for (GLuint b = 0; b < list->count; b++)
+        {
+            GLint n;
 
-        seen += list->count;
+            if (blockSeenEarlier(ptr, stage, b))
+                continue;
+
+            n = blockInstances(&list->list[b]);
+
+            if (index < seen + (GLuint)n)
+            {
+                if (element)
+                    *element = list->list[b].element_binding ? (GLint)(index - seen) : -1;
+
+                return &list->list[b];
+            }
+
+            seen += (GLuint)n;
+        }
     }
 
     return NULL;
+}
+
+static SpirvResource *uniformBlockAt(Program *ptr, GLuint index)
+{
+    return uniformBlockAtElement(ptr, index, NULL);
+}
+
+// The name GL answers with: "Block" on its own, or "Block[n]" for an element.
+static void blockNameAt(Program *ptr, GLuint index, char *out, size_t size)
+{
+    GLint element = -1;
+    SpirvResource *blk = uniformBlockAtElement(ptr, index, &element);
+
+    if (!blk || !blk->name)
+    {
+        if (size) out[0] = 0;
+        return;
+    }
+
+    if (element >= 0)
+        snprintf(out, size, "%s[%d]", blk->name, element);
+    else
+        snprintf(out, size, "%s", blk->name);
 }
 
 static void copyName(const char *src, GLsizei bufSize, GLsizei *length, GLchar *dst)
@@ -456,9 +633,11 @@ GLuint  mglGetUniformBlockIndex(GLMContext ctx, GLuint program, const GLchar *un
     // GL wants the block's index, which is what the block queries take
     for (GLuint i = 0; i < (GLuint)uniformBlockCount(ptr); i++)
     {
-        SpirvResource *blk = uniformBlockAt(ptr, i);
+        char nm[256];
 
-        if (blk && !strcmp(blk->name, uniformBlockName))
+        blockNameAt(ptr, i, nm, sizeof nm);
+
+        if (nm[0] && !strcmp(nm, uniformBlockName))
             return i;
     }
 
@@ -508,12 +687,26 @@ void mglGetActiveUniformBlockiv(GLMContext ctx, GLuint program, GLuint uniformBl
     switch(pname)
     {
         case GL_UNIFORM_BLOCK_BINDING:
-            *params = (GLint)blk->binding;
+        {
+            GLint element = -1;
+
+            uniformBlockAtElement(ptr, uniformBlockIndex, &element);
+
+            if (element >= 0 && blk->element_binding)
+                *params = (GLint)blk->element_binding[element];
+            else
+                *params = (GLint)blk->binding;
             break;
+        }
 
         case GL_UNIFORM_BLOCK_NAME_LENGTH:
-            *params = (GLint)strlen(blk->name) + 1;
+        {
+            char nm[256];
+
+            blockNameAt(ptr, uniformBlockIndex, nm, sizeof nm);
+            *params = (GLint)strlen(nm) + 1;
             break;
+        }
 
         case GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS:
             *params = blockMemberCount(ptr, uniformBlockIndex);
@@ -580,9 +773,13 @@ void mglGetActiveUniformBlockName(GLMContext ctx, GLuint program, GLuint uniform
     ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(uniformBlockIndex < (GLuint)uniformBlockCount(ptr), GL_INVALID_VALUE);
 
-    blk = uniformBlockAt(ptr, uniformBlockIndex);
+    {
+        char nm[256];
 
-    copyName(blk->name, bufSize, length, uniformBlockName);
+        (void)blk;
+        blockNameAt(ptr, uniformBlockIndex, nm, sizeof nm);
+        copyName(nm, bufSize, length, uniformBlockName);
+    }
 }
 
 void mglUniformBlockBinding(GLMContext ctx, GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding)
@@ -593,7 +790,17 @@ void mglUniformBlockBinding(GLMContext ctx, GLuint program, GLuint uniformBlockI
     ERROR_CHECK_RETURN(uniformBlockIndex < (GLuint)uniformBlockCount(ptr), GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(uniformBlockBinding < MAX_UNIFORM_BUFFER_BINDINGS, GL_INVALID_VALUE);
 
-    uniformBlockAt(ptr, uniformBlockIndex)->binding = uniformBlockBinding;
+    {
+        GLint element = -1;
+        SpirvResource *blk = uniformBlockAtElement(ptr, uniformBlockIndex, &element);
+
+        // every element of an instance array is its own GL block, so writing
+        // the resource's single binding made them all share one buffer
+        if (blk && element >= 0 && blk->element_binding)
+            blk->element_binding[element] = uniformBlockBinding;
+        else if (blk)
+            blk->binding = uniformBlockBinding;
+    }
 
     ptr->dirty_bits |= DIRTY_PROGRAM;
 }
@@ -698,6 +905,140 @@ static bool uniformWriteFits(Program *ptr, GLint location, GLsizei size)
     return size >= elem;
 }
 
+// The plain uniform that owns a location, or NULL. An array uniform owns
+// array_size consecutive locations, one per element.
+static SpirvResource *plainUniformByLocation(Program *ptr, GLint location, GLint *element)
+{
+    if (element)
+        *element = 0;
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        for (GLuint i = 0; i < list->count; i++)
+        {
+            GLint base = (GLint)list->list[i].location;
+            GLint n = list->list[i].array_size > 1 ? list->list[i].array_size : 1;
+
+            if (list->list[i].location == MGL_NO_LOCATION)
+                continue;
+
+            if (location >= base && location < base + n)
+            {
+                if (element)
+                    *element = location - base;
+
+                return &list->list[i];
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static GLuint boolComponentsFor(GLenum gl_type)
+{
+    switch (gl_type)
+    {
+        case GL_BOOL:      return 1;
+        case GL_BOOL_VEC2: return 2;
+        case GL_BOOL_VEC3: return 3;
+        case GL_BOOL_VEC4: return 4;
+        default:           return 0;
+    }
+}
+
+// GL hands a bool uniform four bytes per component; Metal's bool is one byte,
+// and a bool vector is two or four. Repack, or the shader reads three zeroes
+// out of the first int and every bvec compares false.
+static GLsizei packBoolUniform(GLenum gl_type, const void *src, GLsizei size,
+                               GLubyte *out, GLsizei out_max)
+{
+    GLuint comps = boolComponentsFor(gl_type);
+    GLuint stride = (comps == 1) ? 1u : ((comps == 2) ? 2u : 4u);
+    const GLuint *in = (const GLuint *)src;
+    GLsizei elements, total;
+
+    if (comps == 0 || size <= 0 || (size % (GLsizei)(4 * comps)) != 0)
+        return 0;
+
+    elements = size / (GLsizei)(4 * comps);
+    total = elements * (GLsizei)stride;
+    total = (total + 3) & ~3;
+
+    if (total > out_max)
+        return 0;
+
+    memset(out, 0, (size_t)total);
+
+    for (GLsizei e = 0; e < elements; e++)
+        for (GLuint c = 0; c < comps; c++)
+            out[e * (GLsizei)stride + (GLsizei)c] = in[e * (GLsizei)comps + c] ? 1 : 0;
+
+    return total;
+}
+
+// A uniform inside a plain struct shares one buffer with the rest of the
+// struct, so it is written in place rather than replacing the whole thing.
+static bool writeStructLeaf(GLMContext ctx, Program *pptr, SpirvResource *res,
+                            GLint element, const void *ptr, GLsizei size)
+{
+    GLint owner = (GLint)res->binding;
+    Buffer *buf;
+    GLubyte packed[256];
+    GLsizei packed_size = 0;
+    GLint offset;
+
+    if (owner < 0 || owner >= MAX_UNIFORM_LOCATIONS || res->block_size <= 0)
+        return false;
+
+    buf = pptr->uniform_constants.buffers[owner].buf;
+
+    if (buf == NULL)
+    {
+        buf = newBuffer(ctx, GL_UNIFORM_BUFFER, owner);
+
+        if (buf == NULL)
+            return false;
+
+        pptr->uniform_constants.buffers[owner].buf = buf;
+    }
+
+    // the whole struct has to be there before a member lands in the middle
+    if (buf->data.buffer_data == 0 || buf->size < res->block_size)
+        initBufferData(ctx, buf, res->block_size, NULL, true);
+
+    if (buf->data.buffer_data == 0)
+        return false;
+
+    buf->size = res->block_size;
+
+    if (boolComponentsFor(res->gl_type))
+    {
+        packed_size = packBoolUniform(res->gl_type, ptr, size, packed, (GLsizei)sizeof packed);
+
+        if (packed_size)
+        {
+            ptr = packed;
+            size = packed_size;
+        }
+    }
+
+    offset = res->offset + element * res->array_stride;
+
+    if (offset < 0 || offset + size > res->block_size)
+        return false;
+
+    memcpy((void *)(buf->data.buffer_data + offset), ptr, (size_t)size);
+    buf->data.dirty_bits |= DIRTY_BUFFER_DATA;
+
+    if (pptr->uniform_constants.elem_size[owner] == 0)
+        pptr->uniform_constants.elem_size[owner] = sizeof(GLfloat);
+
+    return true;
+}
+
 void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size)
 {
     Buffer *buf;
@@ -710,6 +1051,15 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
     ERROR_CHECK_RETURN(location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(size > 0, GL_INVALID_VALUE);
 
+    {
+        GLint element = 0;
+        SpirvResource *leaf = plainUniformByLocation(pptr, location, &element);
+
+        if (leaf && leaf->offset >= 0 &&
+            writeStructLeaf(ctx, pptr, leaf, element, ptr, size))
+            return;
+    }
+
     buf = pptr->uniform_constants.buffers[location].buf;
 
     if (buf == NULL)
@@ -719,7 +1069,20 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
         pptr->uniform_constants.buffers[location].buf = buf;
     }
 
-    initBufferData(ctx, buf, size, (void *)ptr, true);
+    {
+        GLint element = 0;
+        SpirvResource *res = plainUniformByLocation(pptr, location, &element);
+        GLubyte packed[256];
+        GLsizei packed_size = 0;
+
+        if (res && boolComponentsFor(res->gl_type))
+            packed_size = packBoolUniform(res->gl_type, ptr, size, packed, (GLsizei)sizeof packed);
+
+        if (packed_size)
+            initBufferData(ctx, buf, packed_size, packed, true);
+        else
+            initBufferData(ctx, buf, size, (void *)ptr, true);
+    }
 
     if (pptr->uniform_constants.elem_size[location] == 0)
         pptr->uniform_constants.elem_size[location] = sizeof(GLfloat);

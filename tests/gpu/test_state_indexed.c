@@ -476,3 +476,43 @@ GPU_TEST(state_indexed, scissor_indexedv_sets_one)
     glScissorIndexedv(0, NULL);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 }
+
+/* glEnablei/glDisablei take GL_BLEND and GL_SCISSOR_TEST as well as the clip
+   distances. MGL accepted only clip distances, so a deferred renderer turning
+   blending off per draw buffer raised GL_INVALID_ENUM on every call. */
+GPU_TEST(state_indexed, indexed_enable_takes_blend_and_scissor)
+{
+    mgl_drain_errors();
+
+    for (GLuint i = 0; i < 4; i++)
+    {
+        glEnablei(GL_BLEND, i);
+        CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+        CHECK(glIsEnabledi(GL_BLEND, i) == GL_TRUE);
+    }
+
+    glDisablei(GL_BLEND, 2);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+    CHECK(glIsEnabledi(GL_BLEND, 2) == GL_FALSE);
+    CHECK(glIsEnabledi(GL_BLEND, 1) == GL_TRUE);
+    CHECK(glIsEnabledi(GL_BLEND, 3) == GL_TRUE);
+
+    glEnablei(GL_SCISSOR_TEST, 0);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+    CHECK(glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE);
+    glDisablei(GL_SCISSOR_TEST, 0);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+    CHECK(glIsEnabled(GL_SCISSOR_TEST) == GL_FALSE);
+
+    /* the plain enable goes back to controlling every draw buffer */
+    glEnable(GL_BLEND);
+    CHECK(glIsEnabledi(GL_BLEND, 2) == GL_TRUE);
+    glDisable(GL_BLEND);
+    CHECK(glIsEnabledi(GL_BLEND, 2) == GL_FALSE);
+
+    /* an index past the end is a value error, an unindexed cap an enum error */
+    glEnablei(GL_BLEND, 1024);
+    CHECK_EQ_UINT(GL_INVALID_VALUE, mgl_drain_errors());
+    glEnablei(GL_CULL_FACE, 0);
+    CHECK_EQ_UINT(GL_INVALID_ENUM, mgl_drain_errors());
+}
