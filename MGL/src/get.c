@@ -465,19 +465,7 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         // GL_MAX_VARYING_FLOATS and GL_MAX_VARYING_COMPONENTS are the same
         // enum and count the same thing, four per vector. The stored value was
         // read back from MGL itself at startup and so was always zero.
-        case 0x8B4B: { // GL_MAX_VARYING_FLOATS / GL_MAX_VARYING_COMPONENTS
-            GLint n = (GLint)STATE_VAR(max_varying_vectors) * 4;
-
-            if (n < 60)
-                n = 60;
-
-            switch(type) {
-                case kBool: RET_BOOL(n)
-                case kInt: RET_INT(n)
-                case kFloat: RET_FLOAT(n)
-                case kDouble: RET_DOUBLE(n)
-            }
-        } break;
+        case 0x8B4B: RET_TYPE_VAR(type, max_varying_components); break; // GL_MAX_VARYING_FLOATS / GL_MAX_VARYING_COMPONENTS
         case 0x8B4C: RET_TYPE_VAR(type, max_vertex_texture_image_units); break; // GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS
         case 0x8B4D: RET_TYPE_VAR(type, max_combined_texture_image_units); break; // GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS
         case 0x8B8D: RET_TYPE_VAR(type, current_program); break; // GL_CURRENT_PROGRAM
@@ -576,7 +564,20 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x90EB: RET_TYPE_VAR(type, max_compute_work_group_invocations); break; // GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS
         case 0x91BE: RET_TYPE_VAR(type, max_compute_work_group_count[0]); break; // GL_MAX_COMPUTE_WORK_GROUP_COUNT
         case 0x91BF: RET_TYPE_VAR(type, max_compute_work_group_size[0]); break; // GL_MAX_COMPUTE_WORK_GROUP_SIZE
-        case 0x90EF: RET_TYPE_VAR(type, dispatch_indirect_buffer_binding); break; // GL_DISPATCH_INDIRECT_BUFFER_BINDING
+        // the live binding is the honest answer; a cached copy drifts the
+        // moment glBindBuffer touches one of these targets
+#define RET_BOUND_BUFFER(__slot__) \
+    RET_TYPE_CONST(type, (GLuint)(STATE(buffers[__slot__]) ? STATE(buffers[__slot__])->name : 0u))
+
+        case 0x90EF: RET_BOUND_BUFFER(_DISPATCH_INDIRECT_BUFFER); break; // GL_DISPATCH_INDIRECT_BUFFER_BINDING
+        case 0x8F43: RET_BOUND_BUFFER(_DRAW_INDIRECT_BUFFER); break;     // GL_DRAW_INDIRECT_BUFFER_BINDING
+
+        case 0x935C: RET_TYPE_VAR(type, clip_origin); break;     // GL_CLIP_ORIGIN
+        case 0x935D: RET_TYPE_VAR(type, clip_depth); break;      // GL_CLIP_DEPTH_MODE
+        case 0x8F36: RET_BOUND_BUFFER(_COPY_READ_BUFFER); break;         // GL_COPY_READ_BUFFER_BINDING
+        case 0x8F37: RET_BOUND_BUFFER(_COPY_WRITE_BUFFER); break;        // GL_COPY_WRITE_BUFFER_BINDING
+        case 0x9193: RET_BOUND_BUFFER(_QUERY_BUFFER); break;             // GL_QUERY_BUFFER_BINDING
+        case 0x8C2A: RET_BOUND_BUFFER(_TEXTURE_BUFFER); break;           // GL_TEXTURE_BUFFER_BINDING
         case 0x826C: RET_TYPE_VAR(type, max_debug_group_stack_depth); break; // GL_MAX_DEBUG_GROUP_STACK_DEPTH
         case 0x826D: RET_TYPE_VAR(type, debug_group_stack_depth); break; // GL_DEBUG_GROUP_STACK_DEPTH
         case 0x82E8: RET_TYPE_VAR(type, max_label_length); break; // GL_MAX_LABEL_LENGTH
@@ -604,12 +605,12 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x82D9: RET_TYPE_VAR(type, max_vertex_attrib_relative_offset); break; // GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET
         case 0x82DA: RET_TYPE_VAR(type, max_vertex_attrib_bindings); break; // GL_MAX_VERTEX_ATTRIB_BINDINGS
 
-        case 0x8C80: RET_TYPE_CONST(type, 4); break;   // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS
-        case 0x8C8A: RET_TYPE_CONST(type, 128); break; // GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS
+        case 0x8C80: RET_TYPE_VAR(type, max_transform_feedback_separate_components); break; // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS
+        case 0x8C8A: RET_TYPE_VAR(type, max_transform_feedback_interleaved_components); break; // GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS
         // this one is a loop bound in the CTS's state reset, so it has to be
         // the number of binding points we actually accept
-        case 0x8C8B: RET_TYPE_CONST(type, MAX_TRANSFORM_FEEDBACK_BUFFERS); break; // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS
-        case 0x8E70: RET_TYPE_CONST(type, MAX_TRANSFORM_FEEDBACK_BUFFERS); break; // GL_MAX_TRANSFORM_FEEDBACK_BUFFERS
+        case 0x8C8B: RET_TYPE_VAR(type, max_transform_feedback_separate_attribs); break; // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS
+        case 0x8E70: RET_TYPE_VAR(type, max_transform_feedback_buffers); break; // GL_MAX_TRANSFORM_FEEDBACK_BUFFERS
 
         case 0x9143: RET_TYPE_CONST(type, 1024); break; // GL_MAX_DEBUG_MESSAGE_LENGTH
         case 0x9144: RET_TYPE_CONST(type, 64); break;   // GL_MAX_DEBUG_LOGGED_MESSAGES
@@ -619,53 +620,62 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x8E74: RET_TYPE_VAR_COUNT(type, patch_default_outer, 4); break; // GL_PATCH_DEFAULT_OUTER_LEVEL
         // the geometry limits MGL never answered; the shader rewrite bounds
         // the first two, the rest are the 4.6 floor
-        case 0x8DE0: RET_TYPE_CONST(type, 256); break;  // GL_MAX_GEOMETRY_OUTPUT_VERTICES
-        case 0x92CF: RET_TYPE_CONST(type, 1); break;    // GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS
-        case 0x90CD: RET_TYPE_CONST(type, 0); break;    // GL_MAX_GEOMETRY_IMAGE_UNIFORMS
-        case 0x8E71: RET_TYPE_CONST(type, 1); break;    // GL_MAX_VERTEX_STREAMS
-        case 0x8F39: RET_TYPE_CONST(type, 16); break;   // GL_MAX_COMBINED_SHADER_OUTPUT_RESOURCES
-        case 0x8E7D: RET_TYPE_CONST(type, 32); break;   // GL_MAX_PATCH_VERTICES
+        case 0x8DE0: RET_TYPE_VAR(type, max_geometry_output_vertices); break; // GL_MAX_GEOMETRY_OUTPUT_VERTICES
+        case 0x92CF: RET_TYPE_VAR(type, max_geometry_atomic_counter_buffers); break; // GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS
+        case 0x90CD: RET_TYPE_VAR(type, max_geometry_image_uniforms); break; // GL_MAX_GEOMETRY_IMAGE_UNIFORMS
+        case 0x8E71: RET_TYPE_VAR(type, max_vertex_streams); break; // GL_MAX_VERTEX_STREAMS
+        case 0x8F39: RET_TYPE_VAR(type, max_combined_shader_output_resources); break; // GL_MAX_COMBINED_SHADER_OUTPUT_RESOURCES
+        case 0x8E7D: RET_TYPE_VAR(type, max_patch_vertices); break; // GL_MAX_PATCH_VERTICES
         // the rest of the 4.6 tessellation limits, at the floor the spec sets
-        case 0x92CD: RET_TYPE_CONST(type, 1); break;    // GL_MAX_TESS_CONTROL_ATOMIC_COUNTER_BUFFERS
-        case 0x92CE: RET_TYPE_CONST(type, 1); break;    // GL_MAX_TESS_EVALUATION_ATOMIC_COUNTER_BUFFERS
-        case 0x8E81: RET_TYPE_CONST(type, 16); break;   // GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS
-        case 0x8E82: RET_TYPE_CONST(type, 16); break;   // GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS
-        case 0x8E7F: RET_TYPE_CONST(type, 1024); break; // GL_MAX_TESS_CONTROL_UNIFORM_COMPONENTS
-        case 0x8E80: RET_TYPE_CONST(type, 1024); break; // GL_MAX_TESS_EVALUATION_UNIFORM_COMPONENTS
-        case 0x8E1E: RET_TYPE_CONST(type, 1024); break; // GL_MAX_COMBINED_TESS_CONTROL_UNIFORM_COMPONENTS
-        case 0x8E1F: RET_TYPE_CONST(type, 1024); break; // GL_MAX_COMBINED_TESS_EVALUATION_UNIFORM_COMPONENTS
-        case 0x90CB: RET_TYPE_CONST(type, 0); break;    // GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS
-        case 0x90CC: RET_TYPE_CONST(type, 0); break;    // GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS
-        case 0x8E7E: RET_TYPE_CONST(type, 64); break;   // GL_MAX_TESS_GEN_LEVEL
-        case 0x8E84: RET_TYPE_CONST(type, 120); break;  // GL_MAX_TESS_PATCH_COMPONENTS
-        case 0x8E85: RET_TYPE_CONST(type, 4096); break; // GL_MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS
-        case 0x886C: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_CONTROL_INPUT_COMPONENTS
-        case 0x8E83: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_CONTROL_OUTPUT_COMPONENTS
-        case 0x886D: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_EVALUATION_INPUT_COMPONENTS
-        case 0x8E86: RET_TYPE_CONST(type, 128); break;  // GL_MAX_TESS_EVALUATION_OUTPUT_COMPONENTS
+        case 0x92CD: RET_TYPE_VAR(type, max_tess_control_atomic_counter_buffers); break; // GL_MAX_TESS_CONTROL_ATOMIC_COUNTER_BUFFERS
+        case 0x92CE: RET_TYPE_VAR(type, max_tess_evaluation_atomic_counter_buffers); break; // GL_MAX_TESS_EVALUATION_ATOMIC_COUNTER_BUFFERS
+        case 0x8E81: RET_TYPE_VAR(type, max_tess_control_texture_image_units); break; // GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS
+        case 0x8E82: RET_TYPE_VAR(type, max_tess_evaluation_texture_image_units); break; // GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS
+        case 0x8E7F: RET_TYPE_VAR(type, max_tess_control_uniform_components); break; // GL_MAX_TESS_CONTROL_UNIFORM_COMPONENTS
+        case 0x8E80: RET_TYPE_VAR(type, max_tess_evaluation_uniform_components); break; // GL_MAX_TESS_EVALUATION_UNIFORM_COMPONENTS
+        case 0x8E1E: RET_TYPE_VAR(type, max_combined_tess_control_uniform_components); break; // GL_MAX_COMBINED_TESS_CONTROL_UNIFORM_COMPONENTS
+        case 0x8E1F: RET_TYPE_VAR(type, max_combined_tess_evaluation_uniform_components); break; // GL_MAX_COMBINED_TESS_EVALUATION_UNIFORM_COMPONENTS
+        case 0x90CB: RET_TYPE_VAR(type, max_tess_control_image_uniforms); break; // GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS
+        case 0x90CC: RET_TYPE_VAR(type, max_tess_evaluation_image_uniforms); break; // GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS
+        case 0x8E7E: RET_TYPE_VAR(type, max_tess_gen_level); break; // GL_MAX_TESS_GEN_LEVEL
+        case 0x8E84: RET_TYPE_VAR(type, max_tess_patch_components); break; // GL_MAX_TESS_PATCH_COMPONENTS
+        case 0x8E85: RET_TYPE_VAR(type, max_tess_control_total_output_components); break; // GL_MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS
+        case 0x886C: RET_TYPE_VAR(type, max_tess_control_input_components); break; // GL_MAX_TESS_CONTROL_INPUT_COMPONENTS
+        case 0x8E83: RET_TYPE_VAR(type, max_tess_control_output_components); break; // GL_MAX_TESS_CONTROL_OUTPUT_COMPONENTS
+        case 0x886D: RET_TYPE_VAR(type, max_tess_evaluation_input_components); break; // GL_MAX_TESS_EVALUATION_INPUT_COMPONENTS
+        case 0x8E86: RET_TYPE_VAR(type, max_tess_evaluation_output_components); break; // GL_MAX_TESS_EVALUATION_OUTPUT_COMPONENTS
 
         // 0x8F38 is MAX_IMAGE_UNITS, not MAX_IMAGE_SAMPLES -- an earlier pass
         // mislabelled it and answered 1 where the 4.6 floor is 8.
-        case 0x8F38: RET_TYPE_CONST(type, TEXTURE_UNITS); break; // GL_MAX_IMAGE_UNITS
-        case 0x906D: RET_TYPE_CONST(type, 1); break;    // GL_MAX_IMAGE_SAMPLES
-        case 0x90CA: RET_TYPE_CONST(type, 8); break;    // GL_MAX_VERTEX_IMAGE_UNIFORMS
-        case 0x90CE: RET_TYPE_CONST(type, 8); break;    // GL_MAX_FRAGMENT_IMAGE_UNIFORMS
-        case 0x90CF: RET_TYPE_CONST(type, 8); break;    // GL_MAX_COMBINED_IMAGE_UNIFORMS
-        case 0x91BD: RET_TYPE_CONST(type, 8); break;    // GL_MAX_COMPUTE_IMAGE_UNIFORMS
+        case 0x8F38: RET_TYPE_VAR(type, max_image_units); break; // GL_MAX_IMAGE_UNITS
+        case 0x906D: RET_TYPE_VAR(type, max_image_samples); break; // GL_MAX_IMAGE_SAMPLES
+        case 0x90CA: RET_TYPE_VAR(type, max_vertex_image_uniforms); break; // GL_MAX_VERTEX_IMAGE_UNIFORMS
+        case 0x90CE: RET_TYPE_VAR(type, max_fragment_image_uniforms); break; // GL_MAX_FRAGMENT_IMAGE_UNIFORMS
+        case 0x90CF: RET_TYPE_VAR(type, max_combined_image_uniforms); break; // GL_MAX_COMBINED_IMAGE_UNIFORMS
+        case 0x91BD: RET_TYPE_VAR(type, max_compute_image_uniforms); break; // GL_MAX_COMPUTE_IMAGE_UNIFORMS
+
+        case 0x82F9: RET_TYPE_VAR(type, max_cull_distances); break; // GL_MAX_CULL_DISTANCES
+        case 0x82FA: RET_TYPE_VAR(type, max_combined_clip_and_cull_distances); break; // GL_MAX_COMBINED_CLIP_AND_CULL_DISTANCES
+        case 0x82E5: RET_TYPE_VAR(type, max_vertex_attrib_stride); break; // GL_MAX_VERTEX_ATTRIB_STRIDE
+        case 0x8E5E: RET_TYPE_VAR(type, min_program_texture_gather_offset); break; // GL_MIN_PROGRAM_TEXTURE_GATHER_OFFSET
+        case 0x8E5F: RET_TYPE_VAR(type, max_program_texture_gather_offset); break; // GL_MAX_PROGRAM_TEXTURE_GATHER_OFFSET
+        case 0x92CC: RET_TYPE_VAR(type, max_vertex_atomic_counter_buffers); break; // GL_MAX_VERTEX_ATOMIC_COUNTER_BUFFERS
+        case 0x92D0: RET_TYPE_VAR(type, max_fragment_atomic_counter_buffers); break; // GL_MAX_FRAGMENT_ATOMIC_COUNTER_BUFFERS
+        case 0x92D1: RET_TYPE_VAR(type, max_combined_atomic_counter_buffers); break; // GL_MAX_COMBINED_ATOMIC_COUNTER_BUFFERS
 
         case 0x8E22: RET_TYPE_CONST(type, 0); break;    // GL_TRANSFORM_FEEDBACK
         case 0x8E23: RET_TYPE_CONST(type, GL_FALSE); break; // GL_TRANSFORM_FEEDBACK_PAUSED
         case 0x8E24: RET_TYPE_CONST(type, GL_FALSE); break; // GL_TRANSFORM_FEEDBACK_ACTIVE
 
-        case 0x8E5A: RET_TYPE_CONST(type, 32); break;   // GL_MAX_GEOMETRY_SHADER_INVOCATIONS
-        case 0x8DE1: RET_TYPE_CONST(type, 1024); break; // GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS
+        case 0x8E5A: RET_TYPE_VAR(type, max_geometry_shader_invocations); break; // GL_MAX_GEOMETRY_SHADER_INVOCATIONS
+        case 0x8DE1: RET_TYPE_VAR(type, max_geometry_total_output_components); break; // GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS
 
         case 0x8E5B: RET_TYPE_CONST(type, -0.5); break; // GL_MIN_FRAGMENT_INTERPOLATION_OFFSET
         case 0x8E5C: RET_TYPE_CONST(type, 0.5); break;  // GL_MAX_FRAGMENT_INTERPOLATION_OFFSET
         case 0x8E5D: RET_TYPE_CONST(type, 4); break;    // GL_FRAGMENT_INTERPOLATION_OFFSET_BITS
 
-        case 0x92DC: RET_TYPE_CONST(type, MAX_ATOMIC_COUNTER_BUFFER_BINDINGS); break; // GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS
-        case 0x92D8: RET_TYPE_CONST(type, 32768); break; // GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE
+        case 0x92DC: RET_TYPE_VAR(type, max_atomic_counter_buffer_bindings); break; // GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS
+        case 0x92D8: RET_TYPE_VAR(type, max_atomic_counter_buffer_size); break; // GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE
         case 0x92D9: RET_TYPE_CONST(type, MAX_ATOMIC_COUNTER_BUFFER_BINDINGS); break; // GL_ACTIVE_ATOMIC_COUNTER_BUFFERS
 
         default:
@@ -770,6 +780,8 @@ static const char * const mgl_extensions[] = {
     "GL_ARB_texture_mirror_clamp_to_edge",
     "GL_ARB_ES2_compatibility",
     "GL_ARB_ES3_compatibility",
+    "GL_ARB_ES3_1_compatibility",
+    "GL_ARB_cull_distance",
     "GL_KHR_debug",
     "GL_KHR_robustness",
     "GL_EXT_texture_filter_anisotropic",

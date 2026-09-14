@@ -494,21 +494,21 @@ GPU_TEST(texture_query, getn_tex_image)
 
 GPU_TEST(texture_query, compressed_texture_stubs)
 {
-    /* All compressed texture readback entry points are stubs that print
-     * a warning but do not set an error. Verify they don't crash. */
+    /* Asking for compressed blocks where there are none is an error, not a
+     * silent no-op: the CTS hands these calls a pointer it expects untouched. */
     unsigned char buf[64] = { 0 };
 
     glGetCompressedTexImage(GL_TEXTURE_2D, 0, buf);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glGetnCompressedTexImage(GL_TEXTURE_2D, 0, sizeof buf, buf);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glGetCompressedTextureSubImage(999, 0, 0, 0, 0, 4, 4, 1, sizeof buf, buf);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glGetCompressedTextureImage(999, 0, sizeof buf, buf);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 }
 
 /* ---------- glGetnCompressedTexImage error validation ---------- */

@@ -198,6 +198,8 @@ bool     mglFormatTypeAgrees(GLenum format, GLenum type);
 size_t   mglFormatBytesPerRow(GLenum gl_internal_format, GLsizei width);
 size_t   mglFormatImageSize(GLenum gl_internal_format, GLsizei w, GLsizei h, GLsizei d);
 GLint    mglFormatComponentBits(GLenum gl_internal_format, GLenum component);
+GLenum   mglFormatComponentType(GLenum gl_internal_format);
+bool     mglFormatIsSRGB(GLenum gl_internal_format);
 GLsizei  mglFormatCompressedFormatList(GLenum *out, GLsizei max);
 size_t   mglFormatTableCount(void);
 const MGLFormatDesc *mglFormatTableRow(size_t i);

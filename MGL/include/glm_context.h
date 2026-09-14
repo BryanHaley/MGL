@@ -441,6 +441,24 @@ typedef struct VertexArray_t {
 #define MGL_XFB_MAX_BUFFERS   4
 #define MGL_XFB_FIRST_MSL_SLOT 22
 
+// Cull distance needs a pass of its own before the draw, and five buffers.
+#define MGL_CULL_FIRST_BINDING  20
+#define MGL_CULL_FIRST_MSL_SLOT 24
+
+// What the cull distance rewrite found and built.
+typedef struct CullInfo_t {
+    GLint  count;            // gl_CullDistance array size, zero when unused
+    char  *capture_src;      // the vertex shader that records the distances
+    char  *kernel_src;       // the compute shader that drops whole primitives
+    GLint  cap_out_slot;     // MglCullB in the capture vertex shader
+    GLint  k_cull_slot, k_src_slot, k_out_slot, k_arg_slot, k_cfg_slot;
+    GLint  building;         // 1 while the capture compiles, 2 for the kernel
+} CullInfo;
+
+GLint mglCullDistanceSize(const char *src);
+bool  mglBuildCullShaders(const char *vs_src, CullInfo *ci);
+void  mglFreeCullInfo(CullInfo *ci);
+
 // What the transform feedback rewrite produced and how it laid the capture out.
 typedef struct CaptureInfo_t {
     char   *rewritten_src;
@@ -487,6 +505,10 @@ static inline bool mglResourceIsInternal(const char *name)
     return name && (!strncmp(name, "Mgl", 3) || !strncmp(name, "mgl", 3));
 }
 
+void  mglInitLimits(GLMContext ctx);
+// really a const glslang_resource_t *, but glslang's header is C++-adjacent
+const void *mglGlslangResource(GLMContext ctx);
+
 bool  mglRewriteGeometryShader(const char *src, GeometryInfo *gi);
 char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi);
 void  mglFreeGeometryInfo(GeometryInfo *gi);
@@ -523,6 +545,9 @@ typedef struct Shader_t {
     const char *mtl_shader_type_name;
     size_t src_len;
     const char *src;
+    // what the source looks like once the preprocessor has had it; the cull
+    // distance rewrite needs to see through the application's own macros
+    char *pp_src;
     glslang_shader_t *compiled_glsl_shader;
     const char *entry_point;
     char *log;
@@ -666,6 +691,11 @@ typedef struct Program_t {
     // a geometry shader becomes a compute pass plus a generated vertex shader
     GeometryInfo geom;
     Spirv gs_passthrough;
+    // gl_CullDistance drops whole primitives, which Metal cannot do, so a
+    // compute pass picks the survivors before the real draw
+    CullInfo cull;
+    Spirv cull_capture;
+    Spirv cull_kernel;
 } Program;
 
 // True once a program has linked a geometry stage. An application may detach
@@ -673,6 +703,11 @@ typedef struct Program_t {
 static inline bool mglProgramHasGeometry(const Program *p)
 {
     return p && p->geom.compute_src != NULL;
+}
+
+static inline bool mglProgramCulls(const Program *p)
+{
+    return p && p->cull.count > 0 && p->cull.kernel_src != NULL;
 }
 
 typedef struct ProgramPipeline_t {

@@ -2243,6 +2243,10 @@ void mglTextureSubImage3D(GLMContext ctx, GLuint texture, GLint level, GLint xof
 
 void texStorage(GLMContext ctx, Texture *tex, GLuint faces, GLsizei levels, GLboolean is_array, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean proxy)
 {
+    // the DSA entry points take a name, and a name nothing was created under
+    // arrives here as NULL
+    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+
     tex->access = GL_READ_ONLY;
 
     for(int face=0; face<faces; face++)
@@ -3359,6 +3363,21 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
         ERROR_CHECK_RETURN_VALUE(bytes_per_row * height * depth <= (size_t)bufSize, GL_INVALID_OPERATION, false);
     }
 
+    // and it still has to fit in what is left of the pack buffer
+    if (STATE(buffers[_PIXEL_PACK_BUFFER]))
+    {
+        Buffer *pbo = STATE(buffers[_PIXEL_PACK_BUFFER]);
+        uintptr_t used = (uintptr_t)pixels - (uintptr_t)pbo->data.buffer_data;
+
+        ERROR_CHECK_RETURN_VALUE(used + bytes_per_row * height * depth <= (size_t)pbo->size,
+                                 GL_INVALID_OPERATION, false);
+
+        // a type wider than a byte has to land on its own size
+        size_t align = sizeForFormatType(GL_RED, type);
+
+        ERROR_CHECK_RETURN_VALUE(align == 0 || (used % align) == 0, GL_INVALID_OPERATION, false);
+    }
+
     // An array or 3D level is more than one image, and GL wants them back to
     // back. Reading only slice zero left the rest of the caller's buffer
     // holding whatever was already in it.
@@ -3505,18 +3524,31 @@ static void getCompressedTexImage(GLMContext ctx, Texture *tex, GLint level, GLs
 {
     TextureLevel *lvl;
     size_t image_size;
+    Buffer *pbo = STATE(buffers[_PIXEL_PACK_BUFFER]);
+    uintptr_t pbo_offset = 0;
+
+    // with a pack buffer bound the pointer is an offset into it, not memory
+    if (pbo)
+    {
+        pbo_offset = (uintptr_t)pixels;
+
+        ERROR_CHECK_RETURN(pbo->mapped == GL_FALSE, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(pbo->data.buffer_data, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(pbo_offset <= (uintptr_t)pbo->size, GL_INVALID_OPERATION);
+
+        pixels = (void *)((uint8_t *)(uintptr_t)pbo->data.buffer_data + pbo_offset);
+    }
 
     if (tex == NULL || pixels == NULL || level < 0 || texLevelDefined(tex, 0, level) == false)
     {
-        MGL_ERR("MGL Warning: glGetCompressedTexImage: nothing compressed to read back\n");
-        return;
+        ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
     if (mglFormatIsCompressed(tex->internalformat) == false)
     {
         MGL_ERR("MGL Warning: glGetCompressedTexImage: texture %u holds 0x%x, which is not compressed\n",
                 tex->name, tex->internalformat);
-        return;
+        ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
     lvl = &tex->faces[0].levels[level];
@@ -3528,6 +3560,10 @@ static void getCompressedTexImage(GLMContext ctx, Texture *tex, GLint level, GLs
 
     if (check_size)
         ERROR_CHECK_RETURN(image_size <= (size_t)bufSize, GL_INVALID_OPERATION);
+
+    // the blocks still have to fit in what is left of the pack buffer
+    if (pbo)
+        ERROR_CHECK_RETURN(pbo_offset + image_size <= (uintptr_t)pbo->size, GL_INVALID_OPERATION);
 
     ERROR_CHECK_RETURN(lvl->data, GL_INVALID_OPERATION);
 
@@ -3571,8 +3607,7 @@ void mglGetCompressedTextureSubImage(GLMContext ctx, GLuint texture, GLint level
     if (tex == NULL || pixels == NULL || texLevelDefined(tex, 0, level) == false ||
         mglFormatIsCompressed(tex->internalformat) == false)
     {
-        MGL_ERR("MGL Warning: glGetCompressedTextureSubImage: nothing compressed to read back\n");
-        return;
+        ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
     ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);

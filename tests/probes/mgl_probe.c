@@ -869,7 +869,183 @@ static void phase6(void)
          }), "silence here returns uninitialised memory");
 
     gate("ARB_cull_distance advertised", hasExt("GL_ARB_cull_distance"), "core since 4.5");
+
+    /* Culling is not clipping: a triangle whose corners disagree stays whole,
+       and one every corner rejects goes away completely. */
+    {
+        static const char *vs =
+            "#version 450 core\n"
+            "layout(location = 0) in vec2 p;\n"
+            "layout(location = 1) in float d;\n"
+            "out float gl_CullDistance[1];\n"
+            "void main() { gl_Position = vec4(p, 0, 1); gl_CullDistance[0] = d; }\n";
+        static const char *fs =
+            "#version 450 core\n"
+            "out vec4 o;\n"
+            "void main() { o = vec4(0, 1, 0, 1); }\n";
+        GLuint prog = buildProgram(vs, NULL, NULL, NULL, fs);
+        int whole = 0, mixed = 0, none = 1;
+
+        if (prog)
+        {
+            GLuint fbo = probeTarget(NULL), vao, vbo;
+            GLfloat v[9] = { -1,-1, 1,  3,-1, 1,  -1,3, 1 };
+
+            glUseProgram(prog);
+            glGenVertexArrays(1, &vao);
+            glBindVertexArray(vao);
+            glGenBuffers(1, &vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_DYNAMIC_DRAW);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 12, 0);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 12, (void *)8);
+            glEnableVertexAttribArray(1);
+            glViewport(0, 0, 64, 64);
+            glClearColor(1, 0, 0, 1);
+
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            whole = greenPixels();
+
+            v[2] = -1.0f;
+            glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_DYNAMIC_DRAW);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            mixed = greenPixels();
+
+            v[5] = v[8] = -1.0f;
+            glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_DYNAMIC_DRAW);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            none = greenPixels();
+
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &fbo);
+            glUseProgram(0);
+        }
+
+        gate("cull distance drops whole primitives", whole > 1000 && mixed == whole && none == 0,
+             "one negative corner keeps the triangle, three lose it");
+    }
+
     gate("ARB_ES3_1_compatibility advertised", hasExt("GL_ARB_ES3_1_compatibility"), "core since 4.5");
+
+    /* The point of the extension is that an ES 3.1 shader compiles and runs in
+       a desktop context, so ask one to fill a storage buffer. */
+    {
+        static const char *cs =
+            "#version 310 es\n"
+            "layout(local_size_x = 4) in;\n"
+            "layout(std430, binding = 0) buffer Out { uint v[]; } o;\n"
+            "void main() { o.v[gl_GlobalInvocationID.x] = gl_GlobalInvocationID.x + 7u; }\n";
+        GLuint prog = glCreateProgram();
+        GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
+        GLint ok = 0;
+        GLuint got[4] = { 0, 0, 0, 0 };
+
+        glShaderSource(sh, 1, &cs, NULL);
+        glCompileShader(sh);
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+
+        if (ok)
+        {
+            glAttachShader(prog, sh);
+            glLinkProgram(prog);
+            glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        }
+
+        if (ok)
+        {
+            GLuint ssbo;
+
+            glGenBuffers(1, &ssbo);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+            glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof got, NULL, GL_DYNAMIC_DRAW);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+            glUseProgram(prog);
+            glDispatchCompute(1, 1, 1);
+            glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof got, got);
+            glUseProgram(0);
+            glDeleteBuffers(1, &ssbo);
+        }
+
+        gate("an ES 3.1 shader runs in a desktop context",
+             ok && got[0] == 7 && got[3] == 10,
+             "#version 310 es, dispatched, read back");
+    }
+
+    /* Direct state access: build and fill a texture without ever binding it,
+       then read the bytes back. */
+    {
+        GLuint tex = 0;
+        GLubyte want[16], got[16];
+        int same = 0;
+
+        for (int i = 0; i < 16; i++)
+            want[i] = (GLubyte)(i * 7 + 3);
+
+        memset(got, 0, sizeof got);
+        drain();
+
+        glCreateTextures(GL_TEXTURE_2D, 1, &tex);
+        glTextureStorage2D(tex, 1, GL_RGBA8, 2, 2);
+        glTextureSubImage2D(tex, 0, 0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, want);
+        glGetTextureImage(tex, 0, GL_RGBA, GL_UNSIGNED_BYTE, sizeof got, got);
+
+        same = glGetError() == GL_NO_ERROR && memcmp(want, got, sizeof got) == 0;
+
+        glDeleteTextures(1, &tex);
+
+        gate("a texture can be made and filled without binding it",
+             same, "glCreateTextures, glTextureStorage2D, glTextureSubImage2D, glGetTextureImage");
+    }
+
+    /* Shader images: a compute shader writes one, and the bytes come back. */
+    {
+        static const char *cs =
+            "#version 430 core\n"
+            "layout(local_size_x = 2, local_size_y = 2) in;\n"
+            "layout(rgba8, binding = 0) uniform writeonly image2D img;\n"
+            "void main() { imageStore(img, ivec2(gl_GlobalInvocationID.xy), vec4(0, 1, 0, 1)); }\n";
+        GLuint prog = glCreateProgram();
+        GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
+        GLint ok = 0;
+        GLubyte got[16];
+
+        memset(got, 0, sizeof got);
+        glShaderSource(sh, 1, &cs, NULL);
+        glCompileShader(sh);
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+
+        if (ok)
+        {
+            glAttachShader(prog, sh);
+            glLinkProgram(prog);
+            glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        }
+
+        if (ok)
+        {
+            GLuint tex;
+
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2);
+            glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
+            glUseProgram(prog);
+            glDispatchCompute(1, 1, 1);
+            glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+            glUseProgram(0);
+            glDeleteTextures(1, &tex);
+        }
+
+        gate("a compute shader writes an image",
+             ok && got[0] == 0 && got[1] == 255 && got[13] == 255,
+             "imageStore into an rgba8 image2D, read back through glGetTexImage");
+    }
 }
 
 /* --- phase 8: extensions beyond core ------------------------------------- */

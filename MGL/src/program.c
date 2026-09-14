@@ -235,6 +235,27 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
 
     memset(&ptr->gs_passthrough, 0, sizeof(ptr->gs_passthrough));
 
+    mglFreeCullInfo(&ptr->cull);
+
+    {
+        Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel };
+
+        for (int c = 0; c < 2; c++)
+        {
+            free(cull[c]->ir);
+            free(cull[c]->msl_str);
+            free(cull[c]->entry_point);
+
+            if (cull[c]->mtl_function)
+                CFRelease(cull[c]->mtl_function);
+
+            if (cull[c]->mtl_library)
+                CFRelease(cull[c]->mtl_library);
+
+            memset(cull[c], 0, sizeof(*cull[c]));
+        }
+    }
+
     for (GLsizei i = 0; i < ptr->xfb_varying_count; i++)
         free(ptr->xfb_varyings[i]);
 
@@ -1310,6 +1331,11 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
+    // Metal has no cull distance and SPIRV-Cross's MSL backend writes broken
+    // code for it, so the builtin never reaches the output. MGL culls in a
+    // compute pass of its own instead.
+    spvc_compiler_mask_stage_output_by_builtin(compiler_msl, SpvBuiltInCullDistance);
+
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_msl_add_discrete_descriptor_set failed\n");
@@ -1376,6 +1402,30 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
             spvc_compiler_msl_add_resource_binding(compiler_msl, &rb);
         }
+    }
+
+    // the cull pass has buffers of its own, pinned the same way
+    if (ptr->cull.building)
+    {
+        int count = ptr->cull.building == 1 ? 1 : 5;
+
+        for (int b = 0; b < count; b++)
+        {
+            spvc_msl_resource_binding rb;
+
+            spvc_msl_resource_binding_init(&rb);
+            rb.stage = spvc_compiler_get_execution_model(compiler_msl);
+            rb.desc_set = 1;
+            rb.binding = MGL_CULL_FIRST_BINDING + b;
+            rb.msl_buffer = MGL_CULL_FIRST_MSL_SLOT + b;
+
+            spvc_compiler_msl_add_resource_binding(compiler_msl, &rb);
+        }
+
+        // the capture pass only fills a buffer, so Metal wants it to rasterise
+        // nothing and return void
+        if (ptr->cull.building == 1)
+            spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION, SPVC_TRUE);
     }
 
     if (ptr->shader_slots[_GEOMETRY_SHADER])
@@ -2086,8 +2136,8 @@ static void scanTessExecutionModes(Program *pptr, int stage)
 void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t *input);
 
 // Compiles one generated source into SPIR-V and then MSL, filling `out`.
-static bool buildGeneratedStage(GLMContext ctx, Program *pptr, GLenum gl_type,
-                                int spirv_slot, const char *src, const char *entry)
+static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_type,
+                                    int spirv_slot, Spirv *dest, const char *src, const char *entry)
 {
     glslang_input_t input;
     glslang_shader_t *shader;
@@ -2138,7 +2188,7 @@ static bool buildGeneratedStage(GLMContext ctx, Program *pptr, GLenum gl_type,
 
     glslang_program_SPIRV_generate(prog, stage);
 
-    Spirv *sp = spirv_slot >= 0 ? &pptr->spirv[spirv_slot] : &pptr->gs_passthrough;
+    Spirv *sp = dest ? dest : (spirv_slot >= 0 ? &pptr->spirv[spirv_slot] : &pptr->gs_passthrough);
 
     free(sp->ir);
     free(sp->msl_str);
@@ -2173,6 +2223,12 @@ static bool buildGeneratedStage(GLMContext ctx, Program *pptr, GLenum gl_type,
         return false;
 
     return true;
+}
+
+static bool buildGeneratedStage(GLMContext ctx, Program *pptr, GLenum gl_type,
+                                int spirv_slot, const char *src, const char *entry)
+{
+    return buildGeneratedStageInto(ctx, pptr, gl_type, spirv_slot, NULL, src, entry);
 }
 
 GLint mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name);
@@ -2247,6 +2303,69 @@ static GLint mslSlotForName(Program *pptr, int stage, const char *name)
             return (GLint)l->list[i].msl_index;
 
     return -1;
+}
+
+// Builds the two extra shaders a program that writes gl_CullDistance needs:
+// the vertex stage that records the distances, and the compute pass that reads
+// them back and keeps the primitives that survived.
+static void linkCullProgram(GLMContext ctx, Program *pptr)
+{
+    Shader *vs = pptr->shader_slots[_VERTEX_SHADER];
+    char entry[128];
+
+    mglFreeCullInfo(&pptr->cull);
+
+    if (vs == NULL || vs->src == NULL)
+        return;
+
+    // a geometry or tessellation stage would have to do the recording instead,
+    // and neither of those is wired up for it yet
+    if (pptr->shader_slots[_GEOMETRY_SHADER] || pptr->tess.active)
+        return;
+
+    // the application's own macros can hide the array's size, so the rewrite
+    // works from the preprocessed source when there is one
+    if (!mglBuildCullShaders(vs->pp_src ? vs->pp_src : vs->src, &pptr->cull))
+        return;
+
+    snprintf(entry, sizeof(entry), "cull_capture_%d", pptr->name);
+    pptr->cull.building = 1;
+
+    if (!buildGeneratedStageInto(ctx, pptr, GL_VERTEX_SHADER, _GEOMETRY_SHADER,
+                                 &pptr->cull_capture, pptr->cull.capture_src, entry))
+    {
+        pptr->cull.building = 0;
+        mglFreeCullInfo(&pptr->cull);
+        return;
+    }
+
+    snprintf(entry, sizeof(entry), "cull_kernel_%d", pptr->name);
+    pptr->cull.building = 2;
+
+    if (!buildGeneratedStageInto(ctx, pptr, GL_COMPUTE_SHADER, _COMPUTE_SHADER,
+                                 &pptr->cull_kernel, pptr->cull.kernel_src, entry))
+    {
+        pptr->cull.building = 0;
+        mglFreeCullInfo(&pptr->cull);
+        return;
+    }
+
+    pptr->cull.building = 0;
+
+    pptr->cull.cap_out_slot = mslSlotForName(pptr, _GEOMETRY_SHADER, "MglCullB");
+    pptr->cull.k_cull_slot  = mslSlotForName(pptr, _COMPUTE_SHADER, "MglCullB");
+    pptr->cull.k_src_slot   = mslSlotForName(pptr, _COMPUTE_SHADER, "MglCullSrcB");
+    pptr->cull.k_out_slot   = mslSlotForName(pptr, _COMPUTE_SHADER, "MglCullIdxB");
+    pptr->cull.k_arg_slot   = mslSlotForName(pptr, _COMPUTE_SHADER, "MglCullArgB");
+    pptr->cull.k_cfg_slot   = mslSlotForName(pptr, _COMPUTE_SHADER, "MglCullCfgB");
+
+    if (pptr->cull.cap_out_slot < 0 || pptr->cull.k_cull_slot < 0 ||
+        pptr->cull.k_src_slot < 0 || pptr->cull.k_out_slot < 0 ||
+        pptr->cull.k_arg_slot < 0 || pptr->cull.k_cfg_slot < 0)
+    {
+        MGL_ERR("MGL Error: the cull distance pass lost one of its buffers\n");
+        mglFreeCullInfo(&pptr->cull);
+    }
 }
 
 // Builds the three pieces a geometry program needs: the vertex stage with its
@@ -2603,6 +2722,9 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
     linkTransformCapture(ctx, pptr);
 
+    if (pptr->link_status == GL_TRUE)
+        linkCullProgram(ctx, pptr);
+
     assignUniformLocations(pptr);
 
     resolveTransformCaptureUniforms(pptr);
@@ -2798,27 +2920,49 @@ GLint  mglGetAttribLocation(GLMContext ctx, GLuint program, const GLchar *name)
 		return -1;
 	}
 
-	for (int stage=_VERTEX_SHADER; stage<_MAX_SHADER_TYPES; stage++)
+	// An array attribute takes one location per element, and GL lets the
+	// caller ask for any of them by index.
+	char base[256];
+	GLint element = 0;
+	const char *bracket = strchr(name, '[');
+
+	if (bracket)
 	{
-		int count;
+		size_t n = (size_t)(bracket - name);
 
-		count = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STAGE_INPUT].count;
+		if (n >= sizeof(base))
+			return -1;
 
-		for (int i=0; i<count; i++)
+		memcpy(base, name, n);
+		base[n] = 0;
+		element = atoi(bracket + 1);
+
+		if (element < 0)
+			return -1;
+	}
+	else
+	{
+		if (strlen(name) >= sizeof(base))
+			return -1;
+
+		strcpy(base, name);
+	}
+
+	{
+		SpirvResourceList *l = &ptr->spirv_resources_list[_VERTEX_SHADER][SPVC_RESOURCE_TYPE_STAGE_INPUT];
+
+		for (GLuint i = 0; i < l->count; i++)
 		{
-			const char *str = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STAGE_INPUT].list[i].name;
+			if (l->list[i].name == NULL || strcmp(l->list[i].name, base))
+				continue;
 
-			if (!strcmp(str, name))
-			{
-				GLuint location;
+			if (element > 0 && (GLuint)element >= l->list[i].array_size)
+				return -1;
 
-				location = ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STAGE_INPUT].list[i].location;
-
-				return location;
-			}
+			return (GLint)l->list[i].location + element;
 		}
 	}
-	
+
 	return -1;
 }
 

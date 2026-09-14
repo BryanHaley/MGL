@@ -92,14 +92,23 @@ void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t
      */
     int glsl_version = 330; /* Default to GLSL 3.30 - minimum for SPIR-V */
     int original_version = 330;
+    /* GL_ARB_ES3_1_compatibility lets an ES shader be compiled by a desktop
+     * context. Forcing it to the core profile makes the front end reject it. */
+    bool es_profile = false;
     const char *version_str = strstr(src, "#version");
     if (version_str) {
         int scanned_version;
         if (sscanf(version_str, "#version %d", &scanned_version) == 1) {
+            const char *eol = strchr(version_str, '\n');
+
             original_version = scanned_version;
             glsl_version = scanned_version;
+
+            if (eol && memmem(version_str, (size_t)(eol - version_str), " es", 3))
+                es_profile = true;
+
             /* Upgrade legacy GLSL versions to 330 minimum for SPIR-V */
-            if (glsl_version < 330) {
+            if (!es_profile && glsl_version < 330) {
                 glsl_version = 330;
             }
         }
@@ -127,7 +136,7 @@ void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t
     static char *modified_src = NULL;
     static size_t modified_src_size = 0;
 
-    if (original_version < 330) {
+    if (original_version < 330 && !es_profile) {
         MGL_INFO("[MGL] Upgrading GLSL shader from version %d to %d\n",
                 original_version, glsl_version);
 
@@ -185,10 +194,10 @@ void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t
     }
 
     input->default_version = glsl_version;
-    input->default_profile = GLSLANG_CORE_PROFILE;
+    input->default_profile = es_profile ? GLSLANG_ES_PROFILE : GLSLANG_CORE_PROFILE;
     //input->messages = 0xFFFF & ~GLSLANG_MSG_RELAXED_ERRORS_BIT;
     input->messages = GLSLANG_MSG_DEFAULT_BIT | GLSLANG_MSG_DEBUG_INFO_BIT | GLSLANG_MSG_RELAXED_ERRORS_BIT;
-    input->resource = glslang_default_resource();
+    input->resource = (const glslang_resource_t *)mglGlslangResource(ctx);
 
     input->force_default_version_and_profile = 1;
 }
@@ -295,6 +304,7 @@ void mglFreeShader(GLMContext ctx, Shader *ptr)
 
     free((void *)ptr->mtl_shader_type_name);
     free((void *)ptr->src);
+    free(ptr->pp_src);
     if (ptr->log) free(ptr->log);
 
     free(ptr);
@@ -472,10 +482,69 @@ static void rewriteBlockLayouts(char *src)
     }
 }
 
+// glslang does not carry GL_ARB_cull_distance, so a shader that asks for it by
+// extension is raised to the version that has cull distance in core. The name
+// itself becomes one of ours, because GLSL will not let anyone define a macro
+// that starts with GL_.
+static char *rewriteCullExtension(const char *src)
+{
+    static const char *want = "GL_ARB_cull_distance";
+    const char *ver, *nl, *body;
+    char *out;
+    size_t len;
+
+    if (strstr(src, want) == NULL)
+        return NULL;
+
+    ver = strstr(src, "#version");
+
+    if (ver == NULL)
+        return NULL;
+
+    nl = strchr(ver, '\n');
+
+    if (nl == NULL)
+        return NULL;
+
+    body = nl + 1;
+    len = strlen(src) + 128;
+    out = (char *)malloc(len);
+
+    if (out == NULL)
+        return NULL;
+
+    snprintf(out, len, "%.*s#version 450 core\n#define MG_ARB_cull_distance 1\n%s",
+             (int)(ver - src), src, body);
+
+    // the extension is core at this version, so asking for it again is an error
+    for (char *p = out; (p = strstr(p, "#extension")) != NULL; )
+    {
+        char *e = strchr(p, '\n');
+
+        if (e == NULL)
+            e = p + strlen(p);
+
+        if (memmem(p, (size_t)(e - p), want, strlen(want)))
+            memset(p, ' ', (size_t)(e - p));
+
+        p = e;
+    }
+
+    // whatever is left is the shader testing for the name, so point it at ours
+    for (char *p = out; (p = strstr(p, want)) != NULL; p += strlen(want))
+    {
+        p[0] = 'M';
+        p[1] = 'G';
+    }
+
+    return out;
+}
+
 // glslang drops gl_NumSamples when it is generating SPIR-V, because Vulkan has
 // no such built-in -- but it is core GLSL and the CTS leans on it. Rename it to
 // a plain uniform of the same length, which MGL writes at draw time.
 // Returns a new string when something changed, NULL when nothing did.
+
 static char *rewriteNumSamples(const char *src)
 {
     static const char gl_name[] = "gl_NumSamples";
@@ -560,11 +629,21 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     // false and fills the info log. It does not raise a GL error.
     ctx->error_suppress++;
 
+    char *raised = rewriteCullExtension(ptr->src);
+    const char *front = raised ? raised : ptr->src;
+
     // glslang will not take the subroutine keyword when it targets SPIR-V, so
     // the source is rewritten into plain GLSL before it ever sees it.
-    char *desub = mglRewriteSubroutines(ptr->src, &ptr->subroutines);
+    char *desub = mglRewriteSubroutines(front, &ptr->subroutines);
 
-    initGLSLInput(ctx, ptr->type, desub ? desub : ptr->src, &glsl_input);
+    if (desub)
+    {
+        free(raised);
+        raised = NULL;
+        front = desub;
+    }
+
+    initGLSLInput(ctx, ptr->type, front, &glsl_input);
 
     glsl_shader = glslang_shader_create(&glsl_input);
     if (glsl_shader == NULL)
@@ -577,6 +656,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
             ptr->log = strdup("GLSL shader creation failed - insufficient memory or unsupported shader type");
         }
         free(desub);
+        free(raised);
         ctx->error_suppress--;
         return;
     }
@@ -621,7 +701,10 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 }
 
                 glslang_shader_set_preprocessed_code(glsl_shader, fixed);
-                free(fixed);
+
+                free(ptr->pp_src);
+                ptr->pp_src = fixed;
+                fixed = NULL;
             }
         }
     }
@@ -661,6 +744,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 glslang_shader_get_info_debug_log(glsl_shader));
 
         free(desub);
+        free(raised);
         ctx->error_suppress--;
         return;
     }
@@ -701,6 +785,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 glslang_shader_get_info_debug_log(glsl_shader));
 
         free(desub);
+        free(raised);
         ctx->error_suppress--;
         return;
     }
@@ -711,6 +796,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
     ptr->compiled_glsl_shader = glsl_shader;
     free(desub);
+    free(raised);
     ctx->error_suppress--;
 }
 

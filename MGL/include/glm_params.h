@@ -400,6 +400,55 @@ typedef struct GLMParams_t {
     GLuint vertex_binding_stride;
     GLuint max_vertex_attrib_relative_offset;
     GLuint max_vertex_attrib_bindings;
+    GLuint max_vertex_attrib_stride;
+
+    // limits MGL never had a home for
+    GLuint max_cull_distances;
+    GLuint max_combined_clip_and_cull_distances;
+    GLint  min_program_texture_gather_offset;
+    GLint  max_program_texture_gather_offset;
+    GLuint max_atomic_counter_buffer_bindings;
+    GLuint max_atomic_counter_buffer_size;
+    GLuint max_vertex_atomic_counter_buffers;
+    GLuint max_tess_control_atomic_counter_buffers;
+    GLuint max_tess_evaluation_atomic_counter_buffers;
+    GLuint max_geometry_atomic_counter_buffers;
+    GLuint max_fragment_atomic_counter_buffers;
+    GLuint max_combined_atomic_counter_buffers;
+    GLuint max_image_units;
+    GLuint max_image_samples;
+    GLuint max_vertex_image_uniforms;
+    GLuint max_tess_control_image_uniforms;
+    GLuint max_tess_evaluation_image_uniforms;
+    GLuint max_geometry_image_uniforms;
+    GLuint max_fragment_image_uniforms;
+    GLuint max_compute_image_uniforms;
+    GLuint max_combined_image_uniforms;
+    GLuint max_combined_image_units_and_fragment_outputs;
+    GLuint max_combined_shader_output_resources;
+    GLuint max_transform_feedback_buffers;
+    GLuint max_transform_feedback_interleaved_components;
+    GLuint max_transform_feedback_separate_attribs;
+    GLuint max_transform_feedback_separate_components;
+    GLuint max_vertex_streams;
+    GLuint max_patch_vertices;
+    GLuint max_tess_gen_level;
+    GLuint max_tess_patch_components;
+    GLuint max_tess_control_input_components;
+    GLuint max_tess_control_output_components;
+    GLuint max_tess_control_texture_image_units;
+    GLuint max_tess_control_uniform_components;
+    GLuint max_tess_control_total_output_components;
+    GLuint max_tess_evaluation_input_components;
+    GLuint max_tess_evaluation_output_components;
+    GLuint max_tess_evaluation_texture_image_units;
+    GLuint max_tess_evaluation_uniform_components;
+    GLuint max_combined_tess_control_uniform_components;
+    GLuint max_combined_tess_evaluation_uniform_components;
+    GLuint max_geometry_output_vertices;
+    GLuint max_geometry_total_output_components;
+    GLuint max_geometry_shader_invocations;
+    GLuint max_geometry_varying_components;
 } GLMParams;
 
 #endif /* glm_params_h */

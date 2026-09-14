@@ -23,6 +23,7 @@
 
 #include "glm_context.h"
 #include "pixel_utils.h"
+#include "mgl_format_table.h"
 #include "utils.h"
 #include "mgl_log.h"
 
@@ -1060,10 +1061,23 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
 
         fbo_attachment_ptr = getFBOAttachment(ctx, fbo, attachment);
 
-        if (fbo_attachment_ptr == NULL)
+        if (fbo_attachment_ptr == NULL || fbo_attachment_ptr->texture == 0)
         {
-            *params = GL_NONE;
-            return;
+            // nothing hangs there, so the only two questions with an answer
+            // are what it is and what it is called
+            switch(pname)
+            {
+                case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+                    *params = GL_NONE;
+                    return;
+
+                case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+                    *params = 0;
+                    return;
+
+                default:
+                    ERROR_RETURN(GL_INVALID_OPERATION);
+            }
         }
 
         level = fbo_attachment_ptr->level;
@@ -1071,11 +1085,47 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
 
         if (target == GL_RENDERBUFFER)
         {
-            tex = fbo_attachment_ptr->buf.rbo->tex;
+            tex = fbo_attachment_ptr->buf.rbo ? fbo_attachment_ptr->buf.rbo->tex : NULL;
         }
         else
         {
             tex = fbo_attachment_ptr->buf.tex;
+        }
+
+        // a renderbuffer that was named but never given storage has no texture
+        if (tex == NULL)
+        {
+            switch(pname)
+            {
+                case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+                    *params = (target == GL_RENDERBUFFER) ? GL_RENDERBUFFER : GL_TEXTURE;
+                    return;
+
+                case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+                    *params = fbo_attachment_ptr->texture;
+                    return;
+
+                case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+                case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+                    *params = GL_NONE;
+                    return;
+
+                case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+                case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+                case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
+                case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+                case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+                case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+                case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+                case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+                case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+                case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+                    *params = 0;
+                    return;
+
+                default:
+                    ERROR_RETURN(GL_INVALID_ENUM);
+            }
         }
 
         switch(pname)
@@ -1097,16 +1147,28 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
                 return;
 
             case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+                *params = bitcountForInternalFormat(tex->internalformat, GL_DEPTH_COMPONENT);
+                return;
+
             case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
-                *params = bitcountForInternalFormat(tex->internalformat, GL_NONE);
+                *params = bitcountForInternalFormat(tex->internalformat, GL_STENCIL_INDEX);
                 return;
 
             case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
-                *params = GL_UNSIGNED_NORMALIZED;
+                *params = mglFormatComponentType(tex->internalformat);
                 return;
 
             case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
-                *params = GL_LINEAR;
+                *params = mglFormatIsSRGB(tex->internalformat) ? GL_SRGB : GL_LINEAR;
+                return;
+
+            case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
+                *params = GL_FALSE;
+                return;
+
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+                *params = isCubeMapTarget(ctx, fbo_attachment_ptr->textarget)
+                        ? (GLint)fbo_attachment_ptr->textarget : 0;
                 return;
 
             case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:

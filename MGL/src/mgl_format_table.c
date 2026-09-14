@@ -839,6 +839,44 @@ GLint mglFormatComponentBits(GLenum gl_internal_format, GLenum component)
     }
 }
 
+// What GL calls the channel's type: a float, a signed or unsigned integer, or
+// a fixed-point value that reads back between -1 and 1 or 0 and 1.
+GLenum mglFormatComponentType(GLenum gl_internal_format)
+{
+    const MGLFormatDesc *d = mglFormatDesc(gl_internal_format);
+
+    if (d->gl_format == 0)
+        return GL_NONE;
+
+    switch (d->kind) {
+        case MGL_FMT_COLOR_INT:   return GL_INT;
+        case MGL_FMT_COLOR_UINT:  return GL_UNSIGNED_INT;
+        default: break;
+    }
+
+    switch (gl_internal_format) {
+        case GL_R16F: case GL_RG16F: case GL_RGB16F: case GL_RGBA16F:
+        case GL_R32F: case GL_RG32F: case GL_RGB32F: case GL_RGBA32F:
+        case GL_R11F_G11F_B10F: case GL_RGB9_E5:
+        case GL_DEPTH_COMPONENT32F: case GL_DEPTH32F_STENCIL8:
+            return GL_FLOAT;
+
+        case GL_R8_SNORM: case GL_RG8_SNORM: case GL_RGB8_SNORM: case GL_RGBA8_SNORM:
+        case GL_R16_SNORM: case GL_RG16_SNORM: case GL_RGB16_SNORM: case GL_RGBA16_SNORM:
+        case GL_COMPRESSED_SIGNED_RED_RGTC1: case GL_COMPRESSED_SIGNED_RG_RGTC2:
+        case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+            return GL_SIGNED_NORMALIZED;
+
+        default:
+            return GL_UNSIGNED_NORMALIZED;
+    }
+}
+
+bool mglFormatIsSRGB(GLenum gl_internal_format)
+{
+    return mglFormatDesc(gl_internal_format)->srgb;
+}
+
 // The unsized names above are a request to pick a format, not a format, so
 // they must not show up in GL_COMPRESSED_TEXTURE_FORMATS.
 static bool is_generic_compressed(GLenum fmt)

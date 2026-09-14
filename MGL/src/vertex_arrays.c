@@ -541,7 +541,7 @@ void mglDisableVertexArrayAttrib(GLMContext ctx, GLuint vaobj, GLuint index)
 
     ptr->enabled_attribs &= ~(0x1 << index);
 
-    VAO_STATE(dirty_bits) |= DIRTY_VAO;
+    ptr->dirty_bits |= DIRTY_VAO_ATTRIB;
 }
 
 void mglEnableVertexAttribArray(GLMContext ctx, GLuint index)

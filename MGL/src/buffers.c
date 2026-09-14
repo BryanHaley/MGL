@@ -568,6 +568,22 @@ void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
                 }
             }
 
+            // the per-stage maps hand these straight to Metal on the next draw,
+            // so a deleted buffer left in one is bound after it is freed
+            BufferMapList *maps[] = {
+                &ctx->state.vertex_buffer_map_list,
+                &ctx->state.fragment_buffer_map_list,
+                &ctx->state.compute_buffer_map_list,
+                &ctx->state.tess_control_buffer_map_list,
+                &ctx->state.tess_eval_buffer_map_list,
+                &ctx->state.geometry_buffer_map_list,
+            };
+
+            for(int m=0; m<6; m++)
+                for(int i=0; i<maps[m]->count; i++)
+                    if (maps[m]->buffers[i].buf == ptr)
+                        maps[m]->buffers[i].buf = NULL;
+
             free(ptr);
         } // if (isBuffer(ctx, buffer))
     } // while(--n)

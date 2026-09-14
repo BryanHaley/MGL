@@ -30,6 +30,7 @@
 
 #if MGL_TOOLCHAIN_HAS_GLSLANG
 const glslang_resource_t* glslang_default_resource(void);
+const void *mglGlslangResource(void *ctx);
 #endif
 
 static int mgl_set_error(char **out_error, const char *msg) {
@@ -149,7 +150,7 @@ static void mgl_init_input(glslang_input_t *input,
     input->default_profile = GLSLANG_CORE_PROFILE;
     input->force_default_version_and_profile = 1;
     input->messages = GLSLANG_MSG_DEFAULT_BIT | GLSLANG_MSG_RELAXED_ERRORS_BIT;
-    input->resource = glslang_default_resource();
+    input->resource = (const glslang_resource_t *)mglGlslangResource(NULL);
 }
 
 int mgl_toolchain_glsl_to_msl(
