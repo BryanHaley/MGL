@@ -2562,6 +2562,38 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 // GL says a sampler with nothing bound, or with an incomplete texture, reads
 // as opaque black. Metal says nothing at all about sampling an empty slot, and
 // on AGX it is a way to lose the process, so bind this instead.
+// GL_TEXTURE_BASE_LEVEL chooses which mip the shader treats as level zero.
+// Metal says that with a view over the level range. The texture itself stays
+// whole, because glTexSubImage still counts its levels from zero.
+- (id<MTLTexture>) samplingTexture: (Texture *)tex from: (id<MTLTexture>) base
+{
+    if (base == nil || tex == NULL)
+        return base;
+
+    NSUInteger have = base.mipmapLevelCount;
+    NSUInteger first = tex->params.base_level;
+
+    if (have <= 1 || first == 0)
+        return base;
+
+    if (first >= have)
+        first = have - 1;
+
+    NSUInteger last = tex->params.max_level;
+
+    if (last >= have)
+        last = have - 1;
+
+    NSUInteger count = last >= first ? last - first + 1 : 1;
+
+    id<MTLTexture> view = [base newTextureViewWithPixelFormat: base.pixelFormat
+                                                  textureType: base.textureType
+                                                       levels: NSMakeRange(first, count)
+                                                       slices: NSMakeRange(0, base.arrayLength)];
+
+    return view ? view : base;
+}
+
 - (id<MTLTexture>) incompleteTexture
 {
     if (_incompleteTexture == nil)
@@ -2665,7 +2697,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
                     continue;
                 }
 
-                texture = (__bridge id<MTLTexture>)(ptr->mtl_data);
+                texture = [self samplingTexture: ptr from: (__bridge id<MTLTexture>)(ptr->mtl_data)];
 
                 id<MTLSamplerState> sampler;
 
@@ -4227,7 +4259,11 @@ static GLuint packedSwizzle(const TextureParameter *p)
                      (__bridge void *)_currentCommandBuffer,
                      (long)(_currentCommandBuffer ? _currentCommandBuffer.status : -1));
 
-        _currentRenderEncoder = nil;
+        // Close what is open on the old buffer -- abandoning an encoder is
+        // the other way to wedge AGX.
+        [self endComputeEncoding];
+        [self endRenderEncoding];
+
         _currentCommandBuffer = [_commandQueue commandBuffer];
     }
 
@@ -6484,10 +6520,9 @@ static MTLWinding mtlWindingForSpv(GLuint mode)
     MGL_NSERR(@"MGL CRITICAL: Performing emergency Metal state reset");
 
     @try {
-        // Force cleanup of all Metal objects
-        [self endRenderEncoding];
+        // Close the encoders and hand the buffer back rather than dropping it.
+        [self cleanupCommandBuffer];
 
-        _currentCommandBuffer = NULL;
         _currentRenderEncoder = NULL;
         _drawable = NULL;
 
@@ -7073,7 +7108,7 @@ static MTLWinding mtlWindingForSpv(GLuint mode)
                     MTL_CHECK_RETURN_FALSE(ptr->mtl_data, GL_OUT_OF_MEMORY);
 
                     id<MTLTexture> texture;
-                    texture = (__bridge id<MTLTexture>)(ptr->mtl_data);
+                    texture = [self samplingTexture: ptr from: (__bridge id<MTLTexture>)(ptr->mtl_data)];
                     MTL_CHECK_RETURN_FALSE(texture, GL_OUT_OF_MEMORY);
 
                     id<MTLSamplerState> sampler;
@@ -7451,14 +7486,14 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
     // Validate command buffer before committing
     if (_currentCommandBuffer.error) {
         MGL_NSERR(@"MGL ERROR: Command buffer has error before commit: %@", _currentCommandBuffer.error);
-        [self cleanupCommandBuffer];
+        [self cleanupCommandBufferWaiting: finish];
         return;
     }
 
     // GPU ERROR THROTTLING: Check for excessive recent failures
     if (![self validateMetalObjects]) {
         MGL_NSERR(@"MGL WARNING: GPU throttling active - skipping command buffer commit");
-        [self cleanupCommandBuffer];
+        [self cleanupCommandBufferWaiting: finish];
         return;
     }
 
@@ -7468,7 +7503,7 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
         currentStatus = _currentCommandBuffer.status;
         if (currentStatus != 0) { // 0 = MTLCommandBufferStatusNotCommitted
             MGL_NSERR(@"MGL WARNING: Command buffer in unexpected state %ld - cleaning up", (long)currentStatus);
-            [self cleanupCommandBuffer];
+            [self cleanupCommandBufferWaiting: finish];
             return;
         }
 
@@ -7492,7 +7527,7 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
             }
 
             // CRITICAL FIX: Always cleanup command buffer in exception path
-            [self cleanupCommandBuffer];
+            [self cleanupCommandBufferWaiting: finish];
             return;
         }
 
@@ -7504,7 +7539,7 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
         } @catch (NSException *e) {
             MGL_NSERR(@"MGL WARNING: Exception accessing command buffer error: %@", e);
             [self recordGPUError];
-            [self cleanupCommandBuffer];
+            [self cleanupCommandBufferWaiting: finish];
             return;
         }
 
@@ -8576,10 +8611,18 @@ MTLPrimitiveType getMTLPrimitiveType(GLenum mode);
 
     NSUInteger bytes = (NSUInteger)ex.indexCount * (NSUInteger)ex.indexSize;
 
-    // One buffer per draw, recycled when the command buffer finishes. Growing a
+    // One buffer per draw, tied to the command buffer that reads it. Growing a
     // single shared buffer instead resized the one the GPU was still reading as
     // soon as two expanded draws were in flight together.
-    id<MTLBuffer> expandIndexBuffer = [_scratchPool bufferOfLength: bytes];
+    //
+    // Tied rather than merely pooled: the pooled form is released by whichever
+    // command buffer closes next, which need not be this one. That handed this
+    // draw's index buffer back to the free list while it was still in flight,
+    // the next expanded draw memcpy'd its own indices over it, and this draw
+    // fetched vertices through indices belonging to another primitive — reading
+    // outside the bound vertex buffer and faulting the GPU.
+    id<MTLBuffer> expandIndexBuffer = [_scratchPool bufferOfLength: bytes
+                                                 forCommandBuffer: _currentCommandBuffer];
 
     if (expandIndexBuffer == nil)
     {
@@ -8694,7 +8737,10 @@ Buffer *getIndirectBuffer(GLMContext ctx)
 
     size_t outElem = (elem == 1) ? 2 : elem;
     MTLIndexType outType = (outElem == 4) ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
-    id<MTLBuffer> scratch = [_scratchPool bufferOfLength: (NSUInteger)count * outElem];
+    // Tied for the same reason the expansion path is: this is the index buffer
+    // the draw reads, and a pooled one can be recycled under it mid-flight.
+    id<MTLBuffer> scratch = [_scratchPool bufferOfLength: (NSUInteger)count * outElem
+                                       forCommandBuffer: _currentCommandBuffer];
     MTL_CHECK_RETURN_FALSE(scratch, GL_OUT_OF_MEMORY);
 
     bool ok = true;
@@ -10009,19 +10055,10 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
         // Stop any ongoing capture
         [MTLCaptureManager.sharedCaptureManager stopCapture];
 
-        // End any active rendering
-        [self endRenderEncoding];
-
-        // Cleanup command buffer and encoder
-        if (_currentCommandBuffer) {
-            MGL_NSINFO(@"MGL INFO: Releasing current command buffer");
-            _currentCommandBuffer = nil;
-        }
-
-        if (_currentRenderEncoder) {
-            MGL_NSINFO(@"MGL INFO: Releasing current render encoder");
-            _currentRenderEncoder = nil;
-        }
+        // Teardown is the last chance to hand the GPU's work back. Dropping an
+        // uncommitted buffer here strands its mappings, and the unmap that
+        // follows the process dying times out in firmware and panics the machine.
+        [self cleanupCommandBufferWaiting: true];
 
         // Cleanup sync objects
         if (_currentEvent) {
@@ -10187,22 +10224,54 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 
 - (void)cleanupCommandBuffer
 {
-    // PROPER FIX: Safe command buffer cleanup
     @try {
-        if (_currentCommandBuffer) {
-            if (_currentCommandBuffer.status == MTLCommandBufferStatusCommitted) {
-                // Wait for completion before cleanup
-                [_currentCommandBuffer waitUntilCompleted];
-            }
-            _currentCommandBuffer = nil;
-        }
+        // Close the encoders first. Metal will not let go of a command buffer
+        // that still has one open, and AGX answers that by wedging its firmware.
+        [self endComputeEncoding];
+        [self endRenderEncoding];
 
-        if (_currentRenderEncoder) {
-            [_currentRenderEncoder endEncoding];
-            _currentRenderEncoder = nil;
+        if (_currentCommandBuffer) {
+            // A buffer that was never committed still owns every resource its
+            // encoders touched. Dropping it strands those GPU mappings, and the
+            // next unmap times out in firmware and panics the machine. Handing
+            // it back costs nothing; there is no need to wait for it.
+            if (_currentCommandBuffer.status < MTLCommandBufferStatusCommitted)
+            {
+                // Tie the scratch buffers to this command buffer while we still
+                // can. Left outstanding they get tied to whichever buffer closes
+                // next, and go back to the free list while the GPU still reads
+                // them. A completion handler cannot be added after the commit.
+                [_scratchPool recycleWhenComplete: _currentCommandBuffer];
+
+                [_currentCommandBuffer commit];
+            }
+
+            _currentCommandBuffer = nil;
         }
     } @catch (NSException *exception) {
         MGL_NSERR(@"MGL ERROR: Exception during command buffer cleanup: %@", exception);
+        _currentCommandBuffer = nil;
+    }
+}
+
+// Cleanup on a path that already promised the GPU was finished. glFinish and
+// mapping a buffer both make that promise, so the work has to be waited out
+// rather than merely handed over.
+- (void)cleanupCommandBufferWaiting: (bool) finish
+{
+    id<MTLCommandBuffer> spent = _currentCommandBuffer;
+
+    [self cleanupCommandBuffer];
+
+    if (!finish || spent == nil)
+        return;
+
+    @try {
+        if (spent.status >= MTLCommandBufferStatusCommitted &&
+            spent.status < MTLCommandBufferStatusCompleted)
+            [spent waitUntilCompleted];
+    } @catch (NSException *exception) {
+        MGL_NSERR(@"MGL ERROR: waiting on a retired command buffer failed: %@", exception);
     }
 }
 
@@ -10353,10 +10422,8 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 {
     MGL_NSINFO(@"MGL AGX: Clearing problematic GPU state for recovery");
 
-    // Clear current problematic resources
-    if (_currentCommandBuffer) {
-        _currentCommandBuffer = nil;
-    }
+    // Close the encoders and hand the buffer back rather than dropping it.
+    [self cleanupCommandBuffer];
 
     // Don't recreate command queue immediately - let it rest
     // The AGX driver needs time to recover from error state

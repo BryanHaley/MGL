@@ -64,6 +64,7 @@ CXXFLAGS += -I./external/glfw/include -I./external/glfw/src
 # macOS specific compile definitions for GLFW
 CFLAGS += -D_COCOA -D_GLFW_COCOA
 CXXFLAGS += -D_COCOA -D_GLFW_COCOA
+CXXFLAGS += -I./external/SPIRV-Tools/include -IMGL/include -std=c++17
 
 # GL_CORE SPECIFIC FLAGS
 CFLAGS_GL_CORE := $(CFLAGS) -DMGL_GL_CORE
@@ -143,6 +144,8 @@ brew_prefix := $(shell brew --prefix)
 # mgl
 #mgl_srcs_c := $(wildcard MGL/src/*.c)
 mgl_srcs_c := $(filter-out %/gl_core.c  %/gl_es.c, $(wildcard MGL/src/*.c))
+
+mgl_srcs_cpp := $(wildcard MGL/src/*.cpp)
 
 mgl_srcs_objc := $(wildcard MGL/src/*.m)
 

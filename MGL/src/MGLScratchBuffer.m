@@ -72,6 +72,25 @@ static NSUInteger bucketForLength(NSUInteger length)
 {
     @synchronized (self) {
 
+    id<MTLBuffer> buffer = [self takeBufferOfLength: length];
+
+    if (buffer != nil)
+        [_inFlight addObject: buffer];
+
+    return buffer;
+
+    }
+}
+
+// The allocation on its own, without recording it as outstanding. Callers hold
+// the lock. Split out so a buffer taken for one named command buffer never
+// appears in _inFlight even briefly: it used to be added and then removed
+// under two separate acquisitions, and a recycleWhenComplete: landing in the
+// gap took the buffer with it. Both that command buffer and this one would
+// then return it, putting one buffer in the free list twice and handing it to
+// two callers at once.
+- (id<MTLBuffer>) takeBufferOfLength: (NSUInteger) length
+{
     if (length == 0)
         length = 1;
 
@@ -97,11 +116,7 @@ static NSUInteger bucketForLength(NSUInteger length)
             return nil;
     }
 
-    [_inFlight addObject: buffer];
-
     return buffer;
-
-    }
 }
 
 // Takes a buffer for one specific command buffer and hands it back when that
@@ -112,12 +127,19 @@ static NSUInteger bucketForLength(NSUInteger length)
 - (id<MTLBuffer>) bufferOfLength: (NSUInteger) length
                 forCommandBuffer: (id<MTLCommandBuffer>) commandBuffer
 {
-    id<MTLBuffer> buffer = [self bufferOfLength: length];
+    id<MTLBuffer> buffer = nil;
+
+    @synchronized (self) {
+        buffer = [self takeBufferOfLength: length];
+
+        // With no command buffer to tie it to there is nothing to wait on, so
+        // it falls back to the outstanding set and the next recycle takes it.
+        if (buffer != nil && commandBuffer == nil)
+            [_inFlight addObject: buffer];
+    }
 
     if (buffer == nil || commandBuffer == nil)
         return buffer;
-
-    @synchronized (self) { [_inFlight removeObject: buffer]; }
 
     __weak MGLScratchBufferPool *weakSelf = self;
 
@@ -167,8 +189,14 @@ static NSUInteger bucketForLength(NSUInteger length)
     }];
 }
 
+// Takes the lock itself. @synchronized is recursive, so the completion
+// handlers that already hold it are unaffected, and the one path that called
+// this without it — a recycle with no command buffer — no longer mutates the
+// free lists while another thread is reading them.
 - (void) returnBuffers: (NSArray *) buffers
 {
+    @synchronized (self)
+    {
     for (id<MTLBuffer> buffer in buffers)
     {
         NSUInteger bucket = bucketForLength([buffer length]);
@@ -179,6 +207,7 @@ static NSUInteger bucketForLength(NSUInteger length)
         {
             [_free[bucket] addObject: buffer];
         }
+    }
     }
 }
 

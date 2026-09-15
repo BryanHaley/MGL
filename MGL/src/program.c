@@ -29,6 +29,10 @@
 
 #include <stdlib.h>
 #include "glm_context.h"
+
+// in mgl_spirv_opt.cpp -- folds called functions into their callers
+extern bool mglInlineSpirv(const unsigned int *words, size_t count,
+                           unsigned int **out_words, size_t *out_count);
 #include "shaders.h"
 #include "buffers.h"
 #include "mgl_log.h"
@@ -2211,6 +2215,21 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
 
     glslang_program_SPIRV_get(prog, sp->ir);
 
+    // Fold the application's own main back into the generated one. Left as a
+    // separate function, SPIRV-Cross hands it every uniform it touches as a
+    // parameter, and Metal will not bind one of those across address spaces.
+    {
+        unsigned int *inlined = NULL;
+        size_t n = 0;
+
+        if (mglInlineSpirv(sp->ir, sp->size, &inlined, &n))
+        {
+            free(sp->ir);
+            sp->ir = inlined;
+            sp->size = (unsigned int)n;
+        }
+    }
+
     // parseSPIRVShaderToMetal reads the shader slot for its entry point name,
     // which a generated stage does not have, so it is compiled here instead
     sp->msl_str = parseSPIRVShaderToMetal(ctx, pptr, spirv_slot >= 0 ? spirv_slot : _COMPUTE_SHADER,
@@ -2258,7 +2277,7 @@ static void linkTransformCapture(GLMContext ctx, Program *pptr)
         return;
     }
 
-    if (!mglBuildTransformCapture(vs->src, pptr->xfb_varyings, pptr->xfb_varying_count,
+    if (!mglBuildTransformCapture(vs->pp_src ? vs->pp_src : vs->src, pptr->xfb_varyings, pptr->xfb_varying_count,
                                   pptr->xfb_buffer_mode, &pptr->xfb))
         return;
 
@@ -2384,7 +2403,9 @@ static bool linkGeometryProgram(GLMContext ctx, Program *pptr)
 
     mglFreeGeometryInfo(&pptr->geom);
 
-    if (!mglRewriteGeometryShader(gs->src, &pptr->geom))
+    // the preprocessed source, like the cull rewrite above -- macros decide
+    // max_vertices and which #ifdef branch of the varyings is real
+    if (!mglRewriteGeometryShader(gs->pp_src ? gs->pp_src : gs->src, &pptr->geom))
     {
         MGL_ERR("MGL Error: geometry shader %u is not a shape MGL can rewrite\n", gs->name);
         return false;
@@ -2397,7 +2418,7 @@ static bool linkGeometryProgram(GLMContext ctx, Program *pptr)
     }
 
     // the vertex stage writes its output where the geometry stage will read it
-    captured = mglAddGeometryCapture(vs->src, &pptr->geom);
+    captured = mglAddGeometryCapture(vs->pp_src ? vs->pp_src : vs->src, &pptr->geom);
 
     if (captured == NULL)
         return false;

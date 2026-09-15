@@ -844,11 +844,11 @@ kern_return_t initBufferData(GLMContext ctx, Buffer *ptr, GLsizeiptr size, const
             {
                 // the mtl buffer has a deallocator for the vm allocate
                 ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->data.mtl_data);
-                
-                if(isUniformConstant)
-                {
-                    ptr->data.mtl_data = NULL;
-                }
+
+                // Always forget it. Keeping the pointer after releasing it lets
+                // the next delete release it a second time, and the buffer is
+                // freed while a command buffer is still holding it.
+                ptr->data.mtl_data = NULL;
             }
             else
             {
@@ -863,12 +863,9 @@ kern_return_t initBufferData(GLMContext ctx, Buffer *ptr, GLsizeiptr size, const
             if (ptr->data.mtl_data)
             {
                 ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->data.mtl_data);
-            }
-            
-            if(isUniformConstant)
-            {
                 ptr->data.mtl_data = NULL;
             }
+
             
             ptr->data.buffer_data = 0;
             ptr->data.buffer_size = 0;

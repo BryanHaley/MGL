@@ -214,22 +214,77 @@ void mglDrawBuffers(GLMContext ctx, GLsizei n, const GLenum *bufs)
 
     ERROR_CHECK_RETURN(bufs, GL_INVALID_VALUE);
 
-    // these name more than one buffer each, so glDrawBuffers refuses them
-    for (GLsizei i=0; i<n; ++i) {
-        switch(bufs[i])
+    ERROR_CHECK_RETURN(n <= MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE);
+
+    Framebuffer *fbo = ctx->state.framebuffer;
+    GLenum max_attach = GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments);
+
+    // Check the whole list before touching anything: a call that fails has to
+    // leave the old draw buffers exactly as they were.
+    for (GLsizei i=0; i<n; ++i)
+    {
+        GLenum b = bufs[i];
+
+        // the same buffer cannot be named twice, though GL_NONE may repeat
+        if (b != GL_NONE)
+            for (GLsizei j=0; j<i; ++j)
+                ERROR_CHECK_RETURN(bufs[j] != b, GL_INVALID_OPERATION);
+
+        if (b == GL_NONE)
+            continue;
+
+        if (fbo)
         {
-            case GL_FRONT:
-            case GL_LEFT:
-            case GL_RIGHT:
-            case GL_FRONT_AND_BACK:
-                MGL_ERR("MGL Error: mglDrawBuffers: buffer 0x%x names more than one buffer\n", bufs[i]);
-                ERROR_RETURN(GL_INVALID_ENUM);
+            // a framebuffer object takes its own attachments and nothing else
+            ERROR_CHECK_RETURN(b >= GL_COLOR_ATTACHMENT0 && b < max_attach,
+                               GL_INVALID_OPERATION);
+        }
+        else
+        {
+            switch (b)
+            {
+                case GL_FRONT:
+                case GL_BACK:
+                case GL_LEFT:
+                case GL_RIGHT:
+                case GL_FRONT_LEFT:
+                case GL_FRONT_RIGHT:
+                case GL_BACK_LEFT:
+                case GL_BACK_RIGHT:
+                    break;
+
+                // names more than one buffer, which only glDrawBuffer allows
+                case GL_FRONT_AND_BACK:
+                    ERROR_RETURN(GL_INVALID_OPERATION);
+
+                default:
+                    // an attachment named on the default framebuffer is wrong
+                    // in a different way from an enum that is not a buffer
+                    if (b >= GL_COLOR_ATTACHMENT0 && b < max_attach)
+                        ERROR_RETURN(GL_INVALID_OPERATION);
+
+                    ERROR_RETURN(GL_INVALID_ENUM);
+            }
         }
     }
 
-    for (GLsizei i=0; i<n; ++i) {
-        mglDrawBuffer(ctx, bufs[i]);
+    if (fbo)
+    {
+        for (GLsizei i=0; i<n; ++i)
+            fbo->draw_buffers[i] = bufs[i];
+
+        fbo->n_draw_buffers = n;
+        fbo->draw_buffer = bufs[0];
+
+        mglApplyDrawBuffers(ctx, fbo);
     }
+    else
+    {
+        STATE(default_draw_buffer) = bufs[0];
+    }
+
+    STATE(draw_buffer) = bufs[0];
+    STATE(dirty_bits) |= DIRTY_STATE;
 }
 
 void mglDrawBuffer(GLMContext ctx, GLenum buf)
@@ -266,17 +321,18 @@ void mglDrawBuffer(GLMContext ctx, GLenum buf)
     }
 
     if ((buf >= GL_COLOR_ATTACHMENT0) &&
-        (buf <= (GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments))))
+        (buf < (GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments))))
     {
-        // probably should validate current fbo..
-        Framebuffer * fbo = ctx->state.framebuffer;
-        if (!fbo || !fbo->color_attachments[buf-GL_COLOR_ATTACHMENT0].buf.rbo)
-        {
-            MGL_ERR("MGL Error: mglDrawBuffer: missing color attachment %u\n", (unsigned)(buf - GL_COLOR_ATTACHMENT0));
-            ERROR_RETURN(GL_INVALID_OPERATION);
-            return;
-        }
-        fbo->color_attachments[buf-GL_COLOR_ATTACHMENT0].buf.rbo->is_draw_buffer = GL_TRUE;
+        Framebuffer *fbo = ctx->state.framebuffer;
+
+        // Naming an attachment that has nothing in it yet is legal -- whether
+        // it is usable is the draw call's problem, not this one's.
+        ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
+        fbo->draw_buffers[0] = buf;
+        fbo->n_draw_buffers = 1;
+
+        mglApplyDrawBuffers(ctx, fbo);
     }
 
     STATE(draw_buffer) = buf;

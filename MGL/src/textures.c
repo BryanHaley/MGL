@@ -743,6 +743,10 @@ void invalidateTexture(GLMContext ctx, Texture *tex)
     if (tex->mtl_data)
     {
         ctx->mtl_funcs.mtlDeleteMTLObj(ctx, tex->mtl_data);
+
+        // Forget it as well as release it. Left behind, the next bind hands a
+        // freed texture to a render pass and Metal dies tearing the pass down.
+        tex->mtl_data = NULL;
     }
 
     for(int face=0; face<_CUBE_MAP_MAX_FACE; face++)

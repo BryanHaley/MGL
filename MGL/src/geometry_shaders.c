@@ -151,6 +151,43 @@ typedef struct {
     GsVarying out[MAX_GS_VARYINGS]; int out_count;
 } GsScan;
 
+// "in gl_PerVertex { ... } gl_in[];" -- a geometry shader may redeclare the
+// built-in block to say which built-ins it reads. The compute shader this turns
+// into has its own storage for those, and an interface block is not legal there
+// at all, so the declaration is dropped. Returns the index past the semicolon,
+// or 0 when this is not one.
+static size_t skipPerVertexBlock(const char *s, size_t i)
+{
+    size_t j = i;
+
+    if (wordAt(s, j, "in"))       j += 2;
+    else if (wordAt(s, j, "out")) j += 3;
+    else return 0;
+
+    j = skipSpace(s, j);
+
+    if (!wordAt(s, j, "gl_PerVertex"))
+        return 0;
+
+    j = skipSpace(s, j + 12);
+
+    if (s[j] != '{')
+        return 0;
+
+    int depth = 0;
+
+    for (; s[j]; j++)
+    {
+        if (s[j] == '{') depth++;
+        else if (s[j] == '}' && --depth == 0) { j++; break; }
+    }
+
+    // whatever instance name and array size follow, up to the semicolon
+    while (s[j] && s[j] != ';') j++;
+
+    return s[j] == ';' ? j + 1 : 0;
+}
+
 // The declaration is "[layout(...)] [interp] in|out TYPE NAME[maybe];". Returns
 // the index just past the semicolon, or 0 when this is not one.
 static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, bool *is_varying)
@@ -438,6 +475,21 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
             }
         }
 
+        // ---- in|out gl_PerVertex { ... }; -- the built-in block, dropped ----
+        {
+            size_t end = skipPerVertexBlock(src, i);
+
+            if (end)
+            {
+                if (!bufAddN(body, src + copied, i - copied))
+                    return false;
+
+                i = end;
+                copied = i;
+                continue;
+            }
+        }
+
         // ---- a varying declaration ----
         {
             GsVarying v;
@@ -482,6 +534,19 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
 
     return bufAdd(body, src + copied);
 }
+
+// what every generated geometry kernel has to do before the shader's own code
+#define MGL_GS_PROLOGUE \
+    "\n  mglGsPrims = mglGsPrimsU;\n" \
+    "  mglGsIndexed = mglGsIndexedU;\n" \
+    "  mglGsFirst = mglGsFirstU;\n" \
+    "  mglGsStride = mglGsStrideU;\n" \
+    "  int mglId = int(gl_GlobalInvocationID.x);\n" \
+    "  mglPrimitiveID = mglId / mglGsInvocations;\n" \
+    "  mglInvocationID = mglId - mglPrimitiveID * mglGsInvocations;\n" \
+    "  if (mglPrimitiveID >= mglGsPrims) return;\n" \
+    "  mglBase = mglId * mglGsCap;\n" \
+    "  mglWritten = 0;\n  mglStripLen = 0;\n  mglStripFlip = false;\n"
 
 // ---------------------------------------------------------------------------
 // pass 2: rewrite what the body says into what the compute shader means
@@ -628,15 +693,27 @@ static bool rewriteBody(const char *src, GsScan *sc, Buf *out)
             }
         }
 
-        // the shader's own entry point becomes a function the generated one calls
+        // The shader's own entry point stays the entry point and the prologue is
+        // injected into it. Calling a separate function instead makes every
+        // global it touches a parameter, and Metal refuses a uniform passed that
+        // way -- it lives in constant space and the parameter does not.
         if (wordAt(src, i, "main"))
         {
-            if (!bufAddN(out, src + copied, i - copied) || !bufAdd(out, "mglGsBody"))
-                return false;
+            size_t b = i + 4;
 
-            i += 4;
-            copied = i;
-            continue;
+            while (src[b] && src[b] != '{')
+                b++;
+
+            if (src[b] == '{')
+            {
+                if (!bufAddN(out, src + copied, b + 1 - copied) ||
+                    !bufAdd(out, MGL_GS_PROLOGUE))
+                    return false;
+
+                i = b + 1;
+                copied = i;
+                continue;
+            }
         }
 
         while (src[i] && identChar(src[i])) i++;
@@ -804,20 +881,6 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
         }
     }
 
-    if (!bufAdd(&out,
-        "\nvoid main()\n{\n"
-        "  mglGsPrims = mglGsPrimsU;\n"
-        "  mglGsIndexed = mglGsIndexedU;\n"
-        "  mglGsFirst = mglGsFirstU;\n"
-        "  mglGsStride = mglGsStrideU;\n"
-        "  int id = int(gl_GlobalInvocationID.x);\n"
-        "  mglPrimitiveID = id / mglGsInvocations;\n"
-        "  mglInvocationID = id - mglPrimitiveID * mglGsInvocations;\n"
-        "  if (mglPrimitiveID >= mglGsPrims) return;\n"
-        "  mglBase = id * mglGsCap;\n"
-        "  mglWritten = 0;\n  mglStripLen = 0;\n  mglStripFlip = false;\n"
-        "  mglGsBody();\n}\n"))
-        goto done;
 
     // ---- the vertex shader that draws the result ----
     if (!bufAdd(&pass, "#version 460\n\n"))

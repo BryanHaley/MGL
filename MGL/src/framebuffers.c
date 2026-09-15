@@ -110,6 +110,40 @@ Framebuffer *currentFBOForType(GLMContext ctx, GLenum target)
 }
 
 #pragma mark framebuffer logic
+// glDrawBuffers can name an attachment that does not exist yet, so the list is
+// kept on the framebuffer and re-applied whenever the attachments change.
+void mglApplyDrawBuffers(GLMContext ctx, Framebuffer *fbo)
+{
+    (void)ctx;
+
+    if (fbo == NULL)
+        return;
+
+    for (int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
+    {
+        FBOAttachment *a = &fbo->color_attachments[i];
+
+        // Only a renderbuffer carries this flag. The union holds a Texture
+        // otherwise, and reading that as a Renderbuffer reads the wrong field.
+        if (a->textarget == GL_RENDERBUFFER && a->buf.rbo)
+            a->buf.rbo->is_draw_buffer = GL_FALSE;
+    }
+
+    for (GLsizei i=0; i<fbo->n_draw_buffers; i++)
+    {
+        GLenum b = fbo->draw_buffers[i];
+
+        if (b < GL_COLOR_ATTACHMENT0 ||
+            b >= GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
+            continue;
+
+        FBOAttachment *a = &fbo->color_attachments[b - GL_COLOR_ATTACHMENT0];
+
+        if (a->textarget == GL_RENDERBUFFER && a->buf.rbo)
+            a->buf.rbo->is_draw_buffer = GL_TRUE;
+    }
+}
+
 static Framebuffer *newFramebuffer(GLMContext ctx, GLuint framebuffer)
 {
     Framebuffer *ptr;
@@ -126,6 +160,8 @@ static Framebuffer *newFramebuffer(GLMContext ctx, GLuint framebuffer)
 
     ptr->name = framebuffer;
     ptr->draw_buffer = GL_COLOR_ATTACHMENT0;
+    ptr->draw_buffers[0] = GL_COLOR_ATTACHMENT0;
+    ptr->n_draw_buffers = 1;
 
     return ptr;
 }
@@ -818,6 +854,8 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
     fbo_attachment_ptr->clear_color[3] = 0.f;
     fbo_attachment_ptr->buf.tex = tex;
 
+    mglApplyDrawBuffers(ctx, fbo);
+
     if (attachment == GL_DEPTH_STENCIL_ATTACHMENT)
     {
         fbo->stencil = fbo->depth;
@@ -974,6 +1012,8 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
     fbo_attachment_ptr->texture = renderbuffer;
     fbo_attachment_ptr->level = 0;
     fbo_attachment_ptr->buf.rbo = rbo;
+
+    mglApplyDrawBuffers(ctx, fbo);
 
     if (rbo)
         rbo->is_draw_buffer = GL_FALSE;

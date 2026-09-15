@@ -813,6 +813,11 @@ typedef struct Framebuffer_t {
     GLbitfield color_attachment_bitfield;
     // GL keeps the draw buffer per framebuffer, so each one remembers its own
     GLenum draw_buffer;
+    // glDrawBuffers names one buffer per shader output, and an attachment named
+    // here may not exist yet -- so the list lives on the framebuffer rather than
+    // only as a flag on each attachment.
+    GLenum draw_buffers[MAX_COLOR_ATTACHMENTS];
+    GLsizei n_draw_buffers;
     FBOAttachment color_attachments[MAX_COLOR_ATTACHMENTS];
     FBOAttachment depth;
     FBOAttachment stencil;
@@ -823,6 +828,8 @@ typedef struct Framebuffer_t {
     GLint default_samples;
     GLboolean default_fixed_sample_locations;
 } Framebuffer;
+
+void mglApplyDrawBuffers(GLMContext ctx, struct Framebuffer_t *fbo);
 
 typedef struct __GLsync {
     GLsizei name;
