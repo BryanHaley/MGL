@@ -500,8 +500,11 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 
     if (ptr->storage_flags & GL_CLIENT_STORAGE_BIT)
     {
+        // The whole page-aligned allocation, not just the GL size. Metal maps
+        // whole pages either way, and the deallocator below is handed back this
+        // same length -- given the short one it would free less than was taken.
         id<MTLBuffer> buffer = [_device newBufferWithBytesNoCopy: (void *)(ptr->data.buffer_data)
-                                                     length: ptr->size // allocate only size since this is what will be transferred
+                                                     length: ptr->data.buffer_size
                                                     options: options
                                                 deallocator: ^(void *pointer, NSUInteger length)
                                                 {

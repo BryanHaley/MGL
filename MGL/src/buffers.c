@@ -22,6 +22,7 @@
 #include <mach/mach_init.h>
 #include <mach/vm_map.h>
 #include <limits.h>
+#include <unistd.h>
 #include <stdint.h>
 
 #include "glm_context.h"
@@ -223,14 +224,14 @@ static inline GLMContext mgl_sanitize_ctx(GLMContext ctx, const char *func)
 
 size_t page_size_align(size_t size)
 {
-    if (size & (4096-1))
-    {
-        size_t pad_size = 0;
+    // Ask for the real page size rather than assuming 4K. Apple silicon uses
+    // 16K, and newBufferWithBytesNoCopy wants a length that is a whole number
+    // of pages -- a 4K-rounded one is not, and the GPU ends up with a mapping
+    // that does not match the allocation behind it.
+    size_t page = (size_t)getpagesize();
 
-        pad_size = 4096 - (size & (4096-1));
-
-        size += pad_size;
-    }
+    if (size & (page - 1))
+        size += page - (size & (page - 1));
 
     return size;
 }
