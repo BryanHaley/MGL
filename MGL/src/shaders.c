@@ -482,6 +482,116 @@ static void rewriteBlockLayouts(char *src)
     }
 }
 
+// Things glslang refuses that GL accepts, straightened out before it sees them.
+// Returns NULL when there is nothing to change.
+static char *normalizeFrontEnd(const char *src, GLenum type)
+{
+    size_t n = strlen(src);
+    char *out = (char *)malloc(n + 1);
+    bool changed = false;
+    size_t o = 0;
+
+    if (out == NULL)
+        return NULL;
+
+    // a line continuation written with a DOS line ending is still one
+    for (size_t i = 0; i < n; i++)
+    {
+        if (src[i] == '\\' && src[i + 1] == '\r' && src[i + 2] == '\n')
+        {
+            out[o++] = '\\';
+            i++;
+            changed = true;
+            continue;
+        }
+        out[o++] = src[i];
+    }
+    out[o] = 0;
+
+    // Extensions core in 4.6 that glslang does not know by name. Subroutines
+    // MGL rewrites away itself; the others are plain core GLSL by now.
+    static const char *core_names[] = {
+        "GL_ARB_shader_subroutine",
+        "GL_ARB_arrays_of_arrays",
+        "GL_ARB_texture_query_levels",
+    };
+
+    for (char *p = out; (p = strstr(p, "#extension")) != NULL; )
+    {
+        char *e = strchr(p, '\n');
+
+        if (e == NULL)
+            e = p + strlen(p);
+
+        for (size_t k = 0; k < sizeof(core_names) / sizeof(core_names[0]); k++)
+            if (memmem(p, (size_t)(e - p), core_names[k], strlen(core_names[k])))
+            {
+                memset(p, ' ', (size_t)(e - p));
+                changed = true;
+                break;
+            }
+
+        p = e;
+    }
+
+    // "invariant" on an input changes nothing, and GL lets any stage but the
+    // vertex stage write it. glslang refuses it from 4.20 on, so it goes.
+    if (type != GL_VERTEX_SHADER && strstr(out, "invariant"))
+    {
+        bool in_block = false;
+        char *stmt = out;
+
+        for (char *p = out; *p; p++)
+        {
+            if (*p != ';' && *p != '{' && *p != '}')
+                continue;
+
+            // the statement is [stmt, p)
+            bool is_in = false;
+
+            for (char *q = stmt; q < p; q++)
+            {
+                if ((q == out || !isalnum((unsigned char)q[-1])) && q[0] == 'i' && q[1] == 'n' &&
+                    !isalnum((unsigned char)q[2]) && q[2] != '_' && (q == out || q[-1] != '_'))
+                {
+                    is_in = true;
+                    break;
+                }
+            }
+
+            if (*p == '{')
+                in_block = is_in;
+
+            if (in_block || is_in)
+            {
+                for (char *q = stmt; q + 9 <= p; q++)
+                {
+                    if (!strncmp(q, "invariant", 9) &&
+                        (q == out || !(isalnum((unsigned char)q[-1]) || q[-1] == '_')) &&
+                        !(isalnum((unsigned char)q[9]) || q[9] == '_'))
+                    {
+                        memset(q, ' ', 9);
+                        changed = true;
+                    }
+                }
+            }
+
+            if (*p == '}')
+                in_block = false;
+
+            stmt = p + 1;
+        }
+    }
+
+    if (!changed)
+    {
+        free(out);
+        return NULL;
+    }
+
+    return out;
+}
+
 // glslang does not carry GL_ARB_cull_distance, so a shader that asks for it by
 // extension is raised to the version that has cull distance in core. The name
 // itself becomes one of ours, because GLSL will not let anyone define a macro
@@ -604,6 +714,268 @@ static char *rewriteNumSamples(const char *src)
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Preprocessor rules glslang lets slide
+//
+// glslang only warns about a handful of things the GLSL specification calls
+// errors, and a conformant compiler has to refuse them. These are checked on
+// the source exactly as the application gave it.
+// ---------------------------------------------------------------------------
+
+static bool ppIdentStart(char c) { return isalpha((unsigned char)c) || c == '_'; }
+static bool ppIdentChar(char c)  { return isalnum((unsigned char)c) || c == '_'; }
+
+// The expression after #if or #elif has to be one expression. "1 foobar" is two.
+// Parentheses are not balanced here: a macro may open one that the line closes.
+static bool ppExpressionIsWellFormed(const char *p)
+{
+    bool want_operand = true;
+
+    for (;;)
+    {
+        while (*p == ' ' || *p == '\t') p++;
+
+        if (*p == 0)
+            break;
+
+        if (ppIdentStart(*p))
+        {
+            const char *start = p;
+
+            while (ppIdentChar(*p)) p++;
+
+            if (!want_operand)
+                return false;
+
+            if (p - start == 7 && !strncmp(start, "defined", 7))
+            {
+                while (*p == ' ' || *p == '\t') p++;
+
+                bool paren = (*p == '(');
+
+                if (paren) p++;
+                while (*p == ' ' || *p == '\t') p++;
+                if (!ppIdentStart(*p)) return false;
+                while (ppIdentChar(*p)) p++;
+                while (*p == ' ' || *p == '\t') p++;
+                if (paren && *p++ != ')') return false;
+            }
+            else
+            {
+                // a function-like macro call is one operand, arguments and all
+                const char *q = p;
+
+                while (*q == ' ' || *q == '\t') q++;
+
+                if (*q == '(')
+                {
+                    int d = 0;
+
+                    for (p = q; *p; p++)
+                    {
+                        if (*p == '(') d++;
+                        else if (*p == ')' && --d == 0) { p++; break; }
+                    }
+                }
+            }
+
+            want_operand = false;
+            continue;
+        }
+
+        if (isdigit((unsigned char)*p))
+        {
+            if (!want_operand)
+                return false;
+
+            while (ppIdentChar(*p) || *p == '.') p++;
+            want_operand = false;
+            continue;
+        }
+
+        if (*p == '(')
+        {
+            if (!want_operand) return false;
+            p++;
+            continue;
+        }
+
+        if (*p == ')')
+        {
+            if (want_operand) return false;
+            p++;
+            continue;
+        }
+
+        // the unary operators may start an operand
+        if (want_operand && (*p == '!' || *p == '~' || *p == '-' || *p == '+'))
+        {
+            p++;
+            continue;
+        }
+
+        if (strchr("+-*/%<>=!&|^?:", *p))
+        {
+            if (want_operand)
+                return false;
+
+            p++;
+            while (*p && strchr("<>=&|", *p)) p++;
+            want_operand = true;
+            continue;
+        }
+
+        // anything else is left for glslang to judge
+        p++;
+    }
+
+    return !want_operand;
+}
+
+static bool ppKnownVersion(int v, bool es)
+{
+    static const int desktop[] = { 110, 120, 130, 140, 150, 330, 400, 410, 420, 430, 440, 450, 460 };
+
+    if (es || v == 100)
+        return v == 100 || v == 300 || v == 310 || v == 320;
+
+    for (size_t i = 0; i < sizeof(desktop) / sizeof(desktop[0]); i++)
+        if (desktop[i] == v)
+            return true;
+
+    return false;
+}
+
+// NULL when the source is fine, otherwise the reason it is not.
+static const char *ppStrictError(const char *src)
+{
+    static const char *const kVersionFirst = "#version must come before anything else in the shader";
+    static const char *const kVersionBad   = "#version names a GLSL version that does not exist";
+    static const char *const kStringify    = "GLSL has no # stringification operator";
+    static const char *const kExtraTokens  = "unexpected tokens after a preprocessor directive";
+    static const char *const kBadExpr      = "malformed #if or #elif expression";
+
+    size_t n = strlen(src);
+    char *buf = (char *)malloc(n + 1);
+    const char *err = NULL;
+    bool seen = false;
+
+    if (buf == NULL)
+        return NULL;
+
+    // comments become spaces, and a backslash-newline joins the lines
+    size_t o = 0;
+
+    for (size_t i = 0; i < n; i++)
+    {
+        if (src[i] == '/' && src[i + 1] == '/')
+        {
+            while (i < n && src[i] != '\n') i++;
+            if (i < n) buf[o++] = '\n';
+        }
+        else if (src[i] == '/' && src[i + 1] == '*')
+        {
+            i += 2;
+            while (i < n && !(src[i] == '*' && src[i + 1] == '/'))
+            {
+                if (src[i] == '\n') buf[o++] = '\n';
+                i++;
+            }
+            i++;
+            buf[o++] = ' ';
+        }
+        else if (src[i] == '\\' && src[i + 1] == '\n')
+        {
+            i++;
+        }
+        else
+        {
+            buf[o++] = src[i];
+        }
+    }
+    buf[o] = 0;
+
+    for (char *line = buf; line && *line && !err;)
+    {
+        char *next = strchr(line, '\n');
+
+        if (next) *next++ = 0;
+
+        char *p = line;
+
+        while (*p == ' ' || *p == '\t' || *p == '\r') p++;
+
+        if (*p == 0)
+        {
+            line = next;
+            continue;
+        }
+
+        if (*p != '#')
+        {
+            seen = true;
+            line = next;
+            continue;
+        }
+
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+
+        char name[16] = "";
+        size_t k = 0;
+
+        while (ppIdentChar(*p) && k < sizeof(name) - 1) name[k++] = *p++;
+        name[k] = 0;
+
+        char *rest = p;
+        while (*rest == ' ' || *rest == '\t' || *rest == '\r') rest++;
+
+        if (!strcmp(name, "version"))
+        {
+            if (seen)
+                err = kVersionFirst;
+            else
+            {
+                int v = atoi(rest);
+                bool es = strstr(rest, "es") != NULL;
+
+                if (!isdigit((unsigned char)*rest) || !ppKnownVersion(v, es))
+                    err = kVersionBad;
+            }
+        }
+        else if (!strcmp(name, "define"))
+        {
+            char *q = rest;
+
+            while (ppIdentChar(*q)) q++;
+
+            if (*q == '(')
+                while (*q && *q != ')') q++;
+
+            for (; *q && !err; q++)
+                if (*q == '#' && q[1] != '#' && (q == rest || q[-1] != '#'))
+                    err = kStringify;
+        }
+        else if (!strcmp(name, "else") || !strcmp(name, "endif"))
+        {
+            if (*rest && *rest != '\r')
+                err = kExtraTokens;
+        }
+        else if (!strcmp(name, "if") || !strcmp(name, "elif"))
+        {
+            if (!ppExpressionIsWellFormed(rest))
+                err = kBadExpr;
+        }
+
+        seen = true;
+        line = next;
+    }
+
+    free(buf);
+
+    return err;
+}
+
 void mglCompileShader(GLMContext ctx, GLuint shader)
 {
     Shader *ptr;
@@ -627,14 +999,44 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
     // GL 4.6 section 7.1: a shader that will not compile sets COMPILE_STATUS
     // false and fills the info log. It does not raise a GL error.
+    {
+        const char *strict = ppStrictError(ptr->src);
+
+        if (strict)
+        {
+            free(ptr->log);
+            ptr->log = strdup(strict);
+            return;
+        }
+    }
+
     ctx->error_suppress++;
 
-    char *raised = rewriteCullExtension(ptr->src);
+    char *normal = normalizeFrontEnd(ptr->src, ptr->type);
+    char *raised = rewriteCullExtension(normal ? normal : ptr->src);
+
+    if (normal && raised == NULL)
+    {
+        raised = normal;
+        normal = NULL;
+    }
+
+    free(normal);
     const char *front = raised ? raised : ptr->src;
 
     // glslang will not take the subroutine keyword when it targets SPIR-V, so
     // the source is rewritten into plain GLSL before it ever sees it.
     char *desub = mglRewriteSubroutines(front, &ptr->subroutines);
+
+    if (ptr->subroutines.error)
+    {
+        free(ptr->log);
+        ptr->log = strdup(ptr->subroutines.error);
+        free(desub);
+        free(raised);
+        ctx->error_suppress--;
+        return;
+    }
 
     if (desub)
     {

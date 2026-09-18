@@ -35,6 +35,7 @@
 
 // defines above set sizes in glm_params
 #include "glm_params.h"
+#include "mgl_reflect.h"
 
 #ifdef DEBUG
 #define DEBUG_LEVEL 3
@@ -436,6 +437,11 @@ typedef struct VertexArray_t {
 #define MGL_GS_OUT_MSL_SLOT   28
 #define MGL_GS_INDEX_MSL_SLOT 29
 
+// Point-mode isolines ahead of a geometry shader: each patch gets a fixed
+// block of input slots, one per point the highest level could make.
+#define MGL_TES_MAX_LEVEL        64
+#define MGL_TES_POINTS_PER_PATCH (MGL_TES_MAX_LEVEL * (MGL_TES_MAX_LEVEL + 1))
+
 // Transform feedback writes through storage blocks of its own, starting here.
 #define MGL_XFB_FIRST_BINDING 16
 #define MGL_XFB_MAX_BUFFERS   4
@@ -463,17 +469,23 @@ void  mglFreeCullInfo(CullInfo *ci);
 typedef struct CaptureInfo_t {
     char   *rewritten_src;
     GLint   varying_count;
-    GLint   components[MGL_XFB_MAX_BUFFERS];
-    GLint   stride_words;      // interleaved only; zero when separate
+    GLint   stride_bytes[MGL_XFB_MAX_BUFFERS];  // one recorded vertex, per buffer
     GLint   buffer_count;
     GLboolean separate;
+    GLboolean from_shader;      // laid out by the shader's xfb qualifiers
+    // behind a geometry stage there is no rewrite, just a table of words to copy
+    GLuint *gather;
+    GLint   gather_words;
     // where the rewrite's own uniforms and buffers ended up
     GLint   on_loc, base_loc;
     GLint   buffer_slot[MGL_XFB_MAX_BUFFERS];
 } CaptureInfo;
 
-bool mglBuildTransformCapture(const char *src, char *const *varyings, GLsizei count,
-                              GLenum buffer_mode, CaptureInfo *ci);
+bool mglBuildTransformCapture(const char *src, void *shader, char *const *varyings, GLsizei count,
+                              GLenum buffer_mode, const char *slot_expr, CaptureInfo *ci);
+int  mglTransformCaptureItems(const char *src, void *shader, char *const *varyings, GLsizei count,
+                              GLenum buffer_mode, MglXfbItem *items, int max_items,
+                              GLint *stride_bytes, GLboolean *from_shader);
 void mglFreeCaptureInfo(CaptureInfo *ci);
 
 // What a geometry shader turned into, and what it needs to run.
@@ -496,13 +508,25 @@ typedef struct GeometryInfo_t {
     GLint  pass_out_slot;
     // the three numbers the compute pass is told about this draw
     GLint  prims_loc, indexed_loc, first_loc, stride_loc;
+    // where each output sits in one emitted vertex, for transform feedback
+    GLint  out_count;
+    char   out_names[32][64];
+    char   out_types[32][32];
+    GLint  out_offsets[32];
 } GeometryInfo;
+
+// Transform feedback behind a geometry stage copies words straight out of the
+// emitted vertices: three numbers per word, where from, which buffer, where to.
+int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
+                     GLuint *table, int max_words);
 
 // Names MGL generates for its own use, which GL must not see and the buffer
 // mapping must not try to find a GL object for.
 static inline bool mglResourceIsInternal(const char *name)
 {
-    return name && (!strncmp(name, "Mgl", 3) || !strncmp(name, "mgl", 3));
+    // MGL's own names run straight on in capitals: mglGsIn, MglXfbB0
+    return name && (!strncmp(name, "Mgl", 3) || !strncmp(name, "mgl", 3)) &&
+           name[3] >= 'A' && name[3] <= 'Z';
 }
 
 void  mglInitLimits(GLMContext ctx);
@@ -510,6 +534,9 @@ void  mglInitLimits(GLMContext ctx);
 const void *mglGlslangResource(GLMContext ctx);
 
 bool  mglRewriteGeometryShader(const char *src, GeometryInfo *gi);
+char *mglAddTessPointCapture(const char *tes_src, const GeometryInfo *gi);
+bool  mglTesIsPointIsolines(const char *tes_src);
+char *mglPassThroughGeometry(const char *tes_src);
 char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi);
 void  mglFreeGeometryInfo(GeometryInfo *gi);
 
@@ -530,10 +557,15 @@ typedef struct SubroutineInfo_t {
     char   **uniform_names;      // every subroutine uniform in this stage
     GLuint  *uniform_array_size;
     GLuint  *uniform_compatible; // how many functions each one accepts
+    GLuint  *uniform_type;       // which subroutine type each uniform has
+    GLint   *uniform_location;   // layout(location), -1 when none was given
+    GLuint64 *fn_types;          // the types each function implements, one bit each
     GLuint   uniform_count;
+    const char *error;           // set when the shader misuses a subroutine
 } SubroutineInfo;
 
 char *mglRewriteSubroutines(const char *src, SubroutineInfo *info);
+bool  mglSubroutineCompatible(const SubroutineInfo *info, GLuint uniform, GLuint fn);
 void  mglFreeSubroutineInfo(SubroutineInfo *info);
 bool  mglCopySubroutineInfo(SubroutineInfo *dst, const SubroutineInfo *src);
 
@@ -595,6 +627,7 @@ typedef struct TessInfo_t {
     GLuint    partition;           // SpvExecutionModeSpacingEqual / Fractional*
     GLuint    winding;             // SpvExecutionModeVertexOrderCw / Ccw
     GLboolean point_mode;
+    GLboolean quad_isolines;       // isolines run as quads to feed a geometry shader
     GLboolean lower_left;
     GLuint    out_control_points;  // vertices the control shader emits per patch
 } TessInfo;
@@ -611,7 +644,9 @@ typedef struct SpirvResource_t {
     GLuint  *element_binding;
     // MGL_NO_LOCATION until the linker numbers it across the whole program
     GLuint  location;
+    GLboolean explicit_location;    // layout(location) gave it
     GLuint  msl_index;      // the [[buffer(n)]] / [[texture(n)]] slot SPIRV-Cross gave it
+    GLuint  msl_sampler_index;  // the [[sampler(n)]] slot, for a combined sampler
     GLenum  gl_type;        // GL_FLOAT_VEC4 and friends, recorded at link time
     GLint   array_size;     // 1 unless the uniform is an array
     // GL picks the texture unit from the sampler uniform's value, not from the
@@ -686,16 +721,29 @@ typedef struct Program_t {
     char   **xfb_varyings;
     GLsizei  xfb_varying_count;
     GLenum   xfb_buffer_mode;
+    // the feedback buffers the capturing stage's own xfb qualifiers write, a
+    // bit each; zero when the shader leaves capture to the API
+    GLuint   xfb_shader_buffers;
+    GLint    xfb_shader_strides[MGL_XFB_MAX_BUFFERS];
     CaptureInfo xfb;
     TessInfo tess;
     // a geometry shader becomes a compute pass plus a generated vertex shader
     GeometryInfo geom;
+    // the geometry shader that was linked: the attached one, or one MGL made
+    // to carry point-mode isolines, which Metal cannot draw on its own
+    struct Shader_t *geom_shader;
+    struct Shader_t *synthetic_gs;
     Spirv gs_passthrough;
     // gl_CullDistance drops whole primitives, which Metal cannot do, so a
     // compute pass picks the survivors before the real draw
     CullInfo cull;
     Spirv cull_capture;
     Spirv cull_kernel;
+    // GL's view of the program's resources, for the interface queries
+    MglResourceTable resources;
+    // glBindAttribLocation and glBindFragDataLocation(Indexed), applied at link
+    struct { char *name; GLuint location; GLuint index; } attrib_binds[32], frag_binds[32];
+    GLint attrib_bind_count, frag_bind_count;
 } Program;
 
 // True once a program has linked a geometry stage. An application may detach

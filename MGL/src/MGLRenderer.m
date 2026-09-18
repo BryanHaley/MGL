@@ -204,6 +204,11 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     size_t        _tessIndexOffset;
     MTLIndexType  _tessIndexType;
     bool          _tessIndexed;
+    // isolines run as quads get their levels moved into quad order
+    id<MTLComputePipelineState> _isolineLevelsPipeline;
+    // transform feedback behind a geometry stage: count what came out, copy it
+    id<MTLComputePipelineState> _gsCountPipeline;
+    id<MTLComputePipelineState> _gsGatherPipeline;
 
     // Metal counts fragments into a buffer rather than into a query object.
     // One slot per encoder an occlusion query stays live across, summed later.
@@ -646,7 +651,8 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                 {
                     SpirvResource *res =
                         &ctx->state.program->spirv_resources_list[stage][spvc_type].list[i];
-                    GLint instances = (spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_BUFFER &&
+                    GLint instances = ((spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_BUFFER ||
+                                        spvc_type == SPVC_RESOURCE_TYPE_STORAGE_BUFFER) &&
                                        res->array_size > 1 && res->element_binding)
                                       ? res->array_size : 1;
                     GLuint base_slot = (GLuint)[self getProgramMSLIndex:stage type:spvc_type index: i];
@@ -1303,19 +1309,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         tex_desc.mipmapLevelCount = 1;
     }
 
-    switch(tex->access)
-    {
-        case GL_READ_ONLY:
-            tex_desc.usage = MTLTextureUsageShaderRead; break;
-        case GL_WRITE_ONLY:
-            tex_desc.usage = MTLTextureUsageShaderWrite; break;
-        case GL_READ_WRITE:
-            tex_desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite; break;
-        default:
-            // access is only set by glBindImageTexture; an ordinary sampled
-            // texture has none, and GL still lets shaders read it
-            tex_desc.usage = MTLTextureUsageShaderRead; break;
-    }
+    tex_desc.usage = accessUsage(tex, pixelFormat);
 
     if (tex->is_render_target)
     {
@@ -2632,129 +2626,161 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     return _incompleteSampler;
 }
 
-- (bool) bindTexturesForStage: (int) stage
+// The sampler state a texture unit reads with: a bound sampler object wins
+// over the texture's own parameters.
+- (id<MTLSamplerState>) samplerForUnit: (GLuint) unit texture: (Texture *) ptr
 {
-    GLuint count;
+    Sampler *gl_sampler = STATE(texture_samplers[unit]);
+    id<MTLSamplerState> sampler;
 
-    // iterate shader storage buffers
-    count = [self getProgramBindingCount: stage type: SPVC_RESOURCE_TYPE_SAMPLED_IMAGE];
-    if (count)
+    if (gl_sampler)
     {
-        int textures_to_be_mapped = count;
-
-        // something is very wrong..
-        MTL_CHECK_RETURN_FALSE(textures_to_be_mapped < TEXTURE_UNITS, GL_INVALID_VALUE);
-
-        for (int i=0; textures_to_be_mapped > 0; i++)
+        if (gl_sampler->dirty_bits && gl_sampler->mtl_data)
         {
-            RETURN_FALSE_ON_FAILURE(i < count);
-
-            GLuint spirv_binding;
-            Texture *ptr;
-
-            spirv_binding = [self getProgramTexUnit:stage type:SPVC_RESOURCE_TYPE_SAMPLED_IMAGE index: i];
-
-            ptr = STATE(active_textures[spirv_binding]);
-
-            // A shader may declare a sampler it never reads, or read one the
-            // app left unbound. GL says that samples undefined, not that the
-            // draw fails, so leave the slot empty and move on.
-            if (ptr == NULL)
-            {
-                MGL_NSDEBUG(@"MGL: sampler at binding %u has no texture bound", spirv_binding);
-
-                if (stage == _VERTEX_SHADER)
-                {
-                    [_currentRenderEncoder setVertexTexture: [self incompleteTexture] atIndex: spirv_binding];
-                    [_currentRenderEncoder setVertexSamplerState: [self incompleteSampler] atIndex: spirv_binding];
-                }
-                else
-                {
-                    [_currentRenderEncoder setFragmentTexture: [self incompleteTexture] atIndex: spirv_binding];
-                    [_currentRenderEncoder setFragmentSamplerState: [self incompleteSampler] atIndex: spirv_binding];
-                }
-
-                textures_to_be_mapped--;
-                continue;
-            }
-
-            {
-                id<MTLTexture> texture;
-
-                if ([self bindMTLTexture: ptr] == false || ptr->mtl_data == NULL)
-                {
-                    MGL_NSDEBUG(@"MGL: texture %u could not be realised, reading it as black", ptr->name);
-
-                    if (stage == _VERTEX_SHADER)
-                    {
-                        [_currentRenderEncoder setVertexTexture: [self incompleteTexture] atIndex: spirv_binding];
-                        [_currentRenderEncoder setVertexSamplerState: [self incompleteSampler] atIndex: spirv_binding];
-                    }
-                    else
-                    {
-                        [_currentRenderEncoder setFragmentTexture: [self incompleteTexture] atIndex: spirv_binding];
-                        [_currentRenderEncoder setFragmentSamplerState: [self incompleteSampler] atIndex: spirv_binding];
-                    }
-
-                    textures_to_be_mapped--;
-                    continue;
-                }
-
-                texture = [self samplingTexture: ptr from: (__bridge id<MTLTexture>)(ptr->mtl_data)];
-
-                id<MTLSamplerState> sampler;
-
-                // late binding of texture samplers.. but its better than scanning all texture_samplers
-                // texture samplers take priority over texture parameters
-                if(STATE(texture_samplers[spirv_binding]))
-                {
-                    Sampler *gl_sampler;
-
-                    gl_sampler = STATE(texture_samplers[spirv_binding]);
-
-                    // delete existing sampler if dirty
-                    if (gl_sampler->dirty_bits)
-                    {
-                        if (gl_sampler->mtl_data)
-                        {
-                            CFBridgingRelease(gl_sampler->mtl_data);
-                            gl_sampler->mtl_data = NULL;
-                        }
-                    }
-
-                    if (gl_sampler->mtl_data == NULL)
-                    {
-                        gl_sampler->mtl_data = (void *)CFBridgingRetain([self createMTLSamplerForTexParam:&gl_sampler->params target:ptr->target]);
-                        gl_sampler->dirty_bits = 0;
-                    }
-
-                    sampler = (__bridge id<MTLSamplerState>)(gl_sampler->mtl_data);
-                }
-                else
-                {
-                    sampler = (__bridge id<MTLSamplerState>)(ptr->params.mtl_data);
-                }
-
-                if (sampler == nil)
-                    sampler = [self incompleteSampler];
-
-                if (stage == _VERTEX_SHADER)
-                {
-                    [_currentRenderEncoder setVertexTexture:texture atIndex:spirv_binding];
-                    [_currentRenderEncoder setVertexSamplerState:sampler atIndex:spirv_binding];
-                }
-                else
-                {
-                    [_currentRenderEncoder setFragmentTexture:texture atIndex:spirv_binding];
-                    [_currentRenderEncoder setFragmentSamplerState:sampler atIndex:spirv_binding];
-                }
-
-                textures_to_be_mapped--;
-            }
+            CFBridgingRelease(gl_sampler->mtl_data);
+            gl_sampler->mtl_data = NULL;
         }
+
+        if (gl_sampler->mtl_data == NULL)
+        {
+            gl_sampler->mtl_data = (void *)CFBridgingRetain([self createMTLSamplerForTexParam: &gl_sampler->params
+                                                                                       target: ptr->target]);
+            gl_sampler->dirty_bits = 0;
+        }
+
+        sampler = (__bridge id<MTLSamplerState>)(gl_sampler->mtl_data);
+    }
+    else
+    {
+        sampler = (__bridge id<MTLSamplerState>)(ptr->params.mtl_data);
+    }
+
+    return sampler ? sampler : [self incompleteSampler];
+}
+
+// What an image unit hands a shader: the bound level, and just the one layer
+// when the binding is not layered.
+- (id<MTLTexture>) imageTexture: (ImageUnit *) iu
+{
+    id<MTLTexture> base = (__bridge id<MTLTexture>)(iu->tex->mtl_data);
+
+    if (base == nil)
+        return nil;
+
+    MTLTextureType type = base.textureType;
+    NSUInteger levels = base.mipmapLevelCount;
+    NSUInteger level = iu->level < levels ? iu->level : levels - 1;
+    NSUInteger layers = base.arrayLength;
+
+    if (type == MTLTextureTypeCube)
+        layers = 6;
+    else if (type == MTLTextureTypeCubeArray)
+        layers *= 6;
+
+    NSRange slices = NSMakeRange(0, layers);
+    bool one_layer = !iu->layered && (type == MTLTextureType2DArray || type == MTLTextureTypeCube ||
+                                      type == MTLTextureTypeCubeArray);
+
+    if (one_layer)
+    {
+        NSUInteger layer = iu->layer > 0 ? (NSUInteger)iu->layer : 0;
+
+        type = MTLTextureType2D;
+        slices = NSMakeRange(layer < layers ? layer : layers - 1, 1);
+    }
+
+    if (levels == 1 && !one_layer)
+        return base;
+
+    id<MTLTexture> view = [base newTextureViewWithPixelFormat: base.pixelFormat
+                                                  textureType: type
+                                                       levels: NSMakeRange(level, 1)
+                                                       slices: slices];
+
+    return view ? view : base;
+}
+
+// Binds every texture and image a stage reads, each into the Metal slot
+// SPIRV-Cross gave it. The GL unit decides which texture; the slot is fixed
+// when the shader is compiled and has nothing to do with the unit number.
+- (bool) bindTexturesForStage: (int) stage
+                   setTexture: (void (^)(id<MTLTexture>, NSUInteger)) setTexture
+                   setSampler: (void (^)(id<MTLSamplerState>, NSUInteger)) setSampler
+{
+    Program *program = ctx->state.program;
+
+    if (program == NULL)
+        return true;
+
+    SpirvResourceList *samplers = &program->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_SAMPLED_IMAGE];
+
+    for (GLuint i = 0; i < samplers->count; i++)
+    {
+        SpirvResource *res = &samplers->list[i];
+
+        if (res->msl_index == (GLuint)-1)
+            continue;
+
+        GLuint unit = [self getProgramTexUnit: stage type: SPVC_RESOURCE_TYPE_SAMPLED_IMAGE index: i];
+        Texture *ptr = STATE(active_textures[unit]);
+        id<MTLTexture> texture = nil;
+
+
+        if (ptr && [self bindMTLTexture: ptr] && ptr->mtl_data)
+            texture = [self samplingTexture: ptr from: (__bridge id<MTLTexture>)(ptr->mtl_data)];
+
+        // GL reads an unbound or unusable sampler as black; Metal wants
+        // something of the declared kind in the slot
+        if (texture == nil)
+        {
+            texture = [self dummyTextureForGLType: res->gl_type];
+            setTexture(texture ? texture : [self incompleteTexture], res->msl_index);
+            setSampler([self incompleteSampler], res->msl_sampler_index);
+            continue;
+        }
+
+        setTexture(texture, res->msl_index);
+        setSampler([self samplerForUnit: unit texture: ptr], res->msl_sampler_index);
+    }
+
+    SpirvResourceList *images = &program->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_IMAGE];
+
+    for (GLuint i = 0; i < images->count; i++)
+    {
+        SpirvResource *res = &images->list[i];
+
+        if (res->msl_index == (GLuint)-1)
+            continue;
+
+        GLuint binding = [self getProgramTexUnit: stage type: SPVC_RESOURCE_TYPE_STORAGE_IMAGE index: i];
+        ImageUnit *iu = &STATE(image_units[binding]);
+        id<MTLTexture> texture = nil;
+
+        if (iu->tex && (iu->tex->mtl_data || [self bindMTLTexture: iu->tex]))
+            texture = [self imageTexture: iu];
+
+        if (texture == nil)
+            texture = [self dummyTextureForGLType: res->gl_type];
+
+        if (texture)
+            setTexture(texture, res->msl_index);
     }
 
     return true;
+}
+
+- (bool) bindTexturesForStage: (int) stage
+{
+    // Realising a texture can retire the encoder, so each call asks for the
+    // current one rather than holding on to the one there was at the start.
+    if (stage == _VERTEX_SHADER)
+        return [self bindTexturesForStage: stage
+                               setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setVertexTexture: t atIndex: i]; }
+                               setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setVertexSamplerState: s atIndex: i]; }];
+
+    return [self bindTexturesForStage: stage
+                           setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setFragmentTexture: t atIndex: i]; }
+                           setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setFragmentSamplerState: s atIndex: i]; }];
 }
 
 - (bool) bindTexturesToCurrentRenderEncoder
@@ -3102,6 +3128,47 @@ static GLuint packedSwizzle(const TextureParameter *p)
          | ((GLuint)(p->swizzle_g & 0xFF) << 8)
          | ((GLuint)(p->swizzle_b & 0xFF) << 16)
          | ((GLuint)(p->swizzle_a & 0xFF) << 24);
+}
+
+// What a shader may do with the texture. Metal fixes usage when a texture is
+// made, and glBindImageTexture can ask for writes -- or atomic counting --
+// long after that, so every texture that could ever be an image is made
+// ready for it up front rather than remade later.
+static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
+{
+    MTLTextureUsage usage = MTLTextureUsageShaderRead;
+
+    // Metal will not make a swizzled texture that can be drawn into or written
+    if (tex->params.swizzled ||
+        tex->params.swizzle_r != GL_RED || tex->params.swizzle_g != GL_GREEN ||
+        tex->params.swizzle_b != GL_BLUE || tex->params.swizzle_a != GL_ALPHA)
+        return usage;
+
+    // Metal fixes usage when the texture is made, and a texture attached to a
+    // framebuffer later without it draws nothing, so anything GL can render
+    // into gets it from the start.
+    if (mglFormatCaps(tex->internalformat) & (MGL_FMT_CAP_COLOR_ATT | MGL_FMT_CAP_DS_ATT))
+        usage |= MTLTextureUsageRenderTarget;
+
+    // A multisample texture cannot be written by a shader at all
+    if (tex->samples > 1)
+        return usage;
+
+    // Metal will not make a depth or stencil texture a shader can write
+    if ((mglFormatCaps(tex->internalformat) & MGL_FMT_CAP_WRITE) &&
+        !(mglFormatCaps(tex->internalformat) & MGL_FMT_CAP_DS_ATT))
+        usage |= MTLTextureUsageShaderWrite;
+
+    // GL's imageAtomic* calls become Metal texture atomics, which Metal only
+    // allows on a 32-bit integer texture made for them. Without the flag the
+    // shader still compiles, and the GPU hangs when it runs.
+    if (pixelFormat == MTLPixelFormatR32Uint || pixelFormat == MTLPixelFormatR32Sint)
+    {
+        if (@available(macOS 14.0, *))
+            usage |= MTLTextureUsageShaderAtomic;
+    }
+
+    return usage;
 }
 
 - (bool)bindMTLTexture:(Texture *)tex
@@ -5013,10 +5080,7 @@ static GLuint drawPrimitiveCount(GLenum mode, GLsizei count)
 // Bytes one recorded vertex takes in this buffer.
 - (NSUInteger) xfbStrideFor: (Program *) program buffer: (int) b
 {
-    if (program->xfb.separate)
-        return (NSUInteger)program->xfb.components[b] * 4;
-
-    return (NSUInteger)program->xfb.stride_words * 4;
+    return (NSUInteger)program->xfb.stride_bytes[b];
 }
 
 // ---------------------------------------------------------------------------
@@ -5056,14 +5120,18 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
     }
 }
 
+static MTLTessellationPartitionMode mtlPartitionForSpv(GLuint mode);
+static MTLWinding mtlWindingForSpv(GLuint mode);
+
 - (bool) buildGeometryPipelines: (Program *) program
 {
-    id<MTLFunction> vfn = (__bridge id<MTLFunction>)(program->spirv[_VERTEX_SHADER].mtl_function);
+    int cap_stage = program->tess.active ? _TESS_EVALUATION_SHADER : _VERTEX_SHADER;
+    id<MTLFunction> vfn = (__bridge id<MTLFunction>)(program->spirv[cap_stage].mtl_function);
     id<MTLFunction> gfn = (__bridge id<MTLFunction>)(program->spirv[_GEOMETRY_SHADER].mtl_function);
     id<MTLFunction> pfn = (__bridge id<MTLFunction>)(program->gs_passthrough.mtl_function);
     id<MTLFunction> ffn = (__bridge id<MTLFunction>)(program->spirv[_FRAGMENT_SHADER].mtl_function);
 
-    if (_gsPipelineVertexFn == program->spirv[_VERTEX_SHADER].mtl_function &&
+    if (_gsPipelineVertexFn == program->spirv[cap_stage].mtl_function &&
         _gsPipelineGeometryFn == program->spirv[_GEOMETRY_SHADER].mtl_function &&
         _gsPipelineFramebuffer == ctx->state.framebuffer &&
         _gsCapturePipeline && _gsComputePipeline && _gsDrawPipeline)
@@ -5089,6 +5157,17 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
     cap.vertexFunction = vfn;
     cap.vertexDescriptor = vd;
     cap.rasterizationEnabled = NO;
+
+    if (program->tess.active)
+    {
+        cap.vertexDescriptor = nil;
+        cap.maxTessellationFactor = MGL_TES_MAX_LEVEL;
+        cap.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        cap.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+        cap.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+        cap.tessellationPartitionMode = mtlPartitionForSpv(program->tess.partition);
+        cap.tessellationOutputWindingOrder = mtlWindingForSpv(program->tess.winding);
+    }
 
     _gsCapturePipeline = [_device newRenderPipelineStateWithDescriptor: cap error: &err];
 
@@ -5132,11 +5211,169 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
         return false;
     }
 
-    _gsPipelineVertexFn = program->spirv[_VERTEX_SHADER].mtl_function;
+    _gsPipelineVertexFn = program->spirv[cap_stage].mtl_function;
     _gsPipelineGeometryFn = program->spirv[_GEOMETRY_SHADER].mtl_function;
     _gsPipelineFramebuffer = ctx->state.framebuffer;
 
     return true;
+}
+
+static const char *mgl_gs_capture_msl =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    // before[s] is how many vertices the slots ahead of s emitted. A slot's
+    // vertices are packed at its front, so the first unused one ends it.
+    "kernel void mglGsCount(const device uint *w [[buffer(0)]],\n"
+    "                       device uint *before [[buffer(1)]],\n"
+    "                       constant uint3 &cfg [[buffer(2)]],\n"
+    "                       uint id [[thread_position_in_grid]])\n"
+    "{\n"
+    "    uint stride = cfg.x, cap = cfg.y, slots = cfg.z, total = 0;\n"
+    "    for (uint s = 0; s < slots; s++) {\n"
+    "        before[s] = total;\n"
+    "        uint n = 0;\n"
+    "        while (n < cap && w[(s * cap + n) * stride + 5] != 0) n++;\n"
+    "        total += n;\n"
+    "    }\n"
+    "    before[slots] = total;\n"
+    "}\n"
+    "kernel void mglGsGather(const device uint *w [[buffer(0)]],\n"
+    "                        const device uint *before [[buffer(1)]],\n"
+    "                        const device uint *table [[buffer(2)]],\n"
+    "                        constant uint4 &cfg [[buffer(3)]],\n"
+    "                        constant uint4 &dst_stride [[buffer(4)]],\n"
+    "                        constant uint4 &dst_room [[buffer(5)]],\n"
+    "                        device uint *b0 [[buffer(6)]],\n"
+    "                        device uint *b1 [[buffer(7)]],\n"
+    "                        device uint *b2 [[buffer(8)]],\n"
+    "                        device uint *b3 [[buffer(9)]],\n"
+    "                        uint s [[thread_position_in_grid]])\n"
+    "{\n"
+    "    uint n = before[s + 1] - before[s];\n"
+    "    for (uint v = 0; v < n; v++) {\n"
+    "        uint src = (s * cfg.y + v) * cfg.x;\n"
+    "        uint dst = before[s] + v;\n"
+    "        for (uint e = 0; e < cfg.z; e++) {\n"
+    "            uint buf = table[e * 3 + 1];\n"
+    "            uint at = dst * dst_stride[buf] + table[e * 3 + 2];\n"
+    "            if (at >= dst_room[buf]) continue;\n"
+    "            uint val = w[src + table[e * 3] / 4];\n"
+    "            if (buf == 0) b0[at] = val;\n"
+    "            else if (buf == 1) b1[at] = val;\n"
+    "            else if (buf == 2) b2[at] = val;\n"
+    "            else b3[at] = val;\n"
+    "        }\n"
+    "    }\n"
+    "}\n";
+
+- (bool) buildGsCapturePipelines
+{
+    if (_gsCountPipeline && _gsGatherPipeline)
+        return true;
+
+    NSError *err = nil;
+    id<MTLLibrary> lib = [_device newLibraryWithSource: @(mgl_gs_capture_msl) options: nil error: &err];
+
+    if (lib)
+    {
+        _gsCountPipeline = [_device newComputePipelineStateWithFunction: [lib newFunctionWithName: @"mglGsCount"]
+                                                                  error: &err];
+        _gsGatherPipeline = [_device newComputePipelineStateWithFunction: [lib newFunctionWithName: @"mglGsGather"]
+                                                                   error: &err];
+    }
+
+    if (_gsCountPipeline == nil || _gsGatherPipeline == nil)
+    {
+        MGL_NSERR(@"MGL ERROR: geometry capture pipelines failed: %@", err);
+        return false;
+    }
+
+    return true;
+}
+
+// Copies what the geometry stage emitted into the bound feedback buffers, in
+// the order GL records it, then waits so the next draw knows where to go on.
+- (void) captureGeometry: (Program *) program
+                  output: (id<MTLBuffer>) out_buf
+                   slots: (NSUInteger) slots
+{
+    TransformFeedback *xfb = ctx->state.transform_feedback;
+    GeometryInfo *gi = &program->geom;
+    CaptureInfo *ci = &program->xfb;
+
+    if (xfb == NULL || !xfb->active || xfb->paused || ci->gather_words <= 0)
+        return;
+
+    if ([self buildGsCapturePipelines] == false)
+        return;
+
+    id<MTLBuffer> before = [_scratchPool bufferOfLength: (slots + 1) * sizeof(uint32_t)
+                                       forCommandBuffer: _currentCommandBuffer];
+
+    if (before == nil)
+        return;
+
+    uint32_t stride_bytes[4] = { 0 }, room[4] = { 0 };
+    id<MTLBuffer> targets[4] = { nil };
+    NSUInteger offsets[4] = { 0 };
+
+    for (int b = 0; b < 4 && b < ci->buffer_count; b++)
+    {
+        BufferBaseTarget *slot = &ctx->state.buffer_base[_TRANSFORM_FEEDBACK_BUFFER].buffers[b];
+        Buffer *buf = xfb->buffers[b].buf ? xfb->buffers[b].buf : slot->buf;
+        GLintptr offset = xfb->buffers[b].buf ? xfb->buffers[b].offset : slot->offset;
+
+        if (buf == NULL || ci->stride_bytes[b] <= 0)
+            continue;
+
+        if (buf->data.mtl_data == NULL)
+            [self bindMTLBuffer: buf];
+
+        if (buf->data.mtl_data == NULL)
+            continue;
+
+        targets[b] = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
+        offsets[b] = (NSUInteger)offset + xfb->vertices_recorded * (NSUInteger)ci->stride_bytes[b];
+        stride_bytes[b] = (uint32_t)((ci->stride_bytes[b] + 3) / 4);
+        room[b] = offsets[b] < targets[b].length ? (uint32_t)((targets[b].length - offsets[b]) / 4) : 0;
+    }
+
+    id<MTLComputeCommandEncoder> enc = [self liveComputeEncoder];
+
+    if (enc == nil)
+        return;
+
+    uint32_t count_cfg[3] = { (uint32_t)(gi->out_stride / 4), (uint32_t)gi->slot_capacity, (uint32_t)slots };
+
+    [enc setComputePipelineState: _gsCountPipeline];
+    [enc setBuffer: out_buf offset: 0 atIndex: 0];
+    [enc setBuffer: before offset: 0 atIndex: 1];
+    [enc setBytes: count_cfg length: sizeof(count_cfg) atIndex: 2];
+    [enc dispatchThreads: MTLSizeMake(1, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+
+    uint32_t gather_cfg[4] = { count_cfg[0], count_cfg[1], (uint32_t)ci->gather_words, 0 };
+
+    [enc setComputePipelineState: _gsGatherPipeline];
+    [enc setBuffer: out_buf offset: 0 atIndex: 0];
+    [enc setBuffer: before offset: 0 atIndex: 1];
+    [enc setBytes: ci->gather length: sizeof(GLuint) * 3 * (NSUInteger)ci->gather_words atIndex: 2];
+    [enc setBytes: gather_cfg length: sizeof(gather_cfg) atIndex: 3];
+    [enc setBytes: stride_bytes length: sizeof(stride_bytes) atIndex: 4];
+    [enc setBytes: room length: sizeof(room) atIndex: 5];
+
+    // an unused buffer still needs something in its slot; nothing is written
+    // to it, since its room is zero
+    for (int b = 0; b < 4; b++)
+        [enc setBuffer: targets[b] ? targets[b] : before offset: targets[b] ? offsets[b] : 0 atIndex: 6 + b];
+
+    [enc dispatchThreads: MTLSizeMake(slots, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+    [self endComputeEncoding];
+
+    [self flushCommandBuffer: true];
+
+    uint32_t total = ((uint32_t *)before.contents)[slots];
+
+    xfb->vertices_recorded += total;
 }
 
 // Runs the three passes and issues the draw. Returns false when this draw does
@@ -5155,12 +5392,23 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
     GeometryInfo *gi = &program->geom;
     GLint stride = 1;
     GLuint prims = gsPrimitiveCount(mode, count, &stride);
-
-    if (prims == 0 || gi->compute_src == NULL)
-        return true;
+    bool tess = program->tess.active;
 
     if (instances < 1)
         instances = 1;
+
+    // each patch owns a fixed run of input slots, whichever points it makes
+    if (tess)
+    {
+        GLint in_cp = ctx->state.var.patch_vertices;
+
+        prims = in_cp > 0 ? ((GLuint)count / (GLuint)in_cp) * (GLuint)instances : 0;
+        prims *= MGL_TES_POINTS_PER_PATCH;
+        stride = 1;
+    }
+
+    if (prims == 0 || gi->compute_src == NULL)
+        return true;
 
     if ([self buildGeometryPipelines: program] == false)
         return true;
@@ -5176,6 +5424,12 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
 
     NSUInteger in_verts = (NSUInteger)(first > 0 ? first : 0) + (NSUInteger)count;
     NSUInteger slots = (NSUInteger)prims * (NSUInteger)gi->invocations * (NSUInteger)instances;
+
+    if (tess)
+    {
+        in_verts = prims;
+        slots = (NSUInteger)prims * (NSUInteger)gi->invocations;
+    }
 
     id<MTLBuffer> in_buf = [_scratchPool bufferOfLength: in_verts * (NSUInteger)gi->in_stride
                                       forCommandBuffer: _currentCommandBuffer];
@@ -5198,6 +5452,11 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
             return true;
 
         [blit fillBuffer: out_buf range: NSMakeRange(0, out_buf.length) value: 0];
+
+        // the same for input slots no point lands in
+        if (tess)
+            [blit fillBuffer: in_buf range: NSMakeRange(0, in_buf.length) value: 0];
+
         [blit endEncoding];
     }
 
@@ -5206,21 +5465,63 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
         GLint v;
 
         v = (GLint)prims;   mglWriteProgramUniform(ctx, program, gi->prims_loc, v);
-        v = indexed ? 1 : 0; mglWriteProgramUniform(ctx, program, gi->indexed_loc, v);
-        v = first;          mglWriteProgramUniform(ctx, program, gi->first_loc, v);
+        v = indexed && !tess ? 1 : 0; mglWriteProgramUniform(ctx, program, gi->indexed_loc, v);
+        v = tess ? 0 : first; mglWriteProgramUniform(ctx, program, gi->first_loc, v);
         v = stride;         mglWriteProgramUniform(ctx, program, gi->stride_loc, v);
     }
 
-    // ---- pass one: the vertex stage, capturing ----
-    if (_currentRenderEncoder == nil && [self newRenderEncoder] == false)
-        return true;
+    // ---- pass one: the vertex stage, or the tessellation stages, capturing ----
+    if (tess)
+    {
+        GLuint patches = 0;
+        bool ok;
 
-    [_currentRenderEncoder setRenderPipelineState: _gsCapturePipeline];
-    [self bindVertexBuffersToCurrentRenderEncoder];
-    [_currentRenderEncoder setVertexBuffer: in_buf offset: 0 atIndex: gi->vs_in_slot];
-    [_currentRenderEncoder drawPrimitives: MTLPrimitiveTypePoint
-                              vertexStart: first > 0 ? first : 0
-                              vertexCount: count];
+        if (indexed)
+        {
+            _tessIndexBuffer = src->buffer;
+            _tessIndexOffset = src->offset;
+            _tessIndexType = src->type;
+            _tessIndexed = true;
+        }
+
+        ok = [self runTessellationForCount: count first: first instances: instances
+                                   patches: &patches pipeline: _gsCapturePipeline];
+
+        _tessIndexed = false;
+        _tessIndexBuffer = nil;
+
+        if (!ok)
+            return true;
+
+        [_currentRenderEncoder setVertexBuffer: in_buf offset: 0 atIndex: gi->vs_in_slot];
+
+        @try {
+            [_currentRenderEncoder drawPatches: program->tess.out_control_points
+                                    patchStart: 0
+                                    patchCount: patches
+                              patchIndexBuffer: nil
+                        patchIndexBufferOffset: 0
+                                 instanceCount: 1
+                                  baseInstance: 0];
+        } @catch (NSException *exception) {
+            MGL_NSERR(@"MGL ERROR: drawPatches failed: %@", exception);
+            return true;
+        }
+
+        indexed = false;
+    }
+    else
+    {
+        if (_currentRenderEncoder == nil && [self newRenderEncoder] == false)
+            return true;
+
+        [_currentRenderEncoder setRenderPipelineState: _gsCapturePipeline];
+        [self bindVertexBuffersToCurrentRenderEncoder];
+        [_currentRenderEncoder setVertexBuffer: in_buf offset: 0 atIndex: gi->vs_in_slot];
+        [_currentRenderEncoder drawPrimitives: MTLPrimitiveTypePoint
+                                  vertexStart: first > 0 ? first : 0
+                                  vertexCount: count];
+    }
 
     // ---- pass two: the geometry stage ----
     id<MTLComputeCommandEncoder> enc = [self liveComputeEncoder];
@@ -5254,6 +5555,8 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
     [_currentRenderEncoder drawPrimitives: gsOutputPrimitive(gi->out_primitive)
                               vertexStart: 0
                               vertexCount: slots * (NSUInteger)gi->slot_capacity];
+
+    [self captureGeometry: program output: out_buf slots: slots];
 
     return true;
 }
@@ -5617,7 +5920,8 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
     if (ctx->state.program == NULL || !ctx->state.program->tess.active)
         return false;
 
-    if ([self runTessellationForCount: count first: first instances: instances patches: &patches] == false)
+    if ([self runTessellationForCount: count first: first instances: instances patches: &patches
+                             pipeline: _pipelineState] == false)
         return true;
 
     @try {
@@ -5649,6 +5953,20 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
     if (dst == NULL)
         return;
 
+    // isolines as quads: outer[0] is the line count, down the u edges and
+    // across v inside; outer[1] is the segment count, the other way round
+    if (ctx->state.program->tess.quad_isolines)
+    {
+        uint16_t lines = mglFloatToHalf(outer[0]);
+        uint16_t segments = mglFloatToHalf(outer[1]);
+        uint16_t quad[6] = { lines, segments, lines, segments, segments, lines };
+
+        for (GLuint p = 0; p < patches; p++)
+            memcpy(dst + (size_t)p * 6, quad, sizeof(quad));
+
+        return;
+    }
+
     for (GLuint p = 0; p < patches; p++)
     {
         uint16_t *slot = dst + (size_t)p * (edges + inners);
@@ -5659,6 +5977,52 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
         for (int i = 0; i < inners; i++)
             slot[edges + i] = mglFloatToHalf(inner[i]);
     }
+}
+
+static const char *mgl_isoline_levels_msl =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "kernel void mglIsolineLevels(device uint16_t *f [[buffer(0)]],\n"
+    "                             uint id [[thread_position_in_grid]])\n"
+    "{\n"
+    "    uint b = id * 6;\n"
+    "    uint16_t lines = f[b];\n"
+    "    uint16_t segments = f[b + 1];\n"
+    "    f[b + 2] = lines;\n"
+    "    f[b + 3] = segments;\n"
+    "    f[b + 4] = segments;\n"
+    "    f[b + 5] = lines;\n"
+    "}\n";
+
+// The control shader wrote isoline levels; Metal is about to read quad ones.
+- (bool) remapIsolineLevels: (id<MTLBuffer>) levels
+                    patches: (GLuint) patches
+                    encoder: (id<MTLComputeCommandEncoder>) enc
+{
+    if (_isolineLevelsPipeline == nil)
+    {
+        NSError *err = nil;
+        id<MTLLibrary> lib = [_device newLibraryWithSource: @(mgl_isoline_levels_msl)
+                                                   options: nil
+                                                     error: &err];
+        id<MTLFunction> fn = [lib newFunctionWithName: @"mglIsolineLevels"];
+
+        if (fn)
+            _isolineLevelsPipeline = [_device newComputePipelineStateWithFunction: fn error: &err];
+
+        if (_isolineLevelsPipeline == nil)
+        {
+            MGL_NSERR(@"MGL ERROR: isoline level pipeline failed: %@", err);
+            return false;
+        }
+    }
+
+    [enc setComputePipelineState: _isolineLevelsPipeline];
+    [enc setBuffer: levels offset: 0 atIndex: 0];
+    [enc dispatchThreads: MTLSizeMake(patches, 1, 1)
+   threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+
+    return true;
 }
 
 // The evaluation stage is the draw's vertex function, so its uniforms are the
@@ -5766,6 +6130,7 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
                            first: (GLint) first
                        instances: (GLsizei) instances
                           patches: (GLuint *) out_patches
+                         pipeline: (id<MTLRenderPipelineState>) pipeline
 {
     Program *program = ctx->state.program;
     GLint in_cp = ctx->state.var.patch_vertices;
@@ -5873,6 +6238,12 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
         [self writeDefaultTessLevels: levels patches: patches];
     }
 
+    if (program->tess.quad_isolines && program->tess.has_control)
+    {
+        if ([self remapIsolineLevels: levels patches: patches encoder: enc] == false)
+            return false;
+    }
+
     [self endComputeEncoding];
 
     // the render encoder went away with the compute pass, so rebuild it and
@@ -5884,10 +6255,10 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
     }
 
     // a fresh encoder carries none of the state processGLState set up
-    if (_pipelineState == nil)
+    if (pipeline == nil)
         return false;
 
-    [_currentRenderEncoder setRenderPipelineState: _pipelineState];
+    [_currentRenderEncoder setRenderPipelineState: pipeline];
     [self bindTessBuffersToRenderEncoder];
 
     [_currentRenderEncoder setVertexBuffer: ctl_out offset: 0 atIndex: MGL_TESS_CONTROL_OUT_INDEX];
@@ -6676,6 +7047,8 @@ static MTLWinding mtlWindingForSpv(GLuint mode)
         // set DIRTY_STATE, so this can't be nested inside it
         if (ctx->state.dirty_bits & DIRTY_FBO)
         {
+            bool attachments_changed = false;
+
             // MEMORY SAFETY: Add comprehensive validation to prevent use-after-free crashes
             if (ctx->state.framebuffer)
             {
@@ -6688,6 +7061,7 @@ static MTLWinding mtlWindingForSpv(GLuint mode)
 
                 if (ctx->state.framebuffer->dirty_bits & DIRTY_FBO_BINDING)
                 {
+                    attachments_changed = true;
                     RETURN_FALSE_ON_FAILURE([self bindFramebufferAttachmentTextures]);
 
                     // Additional validation after binding
@@ -6702,14 +7076,16 @@ static MTLWinding mtlWindingForSpv(GLuint mode)
             // everything drawn after a render to texture landed back in that
             // texture instead of on screen. Rebinding the same framebuffer is
             // not a change, and swapping the encoder for nothing loses work.
-            if (_currentRenderEncoder != nil && _encoderFramebuffer != ctx->state.framebuffer)
+            // New attachments on the same framebuffer are a change too: the
+            // encoder is still drawing into the old textures.
+            if (_currentRenderEncoder != nil &&
+                (_encoderFramebuffer != ctx->state.framebuffer || attachments_changed))
             {
+                // The new one is made further down, once the program this draw
+                // uses has been dealt with; made here, it would bind the last
+                // program's buffers.
                 [self endRenderEncoding];
-                RETURN_FALSE_ON_FAILURE([self newRenderEncoder]);
-                [self updateCurrentRenderEncoder];
-
-                // the new encoder has none of the old one's bindings
-                ctx->state.dirty_bits |= DIRTY_VAO | DIRTY_TEX;
+                ctx->state.dirty_bits |= DIRTY_VAO | DIRTY_TEX | DIRTY_RENDER_STATE;
             }
 
             // dirty FBO state can't be cleared just yet its needed below
@@ -7051,152 +7427,15 @@ static MTLWinding mtlWindingForSpv(GLuint mode)
 
 - (bool) bindTexturesToComputeEncoder:(id <MTLComputeCommandEncoder>) computeCommandEncoder
 {
-    GLuint count;
-    enum {
-        _TEXTURE,
-        _IMAGE_TEXTURE
-    };
-    struct {
-        int spvc_type;
-        int gl_texture_type;
-    } mapped_types[] = {
-        {SPVC_RESOURCE_TYPE_SAMPLED_IMAGE, _TEXTURE},
-        {SPVC_RESOURCE_TYPE_STORAGE_IMAGE, _IMAGE_TEXTURE},
-        {0,0}
-    };
-
     MTL_CHECK_RETURN_FALSE(computeCommandEncoder, GL_OUT_OF_MEMORY);
 
-    for(int type=0; mapped_types[type].spvc_type; type++)
-    {
-        int spvc_type;
-        int gl_texture_type;
-
-        spvc_type = mapped_types[type].spvc_type;
-        gl_texture_type = mapped_types[type].gl_texture_type;
-
-        // iterate shader storage buffers
-        count = [self getProgramBindingCount: _COMPUTE_SHADER type: spvc_type];
-        if (count)
-        {
-            int textures_to_be_mapped = count;
-
-            MTL_CHECK_RETURN_FALSE(textures_to_be_mapped < TEXTURE_UNITS, GL_INVALID_VALUE);
-
-            for (int i=0; textures_to_be_mapped > 0; i++)
-            {
-               // GLuint spirv_location;
-                GLuint spirv_binding;
-                Texture *ptr;
-
-                spirv_binding = [self getProgramLocation:_COMPUTE_SHADER type:spvc_type index: i];
-                spirv_binding = [self getProgramBinding:_COMPUTE_SHADER type:spvc_type index: i];
-
-                switch(gl_texture_type)
-                {
-                    case _TEXTURE: ptr = STATE(active_textures[spirv_binding]); break;
-                    case _IMAGE_TEXTURE: ptr = STATE(image_units[spirv_binding].tex); break;
-                    default:
-                        ptr = NULL;
-                        // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
-            return NULL;
-                }
-
-                if (ptr)
-                {
-                    // residency was settled in prepareComputeTextures: uploading
-                    // here would open a blit encoder and retire the one being
-                    // written to
-                    MTL_CHECK_RETURN_FALSE(ptr->mtl_data, GL_OUT_OF_MEMORY);
-
-                    id<MTLTexture> texture;
-                    texture = [self samplingTexture: ptr from: (__bridge id<MTLTexture>)(ptr->mtl_data)];
-                    MTL_CHECK_RETURN_FALSE(texture, GL_OUT_OF_MEMORY);
-
-                    id<MTLSamplerState> sampler;
-
-                    // late binding of texture samplers.. but its better than scanning the entire texture_samplers
-                    if(STATE(texture_samplers[spirv_binding]))
-                    {
-                        Sampler *gl_sampler;
-
-                        gl_sampler = STATE(texture_samplers[spirv_binding]);
-
-                        // delete existing sampler if dirty
-                        if (gl_sampler->dirty_bits)
-                        {
-                            if (gl_sampler->mtl_data)
-                            {
-                                CFBridgingRelease(gl_sampler->mtl_data);
-                                gl_sampler->mtl_data = NULL;
-                            }
-                        }
-
-                        if (gl_sampler->mtl_data == NULL)
-                        {
-                            gl_sampler->mtl_data = (void *)CFBridgingRetain([self createMTLSamplerForTexParam:&gl_sampler->params target:ptr->target]);
-                            gl_sampler->dirty_bits = 0;
-                        }
-
-                        sampler = (__bridge id<MTLSamplerState>)(gl_sampler->mtl_data);
-                        MTL_CHECK_RETURN_FALSE(sampler, GL_OUT_OF_MEMORY);
-                    }
-                    else
-                    {
-                        sampler = (__bridge id<MTLSamplerState>)(ptr->params.mtl_data);
-                        MTL_CHECK_RETURN_FALSE(sampler, GL_OUT_OF_MEMORY);
-                    }
-
-                    [computeCommandEncoder setTexture:texture atIndex:spirv_binding];
-                    [computeCommandEncoder setSamplerState: sampler atIndex:spirv_binding];
-
-                    textures_to_be_mapped--;
-                }
-                else if (i < (int)count)
-                {
-                    // GL lets a shader declare a sampler it never binds, and
-                    // reads from it just come back black. Leaving the slot
-                    // empty and carrying on matches that; failing the dispatch
-                    // would drop work the app expects to happen.
-                    // GL lets a shader declare a sampler nothing is bound to
-                    // and reads from it come back black, so a stand-in keeps
-                    // the dispatch alive instead of dropping it.
-                    GLenum declared = [self getProgramGLType: _COMPUTE_SHADER type: spvc_type index: i];
-                    id<MTLTexture> stand_in = [self dummyTextureForGLType: declared];
-
-                    if (stand_in == nil)
-                    {
-                        MGL_NSERR(@"MGL ERROR: no stand-in for the %s at binding %u",
-                                  gl_texture_type == _TEXTURE ? "texture" : "image", spirv_binding);
-                        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
-                        return false;
-                    }
-
-                    [computeCommandEncoder setTexture: stand_in atIndex: spirv_binding];
-
-                    if (gl_texture_type == _TEXTURE)
-                        [computeCommandEncoder setSamplerState: [self defaultSamplerState] atIndex: spirv_binding];
-
-                    textures_to_be_mapped--;
-                }
-
-                RETURN_FALSE_ON_FAILURE((i<TEXTURE_UNITS));
-            }
-
-            // texture not found
-            if (textures_to_be_mapped)
-            {
-                DEBUG_PRINT("No texture bound for fragment shader location\n");
-
-                return false;
-            }
-        }
-    }
+    bool ok = [self bindTexturesForStage: _COMPUTE_SHADER
+                              setTexture: ^(id<MTLTexture> t, NSUInteger i) { [computeCommandEncoder setTexture: t atIndex: i]; }
+                              setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [computeCommandEncoder setSamplerState: s atIndex: i]; }];
 
     ctx->state.dirty_bits &= ~(DIRTY_TEX_BINDING | DIRTY_SAMPLER | DIRTY_IMAGE_UNIT_STATE);
 
-    return true;
+    return ok;
 }
 
 #pragma mark ------------------------------------------------------------------------------------------
@@ -7207,39 +7446,32 @@ static MTLWinding mtlWindingForSpv(GLuint mode)
 // exists.
 - (bool) prepareComputeTextures
 {
-    // only sampled textures: a storage image is a render target with no client
-    // data, and asking for an upload of it just errors
-    struct { int spvc_type; bool is_image; } kinds[] = {
-        { SPVC_RESOURCE_TYPE_SAMPLED_IMAGE, false },
-    };
+    Program *program = ctx->state.program;
 
-    if (ctx->state.program == NULL)
+    if (program == NULL)
         return true;
 
-    for (int k = 0; k < (int)(sizeof(kinds) / sizeof(kinds[0])); k++)
+    for (int kind = 0; kind < 2; kind++)
     {
-        int count = [self getProgramBindingCount: _COMPUTE_SHADER type: kinds[k].spvc_type];
+        int type = kind ? SPVC_RESOURCE_TYPE_STORAGE_IMAGE : SPVC_RESOURCE_TYPE_SAMPLED_IMAGE;
+        SpirvResourceList *list = &program->spirv_resources_list[_COMPUTE_SHADER][type];
 
-        for (int i = 0; i < count; i++)
+        for (GLuint i = 0; i < list->count; i++)
         {
-            GLuint binding = [self getProgramBinding: _COMPUTE_SHADER type: kinds[k].spvc_type index: i];
             Texture *tex;
 
-            if (binding >= TEXTURE_UNITS)
-                continue;
+            GLuint unit = [self getProgramTexUnit: _COMPUTE_SHADER type: type index: i];
 
-            tex = kinds[k].is_image ? STATE(image_units[binding].tex) : STATE(active_textures[binding]);
+            tex = kind ? STATE(image_units[unit].tex) : STATE(active_textures[unit]);
 
             if (tex == NULL)
                 continue;
 
-            // a render target has no client data, so it is never "complete" in
-            // the upload sense; asking for one anyway just errors
+            // a texture with no client data yet has nothing to upload, and
+            // asking for it just errors
             if (tex->faces[0].levels == NULL || tex->faces[0].levels[0].complete == false)
                 continue;
 
-            // an incomplete texture is the shader's problem, not a reason to
-            // drop the dispatch here
             [self bindMTLTexture: tex];
         }
     }
@@ -9771,6 +10003,11 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     glm_ctx->state.var.max_compute_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
     glm_ctx->state.var.max_vertex_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
     glm_ctx->state.var.max_fragment_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
+    // the tessellation stages run as a compute kernel and a vertex function,
+    // and the geometry stage as compute, so each can bind storage like the rest
+    glm_ctx->state.var.max_tess_control_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
+    glm_ctx->state.var.max_tess_evaluation_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
+    glm_ctx->state.var.max_geometry_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
     glm_ctx->state.var.max_combined_shader_storage_blocks = MAX_BINDABLE_BUFFERS;
 
     if (@available(macOS 10.14, *))

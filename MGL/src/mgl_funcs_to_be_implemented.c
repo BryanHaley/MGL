@@ -86,9 +86,25 @@ void mglBeginTransformFeedback(GLMContext ctx, GLenum primitiveMode)
 		}
 
 		GLsizei recorded = prog ? prog->xfb_varying_count : 0;
-		GLsizei needed = (prog && prog->xfb_buffer_mode == GL_SEPARATE_ATTRIBS) ? recorded : 1;
+		GLuint needed = 0;
 
-		if (prog == NULL || recorded == 0)
+		if (prog && prog->xfb_shader_buffers)
+			needed = prog->xfb_shader_buffers;
+		else if (recorded > 0)
+		{
+			GLsizei buffers = 1;
+
+			// one buffer each, or one more for every gl_NextBuffer
+			for (GLsizei v = 0; v < recorded; v++)
+				if (prog->xfb_buffer_mode == GL_SEPARATE_ATTRIBS ? v > 0 :
+				    !strcmp(prog->xfb_varyings[v], "gl_NextBuffer"))
+					buffers++;
+
+			for (GLsizei b = 0; b < buffers && b < MAX_TF_BUFFERS; b++)
+				needed |= 1u << b;
+		}
+
+		if (prog == NULL || needed == 0)
 		{
 			STATE(error) = GL_INVALID_OPERATION;
 			return;
@@ -99,8 +115,8 @@ void mglBeginTransformFeedback(GLMContext ctx, GLenum primitiveMode)
 		// counts as a place for the capture to land.
 		BufferBaseTarget *bound = STATE(buffer_base)[_TRANSFORM_FEEDBACK_BUFFER].buffers;
 
-		for (GLsizei i = 0; i < needed && i < MAX_TF_BUFFERS; i++)
-			if (xfb->buffers[i].buf == NULL && bound[i].buf == NULL)
+		for (GLuint i = 0; i < MAX_TF_BUFFERS; i++)
+			if ((needed >> i) & 1u && xfb->buffers[i].buf == NULL && bound[i].buf == NULL)
 			{
 				STATE(error) = GL_INVALID_OPERATION;
 				return;

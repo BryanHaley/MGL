@@ -51,7 +51,6 @@ static bool mglUniformBaseNameIs(const char *stored, const char *base)
 }
 
 
-static GLint opaqueLocBase(Program *ptr);
 
 GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
 {
@@ -119,15 +118,35 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
     // samplers and images are uniforms too, and the app needs a location to
     // point them at a texture unit with glUniform1i
     {
+        char base[256];
+        GLint element = 0;
+        size_t len = strlen(name);
+        const char *open = (len && name[len - 1] == ']') ? strrchr(name, '[') : NULL;
         int n = opaqueCount(ptr);
-        GLint base = opaqueLocBase(ptr);
+
+        snprintf(base, sizeof base, "%s", name);
+
+        if (open && open != name)
+        {
+            element = (GLint)strtol(open + 1, NULL, 10);
+            snprintf(base, sizeof base, "%.*s", (int)(open - name), name);
+        }
 
         for (int i = 0; i < n; i++)
         {
             SpirvResource *res = opaqueAt(ptr, (GLuint)i);
+            GLint size;
 
-            if (res && res->name && !strcmp(res->name, name))
-                return base + i;
+            if (res == NULL || res->name == NULL || res->location == MGL_NO_LOCATION)
+                continue;
+
+            if (!strcmp(res->name, name))
+                return (GLint)res->location;
+
+            size = res->array_size > 1 ? res->array_size : 1;
+
+            if (element >= 0 && element < size && mglUniformBaseNameIs(res->name, base))
+                return (GLint)res->location + element;
         }
     }
 
@@ -176,31 +195,25 @@ static SpirvResource *opaqueAt(Program *ptr, GLuint index)
     return NULL;
 }
 
-// Opaque uniforms sit above every plain uniform location so the two never collide.
-static GLint opaqueLocBase(Program *ptr)
-{
-    GLint top = -1;
-
-    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
-    {
-        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
-
-        for (GLuint i = 0; i < list->count; i++)
-            if ((GLint)list->list[i].location > top)
-                top = (GLint)list->list[i].location;
-    }
-
-    return top + 1;
-}
-
 SpirvResource *mglOpaqueUniformByLocation(Program *ptr, GLint location)
 {
-    GLint base = opaqueLocBase(ptr);
+    int n = opaqueCount(ptr);
 
-    if (location < base)
-        return NULL;
+    for (int i = 0; i < n; i++)
+    {
+        SpirvResource *res = opaqueAt(ptr, (GLuint)i);
+        GLint size;
 
-    return opaqueAt(ptr, (GLuint)(location - base));
+        if (res == NULL || res->location == MGL_NO_LOCATION)
+            continue;
+
+        size = res->array_size > 1 ? res->array_size : 1;
+
+        if (location >= (GLint)res->location && location < (GLint)res->location + size)
+            return res;
+    }
+
+    return NULL;
 }
 
 
@@ -483,6 +496,17 @@ void mglGetUniformfv(GLMContext ctx, GLuint program, GLint location, GLfloat *pa
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(location >= 0 && location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
 
+    // a sampler or image reads back as the unit it points at
+    {
+        SpirvResource *res = mglOpaqueUniformByLocation(ptr, location);
+
+        if (res)
+        {
+            params[0] = res->tex_unit;
+            return;
+        }
+    }
+
     buf = ptr->uniform_constants.buffers[location].buf;
 
     ERROR_CHECK_RETURN(buf && buf->data.buffer_data, GL_INVALID_OPERATION);
@@ -498,6 +522,17 @@ void mglGetUniformiv(GLMContext ctx, GLuint program, GLint location, GLint *para
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(location >= 0 && location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
+
+    // a sampler or image reads back as the unit it points at
+    {
+        SpirvResource *res = mglOpaqueUniformByLocation(ptr, location);
+
+        if (res)
+        {
+            params[0] = res->tex_unit;
+            return;
+        }
+    }
 
     buf = ptr->uniform_constants.buffers[location].buf;
 
@@ -755,8 +790,11 @@ void mglGetActiveUniformBlockiv(GLMContext ctx, GLuint program, GLuint uniformBl
             break;
 
         case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_CONTROL_SHADER:
+            *params = uniformBlockInStage(ptr, blk, _TESS_CONTROL_SHADER);
+            break;
+
         case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_EVALUATION_SHADER:
-            *params = GL_FALSE;
+            *params = uniformBlockInStage(ptr, blk, _TESS_EVALUATION_SHADER);
             break;
 
         default:
@@ -1224,7 +1262,19 @@ static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, vo
         return true;
     }
 
-    res->tex_unit = unit;
+    // the same sampler in another stage is the same uniform
+    {
+        int n = opaqueCount(pptr);
+
+        for (int i = 0; i < n; i++)
+        {
+            SpirvResource *other = opaqueAt(pptr, (GLuint)i);
+
+            if (other && other->location == res->location)
+                other->tex_unit = unit;
+        }
+    }
+
     pptr->dirty_bits |= DIRTY_PROGRAM;
 
     return true;

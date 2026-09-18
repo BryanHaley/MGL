@@ -463,3 +463,108 @@ GPU_TEST(fbo_query, bad_texture_target_errors_not_aborts)
     glDeleteFramebuffers(1, &fbo);
     glDeleteTextures(1, &tex);
 }
+
+/* Two textures take turns on one framebuffer; each keeps what it was given. */
+GPU_TEST(framebuffer, swapped_attachments_keep_their_contents)
+{
+    GLuint tex[2], fbo = 0;
+
+    glGenTextures(2, tex);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    }
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glViewport(0, 0, 8, 8);
+
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[1], 0);
+    glClearColor(0, 1, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    GLubyte px[4];
+
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
+    glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_MSG(px[0] == 255 && px[1] == 0, "first texture reads %u %u %u", px[0], px[1], px[2]);
+
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[1], 0);
+    glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_MSG(px[0] == 0 && px[1] == 255, "second texture reads %u %u %u", px[0], px[1], px[2]);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(2, tex);
+}
+
+/* The same with a draw rather than a clear, the way the base vertex tests do it. */
+GPU_TEST(framebuffer, swapped_attachments_keep_what_was_drawn)
+{
+    static const char *vs =
+        "#version 430 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 430 core\n"
+        "uniform vec4 c;\n"
+        "out vec4 o;\n"
+        "void main() { o = c; }\n";
+    char log[1024] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    if (!prog)
+        return;
+
+    GLuint tex[2], fbo = 0, vbo = 0;
+    GLuint vao = mgl_fullscreen_quad(&vbo);
+
+    glGenTextures(2, tex);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 8);
+    }
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glViewport(0, 0, 8, 8);
+    glUseProgram(prog);
+    glClearColor(0, 0, 0, 1);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[i], 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUniform4f(glGetUniformLocation(prog, "c"), i ? 0.0f : 1.0f, i ? 1.0f : 0.0f, 0.0f, 1.0f);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+    GLubyte px[4];
+
+    for (int i = 0; i < 2; i++)
+    {
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[i], 0);
+        glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK_MSG(px[i ? 1 : 0] == 255 && px[i ? 0 : 1] == 0,
+                  "texture %d reads %u %u %u", i, px[0], px[1], px[2]);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(2, tex);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+}

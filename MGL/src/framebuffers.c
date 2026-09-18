@@ -862,6 +862,9 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
     }
 
     fbo->dirty_bits |= DIRTY_FBO_BINDING;
+
+    // the draw has to notice, not just the framebuffer
+    STATE(dirty_bits) |= DIRTY_FBO;
 }
 
 /*
@@ -1024,6 +1027,9 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
     }
 
     fbo->dirty_bits |= DIRTY_FBO_BINDING;
+
+    // the draw has to notice, not just the framebuffer
+    STATE(dirty_bits) |= DIRTY_FBO;
 }
 
 #pragma mark =====

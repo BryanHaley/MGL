@@ -662,3 +662,74 @@ TEST(convert, signed_int_client_data_is_normalised)
     CHECK_EQ_UINT(0u,   dst[2]);    /* -1 clamps */
     CHECK_EQ_UINT(255u, dst[3]);
 }
+
+/* ---------- packed client uploads ---------- */
+
+/* A packed type lists its fields in the order the format names them, so with
+   GL_BGRA the top nibble of 4_4_4_4 is blue. Red here is the third field. */
+TEST(convert, packed_bgra_upload_keeps_channel_order)
+{
+    GLushort px = (GLushort)((0xF << 12) | (0x0 << 8) | (0x5 << 4) | 0xA);  /* B G R A */
+    GLubyte out[4] = {0};
+
+    CHECK(mglConvertPixelsToNative(&px, 2, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4,
+                                   out, 4, MGL_NF_RGBA8_UNORM, 1, 1) == GL_TRUE);
+    CHECK_EQ_UINT(0x55, out[0]);    /* red   */
+    CHECK_EQ_UINT(0x00, out[1]);    /* green */
+    CHECK_EQ_UINT(0xFF, out[2]);    /* blue  */
+    CHECK_EQ_UINT(0xAA, out[3]);    /* alpha */
+}
+
+/* An integer format takes the packed fields as integers, not as 0 or 1. */
+TEST(convert, packed_integer_upload_keeps_raw_fields)
+{
+    GLushort px = (GLushort)((3 << 12) | (7 << 8) | (9 << 4) | 12);
+    GLubyte out[4] = {0};
+
+    CHECK(mglConvertPixelsToNative(&px, 2, GL_RGBA_INTEGER, GL_UNSIGNED_SHORT_4_4_4_4,
+                                   out, 4, MGL_NF_RGBA8_UINT, 1, 1) == GL_TRUE);
+    CHECK_EQ_UINT(3, out[0]);
+    CHECK_EQ_UINT(7, out[1]);
+    CHECK_EQ_UINT(9, out[2]);
+    CHECK_EQ_UINT(12, out[3]);
+}
+
+/* Crossing signedness saturates rather than wrapping. */
+TEST(convert, integer_upload_saturates_across_signedness)
+{
+    GLuint big[2] = { 0xF0000000u, 5u };
+    GLbyte sout[2] = {0};
+
+    CHECK(mglConvertPixelsToNative(big, 8, GL_RG_INTEGER, GL_UNSIGNED_INT,
+                                   sout, 2, MGL_NF_RG8_SINT, 1, 1) == GL_TRUE);
+    CHECK_EQ_INT(127, sout[0]);
+    CHECK_EQ_INT(5, sout[1]);
+
+    GLbyte neg[2] = { -7, 9 };
+    GLubyte uout[2] = {0};
+
+    CHECK(mglConvertPixelsToNative(neg, 2, GL_RG_INTEGER, GL_BYTE,
+                                   uout, 2, MGL_NF_RG8_UINT, 1, 1) == GL_TRUE);
+    CHECK_EQ_UINT(0, uout[0]);
+    CHECK_EQ_UINT(9, uout[1]);
+}
+
+/* An RGTC block at the image edge keeps each texel where it was. */
+TEST(convert, rgtc_edge_block_keeps_texel_positions)
+{
+    enum { W = 3, H = 2 };
+    GLubyte src[W * H];
+    GLubyte blocks[8];
+    GLubyte back[W * H];
+
+    for (int i = 0; i < W * H; i++)
+        src[i] = (GLubyte)(i * 51);
+
+    CHECK(mglCompressToRGTC(src, W, GL_RED, GL_UNSIGNED_BYTE,
+                            blocks, GL_COMPRESSED_RED_RGTC1, W, H) == GL_TRUE);
+    CHECK(mglDecompressRGTC(blocks, GL_COMPRESSED_RED_RGTC1, W, H, back, W) == GL_TRUE);
+
+    for (int i = 0; i < W * H; i++)
+        CHECK_MSG(abs((int)back[i] - (int)src[i]) <= 20, "texel %d: wrote %u, read %u",
+                  i, src[i], back[i]);
+}

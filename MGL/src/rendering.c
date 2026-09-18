@@ -205,141 +205,122 @@ void mglFlush(GLMContext ctx)
     ctx->mtl_funcs.mtlFlush(ctx, false);
 }
 
+// A name GL knows as a draw buffer at all. Anything else is GL_INVALID_ENUM.
+static bool drawBufferKnown(GLenum b)
+{
+    switch (b)
+    {
+        case GL_NONE:
+        case GL_FRONT_LEFT: case GL_FRONT_RIGHT:
+        case GL_BACK_LEFT:  case GL_BACK_RIGHT:
+        case GL_FRONT: case GL_BACK:
+        case GL_LEFT:  case GL_RIGHT:
+        case GL_FRONT_AND_BACK:
+            return true;
+    }
+
+    // GL names 32 colour attachments whatever this implementation offers
+    return b >= GL_COLOR_ATTACHMENT0 && b <= GL_COLOR_ATTACHMENT0 + 31;
+}
+
+static bool drawBufferIsAttachment(GLMContext ctx, GLenum b)
+{
+    return b >= GL_COLOR_ATTACHMENT0 &&
+           b < GL_COLOR_ATTACHMENT0 + (GLenum)STATE(max_color_attachments);
+}
+
 void mglDrawBuffers(GLMContext ctx, GLsizei n, const GLenum *bufs)
 {
     ERROR_CHECK_RETURN(n >= 0 && n <= (GLsizei)STATE_VAR(max_draw_buffers), GL_INVALID_VALUE);
-
-    if (n == 0)
-        return;
-
-    ERROR_CHECK_RETURN(bufs, GL_INVALID_VALUE);
-
     ERROR_CHECK_RETURN(n <= MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(n == 0 || bufs, GL_INVALID_VALUE);
 
     Framebuffer *fbo = ctx->state.framebuffer;
-    GLenum max_attach = GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments);
 
     // Check the whole list before touching anything: a call that fails has to
     // leave the old draw buffers exactly as they were.
-    for (GLsizei i=0; i<n; ++i)
+    for (GLsizei i = 0; i < n; ++i)
+    {
+        GLenum b = bufs[i];
+
+        // FRONT, LEFT, RIGHT and FRONT_AND_BACK can each mean more than one
+        // buffer, so a list may not use them for either kind of framebuffer
+        ERROR_CHECK_RETURN(drawBufferKnown(b) && b != GL_FRONT && b != GL_LEFT &&
+                           b != GL_RIGHT && b != GL_FRONT_AND_BACK, GL_INVALID_ENUM);
+    }
+
+    for (GLsizei i = 0; i < n; ++i)
     {
         GLenum b = bufs[i];
 
         // the same buffer cannot be named twice, though GL_NONE may repeat
         if (b != GL_NONE)
-            for (GLsizei j=0; j<i; ++j)
+            for (GLsizei j = 0; j < i; ++j)
                 ERROR_CHECK_RETURN(bufs[j] != b, GL_INVALID_OPERATION);
-
-        if (b == GL_NONE)
-            continue;
 
         if (fbo)
         {
             // a framebuffer object takes its own attachments and nothing else
-            ERROR_CHECK_RETURN(b >= GL_COLOR_ATTACHMENT0 && b < max_attach,
-                               GL_INVALID_OPERATION);
+            ERROR_CHECK_RETURN(b == GL_NONE || drawBufferIsAttachment(ctx, b), GL_INVALID_OPERATION);
         }
         else
         {
-            switch (b)
-            {
-                case GL_FRONT:
-                case GL_BACK:
-                case GL_LEFT:
-                case GL_RIGHT:
-                case GL_FRONT_LEFT:
-                case GL_FRONT_RIGHT:
-                case GL_BACK_LEFT:
-                case GL_BACK_RIGHT:
-                    break;
+            ERROR_CHECK_RETURN(!(b >= GL_COLOR_ATTACHMENT0 && b <= GL_COLOR_ATTACHMENT0 + 31),
+                               GL_INVALID_OPERATION);
 
-                // names more than one buffer, which only glDrawBuffer allows
-                case GL_FRONT_AND_BACK:
-                    ERROR_RETURN(GL_INVALID_OPERATION);
-
-                default:
-                    // an attachment named on the default framebuffer is wrong
-                    // in a different way from an enum that is not a buffer
-                    if (b >= GL_COLOR_ATTACHMENT0 && b < max_attach)
-                        ERROR_RETURN(GL_INVALID_OPERATION);
-
-                    ERROR_RETURN(GL_INVALID_ENUM);
-            }
+            // BACK stands for both back buffers, so it only works on its own
+            ERROR_CHECK_RETURN(b != GL_BACK || n == 1, GL_INVALID_OPERATION);
         }
     }
 
+    GLenum first = n > 0 ? bufs[0] : GL_NONE;
+
     if (fbo)
     {
-        for (GLsizei i=0; i<n; ++i)
+        for (GLsizei i = 0; i < n; ++i)
             fbo->draw_buffers[i] = bufs[i];
 
         fbo->n_draw_buffers = n;
-        fbo->draw_buffer = bufs[0];
+        fbo->draw_buffer = first;
 
         mglApplyDrawBuffers(ctx, fbo);
     }
     else
     {
-        STATE(default_draw_buffer) = bufs[0];
+        STATE(default_draw_buffer) = first;
     }
 
-    STATE(draw_buffer) = bufs[0];
+    STATE(draw_buffer) = first;
     STATE(dirty_bits) |= DIRTY_STATE;
 }
 
 void mglDrawBuffer(GLMContext ctx, GLenum buf)
 {
-    if ((buf >= GL_COLOR_ATTACHMENT0) &&
-        (buf <= (GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments))))
+    Framebuffer *fbo = ctx->state.framebuffer;
+
+    ERROR_CHECK_RETURN(drawBufferKnown(buf), GL_INVALID_ENUM);
+
+    if (fbo)
     {
-        // ok
-    }
-    else
-    switch(buf)
-    {
-        // GL_BACK is what a double-buffered default framebuffer draws to, so
-        // it is the common case, not an exotic one
-        case GL_FRONT:
-        case GL_BACK:
-            break;
-
-        case GL_NONE:
-        case GL_FRONT_LEFT:
-        case GL_FRONT_RIGHT:
-        case GL_BACK_LEFT:
-        case GL_BACK_RIGHT:
-        case GL_LEFT:
-        case GL_RIGHT:
-        case GL_FRONT_AND_BACK:
-            // TODO: Implement these buffer modes properly
-            MGL_INFO("MGL: mglDrawBuffer called with unimplemented mode 0x%x\n", buf);
-            break;
-
-        default:
-            MGL_ERR("MGL Error: mglDrawBuffer: invalid enum 0x%x\n", buf);
-            ERROR_RETURN(GL_INVALID_ENUM);
-    }
-
-    if ((buf >= GL_COLOR_ATTACHMENT0) &&
-        (buf < (GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments))))
-    {
-        Framebuffer *fbo = ctx->state.framebuffer;
-
         // Naming an attachment that has nothing in it yet is legal -- whether
         // it is usable is the draw call's problem, not this one's.
-        ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(buf == GL_NONE || drawBufferIsAttachment(ctx, buf), GL_INVALID_OPERATION);
 
         fbo->draw_buffers[0] = buf;
         fbo->n_draw_buffers = 1;
+        fbo->draw_buffer = buf;
 
         mglApplyDrawBuffers(ctx, fbo);
     }
+    else
+    {
+        ERROR_CHECK_RETURN(!(buf >= GL_COLOR_ATTACHMENT0 && buf <= GL_COLOR_ATTACHMENT0 + 31),
+                           GL_INVALID_OPERATION);
+
+        STATE(default_draw_buffer) = buf;
+    }
 
     STATE(draw_buffer) = buf;
-    if (ctx->state.framebuffer)
-        ctx->state.framebuffer->draw_buffer = buf;
-    else
-        STATE(default_draw_buffer) = buf;
     STATE(dirty_bits) |= DIRTY_STATE;
 }
 
@@ -630,9 +611,9 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
 
         case GL_DEPTH_STENCIL:
             ERROR_CHECK_RETURN(ctx->state.readbuffer
-                               ? (fboAttachmentPresent(&ctx->state.readbuffer->depth) ||
+                               ? (fboAttachmentPresent(&ctx->state.readbuffer->depth) &&
                                   fboAttachmentPresent(&ctx->state.readbuffer->stencil))
-                               : ((ctx->depth_format.mtl_pixel_format > 0) ||
+                               : ((ctx->depth_format.mtl_pixel_format > 0) &&
                                   (ctx->stencil_format.mtl_pixel_format > 0)), GL_INVALID_OPERATION);
             switch(type)
             {

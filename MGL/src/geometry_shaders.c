@@ -545,6 +545,7 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
     "  mglPrimitiveID = mglId / mglGsInvocations;\n" \
     "  mglInvocationID = mglId - mglPrimitiveID * mglGsInvocations;\n" \
     "  if (mglPrimitiveID >= mglGsPrims) return;\n" \
+    "  if (mglGsIn[mglFetch(0)].mglPointSize == 0.0) return;\n" \
     "  mglBase = mglId * mglGsCap;\n" \
     "  mglWritten = 0;\n  mglStripLen = 0;\n  mglStripFlip = false;\n"
 
@@ -804,6 +805,26 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     gi->in_stride = structStride(sc.in, sc.in_count, false);
     gi->out_stride = structStride(sc.out, sc.out_count, true);
 
+    // the same walk as structStride, keeping each output's offset
+    {
+        int offset = 16 + 4 + 4 + 4 + 4;
+
+        gi->out_count = 0;
+
+        for (int i = 0; i < sc.out_count && i < 32; i++)
+        {
+            int align = 4;
+            int size = std430Size(sc.out[i].type, &align);
+
+            offset = roundUp(offset, align);
+            snprintf(gi->out_names[i], sizeof(gi->out_names[i]), "%s", sc.out[i].name);
+            snprintf(gi->out_types[i], sizeof(gi->out_types[i]), "%s", sc.out[i].type);
+            gi->out_offsets[i] = offset;
+            gi->out_count = i + 1;
+            offset += size;
+        }
+    }
+
     if (gi->in_stride == 0 || gi->out_stride == 0)
     {
         MGL_ERR("MGL Error: a geometry varying has a type MGL cannot size\n");
@@ -1049,4 +1070,336 @@ char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi)
     }
 
     return out.s;
+}
+
+// Copies src with every whole-word "from" swapped for "to".
+static bool replaceWord(Buf *out, const char *src, const char *from, const char *to)
+{
+    size_t i = 0, copied = 0;
+
+    while (src[i])
+    {
+        if (wordAt(src, i, from))
+        {
+            if (!bufAddN(out, src + copied, i - copied) || !bufAdd(out, to))
+                return false;
+
+            i += strlen(from);
+            copied = i;
+            continue;
+        }
+
+        i++;
+    }
+
+    return bufAdd(out, src + copied);
+}
+
+// Metal cannot tessellate isolines, but an isoline point set is the bottom
+// rows of a quad grid. So the evaluation shader is built as a quad shader, and
+// each point it is run for writes itself into a fixed slot of the geometry
+// stage's input. Points off the isolines are skipped, and a point Metal runs
+// twice just writes the same slot twice.
+char *mglAddTessPointCapture(const char *tes_src, const GeometryInfo *gi)
+{
+    Buf out = {0}, layout = {0}, decl = {0};
+    const char *src = tes_src;
+    const char *main_at = NULL;
+    bool isolines = false, point_mode = false;
+    size_t i = 0, copied = 0;
+    char *result = NULL;
+
+    // drop every "layout(...) in;" and remember what it asked for
+    while (src[i])
+    {
+        if (!wordAt(src, i, "layout"))
+        {
+            i++;
+            continue;
+        }
+
+        size_t j = skipSpace(src, i + 6);
+
+        if (src[j] != '(')
+        {
+            i++;
+            continue;
+        }
+
+        size_t close = j;
+        int depth = 0;
+
+        for (; src[close]; close++)
+        {
+            if (src[close] == '(') depth++;
+            else if (src[close] == ')' && --depth == 0) { close++; break; }
+        }
+
+        size_t after = skipSpace(src, close);
+
+        if (!wordAt(src, after, "in") || src[skipSpace(src, after + 2)] != ';')
+        {
+            i = close;
+            continue;
+        }
+
+        // each comma separated word, kept unless it is one this replaces
+        for (size_t k = j + 1; k < close - 1;)
+        {
+            char word[64];
+
+            k = skipSpace(src, k);
+
+            if (!identChar(src[k]))
+            {
+                k++;
+                continue;
+            }
+
+            k = readIdent(src, k, word, sizeof(word));
+
+            if (!strcmp(word, "isolines"))
+                isolines = true;
+            else if (!strcmp(word, "point_mode"))
+                point_mode = true;
+            else if (!bufAdd(&layout, ", ") || !bufAdd(&layout, word))
+                goto done;
+        }
+
+        if (!bufAddN(&out, src + copied, i - copied))
+            goto done;
+
+        i = skipSpace(src, after + 2) + 1;
+        copied = i;
+    }
+
+    if (!isolines || !point_mode)
+        goto done;
+
+    if (!bufAdd(&out, src + copied))
+        goto done;
+
+    // the rest is the same as for a vertex shader, from the stripped copy
+    src = out.s;
+    out = (Buf){0};
+
+    for (i = 0; src[i]; i++)
+    {
+        if (wordAt(src, i, "main") && src[skipSpace(src, i + 4)] == '(')
+        {
+            main_at = src + i;
+            break;
+        }
+    }
+
+    if (main_at == NULL)
+        goto done_src;
+
+    const char *p = src;
+
+    if (!addRaisedVersion(&out, src, &p))
+        goto done_src;
+
+    if (!bufAddN(&out, p, (size_t)(main_at - p)) ||
+        !bufAdd(&out, "mglVsBody") ||
+        !bufAdd(&out, main_at + 4))
+        goto done_src;
+
+    if (!replaceWord(&decl, gi->capture_decl, "gl_VertexID", "mglCapIdx"))
+        goto done_src;
+
+    char line[512];
+
+    snprintf(line, sizeof(line),
+        "void main()\n{\n"
+        "  mglVsBody();\n"
+        "  int mglN0 = max(int(round(gl_TessLevelOuter[0])), 1);\n"
+        "  int mglN1 = max(int(round(gl_TessLevelOuter[1])), 1);\n"
+        "  int mglU = int(round(gl_TessCoord.x * float(mglN1)));\n"
+        "  int mglV = int(round(gl_TessCoord.y * float(mglN0)));\n"
+        "  if (mglV >= mglN0 || mglN0 > %d || mglN1 > %d) return;\n"
+        "  mglCapIdx = gl_PrimitiveID * %d + mglV * (mglN1 + 1) + mglU;\n"
+        "  mglGsCapture();\n}\n",
+        MGL_TES_MAX_LEVEL, MGL_TES_MAX_LEVEL, MGL_TES_POINTS_PER_PATCH);
+
+    // after the body, so it cannot land ahead of an #extension line
+    if (!bufAdd(&out, "\nlayout(quads") || !bufAdd(&out, layout.s ? layout.s : "") ||
+        !bufAdd(&out, ") in;\n\nint mglCapIdx;\n") || !bufAdd(&out, decl.s) ||
+        !bufAdd(&out, "\n") || !bufAdd(&out, line))
+        goto done_src;
+
+    result = out.s;
+    out.s = NULL;
+
+done_src:
+    free((char *)src);
+done:
+    free(out.s);
+    free(layout.s);
+    free(decl.s);
+
+    return result;
+}
+
+// Where component c of a value of this type sits, counting from the value.
+// A std430 matrix is its columns, each padded like a vector of its rows.
+static bool componentOffset(const char *type, int c, int *bytes)
+{
+    int cols = 0, rows = 0;
+
+    if (!strncmp(type, "mat", 3) && type[3])
+    {
+        cols = type[3] - '0';
+        rows = (type[4] == 'x') ? type[5] - '0' : cols;
+    }
+
+    if (cols)
+    {
+        int col_stride = rows == 2 ? 8 : 16;
+
+        *bytes = (c / rows) * col_stride + (c % rows) * 4;
+        return true;
+    }
+
+    if (!strncmp(type, "double", 6) || !strncmp(type, "dvec", 4) || !strncmp(type, "dmat", 4))
+        return false;
+
+    *bytes = c * 4;
+    return true;
+}
+
+int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
+                     GLuint *table, int max_words)
+{
+    int words = 0;
+
+    for (int i = 0; i < count; i++)
+    {
+        const MglXfbItem *it = &items[i];
+        char base[64];
+        int element = -1;
+        const char *open = strchr(it->expr, '[');
+        int offset = -1;
+        char type[32] = "";
+
+        if (it->kind == 'd')
+            return -1;
+
+        snprintf(base, sizeof(base), "%.*s", open ? (int)(open - it->expr) : (int)strlen(it->expr), it->expr);
+
+        if (open)
+            element = atoi(open + 1);
+
+        if (!strcmp(base, "gl_Position"))
+        {
+            offset = 0;
+            snprintf(type, sizeof(type), "vec4");
+        }
+        else if (!strcmp(base, "gl_PointSize"))
+        {
+            offset = 16;
+            snprintf(type, sizeof(type), "float");
+        }
+
+        for (int o = 0; o < gi->out_count && offset < 0; o++)
+            if (!strcmp(gi->out_names[o], base))
+            {
+                offset = gi->out_offsets[o];
+                snprintf(type, sizeof(type), "%s", gi->out_types[o]);
+            }
+
+        if (offset < 0)
+            return -1;
+
+        for (int c = 0; c < it->components; c++)
+        {
+            int at;
+
+            // "v[2]" is one component of a vector
+            if (element >= 0 && it->components == 1 && !it->rows)
+                at = element * 4;
+            else if (!componentOffset(type, c, &at))
+                return -1;
+
+            if (words >= max_words)
+                return -1;
+
+            table[words * 3] = (GLuint)(offset + at);
+            table[words * 3 + 1] = (GLuint)it->buffer;
+            table[words * 3 + 2] = (GLuint)(it->offset / 4 + c);
+            words++;
+        }
+    }
+
+    return words;
+}
+
+// true when the evaluation shader asks for point-mode isolines
+bool mglTesIsPointIsolines(const char *tes_src)
+{
+    GeometryInfo gi;
+    char *probe;
+
+    memset(&gi, 0, sizeof(gi));
+    gi.capture_decl = (char *)"";
+    probe = mglAddTessPointCapture(tes_src, &gi);
+
+    free(probe);
+
+    return probe != NULL;
+}
+
+// A geometry shader that passes each point straight through, so point-mode
+// isolines with no geometry shader of their own can use the same path.
+char *mglPassThroughGeometry(const char *tes_src)
+{
+    Buf out = {0};
+    GsVarying outs[MAX_GS_VARYINGS];
+    int count = 0;
+    char line[256];
+
+    for (size_t i = 0; tes_src[i]; i++)
+    {
+        GsVarying v;
+        bool is_varying = false;
+
+        if ((i && identChar(tes_src[i - 1])) || !identChar(tes_src[i]))
+            continue;
+
+        if (readVarying(tes_src, i, true, &v, &is_varying) && is_varying && count < MAX_GS_VARYINGS)
+            outs[count++] = v;
+    }
+
+    if (!bufAdd(&out, "#version 430 core\nlayout(points) in;\nlayout(points, max_vertices = 1) out;\n"))
+        goto fail;
+
+    for (int i = 0; i < count; i++)
+    {
+        snprintf(line, sizeof(line), "%s%sin %s %s[];\n%s%sout %s %s;\n",
+                 outs[i].qualifier, outs[i].qualifier[0] ? " " : "", outs[i].type, outs[i].name,
+                 outs[i].qualifier, outs[i].qualifier[0] ? " " : "", outs[i].type, outs[i].name);
+
+        if (!bufAdd(&out, line))
+            goto fail;
+    }
+
+    if (!bufAdd(&out, "void main()\n{\n  gl_Position = gl_in[0].gl_Position;\n"))
+        goto fail;
+
+    for (int i = 0; i < count; i++)
+    {
+        snprintf(line, sizeof(line), "  %s = %s[0];\n", outs[i].name, outs[i].name);
+
+        if (!bufAdd(&out, line))
+            goto fail;
+    }
+
+    if (!bufAdd(&out, "  EmitVertex();\n}\n"))
+        goto fail;
+
+    return out.s;
+
+fail:
+    free(out.s);
+    return NULL;
 }

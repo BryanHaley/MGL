@@ -222,127 +222,175 @@ void mglFreeCaptureInfo(CaptureInfo *ci)
         return;
 
     free(ci->rewritten_src);
+    free(ci->gather);
     memset(ci, 0, sizeof(*ci));
 }
 
-// Rewrites the last pre-rasterisation stage to copy the recorded varyings into
-// the feedback buffers. Returns false when the shader records something MGL
-// cannot lay out, which leaves transform feedback off rather than wrong.
-bool mglBuildTransformCapture(const char *src, char *const *varyings, GLsizei count,
-                              GLenum buffer_mode, CaptureInfo *ci)
+// Turns the names glTransformFeedbackVaryings recorded into laid-out items:
+// one buffer with everything in a row, or one buffer each, with
+// gl_NextBuffer and gl_SkipComponents moving the write position.
+static int itemsFromVaryings(const char *src, char *const *varyings, GLsizei count, bool separate,
+                             MglXfbItem *items, int max_items, GLint *stride_bytes)
 {
-    Buf out = {0};
-    Buf body = {0};
-    const char *main_at = NULL;
-    bool separate = (buffer_mode == GL_SEPARATE_ATTRIBS);
-    int words = 0;
-    char line[512];
+    int n = 0, buffer = 0, offset = 0;
 
-    memset(ci, 0, sizeof(*ci));
-
-    if (count <= 0 || count > MGL_XFB_MAX_BUFFERS)
-        return false;
-
-    for (size_t i = 0; src[i]; i++)
-        if (wordAt(src, i, "main"))
-        {
-            size_t k = skipSpace(src, i + 4);
-
-            if (src[k] == '(')
-            {
-                main_at = src + i;
-                break;
-            }
-        }
-
-    if (main_at == NULL)
-        return false;
-
-    // one buffer holds everything, or one buffer per varying
-    ci->buffer_count = separate ? count : 1;
-
-    if (!bufAdd(&body, "\nvoid mglXfbCapture(int mglSlot, int mglOn)\n{\n  if (mglOn == 0) return;\n"))
-        goto fail;
+    for (int b = 0; b < MGL_XFB_MAX_BUFFERS; b++)
+        stride_bytes[b] = 0;
 
     for (GLsizei v = 0; v < count; v++)
     {
+        const char *name = varyings[v];
         char type[64];
         char kind = 'f';
-        int n, cols, rows;
-        int buf = separate ? (int)v : 0;
-        int base = separate ? 0 : words;
+        int comps, cols, rows;
 
-        if (!varyings[v] || !varyingType(src, varyings[v], type, sizeof type))
+        if (name == NULL)
+            return -1;
+
+        if (!strcmp(name, "gl_NextBuffer"))
         {
-            MGL_ERR("MGL Error: transform feedback varying '%s' is not an output of this stage\n",
-                    varyings[v] ? varyings[v] : "(null)");
-            goto fail;
+            buffer++;
+            offset = 0;
+
+            if (buffer >= MGL_XFB_MAX_BUFFERS)
+                return -1;
+
+            continue;
         }
 
-        n = componentsOf(type, &kind);
-
-        if (n == 0)
+        if (!strncmp(name, "gl_SkipComponents", 17))
         {
-            MGL_ERR("MGL Error: transform feedback cannot lay out '%s' of type %s\n",
-                    varyings[v], type);
-            goto fail;
+            offset += 4 * atoi(name + 17);
+
+            if (offset > stride_bytes[buffer])
+                stride_bytes[buffer] = offset;
+
+            continue;
+        }
+
+        if (separate)
+        {
+            buffer = (int)v;
+            offset = 0;
+        }
+
+        if (buffer >= MGL_XFB_MAX_BUFFERS || n >= max_items)
+            return -1;
+
+        if (!varyingType(src, name, type, sizeof type))
+        {
+            MGL_ERR("MGL Error: transform feedback varying '%s' is not an output of this stage\n", name);
+            return -1;
+        }
+
+        comps = componentsOf(type, &kind);
+
+        if (comps == 0)
+        {
+            MGL_ERR("MGL Error: transform feedback cannot lay out '%s' of type %s\n", name, type);
+            return -1;
         }
 
         matrixShape(type, &cols, &rows);
 
-        snprintf(line, sizeof(line), "  // %s (%s)\n", varyings[v], type);
+        memset(&items[n], 0, sizeof(items[n]));
+        snprintf(items[n].expr, sizeof(items[n].expr), "%s", name);
+        items[n].buffer = buffer;
+        items[n].offset = offset;
+        items[n].kind = kind;
+        items[n].components = comps;
+        items[n].rows = cols ? rows : 0;
+        n++;
 
-        if (!bufAdd(&body, line))
-            goto fail;
+        offset += 4 * comps;
 
-        for (int c = 0; c < n; c++)
+        if (offset > stride_bytes[buffer])
+            stride_bytes[buffer] = offset;
+    }
+
+    return n;
+}
+
+// Rewrites the last pre-rasterisation stage to copy the laid-out items into
+// the feedback buffers. slot_expr says which recorded vertex this call is.
+static bool buildCapture(const char *src, const MglXfbItem *items, int count,
+                         const GLint *stride_bytes, const char *slot_expr, CaptureInfo *ci)
+{
+    Buf out = {0};
+    Buf body = {0};
+    const char *main_at = NULL;
+    char line[512];
+
+    for (size_t i = 0; src[i]; i++)
+        if (wordAt(src, i, "main") && src[skipSpace(src, i + 4)] == '(')
         {
-            const char *cast = kind == 'f' ? "floatBitsToUint" : kind == 'i' ? "uint" : "";
-            char access[160];
+            main_at = src + i;
+            break;
+        }
 
-            if (cols)
-                snprintf(access, sizeof(access), "%s[%d][%d]", varyings[v], c / rows, c % rows);
-            else if (n == 1)
-                snprintf(access, sizeof(access), "%s", varyings[v]);
+    if (main_at == NULL || count <= 0)
+        return false;
+
+    ci->buffer_count = 0;
+
+    for (int b = 0; b < MGL_XFB_MAX_BUFFERS; b++)
+    {
+        ci->stride_bytes[b] = stride_bytes[b];
+
+        if (stride_bytes[b] > 0)
+            ci->buffer_count = b + 1;
+    }
+
+    if (!bufAdd(&body, "\nvoid mglXfbCapture(int mglSlot, int mglOn)\n{\n  if (mglOn == 0) return;\n"))
+        goto fail;
+
+    for (int v = 0; v < count; v++)
+    {
+        const MglXfbItem *it = &items[v];
+        int word = it->offset / 4;
+        int stride_words = (stride_bytes[it->buffer] + 3) / 4;
+
+        for (int c = 0; c < it->components; c++)
+        {
+            char access[240];
+
+            if (it->rows)
+                snprintf(access, sizeof(access), "%s[%d][%d]", it->expr, c / it->rows, c % it->rows);
+            else if (it->components == 1)
+                snprintf(access, sizeof(access), "%s", it->expr);
             else
-                snprintf(access, sizeof(access), "%s[%d]", varyings[v], c);
+                snprintf(access, sizeof(access), "%s[%d]", it->expr, c);
 
-            if (cast[0])
+            if (it->kind == 'd')
+            {
+                snprintf(line, sizeof(line),
+                         "  { uvec2 w = packDouble2x32(%s);\n"
+                         "    mglXfbBuf%d[mglSlot * %d + %d] = w.x;\n"
+                         "    mglXfbBuf%d[mglSlot * %d + %d] = w.y; }\n",
+                         access, it->buffer, stride_words, word + 2 * c,
+                         it->buffer, stride_words, word + 2 * c + 1);
+            }
+            else
+            {
+                const char *cast = it->kind == 'f' ? "floatBitsToUint" : it->kind == 'u' ? "" : "uint";
+
                 snprintf(line, sizeof(line), "  mglXfbBuf%d[mglSlot * %d + %d] = %s(%s);\n",
-                         buf, separate ? n : 0, 0, cast, access);
-            else
-                snprintf(line, sizeof(line), "  mglXfbBuf%d[mglSlot * %d + %d] = %s;\n",
-                         buf, separate ? n : 0, 0, access);
-
-            // the stride and offset above depend on the mode, so write them here
-            if (separate)
-                snprintf(line, sizeof(line), "  mglXfbBuf%d[mglSlot * %d + %d] = %s%s%s%s;\n",
-                         buf, n, c, cast[0] ? cast : "", cast[0] ? "(" : "",
-                         access, cast[0] ? ")" : "");
-            else
-                snprintf(line, sizeof(line), "  mglXfbBuf0[mglSlot * MGL_XFB_STRIDE + %d] = %s%s%s%s;\n",
-                         base + c, cast[0] ? cast : "", cast[0] ? "(" : "",
-                         access, cast[0] ? ")" : "");
+                         it->buffer, stride_words, word + c, cast, access);
+            }
 
             if (!bufAdd(&body, line))
                 goto fail;
         }
-
-        ci->components[v] = n;
-        words += n;
     }
 
     if (!bufAdd(&body, "}\n"))
         goto fail;
 
-    ci->stride_words = separate ? 0 : words;
-    ci->varying_count = count;
-    ci->separate = separate;
-
     // ---- put the pieces together ----
     {
         const char *rest = src;
         const char *at = strstr(src, "#version");
+        int version = 110;
 
         if (at)
         {
@@ -351,6 +399,8 @@ bool mglBuildTransformCapture(const char *src, char *const *varyings, GLsizei co
             if (nl == NULL)
                 goto fail;
 
+            sscanf(at, "#version %d", &version);
+
             if (!bufAddN(&out, src, (size_t)(at - src)))
                 goto fail;
 
@@ -358,16 +408,16 @@ bool mglBuildTransformCapture(const char *src, char *const *varyings, GLsizei co
         }
 
         // std430 storage blocks need 4.30, and plenty of shaders are older
-        if (!bufAdd(&out, "#version 430 core\n"))
-            goto fail;
-
-        snprintf(line, sizeof(line), "#define MGL_XFB_STRIDE %d\n", words ? words : 1);
+        snprintf(line, sizeof(line), "#version %d core\n", version > 430 ? version : 430);
 
         if (!bufAdd(&out, line))
             goto fail;
 
         for (int b = 0; b < ci->buffer_count; b++)
         {
+            if (stride_bytes[b] <= 0)
+                continue;
+
             snprintf(line, sizeof(line),
                      "layout(std430, binding = %d) buffer MglXfbB%d { uint mglXfbBuf%d[]; };\n",
                      MGL_XFB_FIRST_BINDING + b, b, b);
@@ -387,17 +437,18 @@ bool mglBuildTransformCapture(const char *src, char *const *varyings, GLsizei co
             !bufAdd(&out, main_at + 4))
             goto fail;
 
-        if (!bufAdd(&out, body.s ? body.s : "") ||
-            !bufAdd(&out, "\nvoid main()\n{\n"
-                          "  int mglOn = mglXfbOnU;\n"
-                          "  int mglBase = mglXfbBaseU;\n"
-                          "  mglXfbBody();\n"
-                          "  mglXfbCapture(gl_VertexID - mglBase, mglOn);\n}\n"))
+        snprintf(line, sizeof(line),
+                 "\nvoid main()\n{\n"
+                 "  int mglOn = mglXfbOnU;\n"
+                 "  int mglBase = mglXfbBaseU;\n"
+                 "  mglXfbBody();\n"
+                 "  mglXfbCapture(%s, mglOn);\n}\n", slot_expr);
+
+        if (!bufAdd(&out, body.s ? body.s : "") || !bufAdd(&out, line))
             goto fail;
     }
 
     ci->rewritten_src = out.s;
-    out.s = NULL;
     free(body.s);
 
     return true;
@@ -408,4 +459,44 @@ fail:
     memset(ci, 0, sizeof(*ci));
 
     return false;
+}
+
+// Rewrites the last pre-rasterisation stage to copy the recorded varyings
+// into the feedback buffers. The shader's own xfb qualifiers win over the
+// names glTransformFeedbackVaryings gave. Returns false when there is nothing
+// to capture or it cannot be laid out, which leaves capture off.
+int mglTransformCaptureItems(const char *src, void *shader, char *const *varyings, GLsizei count,
+                             GLenum buffer_mode, MglXfbItem *items, int max_items,
+                             GLint *stride_bytes, GLboolean *from_shader)
+{
+    int n = mglXfbLayout(shader, items, max_items, stride_bytes, MGL_XFB_MAX_BUFFERS);
+
+    *from_shader = n > 0;
+
+    if (n == 0 && count > 0)
+        n = itemsFromVaryings(src, varyings, count, buffer_mode == GL_SEPARATE_ATTRIBS,
+                              items, max_items, stride_bytes);
+
+    return n;
+}
+
+bool mglBuildTransformCapture(const char *src, void *shader, char *const *varyings, GLsizei count,
+                              GLenum buffer_mode, const char *slot_expr, CaptureInfo *ci)
+{
+    MglXfbItem items[64];
+    GLint strides[MGL_XFB_MAX_BUFFERS];
+    int n;
+
+    memset(ci, 0, sizeof(*ci));
+
+    n = mglTransformCaptureItems(src, shader, varyings, count, buffer_mode, items, 64,
+                                 strides, &ci->from_shader);
+
+    if (n <= 0)
+        return false;
+
+    ci->varying_count = n;
+    ci->separate = (buffer_mode == GL_SEPARATE_ATTRIBS) && !ci->from_shader;
+
+    return buildCapture(src, items, n, strides, slot_expr, ci);
 }

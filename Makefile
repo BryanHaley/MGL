@@ -65,6 +65,7 @@ CXXFLAGS += -I./external/glfw/include -I./external/glfw/src
 CFLAGS += -D_COCOA -D_GLFW_COCOA
 CXXFLAGS += -D_COCOA -D_GLFW_COCOA
 CXXFLAGS += -I./external/SPIRV-Tools/include -IMGL/include -std=c++17
+CXXFLAGS += -I./external/glslang -IMGL/include/GL
 
 # GL_CORE SPECIFIC FLAGS
 CFLAGS_GL_CORE := $(CFLAGS) -DMGL_GL_CORE
@@ -294,7 +295,8 @@ test_exe  := $(build_dir)/mgl_tests
 deps += $(test_objs:.o=.d)
 
 TEST_CFLAGS := -Wall -g -O1 -arch $(shell uname -m) -std=c11 \
-  -IMGL/include -IMGL/include/GL -I$(test_dir) -I$(gears_dir) -DMGL_GL_CORE
+  -IMGL/include -IMGL/include/GL -I$(test_dir) -I$(gears_dir) -DMGL_GL_CORE \
+  -I$(glslang_include_path) -I./submodules/SPIRV-Cross
 ifneq ($(SDK_ROOT),)
 TEST_CFLAGS += -isysroot $(SDK_ROOT)
 endif

@@ -257,14 +257,26 @@ GPU_TEST(stage_honesty, tessellation_reports_or_draws)
               linked, draws, log);
 }
 
-/* ----- shader glslang accepts but SPIRV-Cross cannot lower ----- */
+/* ----- a program that links has to run ----- */
 
+/* Atomic counters are the case that used to link and then fail in Metal. A
+ * program that links must count fragments into the bound buffer; one that
+ * cannot has to say so. */
 GPU_TEST(stage_honesty, malformed_shader_is_not_silent_success)
 {
+    MGLTestTarget t;
     GLuint st[2];
-    GLuint prog;
+    GLuint prog, vao, vbo, counter;
     char log[4096] = { 0 };
     int linked;
+    GLuint counted = 0;
+
+    if (!mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+    {
+        CHECK(0);
+        return;
+    }
+    mgl_target_bind(&t);
 
     st[0] = compile(GL_VERTEX_SHADER, VS_PASSTHROUGH);
     st[1] = compile(GL_FRAGMENT_SHADER, FS_ATOMIC);
@@ -276,6 +288,7 @@ GPU_TEST(stage_honesty, malformed_shader_is_not_silent_success)
     {
         for (int i = 0; i < 2; i++)
             if (st[i]) glDeleteShader(st[i]);
+        mgl_target_destroy(&t);
         return;
     }
 
@@ -283,15 +296,34 @@ GPU_TEST(stage_honesty, malformed_shader_is_not_silent_success)
     linked = (prog != 0);
 
     if (linked)
-        glDeleteProgram(prog);
+    {
+        GLuint zero = 0;
 
-    /* The spec (§7.3) says a program that links must be usable.  A shader
-     * glslang accepts but SPIRV-Cross cannot lower to valid MSL produces a
-     * program that either links and draws, or reports link failure.  MGL must
-     * not report success for a program whose Metal library will not compile. */
-    CHECK_MSG(!linked || log[0] != '\0',
-              "atomic-counter program linked=%d log=\"%s\"",
-              linked, log);
+        glGenBuffers(1, &counter);
+        glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, counter);
+        glBufferData(GL_ATOMIC_COUNTER_BUFFER, sizeof zero, &zero, GL_DYNAMIC_DRAW);
+        glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, 0, counter);
+
+        vao = mgl_fullscreen_quad(&vbo);
+        glUseProgram(prog);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glFinish();
+
+        glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, counter);
+        glGetBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof counted, &counted);
+
+        glUseProgram(0);
+        glDeleteVertexArrays(1, &vao);
+        glDeleteBuffers(1, &vbo);
+        glDeleteBuffers(1, &counter);
+        glDeleteProgram(prog);
+    }
+
+    mgl_target_destroy(&t);
+
+    CHECK_MSG((linked && counted > 0) || (!linked && log[0] != '\0'),
+              "atomic-counter program linked=%d counted=%u log=\"%s\"",
+              linked, counted, log);
 }
 
 /* ----- info log is actionable when link fails ----- */

@@ -102,10 +102,10 @@ GPU_TEST(framebuffer_dsa, draw_buffers)
     glDrawBuffers(2, bufs);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
-    /* GL_BACK is not valid for an FBO */
+    /* GL_BACK is a real buffer name, just not one an FBO has (GL 4.6 17.4.1) */
     static const GLenum bad_bufs[] = { GL_BACK };
     glDrawBuffers(1, bad_bufs);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     /* GL_FRONT is also invalid for an FBO */
     static const GLenum bad_bufs2[] = { GL_FRONT };
@@ -114,7 +114,7 @@ GPU_TEST(framebuffer_dsa, draw_buffers)
 
     /* negative n */
     glDrawBuffers(-1, bufs);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDeleteFramebuffers(1, &fbo);

@@ -1117,12 +1117,10 @@ bool verifyInternalFormatAndFormatType(GLMContext ctx, GLint internalformat, GLe
         case GL_DEPTH_COMPONENT24:
         case GL_DEPTH_COMPONENT32:
         case GL_DEPTH_COMPONENT32F:
-            ERROR_CHECK_RETURN_VALUE(format == GL_DEPTH_COMPONENT, GL_INVALID_OPERATION, false);
-            break;
-            
         case GL_DEPTH24_STENCIL8:
         case GL_DEPTH32F_STENCIL8:
-            ERROR_CHECK_RETURN_VALUE(format == GL_DEPTH_STENCIL, GL_INVALID_OPERATION, false);
+            ERROR_CHECK_RETURN_VALUE(format == GL_DEPTH_COMPONENT || format == GL_DEPTH_STENCIL,
+                                     GL_INVALID_OPERATION, false);
             break;
             
         case GL_STENCIL_INDEX8:
@@ -1331,6 +1329,11 @@ bool unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, GLen
     slice_pitch = dst_pitch * level_height;
     rows = height ? height : 1;
 
+    // The client's images sit GL_UNPACK_IMAGE_HEIGHT rows apart when that is
+    // set, which can be taller than the image being taken out of each one.
+    size_t src_rows_per_image = ctx->state.unpack.image_height > 0
+                              ? (size_t)ctx->state.unpack.image_height : rows;
+
     // never write past the level: a cube face holds one face, not six
     if (tex->faces[face].levels[level].data_size)
     {
@@ -1352,7 +1355,7 @@ bool unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, GLen
 
     if (ctx->state.unpack.swap_bytes && src_pitch && rows)
     {
-        size_t bytes = src_pitch * rows * (depth ? depth : 1);
+        size_t bytes = src_pitch * (src_rows_per_image * ((depth ? depth : 1) - 1) + rows);
 
         swapped = (GLubyte *)malloc(bytes);
 
@@ -1360,7 +1363,7 @@ bool unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, GLen
         {
             memcpy(swapped, src, bytes);
             mglSwapPixelBytes(swapped, src_pitch, format, type,
-                              (GLsizei)width, (GLsizei)(rows * (depth ? depth : 1)));
+                              (GLsizei)width, (GLsizei)(bytes / src_pitch));
             src = swapped;
         }
     }
@@ -1368,7 +1371,7 @@ bool unpackTexture(GLMContext ctx, Texture *tex, GLuint face, GLuint level, GLen
     for (size_t z = 0; z < (depth ? depth : 1); z++)
     {
         GLubyte *slice = dst + z * slice_pitch;
-        const GLubyte *src_slice = src + z * src_pitch * rows;
+        const GLubyte *src_slice = src + z * src_pitch * src_rows_per_image;
 
         if (straight_copy)
         {

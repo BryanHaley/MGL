@@ -197,7 +197,9 @@ bool validate_program(GLMContext ctx, GLenum mode)
         return false;
     }
 
-    if (mglProgramHasGeometry(prog) && !mode_feeds_gs(prog->geom.in_primitive, mode))
+    // behind tessellation the geometry stage is fed by the evaluation stage
+    if (mglProgramHasGeometry(prog) && !prog->tess.active &&
+        !mode_feeds_gs(prog->geom.in_primitive, mode))
         return false;
 
     return true;

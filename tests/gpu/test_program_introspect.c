@@ -312,10 +312,10 @@ GPU_TEST(prog_introspect, program_resource_location)
     loc = glGetProgramResourceLocation(999123, GL_PROGRAM_INPUT, "mgl_pos");
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    /* glGetProgramResourceLocationIndex — spec: returns location index */
+    /* glGetProgramResourceLocationIndex — the colour index, 0 with no layout(index) */
     loc = glGetProgramResourceLocationIndex(p, GL_PROGRAM_OUTPUT, "mgl_frag");
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    CHECK_EQ_INT(loc, 1);
+    CHECK_EQ_INT(loc, 0);
 
     /* unknown name */
     loc = glGetProgramResourceLocationIndex(p, GL_PROGRAM_OUTPUT, "nope");

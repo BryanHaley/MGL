@@ -983,6 +983,10 @@ static GLboolean encode_packed(GLubyte *d, GLenum format, GLenum type, const MGL
 
 static void store_int(GLubyte *d, GLenum type, GLint iv, GLuint uv, GLboolean src_signed)
 {
+    // a large unsigned value would wrap negative on the way to a signed type
+    if (!src_signed && uv > 0x7FFFFFFFu && (type == GL_BYTE || type == GL_SHORT || type == GL_INT))
+        uv = 0x7FFFFFFFu;
+
     switch(type)
     {
         case GL_UNSIGNED_BYTE:  d[0] = (GLubyte)(src_signed ? (iv < 0 ? 0 : (iv > 255 ? 255 : iv)) : (uv > 255u ? 255u : uv)); break;
@@ -1146,6 +1150,10 @@ static GLboolean decode_plain(const GLubyte *s, GLenum format, GLenum type, MGLT
     if (comps == 0 || sz == 0 || comps > 4)
         return GL_FALSE;
 
+    // Each value is kept both signed and unsigned, for whichever kind of
+    // integer storage it lands in. Crossing between them saturates: a large
+    // unsigned value into a signed format is its maximum, not a negative
+    // number, and a negative value into an unsigned format is zero.
     for (k = 0; k < comps; k++)
     {
         const GLubyte *p = s + (size_t)k * sz;
@@ -1158,7 +1166,7 @@ static GLboolean decode_plain(const GLubyte *s, GLenum format, GLenum type, MGLT
                 break;
 
             case GL_BYTE:
-                iv[k] = (GLbyte)p[0]; uv[k] = (GLuint)iv[k];
+                iv[k] = (GLbyte)p[0]; uv[k] = iv[k] < 0 ? 0u : (GLuint)iv[k];
                 fv[k] = is_int ? (GLfloat)iv[k] : snorm_to_float(iv[k], 8);
                 break;
 
@@ -1168,7 +1176,7 @@ static GLboolean decode_plain(const GLubyte *s, GLenum format, GLenum type, MGLT
                 break;
 
             case GL_SHORT:
-                iv[k] = (GLshort)rd16(p); uv[k] = (GLuint)iv[k];
+                iv[k] = (GLshort)rd16(p); uv[k] = iv[k] < 0 ? 0u : (GLuint)iv[k];
                 fv[k] = is_int ? (GLfloat)iv[k] : snorm_to_float(iv[k], 16);
                 break;
 
@@ -1176,12 +1184,12 @@ static GLboolean decode_plain(const GLubyte *s, GLenum format, GLenum type, MGLT
             // like the 8 and 16 bit ones. Handing the raw value on saturated
             // every GL_UNSIGNED_INT upload to white.
             case GL_UNSIGNED_INT:
-                uv[k] = rd32(p); iv[k] = (GLint)uv[k];
+                uv[k] = rd32(p); iv[k] = uv[k] > 0x7FFFFFFFu ? 0x7FFFFFFF : (GLint)uv[k];
                 fv[k] = is_int ? (GLfloat)uv[k] : unorm_to_float(uv[k], 32);
                 break;
 
             case GL_INT:
-                iv[k] = (GLint)rd32(p); uv[k] = (GLuint)iv[k];
+                iv[k] = (GLint)rd32(p); uv[k] = iv[k] < 0 ? 0u : (GLuint)iv[k];
                 fv[k] = is_int ? (GLfloat)iv[k] : snorm_to_float(iv[k], 32);
                 break;
 
@@ -1358,8 +1366,8 @@ static GLboolean encode_native(GLubyte *d, MGLNativeFormat fmt, const MGLTexel *
             return GL_TRUE;
 
         case MGL_NF_RGB10A2_UINT:
-            wr32(d, ((t->u[3] & 0x3u) << 30) | ((t->u[2] & 0x3FFu) << 20) |
-                    ((t->u[1] & 0x3FFu) << 10) | (t->u[0] & 0x3FFu));
+            wr32(d, (clamp_field(t->u[3], 0x3u) << 30) | (clamp_field(t->u[2], 0x3FFu) << 20) |
+                    (clamp_field(t->u[1], 0x3FFu) << 10) | clamp_field(t->u[0], 0x3FFu));
             return GL_TRUE;
 
         case MGL_NF_RG11B10_FLOAT:
@@ -1441,125 +1449,83 @@ static GLboolean encode_native(GLubyte *d, MGLNativeFormat fmt, const MGLTexel *
 // one word. Without this, any upload using a packed type had to be stored in
 // whatever format the data happened to be, which quietly changed the texture's
 // internal format out from under the app.
+// Where each field of a packed type sits, in the order the client format
+// names its components. A _REV type simply lists them low bits first.
+typedef struct {
+    GLenum type;
+    GLuint bytes, fields;
+    GLubyte shift[4], bits[4];
+} PackedLayout;
+
+static const PackedLayout packed_layouts[] = {
+    { GL_UNSIGNED_BYTE_3_3_2,         1, 3, {5, 2, 0, 0},     {3, 3, 2, 0} },
+    { GL_UNSIGNED_BYTE_2_3_3_REV,     1, 3, {0, 3, 6, 0},     {3, 3, 2, 0} },
+    { GL_UNSIGNED_SHORT_5_6_5,        2, 3, {11, 5, 0, 0},    {5, 6, 5, 0} },
+    { GL_UNSIGNED_SHORT_5_6_5_REV,    2, 3, {0, 5, 11, 0},    {5, 6, 5, 0} },
+    { GL_UNSIGNED_SHORT_4_4_4_4,      2, 4, {12, 8, 4, 0},    {4, 4, 4, 4} },
+    { GL_UNSIGNED_SHORT_4_4_4_4_REV,  2, 4, {0, 4, 8, 12},    {4, 4, 4, 4} },
+    { GL_UNSIGNED_SHORT_5_5_5_1,      2, 4, {11, 6, 1, 0},    {5, 5, 5, 1} },
+    { GL_UNSIGNED_SHORT_1_5_5_5_REV,  2, 4, {0, 5, 10, 15},   {5, 5, 5, 1} },
+    { GL_UNSIGNED_INT_8_8_8_8,        4, 4, {24, 16, 8, 0},   {8, 8, 8, 8} },
+    { GL_UNSIGNED_INT_8_8_8_8_REV,    4, 4, {0, 8, 16, 24},   {8, 8, 8, 8} },
+    { GL_UNSIGNED_INT_10_10_10_2,     4, 4, {22, 12, 2, 0},   {10, 10, 10, 2} },
+    { GL_UNSIGNED_INT_2_10_10_10_REV, 4, 4, {0, 10, 20, 30},  {10, 10, 10, 2} },
+};
+
+// The inverse of encode_packed: client pixels that stuff every component into
+// one word. Without this, any upload using a packed type had to be stored in
+// whatever format the data happened to be, which quietly changed the texture's
+// internal format out from under the app.
 static GLboolean decode_packed(const GLubyte *sp, GLenum format, GLenum type, MGLTexel *t)
 {
     GLuint comps = mglComponentsForFormat(format);
-    GLboolean bgr = (format == GL_BGR || format == GL_BGRA ||
-                     format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
     GLfloat fv[4] = {0,0,0,1};
     GLint   iv[4] = {0,0,0,1};
     GLuint  uv[4] = {0,0,0,1};
     GLuint v = 0;
-    GLushort h = 0;
+
+    for (size_t n = 0; n < sizeof(packed_layouts) / sizeof(packed_layouts[0]); n++)
+    {
+        const PackedLayout *L = &packed_layouts[n];
+
+        if (L->type != type)
+            continue;
+
+        if (comps != L->fields)
+            return GL_FALSE;
+
+        if (L->bytes == 1)      v = sp[0];
+        else if (L->bytes == 2) { GLushort h; memcpy(&h, sp, 2); v = h; }
+        else                    memcpy(&v, sp, 4);
+
+        // The fields come out in the order the format names them. Mapping
+        // that order onto RGBA is scatter_components' job -- swapping red and
+        // blue here as well undid it for every BGR format.
+        for (GLuint k = 0; k < L->fields; k++)
+        {
+            GLuint raw = (v >> L->shift[k]) & ((1u << L->bits[k]) - 1u);
+
+            fv[k] = unorm_to_float(raw, L->bits[k]);
+            uv[k] = raw;
+            iv[k] = (GLint)raw;
+        }
+
+        texel_zero(t);
+
+        // an integer format takes the fields as they are, not normalised
+        if (format_is_integer(format))
+        {
+            t->is_uint = GL_TRUE;
+            t->is_sint = GL_FALSE;
+        }
+
+        scatter_components(t, format, fv, iv, uv);
+
+        return GL_TRUE;
+    }
 
     switch(type)
     {
-        case GL_UNSIGNED_BYTE_3_3_2:
-            if (comps != 3) return GL_FALSE;
-            fv[0] = unorm_to_float((sp[0] >> 5) & 0x7u, 3);
-            fv[1] = unorm_to_float((sp[0] >> 2) & 0x7u, 3);
-            fv[2] = unorm_to_float(sp[0] & 0x3u, 2);
-            break;
-
-        case GL_UNSIGNED_BYTE_2_3_3_REV:
-            if (comps != 3) return GL_FALSE;
-            fv[0] = unorm_to_float(sp[0] & 0x7u, 3);
-            fv[1] = unorm_to_float((sp[0] >> 3) & 0x7u, 3);
-            fv[2] = unorm_to_float((sp[0] >> 6) & 0x3u, 2);
-            break;
-
-        case GL_UNSIGNED_SHORT_5_6_5:
-            if (comps != 3) return GL_FALSE;
-            memcpy(&h, sp, 2);
-            fv[0] = unorm_to_float((h >> 11) & 0x1Fu, 5);
-            fv[1] = unorm_to_float((h >> 5) & 0x3Fu, 6);
-            fv[2] = unorm_to_float(h & 0x1Fu, 5);
-            break;
-
-        case GL_UNSIGNED_SHORT_5_6_5_REV:
-            if (comps != 3) return GL_FALSE;
-            memcpy(&h, sp, 2);
-            fv[2] = unorm_to_float((h >> 11) & 0x1Fu, 5);
-            fv[1] = unorm_to_float((h >> 5) & 0x3Fu, 6);
-            fv[0] = unorm_to_float(h & 0x1Fu, 5);
-            break;
-
-        case GL_UNSIGNED_SHORT_4_4_4_4:
-            if (comps != 4) return GL_FALSE;
-            memcpy(&h, sp, 2);
-            fv[0] = unorm_to_float((h >> 12) & 0xFu, 4);
-            fv[1] = unorm_to_float((h >> 8) & 0xFu, 4);
-            fv[2] = unorm_to_float((h >> 4) & 0xFu, 4);
-            fv[3] = unorm_to_float(h & 0xFu, 4);
-            break;
-
-        case GL_UNSIGNED_SHORT_4_4_4_4_REV:
-            if (comps != 4) return GL_FALSE;
-            memcpy(&h, sp, 2);
-            fv[3] = unorm_to_float((h >> 12) & 0xFu, 4);
-            fv[2] = unorm_to_float((h >> 8) & 0xFu, 4);
-            fv[1] = unorm_to_float((h >> 4) & 0xFu, 4);
-            fv[0] = unorm_to_float(h & 0xFu, 4);
-            break;
-
-        case GL_UNSIGNED_SHORT_5_5_5_1:
-            if (comps != 4) return GL_FALSE;
-            memcpy(&h, sp, 2);
-            fv[0] = unorm_to_float((h >> 11) & 0x1Fu, 5);
-            fv[1] = unorm_to_float((h >> 6) & 0x1Fu, 5);
-            fv[2] = unorm_to_float((h >> 1) & 0x1Fu, 5);
-            fv[3] = unorm_to_float(h & 0x1u, 1);
-            break;
-
-        case GL_UNSIGNED_SHORT_1_5_5_5_REV:
-            if (comps != 4) return GL_FALSE;
-            memcpy(&h, sp, 2);
-            fv[3] = unorm_to_float((h >> 15) & 0x1u, 1);
-            fv[2] = unorm_to_float((h >> 10) & 0x1Fu, 5);
-            fv[1] = unorm_to_float((h >> 5) & 0x1Fu, 5);
-            fv[0] = unorm_to_float(h & 0x1Fu, 5);
-            break;
-
-        case GL_UNSIGNED_INT_8_8_8_8:
-            if (comps != 4) return GL_FALSE;
-            memcpy(&v, sp, 4);
-            fv[0] = unorm_to_float((v >> 24) & 0xFFu, 8);
-            fv[1] = unorm_to_float((v >> 16) & 0xFFu, 8);
-            fv[2] = unorm_to_float((v >> 8) & 0xFFu, 8);
-            fv[3] = unorm_to_float(v & 0xFFu, 8);
-            break;
-
-        case GL_UNSIGNED_INT_8_8_8_8_REV:
-            if (comps != 4) return GL_FALSE;
-            memcpy(&v, sp, 4);
-            fv[3] = unorm_to_float((v >> 24) & 0xFFu, 8);
-            fv[2] = unorm_to_float((v >> 16) & 0xFFu, 8);
-            fv[1] = unorm_to_float((v >> 8) & 0xFFu, 8);
-            fv[0] = unorm_to_float(v & 0xFFu, 8);
-            break;
-
-        case GL_UNSIGNED_INT_10_10_10_2:
-            if (comps != 4) return GL_FALSE;
-            memcpy(&v, sp, 4);
-            fv[0] = unorm_to_float((v >> 22) & 0x3FFu, 10);
-            fv[1] = unorm_to_float((v >> 12) & 0x3FFu, 10);
-            fv[2] = unorm_to_float((v >> 2) & 0x3FFu, 10);
-            fv[3] = unorm_to_float(v & 0x3u, 2);
-            uv[0] = (v >> 22) & 0x3FFu; uv[1] = (v >> 12) & 0x3FFu;
-            uv[2] = (v >> 2) & 0x3FFu;  uv[3] = v & 0x3u;
-            break;
-
-        case GL_UNSIGNED_INT_2_10_10_10_REV:
-            if (comps != 4) return GL_FALSE;
-            memcpy(&v, sp, 4);
-            fv[3] = unorm_to_float((v >> 30) & 0x3u, 2);
-            fv[2] = unorm_to_float((v >> 20) & 0x3FFu, 10);
-            fv[1] = unorm_to_float((v >> 10) & 0x3FFu, 10);
-            fv[0] = unorm_to_float(v & 0x3FFu, 10);
-            uv[3] = (v >> 30) & 0x3u;   uv[2] = (v >> 20) & 0x3FFu;
-            uv[1] = (v >> 10) & 0x3FFu; uv[0] = v & 0x3FFu;
-            break;
-
         case GL_UNSIGNED_INT_24_8:
             if (format != GL_DEPTH_STENCIL) return GL_FALSE;
             memcpy(&v, sp, 4);
@@ -1600,23 +1566,13 @@ static GLboolean decode_packed(const GLubyte *sp, GLenum format, GLenum type, MG
             return GL_FALSE;
     }
 
-    if (bgr) { GLfloat tmp = fv[0]; fv[0] = fv[2]; fv[2] = tmp; }
-
     for (GLuint k = 0; k < 4; k++)
     {
-        if (type != GL_UNSIGNED_INT_10_10_10_2 && type != GL_UNSIGNED_INT_2_10_10_10_REV)
-            uv[k] = (GLuint)(fv[k] < 0.0f ? 0.0f : fv[k]);
+        uv[k] = (GLuint)(fv[k] < 0.0f ? 0.0f : fv[k]);
         iv[k] = (GLint)uv[k];
     }
 
     texel_zero(t);
-
-    if (format_is_integer(format))
-    {
-        t->is_uint = GL_TRUE;
-        t->is_sint = GL_FALSE;
-    }
-
     scatter_components(t, format, fv, iv, uv);
 
     return GL_TRUE;
@@ -1812,97 +1768,51 @@ GLboolean mglUploadNeedsNoConversion(GLenum internalformat, GLenum format, GLenu
 // GL lets an application hand uncompressed pixels to a compressed internal
 // format and expects the driver to compress them. RGTC is one 4x4 block of one
 // channel in 8 bytes: two endpoints and sixteen 3-bit indices.
-static void encodeRGTCBlockUnsigned(const GLubyte *src, GLuint count, GLubyte *out)
+// src holds the block by position (y * 4 + x); valid marks the texels that
+// are inside the image, which is all of them except at the right and top edge.
+static void encodeRGTCBlock(const GLint *src, GLuint valid, GLubyte *out)
 {
-    GLubyte lo = 255, hi = 0;
+    GLint lo = 255, hi = 0;
+    GLuint64 bits = 0;
     GLuint i;
 
-    for (i = 0; i < count; i++)
+    for (i = 0; i < 16; i++)
     {
+        if (!(valid & (1u << i)))
+            continue;
+
         if (src[i] < lo) lo = src[i];
         if (src[i] > hi) hi = src[i];
     }
 
-    if (count == 0) { lo = 0; hi = 0; }
-
-    out[0] = hi;
-    out[1] = lo;
-
-    // hi > lo selects the eight-value mode: six interpolated steps between them
-    {
-        GLuint64 bits = 0;
-        GLint range = (GLint)hi - (GLint)lo;
-
-        for (i = 0; i < 16; i++)
-        {
-            GLuint idx = 0;
-
-            if (i < count && range > 0)
-            {
-                GLint t = (((GLint)src[i] - (GLint)lo) * 14 + range) / (2 * range); /* 0..7 */
-
-                if (t > 7) t = 7;
-                if (t < 0) t = 0;
-
-                // block layout: 0 is hi, 1 is lo, 2..7 walk from hi down to lo
-                idx = (t == 7) ? 0u : (t == 0 ? 1u : (GLuint)(8 - t));
-            }
-            else if (i < count)
-            {
-                idx = 0;   // flat block, every texel is the endpoint
-            }
-
-            bits |= ((GLuint64)(idx & 0x7u)) << (3 * i);
-        }
-
-        for (i = 0; i < 6; i++)
-            out[2 + i] = (GLubyte)((bits >> (8 * i)) & 0xFFu);
-    }
-}
-
-static void encodeRGTCBlockSigned(const GLbyte *src, GLuint count, GLubyte *out)
-{
-    GLbyte lo = 127, hi = -127;
-    GLuint i;
-
-    for (i = 0; i < count; i++)
-    {
-        GLbyte v = src[i] == -128 ? -127 : src[i];
-
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-    }
-
-    if (count == 0) { lo = 0; hi = 0; }
+    if (valid == 0) { lo = 0; hi = 0; }
 
     out[0] = (GLubyte)hi;
     out[1] = (GLubyte)lo;
 
+    // hi > lo selects the eight-value mode: six interpolated steps between them
+    GLint range = hi - lo;
+
+    for (i = 0; i < 16; i++)
     {
-        GLuint64 bits = 0;
-        GLint range = (GLint)hi - (GLint)lo;
+        GLuint idx = 0;
 
-        for (i = 0; i < 16; i++)
+        if ((valid & (1u << i)) && range > 0)
         {
-            GLuint idx = 0;
+            GLint t = ((src[i] - lo) * 14 + range) / (2 * range); /* 0..7 */
 
-            if (i < count && range > 0)
-            {
-                GLbyte v = src[i] == -128 ? -127 : src[i];
-                GLint t = (((GLint)v - (GLint)lo) * 14 + range) / (2 * range);
+            if (t > 7) t = 7;
+            if (t < 0) t = 0;
 
-                if (t > 7) t = 7;
-                if (t < 0) t = 0;
-
-                idx = (t == 7) ? 0u : (t == 0 ? 1u : (GLuint)(8 - t));
-            }
-
-            bits |= ((GLuint64)(idx & 0x7u)) << (3 * i);
+            // block layout: 0 is hi, 1 is lo, 2..7 walk from hi down to lo
+            idx = (t == 7) ? 0u : (t == 0 ? 1u : (GLuint)(8 - t));
         }
 
-        for (i = 0; i < 6; i++)
-            out[2 + i] = (GLubyte)((bits >> (8 * i)) & 0xFFu);
+        bits |= ((GLuint64)idx) << (3 * i);
     }
+
+    for (i = 0; i < 6; i++)
+        out[2 + i] = (GLubyte)((bits >> (8 * i)) & 0xFFu);
 }
 
 // How many channels the format keeps, and whether they are signed.
@@ -1937,8 +1847,8 @@ GLboolean mglCompressToRGTC(const void *src, size_t src_row_pitch, GLenum format
     {
         for (bx = 0; bx < width; bx += 4)
         {
-            GLubyte chan[2][16];
-            GLuint count = 0;
+            GLint chan[2][16] = {{0}};
+            GLuint valid = 0;
             GLsizei y, x;
             GLuint c;
 
@@ -1947,6 +1857,7 @@ GLboolean mglCompressToRGTC(const void *src, size_t src_row_pitch, GLenum format
                 {
                     const GLubyte *p = (const GLubyte *)src + (size_t)y * src_row_pitch
                                      + (size_t)x * mglPackedPixelSize(format, type);
+                    GLuint pos = (GLuint)((y - by) * 4 + (x - bx));
                     MGLTexel t;
                     GLboolean got = packed_type_size(type) ? decode_packed(p, format, type, &t)
                                                            : decode_plain(p, format, type, &t);
@@ -1960,30 +1871,41 @@ GLboolean mglCompressToRGTC(const void *src, size_t src_row_pitch, GLenum format
 
                         if (is_signed)
                         {
-                            GLint s = (GLint)(v * 127.0f + (v < 0.0f ? -0.5f : 0.5f));
+                            GLint sv = (GLint)(v * 127.0f + (v < 0.0f ? -0.5f : 0.5f));
 
-                            if (s > 127) s = 127;
-                            if (s < -127) s = -127;
-
-                            chan[c][count] = (GLubyte)(GLbyte)s;
+                            chan[c][pos] = sv > 127 ? 127 : (sv < -127 ? -127 : sv);
                         }
                         else
                         {
                             GLfloat cl = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
 
-                            chan[c][count] = (GLubyte)(cl * 255.0f + 0.5f);
+                            chan[c][pos] = (GLint)(cl * 255.0f + 0.5f);
                         }
                     }
 
-                    count++;
+                    valid |= 1u << pos;
                 }
 
             for (c = 0; c < channels; c++)
             {
                 if (is_signed)
-                    encodeRGTCBlockSigned((const GLbyte *)chan[c], count, out);
+                {
+                    // the same search, on values shifted into 0..254
+                    GLint shifted[16];
+                    GLubyte blk[8];
+
+                    for (GLuint k = 0; k < 16; k++)
+                        shifted[k] = chan[c][k] + 127;
+
+                    encodeRGTCBlock(shifted, valid, blk);
+                    out[0] = (GLubyte)(GLbyte)((GLint)blk[0] - 127);
+                    out[1] = (GLubyte)(GLbyte)((GLint)blk[1] - 127);
+                    memcpy(out + 2, blk + 2, 6);
+                }
                 else
-                    encodeRGTCBlockUnsigned(chan[c], count, out);
+                {
+                    encodeRGTCBlock(chan[c], valid, out);
+                }
 
                 out += 8;
             }
