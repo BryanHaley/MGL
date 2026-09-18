@@ -711,3 +711,88 @@ extern "C" int mglXfbLayout(void *shader, MglXfbItem *items, int max_items, GLin
 
     return (int)found.size();
 }
+
+static bool locationFits(const glslang::TType &t, int location, int max, EShLanguage stage,
+                         const char *name, const char *dir, char *msg, size_t n)
+{
+    glslang::TType element(t, 0);
+    int size = (t.isArray() && t.getQualifier().isArrayedIo(stage))
+                   ? glslang::TIntermediate::computeTypeLocationSize(element, stage)
+                   : glslang::TIntermediate::computeTypeLocationSize(t, stage);
+
+    if (location + size <= max)
+        return true;
+
+    std::snprintf(msg, n, "ERROR: %s %s: location %d is past the last %s location (%d)\n",
+                  dir, name, location, dir, max - 1);
+    return false;
+}
+
+extern "C" bool mglVaryingLocationsFit(void *shader, int max_in, int max_out, char *msg, size_t n)
+{
+    if (shader == nullptr || ((CShaderHandle *)shader)->shader == nullptr)
+        return true;
+
+    const glslang::TIntermediate *interm = ((CShaderHandle *)shader)->shader->getIntermediate();
+
+    if (interm == nullptr || interm->getTreeRoot() == nullptr)
+        return true;
+
+    glslang::TIntermAggregate *root = interm->getTreeRoot()->getAsAggregate();
+
+    if (root == nullptr)
+        return true;
+
+    EShLanguage stage = interm->getStage();
+
+    for (TIntermNode *n0 : root->getSequence())
+    {
+        glslang::TIntermAggregate *a = n0->getAsAggregate();
+
+        if (a == nullptr || a->getOp() != glslang::EOpLinkerObjects)
+            continue;
+
+        for (TIntermNode *node : a->getSequence())
+        {
+            glslang::TIntermSymbol *sym = node->getAsSymbolNode();
+
+            if (sym == nullptr)
+                continue;
+
+            const glslang::TType &t = sym->getType();
+            const glslang::TQualifier &q = t.getQualifier();
+            int max;
+            const char *dir;
+
+            if (q.storage == glslang::EvqVaryingIn && stage != EShLangVertex)
+                max = max_in, dir = "input";
+            else if (q.storage == glslang::EvqVaryingOut && stage != EShLangFragment)
+                max = max_out, dir = "output";
+            else
+                continue;
+
+            if (max <= 0 || q.builtIn != glslang::EbvNone)
+                continue;
+
+            if (q.hasLocation())
+            {
+                if (!locationFits(t, q.layoutLocation, max, stage, sym->getName().c_str(), dir, msg, n))
+                    return false;
+            }
+            else if (t.isStruct() && t.getBasicType() == glslang::EbtBlock)
+            {
+                for (const glslang::TTypeLoc &m : *t.getStruct())
+                {
+                    const glslang::TQualifier &mq = m.type->getQualifier();
+
+                    if (mq.hasLocation() &&
+                        !locationFits(*m.type, mq.layoutLocation, max, stage,
+                                      m.type->getFieldName().c_str(), dir, msg, n))
+                        return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}

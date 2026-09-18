@@ -238,3 +238,61 @@ GPU_TEST(cts_findings, successful_link_raises_nothing)
     glDeleteShader(f);
     glDeleteProgram(p);
 }
+
+/* ---------- compile errors that five-stage linking used to hide ---------- */
+
+static GLint compiles(GLenum type, const char *src)
+{
+    GLuint s = glCreateShader(type);
+    GLint ok = GL_FALSE;
+
+    glShaderSource(s, 1, &src, NULL);
+    glCompileShader(s);
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    glDeleteShader(s);
+    return ok;
+}
+
+GPU_TEST(cts_findings, output_location_past_the_limit_fails)
+{
+    GLint comps = 0;
+    char src[512];
+
+    glGetIntegerv(GL_MAX_VERTEX_OUTPUT_COMPONENTS, &comps);
+
+    const char *fmt =
+        "#version 440 core\n"
+        "layout(location = %d) out vec4 v;\n"
+        "void main() { v = vec4(1.0); gl_Position = vec4(0.0); }\n";
+
+    snprintf(src, sizeof src, fmt, comps / 4 - 1);
+    CHECK_EQ_INT(compiles(GL_VERTEX_SHADER, src), GL_TRUE);
+
+    snprintf(src, sizeof src, fmt, comps / 4);
+    CHECK_EQ_INT(compiles(GL_VERTEX_SHADER, src), GL_FALSE);
+
+    // a mat4 takes four locations, so the last one it can start at is limit - 4
+    snprintf(src, sizeof src,
+             "#version 440 core\n"
+             "layout(location = %d) out mat4 m;\n"
+             "void main() { m = mat4(1.0); gl_Position = vec4(0.0); }\n", comps / 4 - 3);
+    CHECK_EQ_INT(compiles(GL_VERTEX_SHADER, src), GL_FALSE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+GPU_TEST(cts_findings, packed_block_cannot_place_members)
+{
+    // offset and align only work with std140 and std430
+    CHECK_EQ_INT(compiles(GL_FRAGMENT_SHADER,
+        "#version 440 core\n"
+        "layout(packed) uniform Block { layout(offset = 16) vec4 b; } blk;\n"
+        "out vec4 c;\n"
+        "void main() { c = blk.b; }\n"), GL_FALSE);
+
+    CHECK_EQ_INT(compiles(GL_FRAGMENT_SHADER,
+        "#version 440 core\n"
+        "layout(shared) uniform Block { vec4 b; } blk;\n"
+        "out vec4 c;\n"
+        "void main() { c = blk.b; }\n"), GL_TRUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}

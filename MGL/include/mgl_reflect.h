@@ -24,6 +24,7 @@
 #define mgl_reflect_h
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "glcorearb.h"
 
@@ -98,6 +99,10 @@ typedef struct MglXfbItem_t {
 // items it filled, 0 when the shader declares none, -1 when there are too
 // many. stride_bytes gets each buffer's recorded size, 0 for an unused one.
 int mglXfbLayout(void *shader, MglXfbItem *items, int max_items, GLint *stride_bytes, int max_buffers);
+
+// False, with a message, when an input or output's layout(location) runs past
+// the stage's limit. The limits are in locations; 0 skips that direction.
+bool mglVaryingLocationsFit(void *shader, int max_in, int max_out, char *msg, size_t msg_size);
 
 #ifdef __cplusplus
 }

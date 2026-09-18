@@ -25,6 +25,7 @@
 
 #include "shaders.h"
 #include <ctype.h>
+#include "mgl_reflect.h"
 #include "glm_context.h"
 #include "mgl_log.h"
 
@@ -429,6 +430,45 @@ void mglShaderSource(GLMContext ctx, GLuint shader, GLsizei count, const GLchar 
     ptr->dirty_bits |= DIRTY_SHADER;
 }
 
+static bool isWord(const char *p, const char *start, const char *word)
+{
+    size_t n = strlen(word);
+
+    return !strncmp(p, word, n) &&
+           (p == start || (!isalnum((unsigned char)p[-1]) && p[-1] != '_')) &&
+           !isalnum((unsigned char)p[n]) && p[n] != '_';
+}
+
+// Does the block after a layout(...) ask for offset or align? Those only
+// work with std140 and std430, so a packed or shared block using them has to
+// stay as written and fail.
+static bool blockPlacesMembers(const char *layout, const char *after)
+{
+    for (const char *p = layout; p < after; p++)
+        if (isWord(p, layout, "align"))
+            return true;
+
+    const char *p = after;
+
+    while (*p && *p != '{' && *p != ';')
+        p++;
+
+    if (*p != '{')
+        return false;
+
+    const char *open = p;
+    int depth = 0;
+
+    for (; *p; p++)
+    {
+        if (*p == '{') depth++;
+        else if (*p == '}' && --depth == 0) break;
+        else if (isWord(p, open, "offset") || isWord(p, open, "align")) return true;
+    }
+
+    return false;
+}
+
 // SPIR-V has no notion of the shared or packed block layouts, so glslang
 // refuses them outright. They are legal GLSL, and an app using them is meant
 // to ask the API where each member sits -- which MGL answers -- so treat them
@@ -456,6 +496,9 @@ static void rewriteBlockLayouts(char *src)
             continue;
         }
 
+        char *open = q;
+        char *words[8];
+        int nwords = 0;
         int depth = 0;
 
         for (; *q; q++)
@@ -463,20 +506,13 @@ static void rewriteBlockLayouts(char *src)
             if (*q == '(') { depth++; continue; }
             if (*q == ')') { if (--depth == 0) { q++; break; } continue; }
 
-            if (depth > 0 && (*q == 's' || *q == 'p'))
-            {
-                const char *word = (*q == 's') ? "shared" : "packed";
-                char before = q[-1];
-
-                if (!strncmp(q, word, 6) &&
-                    !isalnum((unsigned char)before) && before != '_' &&
-                    !isalnum((unsigned char)q[6]) && q[6] != '_')
-                {
-                    memcpy(q, "std140", 6);
-                    q += 5;
-                }
-            }
+            if (depth > 0 && nwords < 8 && (isWord(q, src, "shared") || isWord(q, src, "packed")))
+                words[nwords++] = q;
         }
+
+        if (nwords && !blockPlacesMembers(open, q))
+            for (int i = 0; i < nwords; i++)
+                memcpy(words[i], "std140", 6);
 
         p = q;
     }
@@ -1186,6 +1222,44 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 glslang_shader_get_info_log(glsl_shader),
                 glslang_shader_get_info_debug_log(glsl_shader));
 
+        free(desub);
+        free(raised);
+        ctx->error_suppress--;
+        return;
+    }
+
+    int max_in = 0, max_out = 0;
+
+    switch (ptr->glm_type)
+    {
+        case _VERTEX_SHADER:
+            max_out = ctx->state.var.max_vertex_output_components / 4;
+            break;
+        case _TESS_CONTROL_SHADER:
+            max_in = ctx->state.var.max_tess_control_input_components / 4;
+            max_out = ctx->state.var.max_tess_control_output_components / 4;
+            break;
+        case _TESS_EVALUATION_SHADER:
+            max_in = ctx->state.var.max_tess_evaluation_input_components / 4;
+            max_out = ctx->state.var.max_tess_evaluation_output_components / 4;
+            break;
+        case _GEOMETRY_SHADER:
+            max_in = ctx->state.var.max_geometry_input_components / 4;
+            max_out = ctx->state.var.max_geometry_output_components / 4;
+            break;
+        case _FRAGMENT_SHADER:
+            max_in = ctx->state.var.max_fragment_input_components / 4;
+            break;
+        default:
+            break;
+    }
+
+    char where[256];
+
+    if (!mglVaryingLocationsFit(glsl_shader, max_in, max_out, where, sizeof where))
+    {
+        ptr->log = strdup(where);
+        glslang_shader_delete(glsl_shader);
         free(desub);
         free(raised);
         ctx->error_suppress--;
