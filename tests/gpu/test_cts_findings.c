@@ -296,3 +296,69 @@ GPU_TEST(cts_findings, packed_block_cannot_place_members)
         "void main() { c = blk.b; }\n"), GL_TRUE);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 }
+
+/* ---------- crashes and hangs from the 18 Sep sweep ---------- */
+
+GPU_TEST(cts_findings, patch_state_starts_at_gl_defaults)
+{
+    GLint verts = 0;
+    GLfloat outer[4] = { 0 }, inner[2] = { 0 };
+
+    glGetIntegerv(GL_PATCH_VERTICES, &verts);
+    glGetFloatv(GL_PATCH_DEFAULT_OUTER_LEVEL, outer);
+    glGetFloatv(GL_PATCH_DEFAULT_INNER_LEVEL, inner);
+
+    // tests save this and put it back, and 0 is not a legal value to put back
+    CHECK_EQ_INT(verts, 3);
+    CHECK_NEAR(outer[3], 1.0f, 0.0f);
+    CHECK_NEAR(inner[1], 1.0f, 0.0f);
+}
+
+GPU_TEST(cts_findings, depth_1d_array_with_mips_is_usable)
+{
+    // Metal has no 1D depth textures and no 1D mip chains
+    GLuint tex;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_1D_ARRAY, tex);
+    glTexStorage2D(GL_TEXTURE_1D_ARRAY, 4, GL_DEPTH_COMPONENT32F, 8, 3);
+    glGenerateMipmap(GL_TEXTURE_1D_ARRAY);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteTextures(1, &tex);
+}
+
+GPU_TEST(cts_findings, stride_only_feedback_buffer_needs_no_binding)
+{
+    static const char *vs =
+        "#version 440 core\n"
+        "layout(xfb_buffer = 0, xfb_offset = 0) out vec4 v;\n"
+        "layout(xfb_buffer = 1, xfb_stride = 64) out;\n"
+        "void main() { v = vec4(1.0); gl_Position = vec4(0.0); }\n";
+    static const char *fs =
+        "#version 440 core\n"
+        "in vec4 v;\n"
+        "out vec4 c;\n"
+        "void main() { c = v; }\n";
+    char log[1024] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log);
+    GLuint buf;
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    if (!prog)
+        return;
+
+    glGenBuffers(1, &buf);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 64, NULL, GL_DYNAMIC_DRAW);
+    glUseProgram(prog);
+
+    // buffer 1 has a stride but nothing written to it
+    glBeginTransformFeedback(GL_POINTS);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glEndTransformFeedback();
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteProgram(prog);
+}

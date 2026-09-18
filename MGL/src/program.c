@@ -1486,6 +1486,12 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
+    // 1D textures live in Metal as 2D ones (see createMTLTextureFromGLTexture)
+    if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_1D_AS_2D, SPVC_TRUE) != SPVC_SUCCESS) {
+        MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_TEXTURE_1D_AS_2D) failed\n");
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
+
     // The buffers the geometry emulation uses have to sit above whatever the
     // vertex descriptor and the uniform blocks are using, or the attribute
     // fetch and the capture write end up in the same Metal slot.
@@ -2622,14 +2628,15 @@ static void noteShaderCapture(Program *pptr)
         if (sh == NULL)
             continue;
 
-        if (mglXfbLayout(sh->compiled_glsl_shader, items, 64, strides, MGL_XFB_MAX_BUFFERS) > 0)
-            for (int b = 0; b < MGL_XFB_MAX_BUFFERS; b++)
-            {
-                pptr->xfb_shader_strides[b] = strides[b];
+        int n = mglXfbLayout(sh->compiled_glsl_shader, items, 64, strides, MGL_XFB_MAX_BUFFERS);
 
-                if (strides[b] > 0)
-                    pptr->xfb_shader_buffers |= 1u << b;
-            }
+        for (int b = 0; n > 0 && b < MGL_XFB_MAX_BUFFERS; b++)
+            pptr->xfb_shader_strides[b] = strides[b];
+
+        // a buffer with only a stride and nothing captured into it needs no buffer bound
+        for (int k = 0; k < n; k++)
+            if (items[k].buffer >= 0 && items[k].buffer < MGL_XFB_MAX_BUFFERS)
+                pptr->xfb_shader_buffers |= 1u << items[k].buffer;
         break;
     }
 }
@@ -3242,6 +3249,19 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
                 free(gsrc);
             }
         }
+    }
+
+    // A separable geometry-only program gets its vertex stage from another
+    // program in a pipeline, so there is nothing to build for it on its own.
+    if (pptr->geom_shader && pptr->separable &&
+        pptr->shader_slots[_VERTEX_SHADER] == NULL && !pptr->tess.active)
+    {
+        assignUniformLocations(pptr);
+        pptr->validate_status = pptr->link_status;
+        reflectProgram(pptr);
+        ctx->error_suppress--;
+
+        return;
     }
 
     // A geometry shader never reaches Metal as one; it is rewritten into a

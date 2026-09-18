@@ -1142,7 +1142,9 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 //        case GL_TEXTURE_1D: tex_type = MTLTextureType1D; break;
         case GL_TEXTURE_1D: tex_type = MTLTextureType2D; break;
         case GL_RENDERBUFFER: tex_type = MTLTextureType2D; break;
-        case GL_TEXTURE_1D_ARRAY: tex_type = MTLTextureType1DArray; is_array = true; break;
+        // Metal's 1D textures take no depth formats and no mip chain, so a 1D
+        // array is a 2D array one row high, and shaders read it that way
+        case GL_TEXTURE_1D_ARRAY: tex_type = MTLTextureType2DArray; is_array = true; break;
         case GL_TEXTURE_2D: tex_type = MTLTextureType2D; break;
         // a rectangle is a 2D texture with unnormalised coordinates and no
         // mip chain; Metal has no separate type for it
@@ -1439,18 +1441,19 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 
                         if (addr % 256 != 0 || alignedBytesPerRow != bytesPerRow) {
                             // Data is not aligned OR bytesPerRow needs alignment - allocate aligned buffer and copy row by row
-                            NSUInteger alignedSize = ((bytesPerImage + alignment - 1) / alignment) * alignment;
+                            NSUInteger rows = (NSUInteger)(height ? height : 1) * (depth ? depth : 1);
+                            NSUInteger alignedSize = alignedBytesPerRow * rows;
                             void *alignedData = mgl_aligned_alloc(alignment, alignedSize);
 
                             if (alignedData) {
                                 // Copy data row by row to handle bytesPerRow alignment
                                 NSUInteger srcRowSize = bytesPerRow;
                                 NSUInteger dstRowSize = alignedBytesPerRow;
-                                NSUInteger texHeight = height;
                                 uint8_t *srcPtr = (uint8_t *)srcData;
                                 uint8_t *dstPtr = (uint8_t *)alignedData;
 
-                                for (NSUInteger row = 0; row < height; row++) {
+                                // every slice, not just the first
+                                for (NSUInteger row = 0; row < rows; row++) {
                                     NSUInteger copySize = (srcRowSize < dstRowSize) ? srcRowSize : dstRowSize;
                                     memcpy(dstPtr + (row * dstRowSize), srcPtr + (row * srcRowSize), copySize);
                                     // Clear padding to zero
@@ -1585,7 +1588,8 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 
                                 if (addr % alignment != 0 || alignedBytesPerRow != bytesPerRow) {
                                     // Data is not aligned OR bytesPerRow needs alignment - allocate aligned buffer and copy
-                                    NSUInteger alignedSize = ((bytesPerImage + alignment - 1) / alignment) * alignment;
+                                    // padded rows take more room than the image did
+                                    NSUInteger alignedSize = alignedBytesPerRow * region.size.height;
                                     void *alignedData = mgl_aligned_alloc(alignment, alignedSize);
 
                                     if (alignedData) {
@@ -1694,14 +1698,14 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 
                             if (addr % alignment != 0 || alignedBytesPerRow != bytesPerRow) {
                                 // Data is not aligned OR bytesPerRow needs alignment - allocate aligned buffer and copy
-                                NSUInteger alignedSize = ((bytesPerImage + alignment - 1) / alignment) * alignment;
+                                NSUInteger texHeight = height ? height : 1;
+                                NSUInteger alignedSize = alignedBytesPerRow * texHeight;
                                 void *alignedData = mgl_aligned_alloc(alignment, alignedSize);
 
                                 if (alignedData) {
                                     // Copy data row by row to handle bytesPerRow alignment
                                     NSUInteger srcRowSize = bytesPerRow;
                                     NSUInteger dstRowSize = alignedBytesPerRow;
-                                    NSUInteger texHeight = height;
                                     uint8_t *srcPtr = (uint8_t *)srcData;
                                     uint8_t *dstPtr = (uint8_t *)alignedData;
 
@@ -4842,6 +4846,11 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
         case GL_IMAGE_CUBE:
             mtl_type = MTLTextureTypeCube; slot = 2; break;
 
+        case GL_SAMPLER_1D_ARRAY:
+        case GL_SAMPLER_1D_ARRAY_SHADOW:
+        case GL_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+        case GL_IMAGE_1D_ARRAY:
         case GL_SAMPLER_2D_ARRAY:
         case GL_SAMPLER_2D_ARRAY_SHADOW:
         case GL_INT_SAMPLER_2D_ARRAY:

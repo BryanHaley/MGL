@@ -183,6 +183,16 @@ void mglInitLimits(GLMContext ctx)
     if (v->clip_depth == 0)
         v->clip_depth = GL_NEGATIVE_ONE_TO_ONE;
 
+    if (v->patch_vertices == 0)
+    {
+        v->patch_vertices = 3;
+
+        for (int i = 0; i < 4; i++)
+            v->patch_default_outer[i] = 1.0f;
+
+        v->patch_default_inner[0] = v->patch_default_inner[1] = 1.0f;
+    }
+
     v->min_program_texel_offset = (GLuint)-8;
     v->max_program_texel_offset = 7;
     v->min_program_texture_gather_offset = -8;
