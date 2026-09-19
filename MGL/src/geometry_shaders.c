@@ -1053,8 +1053,25 @@ static char *pointSizeIntoCapture(char *result, const char *src)
     static const char from[] = ".mglPointSize = 1.0;";
     static const char to[] = ".mglPointSize = gl_PointSize;";
     char *at;
+    bool writes = false;
 
-    if (result == NULL || strstr(src, "gl_PointSize") == NULL || (at = strstr(result, from)) == NULL)
+    // only an assignment counts; reading gl_in[n].gl_PointSize or declaring
+    // it in the output block is not setting our own
+    for (const char *p = src; (p = strstr(p, "gl_PointSize")) != NULL; p++)
+    {
+        if (p > src && p[-1] == '.')
+            continue;
+
+        const char *q = p + strlen("gl_PointSize");
+
+        while (*q == ' ' || *q == '\t')
+            q++;
+
+        if ((q[0] == '=' && q[1] != '=') || (strchr("+-*/", q[0]) && q[0] && q[1] == '='))
+            writes = true;
+    }
+
+    if (result == NULL || !writes || (at = strstr(result, from)) == NULL)
         return result;
 
     size_t head = (size_t)(at - result);

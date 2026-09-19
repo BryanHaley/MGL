@@ -5455,6 +5455,8 @@ static const char *mgl_gs_capture_msl =
 
     // the last draw that read these buffers, and the factor buffer the
     // control stage is about to clear, has to be done with them first
+    if (_tessGenInFlight && _tessGenInFlight.status < MTLCommandBufferStatusCommitted)
+        [self flushCommandBuffer: true];
     if (_tessGenInFlight && _tessGenInFlight.status < MTLCommandBufferStatusCompleted)
         [_tessGenInFlight waitUntilCompleted];
 

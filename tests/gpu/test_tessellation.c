@@ -446,6 +446,83 @@ GPU_TEST(tessellation, ignored_control_output_keeps_the_layout)
 
 /* ---------- built-ins in the tessellation stages ---------- */
 
+// Point mode that reads the control stage's point size but never sets its own
+// used to lose every point. Two draws in a row also used to hang.
+GPU_TEST(tessellation, point_mode_keeps_points_that_read_point_size)
+{
+    static const char *vs = "#version 440\nvoid main() { gl_Position = vec4(0, 0, 0, 1); }\n";
+    static const char *tcs =
+        "#version 440\n"
+        "layout(vertices = 3) out;\n"
+        "out gl_PerVertex { vec4 gl_Position; float gl_PointSize; } gl_out[];\n"
+        "void main() {\n"
+        "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "    gl_out[gl_InvocationID].gl_PointSize = 2.0 + float(gl_InvocationID);\n"
+        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0;\n"
+        "    gl_TessLevelOuter[2] = 1.0; gl_TessLevelInner[0] = 1.0;\n"
+        "}\n";
+    static const char *tes =
+        "#version 440\n"
+        "layout(triangles, point_mode) in;\n"
+        "in gl_PerVertex { vec4 gl_Position; float gl_PointSize; } gl_in[];\n"
+        "out gl_PerVertex { vec4 gl_Position; float gl_PointSize; };\n"
+        "out float te_size;\n"
+        "void main() {\n"
+        "    gl_Position = vec4(gl_TessCoord, 1.0);\n"
+        "    te_size = gl_in[0].gl_PointSize + gl_in[2].gl_PointSize;\n"
+        "}\n";
+    static const char *fs = "#version 440\nvoid main() {}\n";
+    static const char *names[1] = { "te_size" };
+    GLuint prog = glCreateProgram();
+    GLuint vao, buf;
+    GLint ok = 0;
+
+    glAttachShader(prog, compileOne(GL_VERTEX_SHADER, vs));
+    glAttachShader(prog, compileOne(GL_TESS_CONTROL_SHADER, tcs));
+    glAttachShader(prog, compileOne(GL_TESS_EVALUATION_SHADER, tes));
+    glAttachShader(prog, compileOne(GL_FRAGMENT_SHADER, fs));
+    glTransformFeedbackVaryings(prog, 1, names, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK_MSG(ok, "did not link");
+
+    if (!ok)
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 1024, NULL, GL_STATIC_DRAW);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
+
+    // a triangle at level one is its three corners; two draws make six points
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_PATCHES, 0, 3);
+    glDrawArrays(GL_PATCHES, 0, 3);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+
+    const GLfloat *d = (const GLfloat *)glMapBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 1024, GL_MAP_READ_BIT);
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK(d != NULL);
+
+    if (d)
+    {
+        for (int i = 0; i < 6; i++)
+            CHECK_MSG(d[i] == 6.0f, "point %d captured %g, not 6", i, d[i]);
+
+        glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+}
+
 GPU_TEST(tessellation, ids_read_back_through_feedback)
 {
     static const char *vs = "#version 440\nvoid main() { gl_Position = vec4(0, 0, 0, 1); }\n";
