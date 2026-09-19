@@ -217,9 +217,9 @@ GPU_TEST(prog_introspect, program_pipelines)
         CHECK_EQ_INT(len, 0);
         CHECK_STR_EQ(log, "");
 
-        /* null pipeline name — spec says INVALID_OPERATION */
+        /* no such pipeline — GL 4.6 section 7.14 says INVALID_VALUE */
         glGetProgramPipelineInfoLog(999123, sizeof log, &len, log);
-        CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
     }
 
     glBindProgramPipeline(0);

@@ -219,6 +219,8 @@ GLuint mglCreateProgram(GLMContext ctx)
 
 static void freeSyntheticGeometry(Program *pptr);
 
+void mglDropPipelineProgram(GLMContext ctx, ProgramPipeline *pp);
+
 void mglFreeProgram(GLMContext ctx, Program *ptr)
 {
     if (ptr->linked_glsl_program)
@@ -230,6 +232,34 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
     if (ptr->mtl_data)
     {
         ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->mtl_data);
+    }
+
+    for (int s = 0; s < _MAX_SHADER_TYPES; s++)
+        free(ptr->stage_src[s]);
+
+    // no pipeline may go on pointing at it
+    for (size_t k = 0; k < STATE(program_pipeline_table).size; k++)
+    {
+        ProgramPipeline *pp = (ProgramPipeline *)STATE(program_pipeline_table).keys[k].data;
+        bool used = false;
+
+        if (pp == NULL)
+            continue;
+
+        for (int s = 0; s < _MAX_SHADER_TYPES; s++)
+            if (pp->stage_programs[s] == ptr)
+            {
+                pp->stage_programs[s] = NULL;
+                used = true;
+            }
+
+        if (pp->active == ptr)
+            pp->active = NULL;
+
+        if (pp->merged == ptr)
+            pp->merged = NULL;
+        else if (used)
+            mglDropPipelineProgram(ctx, pp);
     }
 
     // what the geometry, subroutine and transform feedback rewrites left here
@@ -1308,6 +1338,118 @@ static void addStructUniformLeaves(spvc_compiler compiler, Program *ptr, int sta
     }
 }
 
+// The control stage writes a buffer the evaluation stage reads back, and
+// SPIRV-Cross lays each side out from that stage's own declarations. An
+// output the evaluation shader never declares would shift everything after
+// it, so it is told about every one, and pads its side to match. Built-ins
+// are handled by mglTouchTessInputs instead.
+
+static void addTessInterfaceVar(spvc_compiler c, bool input, unsigned location, unsigned vecsize,
+                                SpvBuiltIn builtin, bool patch)
+{
+    spvc_msl_shader_interface_var_2 v;
+
+    spvc_msl_shader_interface_var_init_2(&v);
+    v.location = location;
+    v.vecsize = vecsize;
+    v.builtin = builtin;
+    v.rate = patch ? SPVC_MSL_SHADER_VARIABLE_RATE_PER_PATCH : SPVC_MSL_SHADER_VARIABLE_RATE_PER_VERTEX;
+
+    if (input)
+        spvc_compiler_msl_add_shader_input_2(c, &v);
+    else
+        spvc_compiler_msl_add_shader_output_2(c, &v);
+}
+
+static void declareTessInterface(spvc_compiler compiler_msl, Program *pptr, int stage)
+{
+    bool input = stage == _TESS_EVALUATION_SHADER;
+    Spirv *tcs = &pptr->spirv[_TESS_CONTROL_SHADER];
+
+    if (!input || !pptr->tess.has_control || tcs->ir == NULL)
+        return;
+
+    // the control stage pins its own built-ins; the evaluation stage learns
+    // about everything from the control stage's SPIR-V
+    spvc_context ctx = NULL;
+    spvc_parsed_ir ir = NULL;
+    spvc_compiler c = NULL;
+    spvc_resources res = NULL;
+    const spvc_reflected_resource *list = NULL;
+    size_t count = 0;
+
+    if (spvc_context_create(&ctx) != SPVC_SUCCESS ||
+        spvc_context_parse_spirv(ctx, tcs->ir, tcs->size, &ir) != SPVC_SUCCESS ||
+        spvc_context_create_compiler(ctx, SPVC_BACKEND_NONE, ir, SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &c) != SPVC_SUCCESS ||
+        spvc_compiler_create_shader_resources(c, &res) != SPVC_SUCCESS ||
+        spvc_resources_get_resource_list_for_type(res, SPVC_RESOURCE_TYPE_STAGE_OUTPUT, &list, &count) != SPVC_SUCCESS)
+    {
+        if (ctx)
+            spvc_context_destroy(ctx);
+        return;
+    }
+
+    for (size_t i = 0; i < count; i++)
+    {
+        spvc_type type = spvc_compiler_get_type_handle(c, list[i].base_type_id);
+        bool patch = spvc_compiler_has_decoration(c, list[i].id, SpvDecorationPatch);
+        bool block = spvc_type_get_basetype(type) == SPVC_BASETYPE_STRUCT;
+
+        if (block)
+        {
+            unsigned members = spvc_type_get_num_member_types(type);
+            unsigned base = spvc_compiler_has_decoration(c, list[i].id, SpvDecorationLocation)
+                          ? spvc_compiler_get_decoration(c, list[i].id, SpvDecorationLocation) : 0;
+            unsigned next = base;
+
+            for (unsigned m = 0; m < members; m++)
+            {
+                spvc_type mt = spvc_compiler_get_type_handle(c, spvc_type_get_member_type(type, m));
+                unsigned vec = spvc_type_get_vector_size(mt);
+                unsigned cols = spvc_type_get_columns(mt);
+                unsigned n = 1;
+
+                for (unsigned d = 0; d < spvc_type_get_num_array_dimensions(mt); d++)
+                    n *= spvc_type_get_array_dimension(mt, d) ? spvc_type_get_array_dimension(mt, d) : 1;
+
+                if (spvc_compiler_has_member_decoration(c, list[i].base_type_id, m, SpvDecorationBuiltIn))
+                    continue;
+
+                if (spvc_compiler_has_member_decoration(c, list[i].base_type_id, m, SpvDecorationLocation))
+                    next = spvc_compiler_get_member_decoration(c, list[i].base_type_id, m, SpvDecorationLocation);
+
+                for (unsigned k = 0; k < cols * n; k++)
+                    addTessInterfaceVar(compiler_msl, true, next++, vec, SpvBuiltInMax, patch);
+            }
+
+            continue;
+        }
+
+        if (!spvc_compiler_has_decoration(c, list[i].id, SpvDecorationLocation))
+            continue;
+
+        unsigned loc = spvc_compiler_get_decoration(c, list[i].id, SpvDecorationLocation);
+        unsigned vec = spvc_type_get_vector_size(type);
+        unsigned cols = spvc_type_get_columns(type);
+        unsigned dims = spvc_type_get_num_array_dimensions(type);
+        unsigned n = 1;
+
+        // a per-vertex output's outermost dimension is the vertex, not a location
+        for (unsigned d = 0; d < dims; d++)
+        {
+            if (!patch && d == dims - 1)
+                break;
+
+            n *= spvc_type_get_array_dimension(type, d) ? spvc_type_get_array_dimension(type, d) : 1;
+        }
+
+        for (unsigned k = 0; k < cols * n; k++)
+            addTessInterfaceVar(compiler_msl, true, loc + k, vec, SpvBuiltInMax, patch);
+    }
+
+    spvc_context_destroy(ctx);
+}
+
 // `sp` is where the SPIR-V comes from and where the entry point name is left;
 // it is ptr->spirv[stage] for a stage the application wrote, and somewhere else
 // for one MGL generated. `entry_override` names a generated stage, which has no
@@ -1598,6 +1740,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
             case _TESS_EVALUATION_SHADER:
                 spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_RAW_BUFFER_TESE_INPUT, SPVC_TRUE);
+                declareTessInterface(compiler_msl, ptr, stage);
                 spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_INPUT_BUFFER_INDEX, MGL_TESS_CONTROL_OUT_INDEX);
                 spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_PATCH_INPUT_BUFFER_INDEX, MGL_TESS_PATCH_OUT_INDEX);
                 spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_TESS_FACTOR_OUTPUT_BUFFER_INDEX, MGL_TESS_LEVEL_INDEX);
@@ -2493,11 +2636,79 @@ static void scanTessExecutionModes(Program *pptr, int stage)
 void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t *input);
 
 // Compiles one generated source into SPIR-V and then MSL, filling `out`.
-static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_type,
-                                    int spirv_slot, Spirv *dest, const char *src, const char *entry)
+static glslang_stage_t glslangStageFor(int stage)
+{
+    switch (stage)
+    {
+        case _TESS_CONTROL_SHADER:    return GLSLANG_STAGE_TESSCONTROL;
+        case _TESS_EVALUATION_SHADER: return GLSLANG_STAGE_TESSEVALUATION;
+        case _GEOMETRY_SHADER:        return GLSLANG_STAGE_GEOMETRY;
+        case _FRAGMENT_SHADER:        return GLSLANG_STAGE_FRAGMENT;
+        case _COMPUTE_SHADER:         return GLSLANG_STAGE_COMPUTE;
+        default:                      return GLSLANG_STAGE_VERTEX;
+    }
+}
+
+// glslang's default numbering hands each stage its locations in declaration
+// order, so a control shader and an evaluation shader that list the same
+// varyings in a different order never match. Its GLSL mapper matches them by
+// name instead.
+static bool mapProgramIO(glslang_program_t *prog, glslang_stage_t stage)
+{
+    glslang_mapper_t *mapper = glslang_glsl_mapper_create();
+    glslang_resolver_t *resolver = mapper ? glslang_glsl_resolver_create(prog, stage) : NULL;
+    bool ok;
+
+    if (mapper == NULL || resolver == NULL)
+    {
+        glslang_glsl_mapper_delete(mapper);
+        return glslang_program_map_io(prog) != 0;
+    }
+
+    ok = glslang_program_map_io_with_resolver_and_mapper(prog, resolver, mapper) != 0;
+    glslang_glsl_resolver_delete(resolver);
+    glslang_glsl_mapper_delete(mapper);
+
+    return ok;
+}
+
+// A fresh compile of a stage's source, for linking a generated stage against.
+// The real shader object has been linked already, and glslang will not link
+// the same intermediate twice without complaint.
+static glslang_shader_t *companionShader(GLMContext ctx, GLenum gl_type, const char *src)
 {
     glslang_input_t input;
     glslang_shader_t *shader;
+
+    if (src == NULL)
+        return NULL;
+
+    initGLSLInput(ctx, gl_type, src, &input);
+    shader = glslang_shader_create(&input);
+
+    if (shader == NULL)
+        return NULL;
+
+    glslang_shader_set_options(shader, GLSLANG_SHADER_VULKAN_RULES_RELAXED |
+                                       GLSLANG_SHADER_AUTO_MAP_LOCATIONS |
+                                       GLSLANG_SHADER_AUTO_MAP_BINDINGS);
+
+    if (!glslang_shader_preprocess(shader, &input) || !glslang_shader_parse(shader, &input))
+    {
+        glslang_shader_delete(shader);
+        return NULL;
+    }
+
+    return shader;
+}
+
+static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_type,
+                                    int spirv_slot, Spirv *dest, const char *src, const char *entry,
+                                    GLenum companion_type, const char *companion_src)
+{
+    glslang_input_t input;
+    glslang_shader_t *shader;
+    glslang_shader_t *companion = companionShader(ctx, companion_type, companion_src);
     glslang_program_t *prog;
     glslang_stage_t stage;
 
@@ -2507,7 +2718,10 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
     shader = glslang_shader_create(&input);
 
     if (shader == NULL)
+    {
+        glslang_shader_delete(companion);
         return false;
+    }
 
     glslang_shader_set_options(shader, GLSLANG_SHADER_VULKAN_RULES_RELAXED |
                                        GLSLANG_SHADER_AUTO_MAP_LOCATIONS |
@@ -2519,6 +2733,7 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
                 gl_type == GL_COMPUTE_SHADER ? "compute" : "vertex",
                 glslang_shader_get_info_log(shader), src);
         glslang_shader_delete(shader);
+        glslang_shader_delete(companion);
 
         return false;
     }
@@ -2528,17 +2743,24 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
     if (prog == NULL)
     {
         glslang_shader_delete(shader);
+        glslang_shader_delete(companion);
         return false;
     }
 
     glslang_program_add_shader(prog, shader);
 
-    if (!glslang_program_link(prog, GLSLANG_MSG_DEFAULT_BIT) || !glslang_program_map_io(prog))
+    // linked with the stage it reads from, so glslang numbers the varyings
+    // between them the same way it did for the real program
+    if (companion)
+        glslang_program_add_shader(prog, companion);
+
+    if (!glslang_program_link(prog, GLSLANG_MSG_DEFAULT_BIT) || !mapProgramIO(prog, stage))
     {
         MGL_ERR("MGL Error: generated shader would not link: %s\n",
                 glslang_program_get_info_log(prog));
         glslang_program_delete(prog);
         glslang_shader_delete(shader);
+        glslang_shader_delete(companion);
 
         return false;
     }
@@ -2562,6 +2784,7 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
     {
         glslang_program_delete(prog);
         glslang_shader_delete(shader);
+        glslang_shader_delete(companion);
 
         return false;
     }
@@ -2590,6 +2813,7 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
 
     glslang_program_delete(prog);
     glslang_shader_delete(shader);
+    glslang_shader_delete(companion);
 
     if (sp->msl_str == NULL)
         return false;
@@ -2600,7 +2824,7 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
 static bool buildGeneratedStage(GLMContext ctx, Program *pptr, GLenum gl_type,
                                 int spirv_slot, const char *src, const char *entry)
 {
-    return buildGeneratedStageInto(ctx, pptr, gl_type, spirv_slot, NULL, src, entry);
+    return buildGeneratedStageInto(ctx, pptr, gl_type, spirv_slot, NULL, src, entry, 0, NULL);
 }
 
 GLint mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name);
@@ -2738,7 +2962,7 @@ static void linkCullProgram(GLMContext ctx, Program *pptr)
     pptr->cull.building = 1;
 
     if (!buildGeneratedStageInto(ctx, pptr, GL_VERTEX_SHADER, _GEOMETRY_SHADER,
-                                 &pptr->cull_capture, pptr->cull.capture_src, entry))
+                                 &pptr->cull_capture, pptr->cull.capture_src, entry, 0, NULL))
     {
         pptr->cull.building = 0;
         mglFreeCullInfo(&pptr->cull);
@@ -2749,7 +2973,7 @@ static void linkCullProgram(GLMContext ctx, Program *pptr)
     pptr->cull.building = 2;
 
     if (!buildGeneratedStageInto(ctx, pptr, GL_COMPUTE_SHADER, _COMPUTE_SHADER,
-                                 &pptr->cull_kernel, pptr->cull.kernel_src, entry))
+                                 &pptr->cull_kernel, pptr->cull.kernel_src, entry, 0, NULL))
     {
         pptr->cull.building = 0;
         mglFreeCullInfo(&pptr->cull);
@@ -2829,7 +3053,8 @@ static void linkGeometryCapture(Program *pptr)
 }
 
 // With tessellation ahead of it, the evaluation stage feeds the geometry stage
-// instead. Only point-mode isolines into a points shader are handled.
+// instead: isolines as points or line segments from a quad grid, triangles and
+// quads from the CPU tessellator.
 static bool linkTessGeometryProgram(GLMContext ctx, Program *pptr)
 {
     Shader *tes = pptr->shader_slots[_TESS_EVALUATION_SHADER];
@@ -2837,19 +3062,52 @@ static bool linkTessGeometryProgram(GLMContext ctx, Program *pptr)
     char *captured;
     bool ok;
 
-    if (pptr->geom.in_primitive != GL_POINTS)
+    const char *tsrc = tes->pp_src ? tes->pp_src : tes->src;
+    int kind = mglTesIsolineKind(tsrc);
+    int domain, spacing;
+    bool cw, points;
+
+    mglTesLayout(tsrc, &domain, &spacing, &cw, &points);
+
+    // point mode feeds a points shader, isolines a lines one, and triangles
+    // and quads a triangles one
+    GLenum wants = points ? GL_POINTS : domain == 2 ? GL_LINES : GL_TRIANGLES;
+
+    if (pptr->geom.in_primitive != wants)
     {
-        MGL_ERR("MGL Error: tessellation into a geometry shader needs points input\n");
+        MGL_ERR("MGL Error: the geometry shader's input does not match what tessellation makes\n");
         return false;
     }
 
-    captured = mglAddTessPointCapture(tes->pp_src ? tes->pp_src : tes->src, &pptr->geom);
+    bool general = domain >= 0;
+
+    {
+        Shader *w = pptr->tess.has_control ? pptr->shader_slots[_TESS_CONTROL_SHADER]
+                                           : pptr->shader_slots[_VERTEX_SHADER];
+        const char *wsrc = w ? (w->pp_src ? w->pp_src : w->src) : NULL;
+        char *touched = wsrc ? mglTouchTessInputs(tsrc, wsrc, pptr->tess.has_control) : NULL;
+
+        captured = general ? mglAddTessGeneralCapture(touched ? touched : tsrc, &pptr->geom)
+                           : mglAddTessPointCapture(touched ? touched : tsrc, &pptr->geom);
+        free(touched);
+    }
 
     if (captured == NULL)
     {
-        MGL_ERR("MGL Error: tessellation into a geometry shader needs point-mode isolines\n");
+        MGL_ERR("MGL Error: the evaluation shader could not be rewritten for the geometry stage\n");
         return false;
     }
+
+    pptr->tess.isoline_segments = kind == 2;
+    pptr->tess.general = general;
+    pptr->tess.gen_domain = domain;
+    pptr->tess.gen_spacing = spacing;
+    pptr->tess.gen_cw = cw;
+    pptr->tess.gen_points = points;
+
+    // the control shader writes its levels in quad layout, which the CPU reads
+    if (general)
+        pptr->tess.patch_kind = SpvExecutionModeQuads;
 
     if (pptr->tess.has_control)
         linkAndCompileProgramToMetal(ctx, pptr, _TESS_CONTROL_SHADER, true);
@@ -2857,11 +3115,18 @@ static bool linkTessGeometryProgram(GLMContext ctx, Program *pptr)
         pptr->tess.out_control_points = (GLuint)ctx->state.var.patch_vertices;
 
     pptr->tess.patch_kind = SpvExecutionModeQuads;
-    pptr->tess.quad_isolines = GL_TRUE;
+    pptr->tess.quad_isolines = !general;
 
     snprintf(entry, sizeof(entry), "tess_evaluation_%d_main", tes->name);
-    ok = buildGeneratedStage(ctx, pptr, GL_TESS_EVALUATION_SHADER, _TESS_EVALUATION_SHADER,
-                             captured, entry);
+    {
+        Shader *before = pptr->tess.has_control ? pptr->shader_slots[_TESS_CONTROL_SHADER]
+                                                : pptr->shader_slots[_VERTEX_SHADER];
+
+        ok = buildGeneratedStageInto(ctx, pptr, GL_TESS_EVALUATION_SHADER, _TESS_EVALUATION_SHADER, NULL,
+                                     captured, entry,
+                                     pptr->tess.has_control ? GL_TESS_CONTROL_SHADER : GL_VERTEX_SHADER,
+                                     before ? (before->pp_src ? before->pp_src : before->src) : NULL);
+    }
     free(captured);
 
     if (!ok)
@@ -2889,6 +3154,7 @@ static bool linkTessGeometryProgram(GLMContext ctx, Program *pptr)
         return false;
 
     pptr->geom.vs_in_slot     = mslSlotForName(pptr, _TESS_EVALUATION_SHADER, "MglGsInB");
+    pptr->geom.tes_gen_slot   = general ? mslSlotForName(pptr, _TESS_EVALUATION_SHADER, "MglTessGenB") : -1;
     pptr->geom.gs_in_slot     = mslSlotForName(pptr, _GEOMETRY_SHADER, "MglGsInB");
     pptr->geom.gs_out_slot    = mslSlotForName(pptr, _GEOMETRY_SHADER, "MglGsOutB");
     pptr->geom.gs_index_slot  = mslSlotForName(pptr, _GEOMETRY_SHADER, "MglGsIdxB");
@@ -3038,7 +3304,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     }
 
     // hands out the locations auto-map left pending, matching them across stages
-    if (!glslang_program_map_io(glsl_program))
+    if (!mapProgramIO(glsl_program, glslangStageFor(stage)))
     {
         MGL_ERR("MGL Error: glslang_program_map_io failed\n");
         MGL_ERR("MGL Error: glslang_program_get_info_log:\n%s\n", glslang_program_get_info_log(glsl_program));
@@ -3184,6 +3450,20 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     pptr->validate_status = GL_FALSE;
     mglFreeResourceTable(&pptr->resources);
 
+    // every link gets a number no other link has had
+    static GLuint serial;
+    pptr->link_serial = ++serial;
+    pptr->linked_separable = pptr->separable;
+
+    for (int s = 0; s < _MAX_SHADER_TYPES; s++)
+    {
+        free(pptr->stage_src[s]);
+        pptr->stage_src[s] = NULL;
+
+        if (pptr->shader_slots[s] && pptr->shader_slots[s]->src)
+            pptr->stage_src[s] = strdup(pptr->shader_slots[s]->src);
+    }
+
     // GL 4.6 section 7.3: a program with one tessellation stage and not the
     // other does not link. Both together are the tessellation pipeline.
     memset(&pptr->tess, 0, sizeof(pptr->tess));
@@ -3206,6 +3486,22 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
         pptr->tess.active = pptr->shader_slots[_TESS_EVALUATION_SHADER] != NULL;
         pptr->tess.has_control = pptr->shader_slots[_TESS_CONTROL_SHADER] != NULL;
+
+        if (pptr->tess.active)
+        {
+            Shader *tes = pptr->shader_slots[_TESS_EVALUATION_SHADER];
+            const char *tsrc = tes->pp_src ? tes->pp_src : tes->src;
+            int domain = -1, spacing = 0;
+            bool cw = false, points = false;
+
+            if (tsrc)
+                mglTesLayout(tsrc, &domain, &spacing, &cw, &points);
+
+            pptr->tess.gl_domain = domain;
+            pptr->tess.gl_spacing = spacing;
+            pptr->tess.gl_cw = cw;
+            pptr->tess.gl_points = points;
+        }
         pptr->tess.lower_left = (ctx->state.var.clip_origin == GL_LOWER_LEFT);
 
         // a separable control shader has no evaluation stage here to take the
@@ -3230,10 +3526,31 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         Shader *tes = pptr->shader_slots[_TESS_EVALUATION_SHADER];
         const char *tsrc = tes->pp_src ? tes->pp_src : tes->src;
 
-        if (tsrc && mglTesIsPointIsolines(tsrc))
+        int kind = 0, input = 0;
+
+        // Metal cannot tessellate isolines at all, and has no point mode.
+        // Those, and triangles and quads when something has to see the
+        // primitives one by one for transform feedback, are cut up on the CPU
+        // and drawn through a geometry stage that passes them straight on.
+        if (tsrc)
+        {
+            int domain, spacing;
+            bool cw, points;
+
+            mglTesLayout(tsrc, &domain, &spacing, &cw, &points);
+
+            if (domain == 2 || points ||
+                ((domain == 0 || domain == 1) && (pptr->xfb_varying_count > 0 || strstr(tsrc, "xfb_"))))
+            {
+                kind = 1;
+                input = points ? 0 : domain == 2 ? 1 : 2;
+            }
+        }
+
+        if (kind)
         {
             Shader *fake = (Shader *)calloc(1, sizeof(Shader));
-            char *gsrc = mglPassThroughGeometry(tsrc);
+            char *gsrc = mglPassThroughGeometry(tsrc, input);
 
             if (fake && gsrc)
             {
@@ -3251,10 +3568,10 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         }
     }
 
-    // A separable geometry-only program gets its vertex stage from another
-    // program in a pipeline, so there is nothing to build for it on its own.
-    if (pptr->geom_shader && pptr->separable &&
-        pptr->shader_slots[_VERTEX_SHADER] == NULL && !pptr->tess.active)
+    // A separable program with a geometry stage but no vertex stage gets that
+    // from another program in a pipeline, so there is nothing to build for it
+    // on its own; the pipeline links the stages together when it draws.
+    if (pptr->geom_shader && pptr->separable && pptr->shader_slots[_VERTEX_SHADER] == NULL)
     {
         assignUniformLocations(pptr);
         pptr->validate_status = pptr->link_status;
@@ -3296,6 +3613,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
                 pptr->log = strdup(uniformLocationProblem(pptr));
         }
         pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
+        pptr->tess.patches_loc = mglFindUniformByName(pptr, "mglPatchesU");
 
         pptr->geom.prims_loc   = mglFindUniformByName(pptr, "mglGsPrimsU");
         pptr->geom.indexed_loc = mglFindUniformByName(pptr, "mglGsIndexedU");
@@ -3350,13 +3668,47 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     {
         pptr->spirv[stage].msl_str = 0;
 
-        if (pptr->shader_slots[stage])
+        if (pptr->shader_slots[stage] == NULL)
+            continue;
+
+        // an evaluation shader that ignores a built-in the stage before it
+        // writes is rebuilt with a read of it, so the two lay out the buffer
+        // between them the same way
+        if (stage == _TESS_EVALUATION_SHADER && pptr->tess.active)
         {
-            if (linkAndCompileProgramToMetal(ctx, pptr, stage, false) == false)
-                pptr->link_status = GL_FALSE;
-            else
-                stages_linked++;
+            Shader *tes = pptr->shader_slots[stage];
+            Shader *w = pptr->tess.has_control ? pptr->shader_slots[_TESS_CONTROL_SHADER]
+                                               : pptr->shader_slots[_VERTEX_SHADER];
+            const char *tsrc = tes->pp_src ? tes->pp_src : tes->src;
+            const char *wsrc = w ? (w->pp_src ? w->pp_src : w->src) : NULL;
+            char *touched = (tsrc && wsrc) ? mglTouchTessInputs(tsrc, wsrc, pptr->tess.has_control) : NULL;
+
+            if (touched)
+            {
+                char entry[128];
+                bool ok;
+
+                snprintf(entry, sizeof(entry), "tess_evaluation_%d_main", tes->name);
+                ok = buildGeneratedStageInto(ctx, pptr, GL_TESS_EVALUATION_SHADER, stage, NULL, touched, entry,
+                                             pptr->tess.has_control ? GL_TESS_CONTROL_SHADER : GL_VERTEX_SHADER, wsrc);
+                free(touched);
+
+                if (ok)
+                {
+                    scanTessExecutionModes(pptr, stage);
+                    stages_linked++;
+                }
+                else
+                    pptr->link_status = GL_FALSE;
+
+                continue;
+            }
         }
+
+        if (linkAndCompileProgramToMetal(ctx, pptr, stage, false) == false)
+            pptr->link_status = GL_FALSE;
+        else
+            stages_linked++;
     }
 
     // a program with no stage, or one whose stage failed, did not link
@@ -3384,6 +3736,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     resolveTransformCaptureUniforms(pptr);
 
     pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
+    pptr->tess.patches_loc = mglFindUniformByName(pptr, "mglPatchesU");
 
     // Hand the MSL to Metal now rather than at the first draw. GL callers expect
     // shader problems at link time, and a program that only fails later reports
@@ -3711,6 +4064,10 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
     ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
     
     switch (pname) {
+        case GL_PROGRAM_SEPARABLE:
+            *params = pptr->linked_separable;
+            break;
+
         case GL_LINK_STATUS:
             *params = pptr->link_status;
             break;
@@ -3770,30 +4127,23 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
             *params = (GLint)pptr->tess.out_control_points;
             break;
 
+        // as the evaluation shader declared them, whatever Metal is running
         case GL_TESS_GEN_MODE:
-            switch (pptr->tess.patch_kind)
-            {
-                case SpvExecutionModeQuads:     *params = GL_QUADS; break;
-                case SpvExecutionModeIsolines:  *params = GL_ISOLINES; break;
-                default:                        *params = GL_TRIANGLES; break;
-            }
+            *params = pptr->tess.gl_domain == 1 ? GL_QUADS :
+                      pptr->tess.gl_domain == 2 ? GL_ISOLINES : GL_TRIANGLES;
             break;
 
         case GL_TESS_GEN_SPACING:
-            switch (pptr->tess.partition)
-            {
-                case SpvExecutionModeSpacingFractionalEven: *params = GL_FRACTIONAL_EVEN; break;
-                case SpvExecutionModeSpacingFractionalOdd:  *params = GL_FRACTIONAL_ODD; break;
-                default:                                    *params = GL_EQUAL; break;
-            }
+            *params = pptr->tess.gl_spacing == 1 ? GL_FRACTIONAL_EVEN :
+                      pptr->tess.gl_spacing == 2 ? GL_FRACTIONAL_ODD : GL_EQUAL;
             break;
 
         case GL_TESS_GEN_VERTEX_ORDER:
-            *params = pptr->tess.winding == SpvExecutionModeVertexOrderCw ? GL_CW : GL_CCW;
+            *params = pptr->tess.gl_cw ? GL_CW : GL_CCW;
             break;
 
         case GL_TESS_GEN_POINT_MODE:
-            *params = pptr->tess.point_mode ? GL_TRUE : GL_FALSE;
+            *params = pptr->tess.gl_points ? GL_TRUE : GL_FALSE;
             break;
 
         default:
@@ -3843,8 +4193,11 @@ void mglGenProgramPipelines(GLMContext ctx, GLsizei n, GLuint *pipelines)
 GLboolean mglIsProgramPipeline(GLMContext ctx, GLuint pipeline)
 {
     ProgramPipeline *ptr = findProgramPipeline(ctx, pipeline);
-    return ptr ? GL_TRUE : GL_FALSE;
+    return ptr && ptr->created ? GL_TRUE : GL_FALSE;
 }
+
+void mglDropPipelineProgram(GLMContext ctx, ProgramPipeline *pp);
+static void setPipelineStage(GLMContext ctx, ProgramPipeline *pp, int stage, Program *p);
 
 void mglDeleteProgramPipelines(GLMContext ctx, GLsizei n, const GLuint *pipelines)
 {
@@ -3861,8 +4214,14 @@ void mglDeleteProgramPipelines(GLMContext ctx, GLsizei n, const GLuint *pipeline
         if (STATE(program_pipeline) && STATE(program_pipeline)->name == pipelines[i])
         {
             STATE(program_pipeline) = NULL;
+            STATE(var.program_pipeline_binding) = 0;
         }
         
+        mglDropPipelineProgram(ctx, ptr);
+
+        for (int s = 0; s < _MAX_SHADER_TYPES; s++)
+            setPipelineStage(ctx, ptr, s, NULL);
+
         // Remove from hash table and free
         deleteHashElement(&STATE(program_pipeline_table), pipelines[i]);
         free(ptr);
@@ -3874,6 +4233,7 @@ void mglBindProgramPipeline(GLMContext ctx, GLuint pipeline)
     if (pipeline == 0)
     {
         STATE(program_pipeline) = NULL;
+        STATE(var.program_pipeline_binding) = 0;
         STATE(dirty_bits) |= DIRTY_PROGRAM;
         return;
     }
@@ -3883,44 +4243,90 @@ void mglBindProgramPipeline(GLMContext ctx, GLuint pipeline)
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
+    ptr->created = GL_TRUE;
     STATE(program_pipeline) = ptr;
+    STATE(var.program_pipeline_binding) = pipeline;
     STATE(dirty_bits) |= DIRTY_PROGRAM;
+}
+
+// A pipeline stage holds its program the way glUseProgram does, so deleting
+// the program only flags it until the last stage lets go.
+static void setPipelineStage(GLMContext ctx, ProgramPipeline *pp, int stage, Program *p)
+{
+    Program *old = pp->stage_programs[stage];
+
+    if (old == p)
+        return;
+
+    if (p)
+        p->refcount++;
+
+    pp->stage_programs[stage] = p;
+
+    if (old && --old->refcount == 0 && old->delete_status)
+        mglFreeProgram(ctx, old);
+}
+
+// A program for a pipeline stage: zero, or a linked separable program. Raises
+// the error GL gives for anything else and returns false.
+static bool pipelineStageProgram(GLMContext ctx, GLuint program, bool need_separable, Program **out)
+{
+    *out = NULL;
+
+    if (program == 0)
+        return true;
+
+    Program *pptr = findProgram(ctx, program);
+
+    if (pptr == NULL)
+    {
+        // a shader's name is the wrong kind of object, anything else no object
+        STATE(error) = findShader(ctx, program) ? GL_INVALID_OPERATION : GL_INVALID_VALUE;
+        return false;
+    }
+
+    if (pptr->link_status != GL_TRUE || (need_separable && !pptr->linked_separable))
+    {
+        STATE(error) = GL_INVALID_OPERATION;
+        return false;
+    }
+
+    *out = pptr;
+    return true;
 }
 
 void mglUseProgramStages(GLMContext ctx, GLuint pipeline, GLbitfield stages, GLuint program)
 {
+    static const struct { GLbitfield bit; int stage; } map[] = {
+        { GL_VERTEX_SHADER_BIT, _VERTEX_SHADER },
+        { GL_TESS_CONTROL_SHADER_BIT, _TESS_CONTROL_SHADER },
+        { GL_TESS_EVALUATION_SHADER_BIT, _TESS_EVALUATION_SHADER },
+        { GL_GEOMETRY_SHADER_BIT, _GEOMETRY_SHADER },
+        { GL_FRAGMENT_SHADER_BIT, _FRAGMENT_SHADER },
+        { GL_COMPUTE_SHADER_BIT, _COMPUTE_SHADER },
+    };
+    GLbitfield known = 0;
     ProgramPipeline *pipe_ptr = findProgramPipeline(ctx, pipeline);
-    if (!pipe_ptr)
-    {
-        STATE(error) = GL_INVALID_OPERATION;
+    Program *prog_ptr;
+
+    ERROR_CHECK_RETURN(pipe_ptr, GL_INVALID_OPERATION);
+
+    for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+        known |= map[i].bit;
+
+    ERROR_CHECK_RETURN(stages == GL_ALL_SHADER_BITS || (stages & ~known) == 0, GL_INVALID_VALUE);
+
+    if (!pipelineStageProgram(ctx, program, true, &prog_ptr))
         return;
-    }
-    
-    Program *prog_ptr = NULL;
-    if (program != 0)
-    {
-        prog_ptr = findProgram(ctx, program);
-        if (!prog_ptr)
-        {
-            STATE(error) = GL_INVALID_VALUE;
-            return;
-        }
-    }
-    
-    // Attach program to specified stages
-    if (stages & GL_VERTEX_SHADER_BIT)
-        pipe_ptr->stage_programs[_VERTEX_SHADER] = prog_ptr;
-    if (stages & GL_FRAGMENT_SHADER_BIT)
-        pipe_ptr->stage_programs[_FRAGMENT_SHADER] = prog_ptr;
-    if (stages & GL_GEOMETRY_SHADER_BIT)
-        pipe_ptr->stage_programs[_GEOMETRY_SHADER] = prog_ptr;
-    if (stages & GL_TESS_CONTROL_SHADER_BIT)
-        pipe_ptr->stage_programs[_TESS_CONTROL_SHADER] = prog_ptr;
-    if (stages & GL_TESS_EVALUATION_SHADER_BIT)
-        pipe_ptr->stage_programs[_TESS_EVALUATION_SHADER] = prog_ptr;
-    if (stages & GL_COMPUTE_SHADER_BIT)
-        pipe_ptr->stage_programs[_COMPUTE_SHADER] = prog_ptr;
-        
+
+    pipe_ptr->created = GL_TRUE;
+
+    // a program with nothing for a stage leaves that stage empty
+    for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+        if (stages & map[i].bit)
+            setPipelineStage(ctx, pipe_ptr, map[i].stage,
+                             prog_ptr && prog_ptr->stage_src[map[i].stage] ? prog_ptr : NULL);
+
     pipe_ptr->validated = GL_FALSE;
     STATE(dirty_bits) |= DIRTY_PROGRAM;
 }
@@ -5347,18 +5753,16 @@ void mglValidateProgram(GLMContext ctx, GLuint program)
     pptr->log = strdup("validation failed: no linked shader stage");
 }
 
+const char *mglPipelineProblem(const ProgramPipeline *pp);
+
 void mglValidateProgramPipeline(GLMContext ctx, GLuint pipeline)
 {
     ProgramPipeline *pp = findProgramPipeline(ctx, pipeline);
-    bool stage_present = false;
 
     ERROR_CHECK_RETURN(pp, GL_INVALID_OPERATION);
 
-    for (int i = 0; i < _MAX_SHADER_TYPES; i++)
-        if (pp->stage_programs[i] && pp->stage_programs[i]->link_status == GL_TRUE)
-            stage_present = true;
-
-    pp->validated = stage_present ? GL_TRUE : GL_FALSE;
+    pp->created = GL_TRUE;
+    pp->validated = mglPipelineProblem(pp) == NULL ? GL_TRUE : GL_FALSE;
 }
 
 static GLint pipelineStageName(ProgramPipeline *pp, int stage)
@@ -5379,8 +5783,10 @@ void mglGetProgramPipelineiv(GLMContext ctx, GLuint pipeline, GLenum pname, GLin
             *params = pp->validated;
             break;
 
-        // MGL has no separate active program, so the vertex stage stands in
         case GL_ACTIVE_PROGRAM:
+            *params = pp->active ? (GLint)pp->active->name : 0;
+            break;
+
         case GL_VERTEX_SHADER:
             *params = pipelineStageName(pp, _VERTEX_SHADER);
             break;
@@ -5417,16 +5823,15 @@ void mglGetProgramPipelineiv(GLMContext ctx, GLuint pipeline, GLenum pname, GLin
 void mglActiveShaderProgram(GLMContext ctx, GLuint pipeline, GLuint program)
 {
     ProgramPipeline *pp = findProgramPipeline(ctx, pipeline);
+    Program *pptr;
 
     ERROR_CHECK_RETURN(pp, GL_INVALID_OPERATION);
 
-    if (program == 0)
+    if (!pipelineStageProgram(ctx, program, false, &pptr))
         return;
 
-    Program *pptr = findProgram(ctx, program);
-
-    ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(pptr->link_status == GL_TRUE, GL_INVALID_OPERATION);
+    pp->created = GL_TRUE;
+    pp->active = pptr;
 }
 
 void mglShaderStorageBlockBinding(GLMContext ctx, GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding)

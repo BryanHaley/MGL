@@ -662,26 +662,25 @@ GPU_TEST(program_uniform, matrix_transpose)
 
 GPU_TEST(program_uniform, rejects_bad_program)
 {
-    /* Spec: GL_INVALID_OPERATION when program does not refer to a GL-owned
-       program object. MGL's programForUniform uses findProgram which
-       returns NULL and generates GL_INVALID_VALUE -- this is a bug. */
+    /* GL 4.6 section 2.3.1: a name that is neither a program nor a shader
+       is GL_INVALID_VALUE, which is also what the CTS checks */
     glProgramUniform1f(999999, 0, 1.0f);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glProgramUniform1i(999999, 0, 1);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glProgramUniform1ui(999999, 0, 1u);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glProgramUniform1d(999999, 0, 1.0);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glProgramUniformMatrix4fv(999999, 0, 1, GL_FALSE, (const GLfloat[]){0});
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glProgramUniformMatrix4dv(999999, 0, 1, GL_FALSE, (const GLdouble[]){0});
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 }
 
 GPU_TEST(program_uniform, rejects_negative_count)

@@ -10,6 +10,8 @@
 
 #include "mgl.h"
 
+void mglWrapPipelineDraws(GLMContext ctx);
+
 #ifdef MGL_GL_CORE
 void init_dispatch(GLMContext ctx)
 {
@@ -1066,6 +1068,8 @@ void init_dispatch(GLMContext ctx)
     ctx->dispatch.multi_draw_arrays_indirect_count = mglMultiDrawArraysIndirectCount;
     ctx->dispatch.multi_draw_elements_indirect_count = mglMultiDrawElementsIndirectCount;
     ctx->dispatch.polygon_offset_clamp = mglPolygonOffsetClamp;
+
+    mglWrapPipelineDraws(ctx);
 };
 #endif
 
@@ -1288,5 +1292,7 @@ void init_dispatch(GLMContext ctx)
     ctx->dispatch.tex_buffer = mglTexBuffer;
     ctx->dispatch.tex_buffer_range = mglTexBufferRange;
     ctx->dispatch.tex_storage3_d_multisample = mglTexStorage3DMultisample;
+
+    mglWrapPipelineDraws(ctx);
 };
 #endif

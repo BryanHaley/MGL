@@ -487,10 +487,15 @@ static void copyName(const char *src, GLsizei bufSize, GLsizei *length, GLchar *
         *length = n;
 }
 
+static void getUniformTyped(GLMContext ctx, GLuint program, GLint location,
+                            GLsizei bufSize, void *params, GLenum dst_type);
+static SpirvResource *plainUniformByLocation(Program *ptr, GLint location, GLint *element);
+static GLsizei glTypeSizeBytes(GLenum type);
+static size_t storedElementSize(Program *pp, SpirvResource *res);
+
 void mglGetUniformfv(GLMContext ctx, GLuint program, GLint location, GLfloat *params)
 {
     Program *ptr = findProgram(ctx, program);
-    Buffer *buf;
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
@@ -507,17 +512,12 @@ void mglGetUniformfv(GLMContext ctx, GLuint program, GLint location, GLfloat *pa
         }
     }
 
-    buf = ptr->uniform_constants.buffers[location].buf;
-
-    ERROR_CHECK_RETURN(buf && buf->data.buffer_data, GL_INVALID_OPERATION);
-
-    memcpy(params, (void *)buf->data.buffer_data, (size_t)buf->size);
+    getUniformTyped(ctx, program, location, -1, params, GL_FLOAT);
 }
 
 void mglGetUniformiv(GLMContext ctx, GLuint program, GLint location, GLint *params)
 {
     Program *ptr = findProgram(ctx, program);
-    Buffer *buf;
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
@@ -534,11 +534,7 @@ void mglGetUniformiv(GLMContext ctx, GLuint program, GLint location, GLint *para
         }
     }
 
-    buf = ptr->uniform_constants.buffers[location].buf;
-
-    ERROR_CHECK_RETURN(buf && buf->data.buffer_data, GL_INVALID_OPERATION);
-
-    memcpy(params, (void *)buf->data.buffer_data, (size_t)buf->size);
+    getUniformTyped(ctx, program, location, -1, params, GL_INT);
 }
 
 
@@ -820,6 +816,26 @@ void mglGetActiveUniformBlockName(GLMContext ctx, GLuint program, GLuint uniform
     }
 }
 
+// The binding uniform block `index` has now, or -1.
+GLint mglUniformBlockBindingOf(Program *ptr, GLuint index)
+{
+    GLint element = -1;
+    SpirvResource *blk;
+
+    if (index >= (GLuint)uniformBlockCount(ptr))
+        return -1;
+
+    blk = uniformBlockAtElement(ptr, index, &element);
+
+    if (blk == NULL)
+        return -1;
+
+    if (element >= 0 && blk->element_binding)
+        return (GLint)blk->element_binding[element];
+
+    return (GLint)blk->binding;
+}
+
 void mglUniformBlockBinding(GLMContext ctx, GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding)
 {
     Program *ptr = findProgram(ctx, program);
@@ -843,9 +859,19 @@ void mglUniformBlockBinding(GLMContext ctx, GLuint program, GLuint uniformBlockI
     ptr->dirty_bits |= DIRTY_PROGRAM;
 }
 
+// glUniform* writes the current program, or with none, the program a bound
+// pipeline was told to take them with glActiveShaderProgram
+static Program *uniformTarget(GLMContext ctx)
+{
+    if (ctx->state.program)
+        return ctx->state.program;
+
+    return ctx->state.program_pipeline ? ctx->state.program_pipeline->active : NULL;
+}
+
 bool checkUniformParams(GLMContext ctx, GLint location)
 {
-    Program* ptr = ctx->state.program;
+    Program* ptr = uniformTarget(ctx);
     
     ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, false);
 
@@ -862,9 +888,12 @@ Program *programForUniform(GLMContext ctx, GLuint program)
 {
     Program *pptr = findProgram(ctx, program);
 
-    // here a name that is not a program is an operation error, not a value one
-    ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_OPERATION, NULL);
-    ERROR_CHECK_RETURN_VALUE(pptr->linked_glsl_program, GL_INVALID_OPERATION, NULL);
+    // MGL numbers shaders and programs apart, so a program's old name may
+    // also be some shader's; it is still no program
+    ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_VALUE, NULL);
+
+    ERROR_CHECK_RETURN_VALUE(pptr->link_status == GL_TRUE && pptr->linked_glsl_program,
+                             GL_INVALID_OPERATION, NULL);
 
     return pptr;
 }
@@ -901,6 +930,32 @@ static GLsizei glTypeSizeBytes(GLenum type)
         case GL_DOUBLE_MAT4:                                                return 128;
         default:                                                            return 0;   // samplers and the unknown
     }
+}
+
+static bool isDoubleType(GLenum type)
+{
+    switch (type)
+    {
+        case GL_DOUBLE: case GL_DOUBLE_VEC2: case GL_DOUBLE_VEC3: case GL_DOUBLE_VEC4:
+        case GL_DOUBLE_MAT2: case GL_DOUBLE_MAT3: case GL_DOUBLE_MAT4:
+        case GL_DOUBLE_MAT2x3: case GL_DOUBLE_MAT2x4: case GL_DOUBLE_MAT3x2:
+        case GL_DOUBLE_MAT3x4: case GL_DOUBLE_MAT4x2: case GL_DOUBLE_MAT4x3:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Bytes one element takes where MGL keeps it. A double uniform the reflection
+// typed as its float twin still holds doubles.
+static size_t storedElementSize(Program *pp, SpirvResource *res)
+{
+    size_t size = (size_t)glTypeSizeBytes(res->gl_type);
+
+    if (pp->uniform_constants.elem_size[res->location] == sizeof(GLdouble) && !isDoubleType(res->gl_type))
+        size *= 2;
+
+    return size;
 }
 
 // The uniform declared at this location, or NULL if the program has none.
@@ -1149,6 +1204,18 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
             return;
     }
 
+    GLint element = 0;
+    SpirvResource *res = plainUniformByLocation(pptr, location, &element);
+    size_t offset = 0;
+
+    // an array lives in its first element's buffer, packed tight, so a write
+    // that starts further in lands part way along it
+    if (res && storedElementSize(pptr, res) > 0)
+    {
+        offset = (size_t)element * storedElementSize(pptr, res);
+        location = (GLint)res->location;
+    }
+
     buf = pptr->uniform_constants.buffers[location].buf;
 
     if (buf == NULL)
@@ -1159,18 +1226,35 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
     }
 
     {
-        GLint element = 0;
-        SpirvResource *res = plainUniformByLocation(pptr, location, &element);
         GLubyte packed[256];
         GLsizei packed_size = 0;
 
         if (res && boolComponentsFor(res->gl_type))
             packed_size = packBoolUniform(res->gl_type, ptr, size, packed, (GLsizei)sizeof packed);
 
-        if (packed_size)
-            initBufferData(ctx, buf, packed_size, packed, true);
+        const void *data = packed_size ? (const void *)packed : ptr;
+        size_t n = packed_size ? (size_t)packed_size : (size_t)size;
+        size_t have = buf->data.buffer_data ? (size_t)buf->size : 0;
+
+        if (offset == 0 && n >= have)
+        {
+            initBufferData(ctx, buf, n, (void *)data, true);
+        }
         else
-            initBufferData(ctx, buf, size, (void *)ptr, true);
+        {
+            // keep the elements this write does not touch
+            size_t total = offset + n > have ? offset + n : have;
+            GLubyte *merged = (GLubyte *)calloc(1, total);
+
+            ERROR_CHECK_RETURN(merged, GL_OUT_OF_MEMORY);
+
+            if (have)
+                memcpy(merged, (const void *)buf->data.buffer_data, have);
+
+            memcpy(merged + offset, data, n);
+            initBufferData(ctx, buf, total, merged, true);
+            free(merged);
+        }
     }
 
     if (pptr->uniform_constants.elem_size[location] == 0)
@@ -1180,15 +1264,22 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
 // Same write, but flags the location as holding doubles.
 void programUniformWriteD(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size)
 {
-    programUniformWrite(ctx, pptr, location, ptr, size);
+    GLint element = 0;
+    SpirvResource *res = plainUniformByLocation(pptr, location, &element);
 
-    if (location >= 0 && location < MAX_UNIFORM_LOCATIONS)
-        pptr->uniform_constants.elem_size[location] = sizeof(GLdouble);
+    // the flag goes where the values go, an array's first element, and before
+    // the write so it sizes the elements as doubles
+    GLint base = res ? (GLint)res->location : location;
+
+    if (base >= 0 && base < MAX_UNIFORM_LOCATIONS)
+        pptr->uniform_constants.elem_size[base] = sizeof(GLdouble);
+
+    programUniformWrite(ctx, pptr, location, ptr, size);
 }
 
 void mglUniformD(GLMContext ctx, GLint location, void *ptr, GLsizei size)
 {
-    Program *pptr = ctx->state.program;
+    Program *pptr = uniformTarget(ctx);
 
     ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
 
@@ -1228,7 +1319,7 @@ Buffer *programUniformDefaultBuffer(GLMContext ctx, Program *pptr, GLint locatio
 
 void mglUniform(GLMContext ctx, GLint location, void *ptr, GLsizei size)
 {
-    Program *pptr = ctx->state.program;
+    Program *pptr = uniformTarget(ctx);
 
     ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
 
@@ -1282,7 +1373,7 @@ static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, vo
 
 static void mglUniformFixed(GLMContext ctx, GLint location, void *ptr, GLsizei size)
 {
-    Program *pptr = ctx->state.program;
+    Program *pptr = uniformTarget(ctx);
 
     ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
 
@@ -1296,7 +1387,7 @@ static void mglUniformFixed(GLMContext ctx, GLint location, void *ptr, GLsizei s
 
 static void mglUniformFixedD(GLMContext ctx, GLint location, void *ptr, GLsizei size)
 {
-    Program *pptr = ctx->state.program;
+    Program *pptr = uniformTarget(ctx);
 
     ERROR_CHECK_RETURN(pptr, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(uniformWriteFits(pptr, location, size), GL_INVALID_OPERATION);
@@ -2237,45 +2328,71 @@ void mglProgramUniformMatrix4x3dv(GLMContext ctx, GLuint program, GLint location
 
 // Values are stored as the bytes the app wrote. bufSize, where present, is a
 // byte cap and a value that does not fit is an error rather than a truncation.
-static const Buffer *uniformValueBuffer(GLMContext ctx, GLuint program, GLint location)
-{
-    Program *ptr = findProgram(ctx, program);
-    Buffer *buf;
-
-    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_VALUE, NULL);
-    ERROR_CHECK_RETURN_VALUE(location >= 0 && location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION, NULL);
-
-    buf = ptr->uniform_constants.buffers[location].buf;
-
-    ERROR_CHECK_RETURN_VALUE(buf && buf->data.buffer_data, GL_INVALID_OPERATION, NULL);
-
-    return buf;
-}
+// One uniform value, element by element. An array lives in the buffer of its
+// first element, packed tight, so element N is N values in. A uniform the app
+// never wrote reads back as zero.
+static void getUniformFrom(GLMContext ctx, Program *pp, GLint location,
+                           GLsizei bufSize, void *params, GLenum dst_type);
 
 static void getUniformTyped(GLMContext ctx, GLuint program, GLint location,
                             GLsizei bufSize, void *params, GLenum dst_type)
 {
-    const Buffer *buf = uniformValueBuffer(ctx, program, location);
-    const GLfloat *src;
-    const GLint *isrc;
-    GLsizei n;
-    bool src_is_double = false;
+    Program *pp = findProgram(ctx, program);
 
-    if (buf == NULL)
-        return;
+    ERROR_CHECK_RETURN(pp, GL_INVALID_VALUE);
 
+    getUniformFrom(ctx, pp, location, bufSize, params, dst_type);
+}
+
+// A uniform's value straight off a program object, which may already have
+// lost its name. Samplers and images read as their unit.
+void mglReadUniform(GLMContext ctx, Program *pp, GLint location, void *params, GLenum as)
+{
+    SpirvResource *res = mglOpaqueUniformByLocation(pp, location);
+
+    if (res)
     {
-        Program *pp = findProgram(ctx, program);
-        size_t stored = (pp && location >= 0 && location < MAX_UNIFORM_LOCATIONS &&
-                         pp->uniform_constants.elem_size[location])
-                      ? pp->uniform_constants.elem_size[location] : sizeof(GLfloat);
-
-        n = (GLsizei)(buf->size / stored);
-        src_is_double = (stored == sizeof(GLdouble));
+        ((GLint *)params)[0] = res->tex_unit;
+        return;
     }
 
-    if (n <= 0)
+    getUniformFrom(ctx, pp, location, -1, params, as);
+}
+
+static void getUniformFrom(GLMContext ctx, Program *pp, GLint location,
+                           GLsizei bufSize, void *params, GLenum dst_type)
+{
+    ERROR_CHECK_RETURN(location >= 0 && location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
+
+    GLint element = 0;
+    SpirvResource *res = plainUniformByLocation(pp, location, &element);
+    GLint base = res ? (GLint)res->location : location;
+    const Buffer *buf = pp->uniform_constants.buffers[base].buf;
+    size_t stored = pp->uniform_constants.elem_size[base] ? pp->uniform_constants.elem_size[base]
+                                                         : sizeof(GLfloat);
+    size_t per = res ? storedElementSize(pp, res) : 0;
+    size_t have = (buf && buf->data.buffer_data) ? (size_t)buf->size : 0;
+
+    ERROR_CHECK_RETURN(res || have, GL_INVALID_OPERATION);
+
+    // a double uniform written through the float path is still sized as doubles
+    if (per == 0)
+        per = have;
+
+    size_t offset = (size_t)element * per;
+    GLsizei n = (GLsizei)(per / stored);
+    bool src_is_double = (stored == sizeof(GLdouble));
+    GLubyte value[128] = {0};
+
+    if (n <= 0 || per > sizeof(value))
         return;
+
+    // what was written, and zero for the rest
+    if (have > offset)
+        memcpy(value, (const GLubyte *)buf->data.buffer_data + offset,
+               have - offset < per ? have - offset : per);
+
+    const GLubyte *from = value;
 
     // the cap counts the bytes this call would write, not the bytes stored
     if (bufSize >= 0)
@@ -2285,8 +2402,7 @@ static void getUniformTyped(GLMContext ctx, GLuint program, GLint location,
         ERROR_CHECK_RETURN((size_t)n * elem <= (size_t)bufSize, GL_INVALID_OPERATION);
     }
 
-    src = (const GLfloat *)buf->data.buffer_data;
-    isrc = (const GLint *)buf->data.buffer_data;
+    const GLfloat *src = (const GLfloat *)from;
 
     switch (dst_type)
     {
@@ -2309,7 +2425,7 @@ static void getUniformTyped(GLMContext ctx, GLuint program, GLint location,
         // integer uniforms were stored as integers, so copy the bits straight
         case GL_INT:
         case GL_UNSIGNED_INT:
-            memcpy(params, isrc, (size_t)n * sizeof(GLint));
+            memcpy(params, src, (size_t)n * sizeof(GLint));
             break;
     }
 }

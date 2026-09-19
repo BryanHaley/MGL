@@ -206,6 +206,16 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     bool          _tessIndexed;
     // isolines run as quads get their levels moved into quad order
     id<MTLComputePipelineState> _isolineLevelsPipeline;
+    // Triangles and quads cut up on the CPU. The draw waits for the control
+    // stage part way through, so what it wrote has to outlive that command
+    // buffer; these are MGL's own, not the pool's.
+    bool          _tessOwnBuffers;
+    id<MTLBuffer> _tessOwn[4];
+    id<MTLBuffer> _tessGenCtl, _tessGenPatch, _tessGenLevels;
+    id<MTLBuffer> _tessGenCoords, _tessGenIndex;
+    // the last command buffer that drew from them, waited on before they
+    // are written again
+    id<MTLCommandBuffer> _tessGenInFlight;
     // transform feedback behind a geometry stage: count what came out, copy it
     id<MTLComputePipelineState> _gsCountPipeline;
     id<MTLComputePipelineState> _gsGatherPipeline;
@@ -1157,9 +1167,11 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
             tex_type = MTLTextureTypeCube;
             break;
 
+        // stored like a 2D array, every face of every layer one slice, which
+        // is also how Metal numbers a cube array's slices
         case GL_TEXTURE_CUBE_MAP_ARRAY:
-            num_faces = 6;
             tex_type = MTLTextureTypeCubeArray;
+            is_array = true;
             break;
 
         case GL_TEXTURE_3D: tex_type = MTLTextureType3D; break;
@@ -1286,6 +1298,11 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         // arrayLength and insists height is 1.
         tex_desc.arrayLength = height ? height : 1;
         tex_desc.height = 1;
+        tex_desc.depth = 1;
+    }
+    else if (tex->target == GL_TEXTURE_CUBE_MAP_ARRAY)
+    {
+        tex_desc.arrayLength = depth / 6 ? depth / 6 : 1;
         tex_desc.depth = 1;
     }
     else if (is_array)
@@ -2573,24 +2590,29 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 
     NSUInteger have = base.mipmapLevelCount;
     NSUInteger first = tex->params.base_level;
-
-    if (have <= 1 || first == 0)
-        return base;
+    NSUInteger last = tex->params.max_level;
 
     if (first >= have)
         first = have - 1;
 
-    NSUInteger last = tex->params.max_level;
-
     if (last >= have)
         last = have - 1;
 
+    // GL_TEXTURE_MAX_LEVEL trims the chain too, which textureQueryLevels sees
+    if (have <= 1 || (first == 0 && last == have - 1))
+        return base;
+
     NSUInteger count = last >= first ? last - first + 1 : 1;
+    NSUInteger slices = base.arrayLength;
+
+    // a cube view counts each face as a slice
+    if (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray)
+        slices *= 6;
 
     id<MTLTexture> view = [base newTextureViewWithPixelFormat: base.pixelFormat
                                                   textureType: base.textureType
                                                        levels: NSMakeRange(first, count)
-                                                       slices: NSMakeRange(0, base.arrayLength)];
+                                                       slices: NSMakeRange(0, slices)];
 
     return view ? view : base;
 }
@@ -3197,7 +3219,9 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
         id<MTLTexture> view = [base newTextureViewWithPixelFormat: base.pixelFormat
                                                      textureType: base.textureType
                                                           levels: NSMakeRange(0, base.mipmapLevelCount)
-                                                          slices: NSMakeRange(0, base.arrayLength)
+                                                          slices: NSMakeRange(0, base.arrayLength *
+                                                                              ((base.textureType == MTLTextureTypeCube ||
+                                                                                base.textureType == MTLTextureTypeCubeArray) ? 6 : 1))
                                                          swizzle: sw];
 
         if (view)
@@ -3739,8 +3763,8 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
 
         if (ctx->state.caps.stencil_test)
         {
-            // mtl maps directly to gl
-            if (ctx->state.var.stencil_func != GL_NEVER)
+            // mtl maps directly to gl, GL_NEVER included: a test that always
+            // fails still runs its fail operation
             {
                 MTLStencilDescriptor *frontSDesc = [[MTLStencilDescriptor alloc] init];
 
@@ -3754,7 +3778,6 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
                 dsDesc.frontFaceStencil = frontSDesc;
             }
 
-            if (ctx->state.var.stencil_func != GL_NEVER)
             {
                 MTLStencilDescriptor *backSDesc = [[MTLStencilDescriptor alloc] init];
 
@@ -3773,6 +3796,10 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
                                   newDepthStencilStateWithDescriptor:dsDesc];
 
         [_currentRenderEncoder setDepthStencilState: dsState];
+
+        if (ctx->state.caps.stencil_test)
+            [_currentRenderEncoder setStencilFrontReferenceValue: ctx->state.var.stencil_ref
+                                               backReferenceValue: ctx->state.var.stencil_back_ref];
     }
 
     if (ctx->state.caps.scissor_test)
@@ -5026,6 +5053,12 @@ static GLuint drawPrimitiveCount(GLenum mode, GLsizei count)
 - (void) countDrawnPrimitives: (GLenum) mode count: (GLsizei) count instances: (GLsizei) instances
 {
     TransformFeedback *xfb = ctx->state.transform_feedback;
+    Program *program = ctx->state.program;
+
+    // the CPU tessellator counts these; the geometry capture counts what it
+    // records
+    bool cpu_tess = program && program->tess.general;
+    bool gs = mglProgramHasGeometry(program);
     GLuint prims = drawPrimitiveCount(mode, count) * (instances > 0 ? instances : 1);
     bool recording = xfb && xfb->active && !xfb->paused;
 
@@ -5038,8 +5071,8 @@ static GLuint drawPrimitiveCount(GLenum mode, GLsizei count)
                 continue;
 
             if (q->target == GL_PRIMITIVES_GENERATED)
-                q->result += prims;
-            else if (recording &&
+                q->result += cpu_tess ? 0 : prims;
+            else if (recording && !gs &&
                      (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN ||
                       q->target == GL_TRANSFORM_FEEDBACK_OVERFLOW))
                 q->result += (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) ? prims : 0;
@@ -5130,7 +5163,6 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
 }
 
 static MTLTessellationPartitionMode mtlPartitionForSpv(GLuint mode);
-static MTLWinding mtlWindingForSpv(GLuint mode);
 
 - (bool) buildGeometryPipelines: (Program *) program
 {
@@ -5175,7 +5207,7 @@ static MTLWinding mtlWindingForSpv(GLuint mode);
         cap.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
         cap.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
         cap.tessellationPartitionMode = mtlPartitionForSpv(program->tess.partition);
-        cap.tessellationOutputWindingOrder = mtlWindingForSpv(program->tess.winding);
+        cap.tessellationOutputWindingOrder = mtlWindingFor(program);
     }
 
     _gsCapturePipeline = [_device newRenderPipelineStateWithDescriptor: cap error: &err];
@@ -5383,6 +5415,197 @@ static const char *mgl_gs_capture_msl =
     uint32_t total = ((uint32_t *)before.contents)[slots];
 
     xfb->vertices_recorded += total;
+
+    // a strip was already split into separate primitives when it was recorded
+    GLuint per = gi->out_primitive == GL_POINTS ? 1 : gi->out_primitive == GL_LINE_STRIP ? 2 : 3;
+
+    for (int t = 0; t < _MAX_QUERY_TARGETS; t++)
+        for (int i = 0; i < MAX_QUERY_STREAMS; i++)
+        {
+            Query *q = ctx->state.active_query[t][i];
+
+            if (q && q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN)
+                q->result += total / per;
+        }
+}
+
+// Runs the vertex and control stages, waits for them, then cuts every patch
+// up the way GL does (tessellator.c). Leaves each patch's vertices and levels
+// in _tessGenCoords, its primitives in _tessGenIndex, and the factor buffer
+// set to the grid the evaluation stage is run over. Returns the primitive
+// count, 0 when nothing is drawn.
+- (GLint) tessellateOnCPU: (GLsizei) count
+                    first: (GLint) first
+                instances: (GLsizei) instances
+                  indices: (MGLIndexSource *) src
+                  patches: (GLuint *) out_patches
+{
+    Program *program = ctx->state.program;
+    TessInfo *ti = &program->tess;
+    GLuint patches = 0;
+    bool ok;
+
+    if (src != NULL && src->buffer != nil && src->type == MTLIndexTypeUInt32)
+    {
+        _tessIndexBuffer = src->buffer;
+        _tessIndexOffset = src->offset;
+        _tessIndexType = src->type;
+        _tessIndexed = true;
+    }
+
+    // the last draw that read these buffers, and the factor buffer the
+    // control stage is about to clear, has to be done with them first
+    if (_tessGenInFlight && _tessGenInFlight.status < MTLCommandBufferStatusCompleted)
+        [_tessGenInFlight waitUntilCompleted];
+
+    _tessGenInFlight = nil;
+
+    _tessOwnBuffers = true;
+    ok = [self runTessellationForCount: count first: first instances: instances
+                               patches: &patches pipeline: nil];
+    _tessOwnBuffers = false;
+    _tessIndexed = false;
+    _tessIndexBuffer = nil;
+
+
+    if (!ok || patches == 0)
+        return 0;
+
+    // the levels only exist once the control stage has run
+    [self flushCommandBuffer: true];
+
+    size_t coord_bytes = (size_t)patches * MGL_TES_GEN_STRIDE * 4 * sizeof(float);
+
+    if (_tessGenCoords == nil || _tessGenCoords.length < coord_bytes)
+        _tessGenCoords = [_device newBufferWithLength: coord_bytes options: MTLResourceStorageModeShared];
+
+    // a patch at the highest levels makes 8192 triangles
+    enum { MAX_INDEX = 2 * MGL_TES_MAX_LEVEL * MGL_TES_MAX_LEVEL * 3 };
+    MglTessCoord *coords = malloc(sizeof(MglTessCoord) * MGL_TES_GEN_VERTS);
+    uint32_t *local = malloc(sizeof(uint32_t) * MAX_INDEX);
+    uint32_t *all = NULL;
+    size_t all_count = 0, all_cap = 0;
+    GLint total = 0;
+
+    if (_tessGenCoords == nil || coords == NULL || local == NULL)
+    {
+        free(coords);
+        free(local);
+        return 0;
+    }
+
+    const __fp16 *half = (const __fp16 *)_tessGenLevels.contents;
+    float *dst = (float *)_tessGenCoords.contents;
+
+    for (GLuint p = 0; p < patches; p++)
+    {
+        float outer[4] = { 0 }, inner[2] = { 0 };
+
+        // with no control shader the levels are context state
+        if (!ti->has_control)
+        {
+            memcpy(outer, ctx->state.var.patch_default_outer, sizeof(outer));
+            memcpy(inner, ctx->state.var.patch_default_inner, sizeof(inner));
+        }
+        // the control stage is built for the quad grid the evaluation stage
+        // runs over, so its levels are in quad layout whatever the domain
+        else
+        {
+            for (int e = 0; e < 4; e++)
+                outer[e] = (float)half[p * 6 + e];
+
+            inner[0] = (float)half[p * 6 + 4];
+            inner[1] = (float)half[p * 6 + 5];
+        }
+
+        int prims = 0;
+        int verts = mglTessellate(ti->gen_domain, ti->gen_spacing, ti->gen_points, ti->gen_cw,
+                                  outer, inner, coords, MGL_TES_GEN_VERTS, local, MAX_INDEX, &prims);
+
+        if (verts < 0)
+            verts = prims = 0;
+
+        float *block = dst + (size_t)p * MGL_TES_GEN_STRIDE * 4;
+
+        block[0] = (float)verts;
+        block[1] = inner[0];
+        block[2] = inner[1];
+        block[3] = (float)(ti->has_control ? ti->out_control_points : (GLuint)ctx->state.var.patch_vertices);
+        memcpy(block + 4, outer, sizeof(outer));
+
+        for (int v = 0; v < verts; v++)
+        {
+            block[8 + v * 4 + 0] = coords[v].u;
+            block[8 + v * 4 + 1] = coords[v].v;
+            block[8 + v * 4 + 2] = coords[v].w;
+            block[8 + v * 4 + 3] = 0;
+        }
+
+        int per = ti->gen_points ? 1 : ti->gen_domain == 2 ? 2 : 3;
+        size_t need = all_count + (size_t)prims * per;
+
+        if (need > all_cap)
+        {
+            size_t cap = all_cap ? all_cap * 2 : 4096;
+
+            while (cap < need)
+                cap *= 2;
+
+            uint32_t *grown = realloc(all, cap * sizeof(uint32_t));
+
+            if (grown == NULL)
+                break;
+
+            all = grown;
+            all_cap = cap;
+        }
+
+        for (int k = 0; k < prims * per; k++)
+            all[all_count++] = local[k] + p * MGL_TES_GEN_VERTS;
+
+        total += prims;
+    }
+
+    free(coords);
+    free(local);
+
+    if (total > 0)
+    {
+        size_t index_bytes = all_count * sizeof(uint32_t);
+
+        if (_tessGenIndex == nil || _tessGenIndex.length < index_bytes)
+            _tessGenIndex = [_device newBufferWithLength: index_bytes options: MTLResourceStorageModeShared];
+
+        if (_tessGenIndex)
+            memcpy(_tessGenIndex.contents, all, index_bytes);
+        else
+            total = 0;
+    }
+
+    free(all);
+
+    // Metal runs the evaluation stage over a full 64 x 64 quad grid
+    {
+        uint16_t f = mglFloatToHalf((float)MGL_TES_MAX_LEVEL);
+        uint16_t *levels = (uint16_t *)_tessGenLevels.contents;
+
+        for (GLuint p = 0; p < patches * 6; p++)
+            levels[p] = f;
+    }
+
+    // what the pipeline produced, which the input count said nothing about
+    for (int t = 0; t < _MAX_QUERY_TARGETS; t++)
+        for (int i = 0; i < MAX_QUERY_STREAMS; i++)
+        {
+            Query *q = ctx->state.active_query[t][i];
+
+            if (q && q->target == GL_PRIMITIVES_GENERATED)
+                q->result += (GLuint64)total;
+        }
+
+    *out_patches = patches;
+
+    return total;
 }
 
 // Runs the three passes and issues the draw. Returns false when this draw does
@@ -5395,6 +5618,7 @@ static const char *mgl_gs_capture_msl =
 {
     Program *program = ctx->state.program;
 
+
     if (!mglProgramHasGeometry(program))
         return false;
 
@@ -5406,20 +5630,45 @@ static const char *mgl_gs_capture_msl =
     if (instances < 1)
         instances = 1;
 
+    bool general = tess && program->tess.general;
+    GLuint gen_patches = 0;
+
+    if ([self buildGeometryPipelines: program] == false)
+        return true;
+
+    // triangles and quads are cut up on the CPU first, which waits for the
+    // control stage; nothing this draw takes from the pool may come before it
+    if (general)
+    {
+        GLint n = [self tessellateOnCPU: count first: first instances: instances
+                                indices: src patches: &gen_patches];
+
+        if (n <= 0)
+            return true;
+
+        prims = (GLuint)n;
+        stride = program->tess.gen_points ? 1 : program->tess.gen_domain == 2 ? 2 : 3;
+    }
     // each patch owns a fixed run of input slots, whichever points it makes
-    if (tess)
+    else if (tess)
     {
         GLint in_cp = ctx->state.var.patch_vertices;
 
         prims = in_cp > 0 ? ((GLuint)count / (GLuint)in_cp) * (GLuint)instances : 0;
-        prims *= MGL_TES_POINTS_PER_PATCH;
-        stride = 1;
+
+        if (program->tess.isoline_segments)
+        {
+            prims *= MGL_TES_SEGMENTS_PER_PATCH;
+            stride = 2;
+        }
+        else
+        {
+            prims *= MGL_TES_POINTS_PER_PATCH;
+            stride = 1;
+        }
     }
 
     if (prims == 0 || gi->compute_src == NULL)
-        return true;
-
-    if ([self buildGeometryPipelines: program] == false)
         return true;
 
     // Metal's indexed stage-in and this kernel both want 32 bit indices, so a
@@ -5434,9 +5683,14 @@ static const char *mgl_gs_capture_msl =
     NSUInteger in_verts = (NSUInteger)(first > 0 ? first : 0) + (NSUInteger)count;
     NSUInteger slots = (NSUInteger)prims * (NSUInteger)gi->invocations * (NSUInteger)instances;
 
-    if (tess)
+    if (general)
     {
-        in_verts = prims;
+        in_verts = (NSUInteger)gen_patches * MGL_TES_GEN_VERTS;
+        slots = (NSUInteger)prims * (NSUInteger)gi->invocations;
+    }
+    else if (tess)
+    {
+        in_verts = (NSUInteger)prims * (NSUInteger)stride;
         slots = (NSUInteger)prims * (NSUInteger)gi->invocations;
     }
 
@@ -5474,13 +5728,49 @@ static const char *mgl_gs_capture_msl =
         GLint v;
 
         v = (GLint)prims;   mglWriteProgramUniform(ctx, program, gi->prims_loc, v);
-        v = indexed && !tess ? 1 : 0; mglWriteProgramUniform(ctx, program, gi->indexed_loc, v);
+        v = (indexed && !tess) || general ? 1 : 0; mglWriteProgramUniform(ctx, program, gi->indexed_loc, v);
         v = tess ? 0 : first; mglWriteProgramUniform(ctx, program, gi->first_loc, v);
         v = stride;         mglWriteProgramUniform(ctx, program, gi->stride_loc, v);
     }
 
     // ---- pass one: the vertex stage, or the tessellation stages, capturing ----
-    if (tess)
+    if (general)
+    {
+        // the control stage already ran; the evaluation stage runs over the
+        // grid, each point standing in for one vertex the CPU made
+        if (_currentRenderEncoder == nil)
+        {
+            if ([self newRenderEncoder] == false)
+                return true;
+
+            [self updateCurrentRenderEncoder];
+        }
+
+        [_currentRenderEncoder setRenderPipelineState: _gsCapturePipeline];
+        [self bindTessBuffersToRenderEncoder];
+        [_currentRenderEncoder setVertexBuffer: _tessGenCtl offset: 0 atIndex: MGL_TESS_CONTROL_OUT_INDEX];
+        [_currentRenderEncoder setVertexBuffer: _tessGenPatch offset: 0 atIndex: MGL_TESS_PATCH_OUT_INDEX];
+        [_currentRenderEncoder setVertexBuffer: _tessGenLevels offset: 0 atIndex: MGL_TESS_LEVEL_INDEX];
+        [_currentRenderEncoder setTessellationFactorBuffer: _tessGenLevels offset: 0 instanceStride: 0];
+        [_currentRenderEncoder setVertexBuffer: _tessGenCoords offset: 0 atIndex: gi->tes_gen_slot];
+        [_currentRenderEncoder setVertexBuffer: in_buf offset: 0 atIndex: gi->vs_in_slot];
+
+        @try {
+            [_currentRenderEncoder drawPatches: program->tess.out_control_points
+                                    patchStart: 0
+                                    patchCount: gen_patches
+                              patchIndexBuffer: nil
+                        patchIndexBufferOffset: 0
+                                 instanceCount: 1
+                                  baseInstance: 0];
+        } @catch (NSException *exception) {
+            MGL_NSERR(@"MGL ERROR: drawPatches failed: %@", exception);
+            return true;
+        }
+
+        _tessGenInFlight = _currentCommandBuffer;
+    }
+    else if (tess)
     {
         GLuint patches = 0;
         bool ok;
@@ -5543,7 +5833,9 @@ static const char *mgl_gs_capture_msl =
     [enc setBuffer: in_buf offset: 0 atIndex: gi->gs_in_slot];
     [enc setBuffer: out_buf offset: 0 atIndex: gi->gs_out_slot];
 
-    if (gi->gs_index_slot >= 0)
+    if (gi->gs_index_slot >= 0 && general)
+        [enc setBuffer: _tessGenIndex offset: 0 atIndex: gi->gs_index_slot];
+    else if (gi->gs_index_slot >= 0)
         [enc setBuffer: indexed ? src->buffer : in_buf
                 offset: indexed ? src->offset : 0
                atIndex: gi->gs_index_slot];
@@ -5554,8 +5846,14 @@ static const char *mgl_gs_capture_msl =
     [self endComputeEncoding];
 
     // ---- pass three: draw what came out ----
-    if (_currentRenderEncoder == nil && [self newRenderEncoder] == false)
-        return true;
+    if (_currentRenderEncoder == nil)
+    {
+        if ([self newRenderEncoder] == false)
+            return true;
+
+        // the compute pass took the encoder and all its state with it
+        [self updateCurrentRenderEncoder];
+    }
 
     [_currentRenderEncoder setRenderPipelineState: _gsDrawPipeline];
     [self bindFragmentBuffersToCurrentRenderEncoder];
@@ -6161,6 +6459,9 @@ static const char *mgl_isoline_levels_msl =
 
     *out_patches = patches;
 
+    // gl_PrimitiveID starts over with each instance
+    mglWriteProgramUniform(ctx, program, program->tess.patches_loc, (GLint)((GLuint)count / (GLuint)in_cp));
+
     if ([self buildTessComputePipelines: program] == false)
         return false;
 
@@ -6177,10 +6478,29 @@ static const char *mgl_isoline_levels_msl =
     size_t patch_bytes = (size_t)patches * MGL_TESS_BYTES_PER_VERTEX;
     size_t level_bytes = (size_t)patches * sizeof(MTLQuadTessellationFactorsHalf);
 
-    id<MTLBuffer> vtx_out = [_scratchPool bufferOfLength: vtx_bytes forCommandBuffer: _currentCommandBuffer];
-    id<MTLBuffer> ctl_out = [_scratchPool bufferOfLength: ctl_bytes forCommandBuffer: _currentCommandBuffer];
-    id<MTLBuffer> patch_out = [_scratchPool bufferOfLength: patch_bytes forCommandBuffer: _currentCommandBuffer];
-    id<MTLBuffer> levels = [_scratchPool bufferOfLength: level_bytes forCommandBuffer: _currentCommandBuffer];
+    id<MTLBuffer> vtx_out, ctl_out, patch_out, levels;
+
+    if (_tessOwnBuffers)
+    {
+        size_t sizes[4] = { vtx_bytes, ctl_bytes, patch_bytes, level_bytes };
+
+        for (int b = 0; b < 4; b++)
+            if (_tessOwn[b] == nil || _tessOwn[b].length < sizes[b])
+                _tessOwn[b] = [_device newBufferWithLength: sizes[b] > 16 ? sizes[b] : 16
+                                                   options: MTLResourceStorageModeShared];
+
+        vtx_out = _tessOwn[0];
+        ctl_out = _tessOwn[1];
+        patch_out = _tessOwn[2];
+        levels = _tessOwn[3];
+    }
+    else
+    {
+        vtx_out = [_scratchPool bufferOfLength: vtx_bytes forCommandBuffer: _currentCommandBuffer];
+        ctl_out = [_scratchPool bufferOfLength: ctl_bytes forCommandBuffer: _currentCommandBuffer];
+        patch_out = [_scratchPool bufferOfLength: patch_bytes forCommandBuffer: _currentCommandBuffer];
+        levels = [_scratchPool bufferOfLength: level_bytes forCommandBuffer: _currentCommandBuffer];
+    }
 
     if (!vtx_out || !ctl_out || !patch_out || !levels)
     {
@@ -6255,15 +6575,26 @@ static const char *mgl_isoline_levels_msl =
 
     [self endComputeEncoding];
 
+    // the CPU tessellator reads the levels first; the draw comes later
+    if (_tessOwnBuffers)
+    {
+        _tessGenCtl = ctl_out;
+        _tessGenPatch = patch_out;
+        _tessGenLevels = levels;
+        return true;
+    }
+
     // the render encoder went away with the compute pass, so rebuild it and
     // point it at what the compute stages wrote
     if (_currentRenderEncoder == nil)
     {
         if ([self newRenderEncoder] == false)
             return false;
+
+        // a fresh encoder carries none of the state processGLState set up
+        [self updateCurrentRenderEncoder];
     }
 
-    // a fresh encoder carries none of the state processGLState set up
     if (pipeline == nil)
         return false;
 
@@ -6289,11 +6620,17 @@ static MTLTessellationPartitionMode mtlPartitionForSpv(GLuint mode)
     }
 }
 
-// Reversed, because MGL hands Metal a flipped clip space.
-static MTLWinding mtlWindingForSpv(GLuint mode)
+// Reversed, because MGL hands Metal a flipped clip space. Triangles are
+// reversed once more: the domain flip that puts quads the right way up is not
+// applied to them (SPIRV-Cross leaves that to the winding instead).
+static MTLWinding mtlWindingFor(const Program *p)
 {
-    return mode == SpvExecutionModeVertexOrderCw ? MTLWindingCounterClockwise
-                                                 : MTLWindingClockwise;
+    bool cw = p->tess.winding == SpvExecutionModeVertexOrderCw;
+
+    if (p->tess.lower_left && p->tess.patch_kind == SpvExecutionModeTriangles)
+        cw = !cw;
+
+    return cw ? MTLWindingCounterClockwise : MTLWindingClockwise;
 }
 
 -(MTLRenderPipelineDescriptor *)generatePipelineDescriptor
@@ -6345,7 +6682,7 @@ static MTLWinding mtlWindingForSpv(GLuint mode)
         pipelineStateDescriptor.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
         pipelineStateDescriptor.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
         pipelineStateDescriptor.tessellationPartitionMode = mtlPartitionForSpv(program->tess.partition);
-        pipelineStateDescriptor.tessellationOutputWindingOrder = mtlWindingForSpv(program->tess.winding);
+        pipelineStateDescriptor.tessellationOutputWindingOrder = mtlWindingFor(program);
     }
     else
     {

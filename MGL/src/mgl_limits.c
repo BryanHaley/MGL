@@ -75,7 +75,7 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_vertex_uniform_components, 1024);
     at_least(&v->max_vertex_uniform_vectors, 256);
     at_least(&v->max_vertex_uniform_blocks, 14);
-    at_least(&v->max_vertex_output_components, 64);
+    at_least(&v->max_vertex_output_components, 128);
     at_least(&v->max_vertex_texture_image_units, 16);
     at_least(&v->max_vertex_image_uniforms, 8);
     at_least(&v->max_vertex_atomic_counters, 8);
@@ -95,7 +95,7 @@ void mglInitLimits(GLMContext ctx)
 
     at_least(&v->max_geometry_uniform_components, 1024);
     at_least(&v->max_geometry_uniform_blocks, 14);
-    at_least(&v->max_geometry_input_components, 64);
+    at_least(&v->max_geometry_input_components, 128);
     at_least(&v->max_geometry_output_components, 128);
     at_least(&v->max_geometry_output_vertices, 256);
     at_least(&v->max_geometry_total_output_components, 1024);

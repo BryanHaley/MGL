@@ -535,6 +535,26 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
     return bufAdd(body, src + copied);
 }
 
+// How many locations a varying of this type takes: one per matrix column,
+// two per column of doubles wider than two.
+static int locationsFor(const char *type)
+{
+    const char *t = type;
+    int cols = 1, wide = 1;
+
+    if (!strncmp(t, "dmat", 4))
+    {
+        cols = t[4] - '0';
+        wide = (t[5] == 'x' ? t[6] - '0' : cols) > 2 ? 2 : 1;
+    }
+    else if (!strncmp(t, "mat", 3))
+        cols = t[3] - '0';
+    else if (!strncmp(t, "dvec", 4))
+        wide = t[4] - '2' > 0 ? 2 : 1;
+
+    return cols * wide;
+}
+
 // what every generated geometry kernel has to do before the shader's own code
 #define MGL_GS_PROLOGUE \
     "\n  mglGsPrims = mglGsPrimsU;\n" \
@@ -547,6 +567,7 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
     "  if (mglPrimitiveID >= mglGsPrims) return;\n" \
     "  if (mglGsIn[mglFetch(0)].mglPointSize == 0.0) return;\n" \
     "  mglBase = mglId * mglGsCap;\n" \
+    "  mglCur.mglPointSize = mglGsIn[mglFetch(0)].mglPointSize;\n" \
     "  mglWritten = 0;\n  mglStripLen = 0;\n  mglStripFlip = false;\n"
 
 // ---------------------------------------------------------------------------
@@ -917,14 +938,16 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     if (!bufAdd(&pass, line))
         goto done;
 
-    for (int i = 0; i < sc.out_count; i++)
+    for (int i = 0, loc = 0; i < sc.out_count; i++)
     {
-        snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s;\n", i,
+        snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s;\n", loc,
                  sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
                  sc.out[i].type, sc.out[i].name);
 
         if (!bufAdd(&pass, line))
             goto done;
+
+        loc += locationsFor(sc.out[i].type);
     }
 
     if (!bufAdd(&pass, "\nvoid main()\n{\n  MglGsOutV v = mglGsOut[gl_VertexID];\n"))
@@ -1024,6 +1047,30 @@ static bool addRaisedVersion(Buf *out, const char *src, const char **body_start)
     return bufAdd(out, "#version 430 core\n");
 }
 
+// The capture records a point size of one unless the shader sets its own.
+static char *pointSizeIntoCapture(char *result, const char *src)
+{
+    static const char from[] = ".mglPointSize = 1.0;";
+    static const char to[] = ".mglPointSize = gl_PointSize;";
+    char *at;
+
+    if (result == NULL || strstr(src, "gl_PointSize") == NULL || (at = strstr(result, from)) == NULL)
+        return result;
+
+    size_t head = (size_t)(at - result);
+    char *out = (char *)malloc(strlen(result) + sizeof(to));
+
+    if (out == NULL)
+        return result;
+
+    memcpy(out, result, head);
+    strcpy(out + head, to);
+    strcat(out, at + sizeof(from) - 1);
+    free(result);
+
+    return out;
+}
+
 char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi)
 {
     Buf out = {0};
@@ -1069,6 +1116,115 @@ char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi)
         return NULL;
     }
 
+    return pointSizeIntoCapture(out.s, vs_src);
+}
+
+// "gl_in[ ... ].gl_X" or "gl_out[ ... ].gl_X" somewhere in the source
+static bool accessesMember(const char *src, const char *array, const char *member)
+{
+    size_t n = strlen(array);
+
+    for (const char *p = src; (p = strstr(p, array)) != NULL; p += n)
+    {
+        if ((p != src && identChar(p[-1])) || identChar(p[n]))
+            continue;
+
+        const char *q = p + n;
+
+        while (*q == ' ' || *q == '\t' || *q == '\n') q++;
+
+        if (*q != '[')
+            continue;
+
+        int depth = 0;
+
+        for (; *q; q++)
+        {
+            if (*q == '[') depth++;
+            else if (*q == ']' && --depth == 0) { q++; break; }
+        }
+
+        while (*q == ' ' || *q == '\t' || *q == '\n') q++;
+
+        if (*q != '.')
+            continue;
+
+        q++;
+
+        while (*q == ' ' || *q == '\t' || *q == '\n') q++;
+
+        if (!strncmp(q, member, strlen(member)) && !identChar(q[strlen(member)]))
+            return true;
+    }
+
+    return false;
+}
+
+// Metal lays the buffer between the control and evaluation stages out from
+// each stage's own built-ins, so a gl_Position or gl_PointSize the control
+// stage writes and the evaluation stage never reads puts every field after
+// it in the wrong place. Give the evaluation shader a read of each one.
+// Returns NULL when nothing needs adding.
+char *mglTouchTessInputs(const char *tes_src, const char *writer_src, bool writer_is_control)
+{
+    bool pos = writer_is_control ? accessesMember(writer_src, "gl_out", "gl_Position")
+                                 : strstr(writer_src, "gl_Position") != NULL;
+    bool ps = writer_is_control ? accessesMember(writer_src, "gl_out", "gl_PointSize")
+                                : strstr(writer_src, "gl_PointSize") != NULL;
+
+    pos = pos && !accessesMember(tes_src, "gl_in", "gl_Position");
+    ps = ps && !accessesMember(tes_src, "gl_in", "gl_PointSize");
+
+    if (!pos && !ps)
+        return NULL;
+
+    // the body starts after main's opening brace
+    const char *body = NULL;
+
+    for (size_t i = 0; tes_src[i]; i++)
+        if (wordAt(tes_src, i, "main") && tes_src[skipSpace(tes_src, i + 4)] == '(')
+        {
+            const char *b = strchr(tes_src + i, '{');
+
+            if (b)
+                body = b + 1;
+
+            break;
+        }
+
+    if (body == NULL)
+        return NULL;
+
+    // the declaration goes in after any # lines at the top
+    const char *decl_at = tes_src;
+
+    for (;;)
+    {
+        while (*decl_at == ' ' || *decl_at == '\t' || *decl_at == '\r' || *decl_at == '\n')
+            decl_at++;
+
+        if (*decl_at != '#')
+            break;
+
+        while (*decl_at && *decl_at != '\n')
+            decl_at++;
+    }
+
+    Buf out = {0};
+
+    if (!bufAddN(&out, tes_src, (size_t)(decl_at - tes_src)) ||
+        !bufAdd(&out, "float mglTouchIn;\n") ||
+        !bufAddN(&out, decl_at, (size_t)(body - decl_at)) ||
+        !bufAdd(&out, "\n  mglTouchIn = 0.0") ||
+        (pos && !bufAdd(&out, " + gl_in[0].gl_Position.x")) ||
+        (ps && !bufAdd(&out, " + gl_in[0].gl_PointSize")) ||
+        !bufAdd(&out, ";\n") ||
+        !bufAdd(&out, body))
+    {
+        free(out.s);
+        return NULL;
+    }
+
     return out.s;
 }
 
@@ -1094,6 +1250,7 @@ static bool replaceWord(Buf *out, const char *src, const char *from, const char 
 
     return bufAdd(out, src + copied);
 }
+
 
 // Metal cannot tessellate isolines, but an isoline point set is the bottom
 // rows of a quad grid. So the evaluation shader is built as a quad shader, and
@@ -1173,7 +1330,7 @@ char *mglAddTessPointCapture(const char *tes_src, const GeometryInfo *gi)
         copied = i;
     }
 
-    if (!isolines || !point_mode)
+    if (!isolines)
         goto done;
 
     if (!bufAdd(&out, src + copied))
@@ -1208,19 +1365,35 @@ char *mglAddTessPointCapture(const char *tes_src, const GeometryInfo *gi)
     if (!replaceWord(&decl, gi->capture_decl, "gl_VertexID", "mglCapIdx"))
         goto done_src;
 
-    char line[512];
+    char line[1024];
 
-    snprintf(line, sizeof(line),
-        "void main()\n{\n"
-        "  mglVsBody();\n"
-        "  int mglN0 = max(int(round(gl_TessLevelOuter[0])), 1);\n"
-        "  int mglN1 = max(int(round(gl_TessLevelOuter[1])), 1);\n"
-        "  int mglU = int(round(gl_TessCoord.x * float(mglN1)));\n"
-        "  int mglV = int(round(gl_TessCoord.y * float(mglN0)));\n"
-        "  if (mglV >= mglN0 || mglN0 > %d || mglN1 > %d) return;\n"
-        "  mglCapIdx = gl_PrimitiveID * %d + mglV * (mglN1 + 1) + mglU;\n"
-        "  mglGsCapture();\n}\n",
-        MGL_TES_MAX_LEVEL, MGL_TES_MAX_LEVEL, MGL_TES_POINTS_PER_PATCH);
+    if (point_mode)
+        snprintf(line, sizeof(line),
+            "void main()\n{\n"
+            "  mglVsBody();\n"
+            "  int mglN0 = max(int(round(gl_TessLevelOuter[0])), 1);\n"
+            "  int mglN1 = max(int(round(gl_TessLevelOuter[1])), 1);\n"
+            "  int mglU = int(round(gl_TessCoord.x * float(mglN1)));\n"
+            "  int mglV = int(round(gl_TessCoord.y * float(mglN0)));\n"
+            "  if (mglV >= mglN0 || mglN0 > %d || mglN1 > %d) return;\n"
+            "  mglCapIdx = gl_PrimitiveID * %d + mglV * (mglN1 + 1) + mglU;\n"
+            "  mglGsCapture();\n}\n",
+            MGL_TES_MAX_LEVEL, MGL_TES_MAX_LEVEL, MGL_TES_POINTS_PER_PATCH);
+    else
+        // a point ends the segment to its left and starts the one to its
+        // right; each segment is two slots side by side
+        snprintf(line, sizeof(line),
+            "void main()\n{\n"
+            "  mglVsBody();\n"
+            "  int mglN0 = max(int(round(gl_TessLevelOuter[0])), 1);\n"
+            "  int mglN1 = max(int(round(gl_TessLevelOuter[1])), 1);\n"
+            "  int mglU = int(round(gl_TessCoord.x * float(mglN1)));\n"
+            "  int mglV = int(round(gl_TessCoord.y * float(mglN0)));\n"
+            "  if (mglV >= mglN0 || mglN0 > %d || mglN1 > %d) return;\n"
+            "  int mglSeg = gl_PrimitiveID * %d + mglV * mglN1;\n"
+            "  if (mglU > 0) { mglCapIdx = (mglSeg + mglU - 1) * 2 + 1; mglGsCapture(); }\n"
+            "  if (mglU < mglN1) { mglCapIdx = (mglSeg + mglU) * 2; mglGsCapture(); }\n}\n",
+            MGL_TES_MAX_LEVEL, MGL_TES_MAX_LEVEL, MGL_TES_SEGMENTS_PER_PATCH);
 
     // after the body, so it cannot land ahead of an #extension line
     if (!bufAdd(&out, "\nlayout(quads") || !bufAdd(&out, layout.s ? layout.s : "") ||
@@ -1228,7 +1401,7 @@ char *mglAddTessPointCapture(const char *tes_src, const GeometryInfo *gi)
         !bufAdd(&out, "\n") || !bufAdd(&out, line))
         goto done_src;
 
-    result = out.s;
+    result = pointSizeIntoCapture(out.s, tes_src);
     out.s = NULL;
 
 done_src:
@@ -1334,24 +1507,274 @@ int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
     return words;
 }
 
-// true when the evaluation shader asks for point-mode isolines
-bool mglTesIsPointIsolines(const char *tes_src)
+// Which kind of isolines the evaluation shader asks for: 0 none, 1 point
+// mode, 2 lines. Only the layout(...) in; declarations count.
+int mglTesIsolineKind(const char *src)
 {
-    GeometryInfo gi;
-    char *probe;
+    bool isolines = false, point_mode = false;
 
-    memset(&gi, 0, sizeof(gi));
-    gi.capture_decl = (char *)"";
-    probe = mglAddTessPointCapture(tes_src, &gi);
+    for (size_t i = 0; src[i]; i++)
+    {
+        if (!wordAt(src, i, "layout"))
+            continue;
 
-    free(probe);
+        size_t j = skipSpace(src, i + 6), close = j;
+        int depth = 0;
 
-    return probe != NULL;
+        if (src[j] != '(')
+            continue;
+
+        for (; src[close]; close++)
+        {
+            if (src[close] == '(') depth++;
+            else if (src[close] == ')' && --depth == 0) { close++; break; }
+        }
+
+        size_t after = skipSpace(src, close);
+
+        if (!wordAt(src, after, "in") || src[skipSpace(src, after + 2)] != ';')
+            continue;
+
+        for (size_t k = j + 1; k + 1 < close;)
+        {
+            char word[64];
+
+            if (!identChar(src[k]))
+            {
+                k++;
+                continue;
+            }
+
+            k = readIdent(src, k, word, sizeof(word));
+
+            if (!strcmp(word, "isolines"))
+                isolines = true;
+            else if (!strcmp(word, "point_mode"))
+                point_mode = true;
+        }
+    }
+
+    return !isolines ? 0 : point_mode ? 1 : 2;
 }
 
-// A geometry shader that passes each point straight through, so point-mode
-// isolines with no geometry shader of their own can use the same path.
-char *mglPassThroughGeometry(const char *tes_src)
+void mglTesLayout(const char *src, int *domain, int *spacing, bool *cw, bool *points)
+{
+    *domain = -1;
+    *spacing = 0;
+    *cw = false;
+    *points = false;
+
+    for (size_t i = 0; src[i]; i++)
+    {
+        if (!wordAt(src, i, "layout"))
+            continue;
+
+        size_t j = skipSpace(src, i + 6), close = j;
+        int depth = 0;
+
+        if (src[j] != '(')
+            continue;
+
+        for (; src[close]; close++)
+        {
+            if (src[close] == '(') depth++;
+            else if (src[close] == ')' && --depth == 0) { close++; break; }
+        }
+
+        size_t after = skipSpace(src, close);
+
+        if (!wordAt(src, after, "in") || src[skipSpace(src, after + 2)] != ';')
+            continue;
+
+        for (size_t k = j + 1; k + 1 < close;)
+        {
+            char word[64];
+
+            if (!identChar(src[k]))
+            {
+                k++;
+                continue;
+            }
+
+            k = readIdent(src, k, word, sizeof(word));
+
+            if (!strcmp(word, "triangles"))                    *domain = 0;
+            else if (!strcmp(word, "quads"))                   *domain = 1;
+            else if (!strcmp(word, "isolines"))                *domain = 2;
+            else if (!strcmp(word, "fractional_even_spacing")) *spacing = 1;
+            else if (!strcmp(word, "fractional_odd_spacing"))  *spacing = 2;
+            else if (!strcmp(word, "equal_spacing"))           *spacing = 0;
+            else if (!strcmp(word, "cw"))                      *cw = true;
+            else if (!strcmp(word, "ccw"))                     *cw = false;
+            else if (!strcmp(word, "point_mode"))              *points = true;
+        }
+    }
+}
+
+// Triangles and quads, where the vertices come from the CPU tessellator. The
+// evaluation shader is run by Metal over a 65 x 65 quad grid; each grid point
+// stands for one vertex of the real patch, reads its coordinate and levels
+// from the buffer the CPU filled, and writes its outputs into its own slot.
+char *mglAddTessGeneralCapture(const char *tes_src, const GeometryInfo *gi)
+{
+    Buf stripped = {0}, body = {0}, t1 = {0}, t2 = {0}, out = {0}, decl = {0};
+    const char *src = tes_src;
+    const char *main_at = NULL;
+    size_t i = 0, copied = 0;
+    char *result = NULL;
+
+    // drop every "layout(...) in;"; the grid gets one of its own below
+    while (src[i])
+    {
+        if (!wordAt(src, i, "layout"))
+        {
+            i++;
+            continue;
+        }
+
+        size_t j = skipSpace(src, i + 6);
+
+        if (src[j] != '(')
+        {
+            i++;
+            continue;
+        }
+
+        size_t close = j;
+        int depth = 0;
+
+        for (; src[close]; close++)
+        {
+            if (src[close] == '(') depth++;
+            else if (src[close] == ')' && --depth == 0) { close++; break; }
+        }
+
+        size_t after = skipSpace(src, close);
+
+        if (!wordAt(src, after, "in") || src[skipSpace(src, after + 2)] != ';')
+        {
+            i = close;
+            continue;
+        }
+
+        if (!bufAddN(&stripped, src + copied, i - copied))
+            goto done;
+
+        i = skipSpace(src, after + 2) + 1;
+        copied = i;
+    }
+
+    if (!bufAdd(&stripped, src + copied))
+        goto done;
+
+    // the shader reads its coordinate and levels from variables this sets
+    Buf t3 = {0};
+
+    if (!replaceWord(&t1, stripped.s, "gl_TessCoord", "mglTC") ||
+        !replaceWord(&t2, t1.s, "gl_TessLevelOuter", "mglTLO") ||
+        !replaceWord(&t3, t2.s, "gl_TessLevelInner", "mglTLI") ||
+        !replaceWord(&body, t3.s, "gl_PatchVerticesIn", "mglPVI"))
+    {
+        free(t3.s);
+        goto done;
+    }
+
+    free(t3.s);
+
+    for (i = 0; body.s[i]; i++)
+    {
+        if (wordAt(body.s, i, "main") && body.s[skipSpace(body.s, i + 4)] == '(')
+        {
+            main_at = body.s + i;
+            break;
+        }
+    }
+
+    if (main_at == NULL)
+        goto done;
+
+    const char *p = body.s;
+
+    if (!addRaisedVersion(&out, body.s, &p))
+        goto done;
+
+    // the body reads these, so they go in ahead of it, after any #extension
+    const char *decls_at = p;
+
+    for (;;)
+    {
+        while (*decls_at == ' ' || *decls_at == '\t' || *decls_at == '\r' || *decls_at == '\n')
+            decls_at++;
+
+        if (*decls_at != '#')
+            break;
+
+        while (*decls_at && *decls_at != '\n')
+            decls_at++;
+    }
+
+    if (!bufAddN(&out, p, (size_t)(decls_at - p)) ||
+        !bufAdd(&out, "vec3 mglTC;\nfloat mglTLO[4];\nfloat mglTLI[2];\nint mglPVI;\n") ||
+        !bufAddN(&out, decls_at, (size_t)(main_at - decls_at)) ||
+        !bufAdd(&out, "mglVsBody") ||
+        !bufAdd(&out, main_at + 4))
+        goto done;
+
+    if (!replaceWord(&decl, gi->capture_decl, "gl_VertexID", "mglCapIdx"))
+        goto done;
+
+    char line[1600];
+
+    snprintf(line, sizeof(line),
+        "\nlayout(quads, equal_spacing, ccw) in;\n\n"
+        "int mglCapIdx;\n"
+        "layout(std430, binding = %d) buffer MglTessGenB { vec4 mglTG[]; };\n",
+        MGL_TES_GEN_BINDING);
+
+    // the capture declarations can be long, so they go in on their own
+    if (!bufAdd(&out, line) || !bufAdd(&out, decl.s) || !bufAdd(&out, "\n"))
+        goto done;
+
+    snprintf(line, sizeof(line),
+        "void main()\n{\n"
+        "  int mglU = int(round(gl_TessCoord.x * %d.0));\n"
+        "  int mglV = int(round(gl_TessCoord.y * %d.0));\n"
+        "  int mglIdx = mglV * %d + mglU;\n"
+        "  int mglAt = gl_PrimitiveID * %d;\n"
+        "  vec4 mglHead = mglTG[mglAt];\n"
+        "  if (mglIdx >= int(mglHead.x)) return;\n"
+        "  vec4 mglOut = mglTG[mglAt + 1];\n"
+        "  mglTLO[0] = mglOut.x; mglTLO[1] = mglOut.y; mglTLO[2] = mglOut.z; mglTLO[3] = mglOut.w;\n"
+        "  mglTLI[0] = mglHead.y; mglTLI[1] = mglHead.z;\n"
+        "  mglPVI = int(mglHead.w);\n"
+        "  mglTC = mglTG[mglAt + 2 + mglIdx].xyz;\n"
+        "  mglVsBody();\n"
+        "  mglCapIdx = gl_PrimitiveID * %d + mglIdx;\n"
+        "  mglGsCapture();\n}\n",
+        MGL_TES_MAX_LEVEL, MGL_TES_MAX_LEVEL, MGL_TES_MAX_LEVEL + 1,
+        MGL_TES_GEN_STRIDE, MGL_TES_GEN_VERTS);
+
+    if (!bufAdd(&out, line))
+        goto done;
+
+    result = pointSizeIntoCapture(out.s, tes_src);
+    out.s = NULL;
+
+done:
+    free(stripped.s);
+    free(body.s);
+    free(t1.s);
+    free(t2.s);
+    free(out.s);
+    free(decl.s);
+
+    return result;
+}
+
+// A geometry shader that passes each point, or each line segment, straight
+// through, so isolines with no geometry shader of their own can use the same
+// path.
+char *mglPassThroughGeometry(const char *tes_src, int input)
 {
     Buf out = {0};
     GsVarying outs[MAX_GS_VARYINGS];
@@ -1367,10 +1790,26 @@ char *mglPassThroughGeometry(const char *tes_src)
             continue;
 
         if (readVarying(tes_src, i, true, &v, &is_varying) && is_varying && count < MAX_GS_VARYINGS)
-            outs[count++] = v;
+        {
+            // "flat out int x" reads as a varying from "flat" and again from "out"
+            bool seen = false;
+
+            for (int k = 0; k < count; k++)
+                if (!strcmp(outs[k].name, v.name))
+                    seen = true;
+
+            if (!seen)
+                outs[count++] = v;
+        }
     }
 
-    if (!bufAdd(&out, "#version 430 core\nlayout(points) in;\nlayout(points, max_vertices = 1) out;\n"))
+    static const char *heads[3] = {
+        "#version 430 core\nlayout(points) in;\nlayout(points, max_vertices = 1) out;\n",
+        "#version 430 core\nlayout(lines) in;\nlayout(line_strip, max_vertices = 2) out;\n",
+        "#version 430 core\nlayout(triangles) in;\nlayout(triangle_strip, max_vertices = 3) out;\n",
+    };
+
+    if (input < 0 || input > 2 || !bufAdd(&out, heads[input]))
         goto fail;
 
     for (int i = 0; i < count; i++)
@@ -1383,18 +1822,29 @@ char *mglPassThroughGeometry(const char *tes_src)
             goto fail;
     }
 
-    if (!bufAdd(&out, "void main()\n{\n  gl_Position = gl_in[0].gl_Position;\n"))
+    if (!bufAdd(&out, "void main()\n{\n"))
         goto fail;
 
-    for (int i = 0; i < count; i++)
+    for (int v = 0; v <= input; v++)
     {
-        snprintf(line, sizeof(line), "  %s = %s[0];\n", outs[i].name, outs[i].name);
+        snprintf(line, sizeof(line), "  gl_Position = gl_in[%d].gl_Position;\n", v);
 
         if (!bufAdd(&out, line))
             goto fail;
+
+        for (int i = 0; i < count; i++)
+        {
+            snprintf(line, sizeof(line), "  %s = %s[%d];\n", outs[i].name, outs[i].name, v);
+
+            if (!bufAdd(&out, line))
+                goto fail;
+        }
+
+        if (!bufAdd(&out, "  EmitVertex();\n"))
+            goto fail;
     }
 
-    if (!bufAdd(&out, "  EmitVertex();\n}\n"))
+    if (!bufAdd(&out, "}\n"))
         goto fail;
 
     return out.s;

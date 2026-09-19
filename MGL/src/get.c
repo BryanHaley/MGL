@@ -27,7 +27,7 @@
 void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data);
 
 // these cast a void ptr to a type and value
-#define RET_BOOL(__value__) *((GLboolean *)data) = (GLboolean)__value__; break;
+#define RET_BOOL(__value__) *((GLboolean *)data) = (__value__) ? GL_TRUE : GL_FALSE; break;
 #define RET_INT(__value__) *((GLint *)data) = (GLint)__value__; break;
 #define RET_FLOAT(__value__) *((GLfloat *)data) = (GLfloat)__value__; break;
 #define RET_DOUBLE(__value__) *((GLdouble *)data) = (GLdouble)__value__; break;
@@ -62,6 +62,19 @@ for(int i=0, counts[]={1,4,4,8};i<__COUNT__; data+=counts[__TYPE__], i++) \
         case kInt: RET_INT(ctx->state.var.__VALUE__[i])    \
         case kFloat: RET_FLOAT(ctx->state.var.__VALUE__[i])    \
         case kDouble: RET_DOUBLE(ctx->state.var.__VALUE__[i])    \
+}
+
+// two fixed numbers, for the ranges GL reports as a pair
+#define RET_PAIR(__A__, __B__) \
+{ \
+    const GLdouble pair_[2] = { (__A__), (__B__) }; \
+    for (int i = 0; i < 2; i++) \
+        switch (type) { \
+            case kBool:   ((GLboolean *)data)[i] = pair_[i] != 0 ? GL_TRUE : GL_FALSE; break; \
+            case kInt:    ((GLint *)data)[i] = (GLint)pair_[i]; break; \
+            case kFloat:  ((GLfloat *)data)[i] = (GLfloat)pair_[i]; break; \
+            case kDouble: ((GLdouble *)data)[i] = pair_[i]; break; \
+        } \
 }
 
 // set value based on type from ctx->state not ctx->state.var
@@ -219,10 +232,10 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
     switch(pname)
     {
         case 0x0B11: RET_TYPE_VAR(type, point_size); break; // GL_POINT_SIZE
-        case 0x0B12: RET_TYPE_VAR(type, point_size_range); break; // GL_POINT_SIZE_RANGE
+        case 0x0B12: RET_PAIR(1.0, 511.0); break; // GL_POINT_SIZE_RANGE, what Metal draws
         case 0x0B13: RET_TYPE_VAR(type, point_size_granularity); break; // GL_POINT_SIZE_GRANULARITY
         case 0x0B21: RET_TYPE_VAR(type, line_width); break; // GL_LINE_WIDTH
-        case 0x0B22: RET_TYPE_VAR(type, line_width_range); break; // GL_LINE_WIDTH_RANGE
+        case 0x0B22: RET_PAIR(1.0, 1.0); break; // GL_LINE_WIDTH_RANGE, Metal lines are one pixel
         case 0x0B23: RET_TYPE_VAR(type, line_width_granularity); break; // GL_LINE_WIDTH_GRANULARITY
         case 0x0B40: RET_TYPE_VAR(type, polygon_mode); break; // GL_POLYGON_MODE
         case 0x0B45: RET_TYPE_VAR(type, cull_face_mode); break; // GL_CULL_FACE_MODE
@@ -378,8 +391,18 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x8073: RET_TYPE_VAR(type, max_3d_texture_size); break; // GL_MAX_3D_TEXTURE_SIZE
         case 0x80E8: RET_TYPE_VAR(type, max_elements_vertices); break; // GL_MAX_ELEMENTS_VERTICES
         case 0x80E9: RET_TYPE_VAR(type, max_elements_indices); break; // GL_MAX_ELEMENTS_INDICES
-        case 0x846E: RET_TYPE_VAR(type, aliased_line_width_range); break; // GL_ALIASED_LINE_WIDTH_RANGE
-        case 0x846D: RET_TYPE_VAR(type, aliased_point_size_range); break; // GL_ALIASED_POINT_SIZE_RANGE
+        case 0x846E: RET_PAIR(1.0, 1.0); break; // GL_ALIASED_LINE_WIDTH_RANGE
+        case 0x846D: RET_PAIR(1.0, 511.0); break; // GL_ALIASED_POINT_SIZE_RANGE
+        // Metal restarts strips, never patches
+        case 0x8221:  // GL_PRIMITIVE_RESTART_FOR_PATCHES_SUPPORTED
+            switch (type)
+            {
+                case kBool: RET_BOOL(0)
+                case kInt: RET_INT(0)
+                case kFloat: RET_FLOAT(0)
+                case kDouble: RET_DOUBLE(0)
+            }
+            break;
         // GL_ACTIVE_TEXTURE reads back as the GL_TEXTUREi enum, not the unit
         // index we store. Returning the index made every save/restore pair --
         // imgui does one per frame -- feed 0 back to glActiveTexture.

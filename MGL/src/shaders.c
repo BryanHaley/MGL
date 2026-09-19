@@ -546,6 +546,7 @@ static char *normalizeFrontEnd(const char *src, GLenum type)
 
     // Extensions core in 4.6 that glslang does not know by name. Subroutines
     // MGL rewrites away itself; the others are plain core GLSL by now.
+    bool wants_430 = false;
     static const char *core_names[] = {
         "GL_ARB_shader_subroutine",
         "GL_ARB_arrays_of_arrays",
@@ -562,12 +563,95 @@ static char *normalizeFrontEnd(const char *src, GLenum type)
         for (size_t k = 0; k < sizeof(core_names) / sizeof(core_names[0]); k++)
             if (memmem(p, (size_t)(e - p), core_names[k], strlen(core_names[k])))
             {
+                if (k == 2)
+                    wants_430 = true;
+
                 memset(p, ' ', (size_t)(e - p));
                 changed = true;
                 break;
             }
 
         p = e;
+    }
+
+    // glslang only has textureQueryLevels from 4.30, where it became core
+    if (wants_430)
+    {
+        char *v = strstr(out, "#version");
+
+        if (v)
+        {
+            char *num = v + 8;
+
+            while (*num == ' ' || *num == '\t')
+                num++;
+
+            if (isdigit((unsigned char)num[0]) && isdigit((unsigned char)num[1]) &&
+                isdigit((unsigned char)num[2]) && !isdigit((unsigned char)num[3]) &&
+                atoi(num) < 430)
+            {
+                memcpy(num, "430", 3);
+                changed = true;
+            }
+        }
+    }
+
+    // Metal numbers patches across every instance of a draw, but GL starts
+    // gl_PrimitiveID over for each instance. The tessellation stages take the
+    // patch number modulo a count MGL writes at draw time.
+    if ((type == GL_TESS_CONTROL_SHADER || type == GL_TESS_EVALUATION_SHADER) && strstr(out, "gl_PrimitiveID"))
+    {
+        static const char repl[] = "(mglPatchesU > 0 ? gl_PrimitiveID % mglPatchesU : gl_PrimitiveID)";
+        static const char decl[] = "uniform int mglPatchesU;\n";
+        size_t hits = 0;
+
+        for (const char *p = out; (p = strstr(p, "gl_PrimitiveID")) != NULL; p += 14)
+            hits++;
+
+        char *fixed = (char *)malloc(strlen(out) + hits * sizeof(repl) + sizeof(decl) + 1);
+
+        if (fixed)
+        {
+            // the declaration goes in after any # lines at the top
+            const char *at = out;
+
+            for (;;)
+            {
+                while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n')
+                    at++;
+
+                if (*at != '#')
+                    break;
+
+                while (*at && *at != '\n')
+                    at++;
+            }
+
+            size_t f = (size_t)(at - out);
+
+            memcpy(fixed, out, f);
+            memcpy(fixed + f, decl, sizeof(decl) - 1);
+            f += sizeof(decl) - 1;
+
+            for (const char *p = at; *p;)
+            {
+                if (!strncmp(p, "gl_PrimitiveID", 14) &&
+                    !isalnum((unsigned char)p[14]) && p[14] != '_' &&
+                    (p == out || (!isalnum((unsigned char)p[-1]) && p[-1] != '_')))
+                {
+                    memcpy(fixed + f, repl, sizeof(repl) - 1);
+                    f += sizeof(repl) - 1;
+                    p += 14;
+                }
+                else
+                    fixed[f++] = *p++;
+            }
+
+            fixed[f] = 0;
+            free(out);
+            out = fixed;
+            changed = true;
+        }
     }
 
     // "invariant" on an input changes nothing, and GL lets any stage but the

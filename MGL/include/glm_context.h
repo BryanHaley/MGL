@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <stdint.h>
 
 #include <mach/vm_types.h>
 #include <glslang_c_interface.h>
@@ -441,6 +442,27 @@ typedef struct VertexArray_t {
 // block of input slots, one per point the highest level could make.
 #define MGL_TES_MAX_LEVEL        64
 #define MGL_TES_POINTS_PER_PATCH (MGL_TES_MAX_LEVEL * (MGL_TES_MAX_LEVEL + 1))
+// isolines drawn as lines: every segment of every line gets two slots
+#define MGL_TES_SEGMENTS_PER_PATCH (MGL_TES_MAX_LEVEL * MGL_TES_MAX_LEVEL)
+// Triangles and quads cut up on the CPU (tessellator.c): a patch has at most
+// 65 x 65 vertices, which is also the grid Metal is asked to run the
+// evaluation shader over. Each patch's block in the coordinate buffer is a
+// header, the outer levels, then one vec4 per vertex.
+#define MGL_TES_GEN_VERTS    ((MGL_TES_MAX_LEVEL + 1) * (MGL_TES_MAX_LEVEL + 1))
+#define MGL_TES_GEN_STRIDE   (MGL_TES_GEN_VERTS + 2)
+#define MGL_TES_GEN_BINDING  15
+
+typedef struct { float u, v, w; } MglTessCoord;
+
+// Cuts one patch up the way GL does. domain 0 triangles, 1 quads, 2 isolines;
+// spacing 0 equal, 1 fractional even, 2 fractional odd. Fills coords with the
+// vertices and index with the primitives' vertices (three a triangle, two a
+// line, one a point).
+// Returns the vertex count, 0 for a dropped patch, -1 when it does not fit.
+int mglTessellate(int domain, int spacing, bool point_mode, bool cw,
+                  const float outer[4], const float inner[2],
+                  MglTessCoord *coords, int max_coords,
+                  uint32_t *index, int max_index, int *prim_count);
 
 // Transform feedback writes through storage blocks of its own, starting here.
 #define MGL_XFB_FIRST_BINDING 16
@@ -506,6 +528,7 @@ typedef struct GeometryInfo_t {
     GLint  vs_in_slot;
     GLint  gs_in_slot, gs_out_slot, gs_index_slot;
     GLint  pass_out_slot;
+    GLint  tes_gen_slot;            // the CPU tessellator's coordinates
     // the three numbers the compute pass is told about this draw
     GLint  prims_loc, indexed_loc, first_loc, stride_loc;
     // where each output sits in one emitted vertex, for transform feedback
@@ -535,8 +558,14 @@ const void *mglGlslangResource(GLMContext ctx);
 
 bool  mglRewriteGeometryShader(const char *src, GeometryInfo *gi);
 char *mglAddTessPointCapture(const char *tes_src, const GeometryInfo *gi);
-bool  mglTesIsPointIsolines(const char *tes_src);
-char *mglPassThroughGeometry(const char *tes_src);
+char *mglAddTessGeneralCapture(const char *tes_src, const GeometryInfo *gi);
+char *mglTouchTessInputs(const char *tes_src, const char *writer_src, bool writer_is_control);
+int   mglTesIsolineKind(const char *tes_src);    // 0 none, 1 point_mode, 2 lines
+// what an evaluation shader's layout(...) in; says: domain 0 triangles, 1
+// quads, 2 isolines, -1 none; spacing 0 equal, 1 fractional even, 2 odd
+void  mglTesLayout(const char *tes_src, int *domain, int *spacing, bool *cw, bool *points);
+// input 0 points, 1 lines, 2 triangles
+char *mglPassThroughGeometry(const char *tes_src, int input);
 char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi);
 void  mglFreeGeometryInfo(GeometryInfo *gi);
 
@@ -628,6 +657,17 @@ typedef struct TessInfo_t {
     GLuint    winding;             // SpvExecutionModeVertexOrderCw / Ccw
     GLboolean point_mode;
     GLboolean quad_isolines;       // isolines run as quads to feed a geometry shader
+    GLboolean isoline_segments;    // ... and handed over as line segments, not points
+    // triangles or quads cut up on the CPU and fed to a geometry stage, for
+    // transform feedback, point mode, or a geometry shader after them
+    GLboolean general;
+    GLint     gen_domain, gen_spacing;
+    GLboolean gen_cw, gen_points;
+    // what the evaluation shader itself declared, for the program queries;
+    // the stage Metal runs may be a rewrite with a different layout
+    GLint     gl_domain, gl_spacing;
+    GLboolean gl_cw, gl_points;
+    GLint     patches_loc;         // mglPatchesU, patches per instance, -1 when unused
     GLboolean lower_left;
     GLuint    out_control_points;  // vertices the control shader emits per patch
 } TessInfo;
@@ -744,6 +784,11 @@ typedef struct Program_t {
     // glBindAttribLocation and glBindFragDataLocation(Indexed), applied at link
     struct { char *name; GLuint location; GLuint index; } attrib_binds[32], frag_binds[32];
     GLint attrib_bind_count, frag_bind_count;
+    // what each stage was linked from, and which link this is, so a program
+    // pipeline can link its stages together again (pipeline_draw.c)
+    char   *stage_src[_MAX_SHADER_TYPES];
+    GLuint  link_serial;
+    GLboolean linked_separable;     // PROGRAM_SEPARABLE as of the last link
 } Program;
 
 // True once a program has linked a geometry stage. An application may detach
@@ -762,6 +807,13 @@ typedef struct ProgramPipeline_t {
     GLuint name;
     GLboolean validated;
     Program *stage_programs[_MAX_SHADER_TYPES];  // Programs attached to each stage
+    // the stages linked into one program for drawing, and the links it came from
+    Program *merged;
+    GLuint   merged_from[_MAX_SHADER_TYPES];
+    // a generated name is only an object once it is bound or used
+    GLboolean created;
+    // where glUniform* goes when no program is current (glActiveShaderProgram)
+    Program *active;
 } ProgramPipeline;
 
 // How many render encoders' worth of occlusion counting a frame can hold.

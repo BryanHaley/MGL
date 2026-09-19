@@ -899,7 +899,7 @@ GPU_TEST(misc_state, program_pipeline_queries)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glActiveShaderProgram(pp, 999123);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glBindProgramPipeline(0);
     glDeleteProgramPipelines(1, &pp);

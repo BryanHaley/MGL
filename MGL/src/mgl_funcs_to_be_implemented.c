@@ -28,6 +28,7 @@ extern GLint programResourceLocation(GLMContext ctx, GLuint program, GLenum prog
 extern GLint programResourceLocationIndex(GLMContext ctx, GLuint program, GLenum programInterface, const GLchar *name);
 extern ProgramPipeline *findProgramPipeline(GLMContext ctx, GLuint pipeline);
 extern Program *findProgram(GLMContext ctx, GLuint program);
+extern Shader *findShader(GLMContext ctx, GLuint shader);
 extern bool validShaderType(GLenum shadertype);
 
 // Forward declarations for the KHR_debug label store from error.c
@@ -431,34 +432,64 @@ void mglCopyImageSubData(GLMContext ctx, GLuint srcName, GLenum srcTarget, GLint
 
 void mglCreateProgramPipelines(GLMContext ctx, GLsizei n, GLuint *pipelines)
 {
+	ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
+
 	for (GLsizei i = 0; i < n; i++)
 	{
 		mglGenProgramPipelines(ctx, 1, &pipelines[i]);
+
+		ProgramPipeline *pp = findProgramPipeline(ctx, pipelines[i]);
+
+		if (pp)
+			pp->created = GL_TRUE;
 	}
 }
 
 
 GLuint  mglCreateShaderProgramv(GLMContext ctx, GLenum type, GLsizei count, const GLchar *const*strings)
 {
+	ERROR_CHECK_RETURN_VALUE(validShaderType(type), GL_INVALID_ENUM, 0);
+	ERROR_CHECK_RETURN_VALUE(count >= 0, GL_INVALID_VALUE, 0);
+
 	GLuint shader = mglCreateShader(ctx, type);
 	if (!shader)
 		return 0;
-	
+
 	mglShaderSource(ctx, shader, count, strings, NULL);
 	mglCompileShader(ctx, shader);
-	
+
 	GLuint program = mglCreateProgram(ctx);
 	if (!program) {
 		mglDeleteShader(ctx, shader);
 		return 0;
 	}
-	
-	mglAttachShader(ctx, program, shader);
-	mglLinkProgram(ctx, program);
 
-	// the spec detaches before deleting, so the program ends up with no
-	// attached shaders at all
-	mglDetachShader(ctx, program, shader);
+	// what this call makes is always a separable program
+	Program *pptr = findProgram(ctx, program);
+	GLint compiled = GL_FALSE;
+
+	mglGetShaderiv(ctx, shader, GL_COMPILE_STATUS, &compiled);
+
+	if (pptr)
+		pptr->separable = GL_TRUE;
+
+	// the spec's own sequence: only a shader that compiled is linked, and the
+	// shader's log goes onto the program either way
+	if (compiled)
+	{
+		mglAttachShader(ctx, program, shader);
+		mglLinkProgram(ctx, program);
+		mglDetachShader(ctx, program, shader);
+	}
+	else if (pptr)
+	{
+		Shader *sptr = findShader(ctx, shader);
+
+		free(pptr->log);
+		pptr->log = strdup(sptr && sptr->log ? sptr->log : "the shader did not compile");
+		pptr->link_status = GL_FALSE;
+	}
+
 	mglDeleteShader(ctx, shader);
 
 	return program;
@@ -587,7 +618,7 @@ void mglGetObjectPtrLabel(GLMContext ctx, const void *ptr, GLsizei bufSize, GLsi
 
 void mglGetProgramPipelineInfoLog(GLMContext ctx, GLuint pipeline, GLsizei bufSize, GLsizei *length, GLchar *infoLog)
 {
-	ERROR_CHECK_RETURN(findProgramPipeline(ctx, pipeline), GL_INVALID_OPERATION);
+	ERROR_CHECK_RETURN(findProgramPipeline(ctx, pipeline), GL_INVALID_VALUE);
 	ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
 
 	// MGL's pipelines never log anything, so the log is always empty

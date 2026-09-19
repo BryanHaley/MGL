@@ -679,6 +679,69 @@ void mglBindTextureUnit(GLMContext ctx, GLuint unit, GLuint texture)
         syncTextureBindings(ctx);
 }
 
+static size_t page_size_align(size_t size);
+
+// glGenerateMipmap defines every level down to 1x1 (or GL_TEXTURE_MAX_LEVEL).
+// Levels the app never gave get storage here, so the Metal texture is made
+// with room for the chain Metal is about to fill.
+static void defineMipChain(GLMContext ctx, Texture *tex)
+{
+    bool is_3d = tex->target == GL_TEXTURE_3D;
+    bool layers_in_height = tex->target == GL_TEXTURE_1D_ARRAY;
+    int faces = (tex->target == GL_TEXTURE_CUBE_MAP) ? 6 : 1;
+    TextureLevel *base = &tex->faces[0].levels[0];
+    GLsizei w = base->width, h = base->height, d = base->depth;
+    GLuint biggest = MAX(w, MAX(layers_in_height ? 1 : h, is_3d ? d : 1));
+    GLuint last = ilog2(biggest);
+
+    if (tex->immutable_storage || mglFormatIsCompressed(tex->internalformat))
+        return;
+
+    if (last > tex->params.max_level)
+        last = tex->params.max_level;
+
+    if (last >= (GLuint)tex->mipmap_levels)
+        last = tex->mipmap_levels - 1;
+
+    for (GLuint level = 1; level <= last; level++)
+    {
+        w = MAX(w / 2, 1);
+
+        if (!layers_in_height)
+            h = MAX(h / 2, 1);
+
+        if (is_3d)
+            d = MAX(d / 2, 1);
+
+        for (int face = 0; face < faces; face++)
+        {
+            TextureLevel *lvl = &tex->faces[face].levels[level];
+            size_t size = mglFormatImageSize(tex->internalformat, w, h, d ? d : 1);
+            vm_address_t data;
+
+            if (lvl->complete && lvl->width == w && lvl->height == h && lvl->depth == d)
+                continue;
+
+            if (size == 0 || vm_allocate(mach_task_self(), &data, page_size_align(size), VM_FLAGS_ANYWHERE) != KERN_SUCCESS)
+                return;
+
+            if (lvl->complete && lvl->data)
+                vm_deallocate(mach_task_self(), lvl->data, lvl->data_size);
+
+            lvl->width = w;
+            lvl->height = h;
+            lvl->depth = d;
+            lvl->pitch = mglFormatBytesPerRow(tex->internalformat, w);
+            lvl->data = data;
+            lvl->data_size = page_size_align(size);
+            lvl->mtl_format = base->mtl_format;
+            lvl->complete = true;
+        }
+
+        tex->num_levels = MAX(tex->num_levels, level + 1);
+    }
+}
+
 void generateMipmaps(GLMContext ctx, GLuint texture, GLenum target)
 {
     Texture *ptr;
@@ -690,6 +753,8 @@ void generateMipmaps(GLMContext ctx, GLuint texture, GLenum target)
     // level 0 needs to be filled out for mipmap geneation
     ERROR_CHECK_RETURN(ptr->faces[0].levels, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(ptr->faces[0].levels[0].complete, GL_INVALID_OPERATION);
+
+    defineMipChain(ctx, ptr);
 
     ptr->mipmapped = true;
     ptr->genmipmaps = true;
@@ -1920,6 +1985,13 @@ void mglTexImage3D(GLMContext ctx, GLenum target, GLint level, GLint internalfor
             is_array = true;
             break;
 
+        // stored like a 2D array, six faces to a layer
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_PROXY_TEXTURE_CUBE_MAP_ARRAY:
+            ERROR_CHECK_RETURN(width == height && depth % 6 == 0, GL_INVALID_VALUE);
+            is_array = true;
+            break;
+
         default:
             ERROR_RETURN(GL_INVALID_ENUM);
     }
@@ -2439,7 +2511,11 @@ void mglTexStorage3D(GLMContext ctx, GLenum target, GLsizei levels, GLenum inter
             break;
 
         case GL_TEXTURE_2D_ARRAY:
+            is_array = true;
+            break;
+
         case GL_TEXTURE_CUBE_MAP_ARRAY:
+            ERROR_CHECK_RETURN(width == height && depth % 6 == 0, GL_INVALID_VALUE);
             is_array = true;
             break;
 

@@ -289,27 +289,59 @@ GPU_TEST(tessellation, evaluation_without_control_links_and_draws)
     mgl_target_destroy(&t);
 }
 
-// Metal has no isoline tessellator, and a documented gap is better than a
-// program that links and draws nothing.
-GPU_TEST(tessellation, isolines_are_refused_with_a_reason)
+// Metal has no isoline tessellator. MGL runs isolines as quads and hands the
+// segments to a generated geometry stage, so they draw as lines.
+GPU_TEST(tessellation, isolines_draw_as_lines)
 {
     static const char *tcs_iso =
         "#version 410\n"
         "layout(vertices = 4) out;\n"
         "void main() {\n"
         "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
-        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0;\n"
+        "    gl_TessLevelOuter[0] = 4.0; gl_TessLevelOuter[1] = 8.0;\n"
         "}\n";
     static const char *tes_iso =
         "#version 410\n"
         "layout(isolines) in;\n"
-        "void main() { gl_Position = gl_in[0].gl_Position; }\n";
+        "void main() {\n"
+        "    vec2 p = mix(vec2(-0.9), vec2(0.9), gl_TessCoord.xy);\n"
+        "    gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const GLfloat quad[8] = { -1,-1, 1,-1, 1,1, -1,1 };
+    MGLTestTarget t;
+    GLuint vao, vbo;
     char log[1024];
     GLuint prog = linkStages(VS, tcs_iso, tes_iso, FS, log, sizeof log);
 
-    CHECK_MSG(prog == 0, "isolines linked, which Metal cannot honour");
-    CHECK_MSG(strstr(log, "isoline") != NULL,
-              "the info log should say isolines are the problem, got \"%s\"", log);
+    CHECK_MSG(prog != 0, "isolines did not link: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 64, 64, GL_RGBA8, 0))
+        return;
+
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+
+    glViewport(0, 0, 64, 64);
+    glPatchParameteri(GL_PATCH_VERTICES, 4);
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_PATCHES, 0, 4);
+
+    int green = greenPixels(&t);
+
+    // four one-pixel lines across most of the target, not a filled quad
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(green > 4 * 40 && green < 64 * 64 / 4, "isolines covered %d pixels", green);
+
+    glUseProgram(0);
+    mgl_target_destroy(&t);
 }
 
 /* ---------- the patch state queries ---------- */
@@ -341,4 +373,164 @@ GPU_TEST(tessellation, patch_parameters_read_back)
                   i, got_outer[i], outer[i]);
 
     glPatchParameteri(GL_PATCH_VERTICES, 3);
+}
+
+/* ---------- the buffer between the control and evaluation stages ---------- */
+
+// Metal lays that buffer out from each stage's own declarations. A point size
+// the control stage writes and the evaluation stage never reads used to shift
+// every vertex after the first patch.
+GPU_TEST(tessellation, ignored_control_output_keeps_the_layout)
+{
+    static const char *vs =
+        "#version 410\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out vec4 color;\n"
+        "void main() { gl_PointSize = 0.1; color = vec4(0, 1, 0, 1); gl_Position = vec4(p, 0, 1); }\n";
+    static const char *tcs =
+        "#version 410\n"
+        "layout(vertices = 3) out;\n"
+        "in vec4 color[];\n"
+        "out vec4 tcColor[];\n"
+        "void main() {\n"
+        "    tcColor[gl_InvocationID] = color[gl_InvocationID];\n"
+        "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "    gl_out[gl_InvocationID].gl_PointSize = gl_in[gl_InvocationID].gl_PointSize;\n"
+        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0; gl_TessLevelOuter[2] = 1.0;\n"
+        "    gl_TessLevelInner[0] = 1.0;\n"
+        "}\n";
+    static const char *tes =
+        "#version 410\n"
+        "layout(triangles) in;\n"
+        "in vec4 tcColor[];\n"
+        "out vec4 c;\n"
+        "void main() {\n"
+        "    gl_Position = gl_TessCoord.x * gl_in[0].gl_Position + gl_TessCoord.y * gl_in[1].gl_Position\n"
+        "                + gl_TessCoord.z * gl_in[2].gl_Position;\n"
+        "    c = tcColor[0];\n"
+        "}\n";
+    static const char *fs = "#version 410\nin vec4 c;\nout vec4 o;\nvoid main() { o = c; }\n";
+    static const GLfloat two[12] = { -1,-1, 1,-1, -1,1,  1,1, -1,1, 1,-1 };
+    MGLTestTarget t;
+    GLuint vao, vbo;
+    char log[1024];
+    GLuint prog = linkStages(vs, tcs, tes, fs, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "did not link: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 32, 32, GL_RGBA8, 0))
+        return;
+
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof two, two, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glViewport(0, 0, 32, 32);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_PATCHES, 0, 6);
+
+    // both triangles, so the whole target
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(greenPixels(&t), 32 * 32);
+
+    glUseProgram(0);
+    mgl_target_destroy(&t);
+}
+
+/* ---------- built-ins in the tessellation stages ---------- */
+
+GPU_TEST(tessellation, ids_read_back_through_feedback)
+{
+    static const char *vs = "#version 440\nvoid main() { gl_Position = vec4(0, 0, 0, 1); }\n";
+    static const char *tcs =
+        "#version 440\n"
+        "layout(vertices = 4) out;\n"
+        "out int tc_invocation[];\n"
+        "out int tc_prim[];\n"
+        "void main() {\n"
+        "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "    tc_invocation[gl_InvocationID] = gl_InvocationID;\n"
+        "    tc_prim[gl_InvocationID] = gl_PrimitiveID;\n"
+        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0;\n"
+        "    gl_TessLevelOuter[2] = 1.0; gl_TessLevelOuter[3] = 1.0;\n"
+        "    gl_TessLevelInner[0] = 1.0; gl_TessLevelInner[1] = 1.0;\n"
+        "}\n";
+    static const char *tes =
+        "#version 440\n"
+        "layout(isolines, point_mode) in;\n"
+        "in int tc_invocation[];\n"
+        "in int tc_prim[];\n"
+        "flat out int last_invocation;\n"
+        "flat out int patch_vertices;\n"
+        "flat out int prim_tc;\n"
+        "flat out int prim_te;\n"
+        "void main() {\n"
+        "    gl_Position = vec4(0, 0, 0, 1);\n"
+        "    last_invocation = tc_invocation[gl_PatchVerticesIn - 1];\n"
+        "    patch_vertices = gl_PatchVerticesIn;\n"
+        "    prim_tc = tc_prim[0];\n"
+        "    prim_te = gl_PrimitiveID;\n"
+        "}\n";
+    static const char *fs = "#version 440\nvoid main() {}\n";
+    static const char *names[4] = { "last_invocation", "patch_vertices", "prim_tc", "prim_te" };
+    GLuint prog = glCreateProgram();
+    GLuint vao, buf;
+    GLint ok = 0;
+
+    glAttachShader(prog, compileOne(GL_VERTEX_SHADER, vs));
+    glAttachShader(prog, compileOne(GL_TESS_CONTROL_SHADER, tcs));
+    glAttachShader(prog, compileOne(GL_TESS_EVALUATION_SHADER, tes));
+    glAttachShader(prog, compileOne(GL_FRAGMENT_SHADER, fs));
+    glTransformFeedbackVaryings(prog, 4, names, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK_MSG(ok, "did not link");
+
+    if (!ok)
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 4);
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 4096, NULL, GL_STATIC_DRAW);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
+
+    // two patches, drawn twice over: eight patches, two points each
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArraysInstanced(GL_PATCHES, 0, 8, 2);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+
+    const GLint *d = (const GLint *)glMapBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 4096, GL_MAP_READ_BIT);
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK(d != NULL);
+
+    if (d)
+    {
+        // the last vertex of the last patch of the second instance
+        const GLint *v = d + (4 * 2 - 1) * 4;
+
+        CHECK_EQ_INT(d[0], 3);      // gl_InvocationID of the last control invocation
+        CHECK_EQ_INT(d[1], 4);      // gl_PatchVerticesIn
+        CHECK_EQ_INT(d[2], 0);      // gl_PrimitiveID in the control stage
+        CHECK_EQ_INT(d[3], 0);      // and in the evaluation stage
+        CHECK_EQ_INT(v[2], 1);      // starts over for the second instance
+        CHECK_EQ_INT(v[3], 1);
+        glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
 }
