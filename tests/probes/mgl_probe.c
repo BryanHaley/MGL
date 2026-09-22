@@ -25,6 +25,32 @@
 #define GL_CLAMP           0x2900
 #endif
 
+/* And the ones phases 10B to 10D name. */
+#ifndef GL_POINT_SPRITE
+#define GL_POINT_SPRITE      0x8861
+#endif
+#ifndef GL_ALL_ATTRIB_BITS
+#define GL_ALL_ATTRIB_BITS   0x000FFFFF
+#endif
+#ifndef GL_TEXTURE_ENV
+#define GL_TEXTURE_ENV       0x2300
+#define GL_TEXTURE_ENV_MODE  0x2200
+#define GL_MODULATE          0x2100
+#endif
+#ifndef GL_QUADS
+#define GL_QUADS             0x0007
+#endif
+#ifndef GL_POLYGON
+#define GL_POLYGON           0x0009
+#endif
+#ifndef GL_COMPILE
+#define GL_COMPILE           0x1300
+#endif
+#ifndef GL_SELECT
+#define GL_SELECT            0x1C02
+#define GL_RENDER            0x1C00
+#endif
+
 /* --- the slice of GL this file drives ------------------------------------ */
 extern const GLubyte *glGetString(GLenum);
 extern const GLubyte *glGetStringi(GLenum, GLuint);
@@ -96,6 +122,24 @@ extern void  glUniformSubroutinesuiv(GLenum, GLsizei, const GLuint *);
 extern GLboolean glIsEnabled(GLenum);
 extern void  glAlphaFunc(GLenum, GLfloat);
 extern void  glDeleteProgram(GLuint);
+extern void  glDrawBuffer(GLenum);
+extern void  glReadBuffer(GLenum);
+extern void  glBegin(GLenum);
+extern void  glEnd(void);
+extern void  glVertex3f(GLfloat, GLfloat, GLfloat);
+extern void  glPointSize(GLfloat);
+extern void  glPushAttrib(GLbitfield);
+extern void  glPopAttrib(void);
+extern void  glPolygonMode(GLenum, GLenum);
+extern void  glTexEnvi(GLenum, GLenum, GLint);
+extern void  glEdgeFlag(GLboolean);
+extern GLuint glGenLists(GLsizei);
+extern void  glNewList(GLuint, GLenum);
+extern void  glEndList(void);
+extern void  glCallList(GLuint);
+extern GLint glRenderMode(GLenum);
+extern void  glDrawPixels(GLsizei, GLsizei, GLenum, GLenum, const void *);
+extern void  glBitmap(GLsizei, GLsizei, GLfloat, GLfloat, GLfloat, GLfloat, const GLubyte *);
 
 /* --- reporting ----------------------------------------------------------- */
 static int  g_gates;
@@ -1239,6 +1283,190 @@ static void phase10(void)
     (void)fbo;
 }
 
+/* --- phase 10B: the software that is not a Steam game ------------------- */
+/*
+ * CAD packages, scientific viewers, modding utilities and the GoldSrc engine
+ * ask for a compatibility profile for reasons phase 10 does not cover. The
+ * matrix stack, which GoldSrc also needs, is gated in phase 10.
+ */
+static void phase10B(void)
+{
+    phase("PHASE 10B  legacy desktop software and the GoldSrc line");
+
+    drain();
+    glDrawBuffer(GL_FRONT);
+    glReadBuffer(GL_BACK);
+    gate("the default framebuffer answers to the old buffer names",
+         glGetError() == GL_NO_ERROR,
+         "GL_FRONT, GL_BACK, GL_AUXi and the stereo pair, for overlays");
+
+    drain();
+    glBegin(GL_TRIANGLES);
+    glVertex3f(0.0f, 0.0f, 0.0f);
+    glVertex3f(1.0f, 0.0f, 0.0f);
+    glVertex3f(0.0f, 1.0f, 0.0f);
+    glEnd();
+    gate("glBegin and glEnd gather into a buffer and draw",
+         glGetError() == GL_NO_ERROR,
+         "one feature unlocks a graveyard of internal tools");
+
+    drain();
+    glEnable(GL_POINT_SPRITE);
+    glPointSize(4.0f);
+    gate("point sprites size and texture themselves",
+         glGetError() == GL_NO_ERROR,
+         "particles and sparks drawn without building quads");
+
+    drain();
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glPopAttrib();
+    gate("glPushAttrib and glPopAttrib save and restore state",
+         glGetError() == GL_NO_ERROR,
+         "GUI toolkits wrap every custom widget in one");
+
+    drain();
+    glPolygonMode(GL_FRONT, GL_FILL);
+    glPolygonMode(GL_BACK, GL_LINE);
+    gate("front and back rasterise differently",
+         glGetError() == GL_NO_ERROR,
+         "wireframe over shaded, which CAD draws in a single pass");
+
+    drain();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    gate("glTexEnv combines a texture with the fragment colour",
+         glGetError() == GL_NO_ERROR,
+         "lightmaps and detail maps without a shader of their own");
+
+    drain();
+    glEdgeFlag(1);
+    gate("glEdgeFlag is accepted", glGetError() == GL_NO_ERROR,
+         "modelling tools mark which polygon edges a wireframe draws");
+
+    gate("GL_ARB_multitexture advertised", hasExt("GL_ARB_multitexture"),
+         "GoldSrc looks for the extension string, not the core entry point");
+}
+
+/* --- phase 10C: the rest of the vintage stack --------------------------- */
+/*
+ * What is left after phase 10B before an application stops needing a
+ * compatibility profile at all.
+ */
+static void phase10C(void)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+    static const GLubyte one_pixel[4] = { 255, 255, 255, 255 };
+    static const GLubyte one_bit[1] = { 0x80 };
+    GLuint list, query = 0, prog;
+    GLuint passed = 0;
+    int quads_drew = 0;
+
+    phase("PHASE 10C  the rest of the vintage stack");
+
+    /* a real draw, so the gate answers about the mode and not the setup */
+    probeTarget(NULL);
+    probeQuadVAO();
+    prog = buildProgram(vs, NULL, NULL, NULL, fs);
+
+    if (prog)
+    {
+        glViewport(0, 0, 64, 64);
+        glUseProgram(prog);
+        glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        drain();
+        glDrawArrays(GL_QUADS, 0, 4);
+        glFinish();
+        quads_drew = (glGetError() == GL_NO_ERROR) && greenPixels() > 0;
+        glUseProgram(0);
+        glDeleteProgram(prog);
+    }
+
+    gate("GL_QUADS, GL_QUAD_STRIP and GL_POLYGON expand to triangles",
+         quads_drew,
+         "level geometry and flat UI built four vertices at a time");
+
+    drain();
+    list = glGenLists(1);
+    glNewList(list, GL_COMPILE);
+    glEndList();
+    glCallList(list);
+    gate("a display list records commands and replays them",
+         list != 0 && glGetError() == GL_NO_ERROR,
+         "terrain chunks, fonts and models compiled once");
+
+    drain();
+    glRenderMode(GL_SELECT);
+    glRenderMode(GL_RENDER);
+    gate("glRenderMode(GL_SELECT) answers what the cursor is over",
+         glGetError() == GL_NO_ERROR,
+         "how every legacy editor handles a click on 3D geometry");
+
+    drain();
+    glDrawPixels(1, 1, GL_RGBA, GL_UNSIGNED_BYTE, one_pixel);
+    glBitmap(1, 1, 0.0f, 0.0f, 0.0f, 0.0f, one_bit);
+    gate("glDrawPixels and glBitmap reach the framebuffer",
+         glGetError() == GL_NO_ERROR,
+         "debug text and HUDs written straight to the screen");
+
+    /* queries are core in 4.6, so this asks whether MGL services them */
+    drain();
+    glGenQueries(1, &query);
+    glBeginQuery(GL_SAMPLES_PASSED, query);
+    glEndQuery(GL_SAMPLES_PASSED);
+    glGetQueryObjectuiv(query, GL_QUERY_RESULT, &passed);
+    gate("occlusion queries return without stalling the caller",
+         query != 0 && glGetError() == GL_NO_ERROR,
+         "flight sims cull scenery by asking what the depth test passed");
+}
+
+/* --- phase 10D: early Mac OS X ------------------------------------------ */
+/*
+ * Screen savers, iTunes visualisers and vintage ports from the PowerPC and
+ * early Intel years, which leaned on Apple's own extensions.
+ */
+static void phase10D(void)
+{
+    GLuint tex = 0;
+    static const GLubyte bgra[4] = { 0, 0, 255, 255 };
+
+    phase("PHASE 10D  early Mac OS X");
+
+    gate("GL_EXT_texture_rectangle aliases the core rectangle target",
+         hasExt("GL_EXT_texture_rectangle"),
+         "the spelling early Mac code checks for before it will run");
+
+    gate("GL_APPLE_client_storage", hasExt("GL_APPLE_client_storage"),
+         "a texture kept in the application's own memory");
+
+    gate("GL_APPLE_texture_range", hasExt("GL_APPLE_texture_range"),
+         "and the hint saying how that memory will be read");
+
+    gate("GL_APPLE_ycbcr_422", hasExt("GL_APPLE_ycbcr_422"),
+         "QuickTime handed video frames to GL in their own colour space");
+
+    gate("GL_APPLE_packed_pixels", hasExt("GL_APPLE_packed_pixels"),
+         "the tokens alone; the unpacking is already core");
+
+    drain();
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra);
+    gate("GL_BGRA uploads without a byte swap", glGetError() == GL_NO_ERROR,
+         "the order the old window server already had the pixels in");
+    glDeleteTextures(1, &tex);
+
+    gate("AGL and CGL context creation is translated", 0,
+         "aglCreateContext and CGLChoosePixelFormat, which this probe "
+         "cannot reach from inside a context");
+}
+
 int main(void)
 {
     printf("MGL phase probe -- %s\n", (const char *)glGetString(GL_VERSION));
@@ -1249,6 +1477,9 @@ int main(void)
     phase6();
     phase8();
     phase10();
+    phase10B();
+    phase10C();
+    phase10D();
 
     printf("    %s\n\n", g_phase_gates ? "-> gates remaining" : "-> PHASE COMPLETE");
     printf("%d gate(s) remaining across the probed phases.\n", g_gates);
