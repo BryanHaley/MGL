@@ -201,6 +201,74 @@ void print_enum(ezxml_t enum_node, FILE *fp_out)
     fprintf(fp_out, "#define %-60s %s\n", name, value);
 }
 
+/* A command listed by more than one GL version is still one function. The
+   walk below visits every <require> block, so remember what has been written
+   and skip repeats. Reset for each file. */
+static char *g_seen[4096];
+static int   g_seen_count;
+
+static void reset_seen(void)
+{
+    for (int i = 0; i < g_seen_count; i++)
+        free(g_seen[i]);
+
+    g_seen_count = 0;
+}
+
+static int already_emitted(const char *name)
+{
+    for (int i = 0; i < g_seen_count; i++)
+        if (!strcmp(g_seen[i], name))
+            return 1;
+
+    if (g_seen_count < (int)(sizeof(g_seen) / sizeof(g_seen[0])))
+        g_seen[g_seen_count++] = strdup(name);
+
+    return 0;
+}
+
+/* The return type is split across the proto text and its <ptype> child:
+   glGetString is "const  *" with "GLubyte" sitting at offset 6. Putting the
+   two back together is the only way to keep the const and the star. */
+static char *full_return_type(ezxml_t proto)
+{
+    ezxml_t ptype = ezxml_child(proto, string("ptype"));
+
+    if (ptype)
+        return insert_string(proto->txt, ptype->txt, ptype->off);
+
+    return strdup(proto->txt ? proto->txt : "void ");
+}
+
+/* Where the macOS SDK and the Khronos registry disagree, the SDK wins for the
+   exported entry points: those sit in the same translation unit as
+   <OpenGL/gl3.h>, so a type the registry has since changed would be a
+   conflicting declaration. Apple's gl3.h still spells these two
+   internalformat parameters GLint.
+
+   This applies to the exported glXxx surface only. The dispatch table and the
+   mglXxx prototypes follow the registry, because that is what MGL's own
+   implementations are written against. */
+static const struct { const char *func; const char *param; const char *type; }
+g_param_overrides[] = {
+    { "glTexImage2DMultisample", "internalformat", "GLint " },
+    { "glTexImage3DMultisample", "internalformat", "GLint " },
+    { 0, 0, 0 }
+};
+
+static const char *param_type_override(const char *func, const char *param)
+{
+    if (!func || !param)
+        return 0;
+
+    for (int i = 0; g_param_overrides[i].func; i++)
+        if (!strcmp(g_param_overrides[i].func, func) &&
+            !strcmp(g_param_overrides[i].param, param))
+            return g_param_overrides[i].type;
+
+    return 0;
+}
+
 int proto_has_return_type(ezxml_t proto)
 {
     ezxml_t ptype;
@@ -215,7 +283,9 @@ int proto_has_return_type(ezxml_t proto)
         return 1;
     }
 
-    if (strstr("void", proto->txt))
+    /* no <ptype>, so the proto text is the whole type: "void " returns
+       nothing, "void *" returns a pointer */
+    if (strchr(proto->txt, '*'))
     {
         return 1;
     }
@@ -237,12 +307,8 @@ char *proto_return_type(ezxml_t proto)
         return ptype->txt;
     }
 
-    if (strstr("void", proto->txt))
-    {
-        return proto->txt;
-    }
-
-    return 0;
+    /* no <ptype>: the proto text is the type, e.g. "void *" */
+    return proto->txt;
 }
 
 int get_param_count(ezxml_t command)
@@ -268,6 +334,8 @@ void print_command(ezxml_t command, int mode, FILE *fp_out)
 
     name = ezxml_child(proto, string("name"));
 
+    const char *func_name = (name && name->txt) ? name->txt : 0;
+
     ptype = ezxml_child(proto, string("ptype"));
 
     int param_count = get_param_count(command);
@@ -278,48 +346,22 @@ void print_command(ezxml_t command, int mode, FILE *fp_out)
 
         dispatch_str = make_dispatch_str(name->txt);
 
-        if (ptype)
-        {
-            if (param_count)
-            {
-                fprintf(fp_out, "\t\t%s (*%s)(GLMContext ctx, ", ptype->txt, dispatch_str);
-            }
-            else
-            {
-                fprintf(fp_out, "\t\t%s (*%s)(GLMContext ctx", ptype->txt, dispatch_str);
-            }
-        }
-        else
-        {
-            if (param_count)
-            {
-                fprintf(fp_out, "\t\t%s (*%s)(GLMContext ctx, ", proto->txt, dispatch_str);
-            }
-            else
-            {
-                fprintf(fp_out, "\t\t%s (*%s)(GLMContext ctx", proto->txt, dispatch_str);
-            }
-        }
+        char *ret = full_return_type(proto);
 
+        fprintf(fp_out, "        %s(*%s)(GLMContext ctx", ret, dispatch_str);
+
+        free(ret);
         free(dispatch_str);
     }
     else if (mode == kGLHeaders || mode == kGLFuncs)
     {
         char *str;
 
-        str = insert_string(proto->txt, name->txt, name->off);
-        assert(str);
+        char *ret = full_return_type(proto);
 
-        if (ptype)
-        {
-            fprintf(fp_out, "%s %s(", ptype->txt, str);
-        }
-        else
-        {
-            fprintf(fp_out, "%s(", str);
-        }
+        fprintf(fp_out, "%s%s(", ret, name->txt);
 
-        free(str);
+        free(ret);
     }
     else if (mode == kMGLHeaders || mode == kMGLFuncs)
     {
@@ -328,34 +370,11 @@ void print_command(ezxml_t command, int mode, FILE *fp_out)
         mgl_func = make_mgl_str(name->txt);
         assert(mgl_func);
 
-        str = insert_string(proto->txt, mgl_func, name->off);
-        assert(str);
+        char *ret = full_return_type(proto);
 
-        if (param_count)
-        {
-            if (ptype)
-            {
-                fprintf(fp_out, "%s %s(GLMContext ctx, ", ptype->txt, str);
-            }
-            else
-            {
-                fprintf(fp_out, "%s(GLMContext ctx, ", str);
-            }
-        }
-        else
-        {
-            if (ptype)
-            {
-                fprintf(fp_out, "%s %s(GLMContext ctx", ptype->txt, str);
-            }
-            else
-            {
-                fprintf(fp_out, "%s(GLMContext ctx", str);
-            }
-        }
+        fprintf(fp_out, "%s%s(GLMContext ctx", ret, mgl_func);
 
-        free(str);
-
+        free(ret);
         free(mgl_func);
     }
     else
@@ -365,10 +384,7 @@ void print_command(ezxml_t command, int mode, FILE *fp_out)
 
     if (param_count)
     {
-        if (!strcmp("glGenBuffers", name->txt))
-        {
-            printf("glGenBuffers\n");
-        }
+        int first = (mode == kGLHeaders || mode == kGLFuncs);
 
         for (param = ezxml_child(command, "param"); param; param = param->next)
         {
@@ -380,29 +396,33 @@ void print_command(ezxml_t command, int mode, FILE *fp_out)
             assert(name);
             assert(name->txt);
 
-            param_count--;
+            /* the separator goes in front, so a parameter whose type has no
+               <ptype> child -- "const void *pixels" -- still gets one */
+            if (!first)
+            {
+                fprintf(fp_out, ", ");
+            }
 
-            if (ptype)
+            first = 0;
+
+            const char *override = (mode == kGLHeaders || mode == kGLFuncs)
+                                 ? param_type_override(func_name, name->txt) : 0;
+
+            if (override)
+            {
+                fprintf(fp_out, "%s%s", override, name->txt);
+            }
+            else if (ptype)
             {
                 char *str = insert_string(param->txt, ptype->txt, ptype->off);
 
                 fprintf(fp_out, "%s%s", str, name->txt);
-
-                if (param_count)
-                {
-                    fprintf(fp_out, ", ");
-                }
 
                 free(str);
             }
             else
             {
                 fprintf(fp_out, "%s%s", param->txt, name->txt);
-
-                if (param_count)
-                {
-                    fprintf(fp_out, ", ");
-                }
             }
         }
     }
@@ -418,49 +438,29 @@ void print_command(ezxml_t command, int mode, FILE *fp_out)
         name = ezxml_child(proto, string("name"));
 
         fprintf(fp_out, ")\n{\n");
-        fprintf(fp_out, "\tGLMContext ctx = GET_CONTEXT();\n\n");
+        fprintf(fp_out, "    GLMContext ctx = GET_CONTEXT();\n\n");
 
         dispatch_name = make_dispatch_str(name->txt);
 
         if (proto_has_return_type(proto))
         {
-            fprintf(fp_out, "\treturn ctx->dispatch.%s(ctx, ", dispatch_name);
+            fprintf(fp_out, "    return ctx->dispatch.%s(ctx", dispatch_name);
         }
         else
         {
-            fprintf(fp_out, "\tctx->dispatch.%s(ctx, ", dispatch_name);
+            fprintf(fp_out, "    ctx->dispatch.%s(ctx", dispatch_name);
         }
 
         free(dispatch_name);
 
-        param_count = get_param_count(command);
-
-        if (param_count)
+        for (param = ezxml_child(command, "param"); param; param = param->next)
         {
-            for (param = ezxml_child(command, "param"); param; param = param->next)
-            {
-                ptype = ezxml_child(param, "ptype");
-                name = ezxml_child(param, "name");
+            name = ezxml_child(param, "name");
 
-                assert(name);
-                assert(name->txt);
+            assert(name);
+            assert(name->txt);
 
-                param_count--;
-
-                if (ptype)
-                {
-                    fprintf(fp_out, "%s", name->txt);
-
-                    if (param_count)
-                    {
-                        fprintf(fp_out, ", ");
-                    }
-                }
-                else
-                {
-                    fprintf(fp_out, "%s", name->txt);
-                }
-            }
+            fprintf(fp_out, ", %s", name->txt);
         }
         // end of function call
         fprintf(fp_out, ");\n");
@@ -519,6 +519,11 @@ void print_command(ezxml_t command, int mode, FILE *fp_out)
             {
                 fprintf(fp_out, "\t%s* ret = NULL;\n\n", ret_type);
             }
+            else if (strchr(ret_type, '*'))
+            {
+                /* glMapBuffer and friends, whose type has no <ptype> child */
+                fprintf(fp_out, "\t%sret = NULL;\n\n", ret_type);
+            }
             else
             {
                 assert(0);
@@ -559,7 +564,7 @@ void print_init_dispatch_command(ezxml_t command, FILE *fp_out)
     dispatch_name = make_dispatch_str(name->txt);
     mgl_name = make_mgl_str(name->txt);
 
-    fprintf(fp_out, "\tctx->dispatch.%s = %s;\n", dispatch_name, mgl_name);
+    fprintf(fp_out, "    ctx->dispatch.%s = %s;\n", dispatch_name, mgl_name);
 
     free(dispatch_name);
     free(mgl_name);
@@ -764,6 +769,9 @@ void print_required_feature_commands(ezxml_t registry, ezxml_t feature, int mode
             command_node = find_command(registry, name);
             assert(command_node);
 
+            if (already_emitted(name))
+                continue;
+
             if (mode == kMGLDispatchInit)
             {
                 print_init_dispatch_command(command_node, fout);
@@ -801,9 +809,30 @@ void print_required_commands(ezxml_t registry, int mode, FILE *fout, unsigned es
     }
 }
 
+/* Where the generated files land. The five the build compiles are written
+   into the source tree; mgl.c and gl_core.h are reference output nothing
+   consumes, so they stay in /tmp. */
+static const char *g_src_dir = "/tmp";
+static const char *g_include_dir = "/tmp";
+
+static const char *out_path(const char *dir, const char *leaf)
+{
+    static char buf[8][1024];
+    static int which;
+
+    char *p = buf[which++ & 7];
+
+    snprintf(p, sizeof(buf[0]), "%s/%s", dir, leaf);
+
+    return p;
+}
+
 void print_about(FILE *fp_out, const char *filename)
 {
-    fprintf(fp_out, "//\n// %s\n", filename);
+    /* the leaf only, so the banner does not record where it was generated */
+    const char *leaf = strrchr(filename, '/');
+
+    fprintf(fp_out, "//\n// %s\n", leaf ? leaf + 1 : filename);
     fprintf(fp_out, "//\n// Autogenerated from gl.xml\n");
     fprintf(fp_out, "//\n// Mike Larson\n");
     fprintf(fp_out, "//\n// January 2026\n");
@@ -839,16 +868,31 @@ void print_mgl_core_header(ezxml_t registry)
 }
 
 
+/* What every generated entry-point file needs in front of it: the GL types,
+   the context, and the lazy accessor the bodies below call. */
+static void print_entry_point_prologue(FILE *fp_out)
+{
+    fprintf(fp_out, "#include \"glcorearb.h\"\n\n");
+    fprintf(fp_out, "#include \"glm_context.h\"\n\n");
+    fprintf(fp_out, "extern GLMContext _ctx;\n");
+    fprintf(fp_out, "extern void mgl_lazy_init(void);\n\n");
+    fprintf(fp_out, "#define GET_CONTEXT()   (mgl_lazy_init(), _ctx)\n\n");
+}
+
 void print_mgl_core_source(ezxml_t registry)
 {
     FILE *fp_out;
-    const char *filename = "/tmp/gl_core.c";
+    const char *filename = out_path(g_src_dir, "gl_core.c");
 
     fp_out = fopen(filename, "w");
     assert(fp_out);
 
     // print mgl_core.h header
     print_about(fp_out, filename);
+
+    print_entry_point_prologue(fp_out);
+
+    reset_seen();
 
     // print the required commands
     print_required_commands(registry, kGLFuncs, fp_out, 0);
@@ -859,13 +903,17 @@ void print_mgl_core_source(ezxml_t registry)
 void print_mgl_es_source(ezxml_t registry)
 {
     FILE *fp_out;
-    const char *filename = "/tmp/gl_es.c";
+    const char *filename = out_path(g_src_dir, "gl_es.c");
 
     fp_out = fopen(filename, "w");
     assert(fp_out);
 
     // print mgl_core.h header
     print_about(fp_out, filename);
+
+    print_entry_point_prologue(fp_out);
+
+    reset_seen();
 
     // print the required commands
     print_required_commands(registry, kGLFuncs, fp_out, 1);
@@ -876,13 +924,20 @@ void print_mgl_es_source(ezxml_t registry)
 void print_mgl_dispatch(ezxml_t registry)
 {
     FILE *fp_out;
-    const char *filename = "/tmp/glm_dispatch.h";
+    const char *filename = out_path(g_include_dir, "glm_dispatch.h");
 
     fp_out = fopen(filename, "w");
     assert(fp_out);
 
     // print mgl_core.h header
     print_about(fp_out, filename);
+
+    fprintf(fp_out, "#ifndef glm_dispatch_h\n");
+    fprintf(fp_out, "#define glm_dispatch_h\n\n");
+    fprintf(fp_out, "#include \"glcorearb.h\"\n");
+    fprintf(fp_out, "#include \"gltypes.h\"\n\n");
+    fprintf(fp_out, "typedef struct GLMContextRec_t *GLMContext;\n\n");
+    fprintf(fp_out, "void init_dispatch(GLMContext ctx);\n\n");
 
     for (int version=0; version<2; version++)
     {
@@ -895,19 +950,23 @@ void print_mgl_dispatch(ezxml_t registry)
             fprintf(fp_out, "\nstruct GLM_ES_DispatchTable {\n");
         }
         
+        reset_seen();
+
         // print the required commands
         print_required_commands(registry, kMGLDispatch, fp_out, version);
         
         fprintf(fp_out, "};\n");
     }
-    
+
+    fprintf(fp_out, "\n\n#endif // #ifndef glm_dispatch_h\n");
+
     fclose(fp_out);
 }
 
 void print_mgl_init_dispatch(ezxml_t registry)
 {
     FILE *fp_out;
-    const char *filename = "/tmp/glm_dispatch.c";
+    const char *filename = out_path(g_src_dir, "glm_dispatch.c");
 
     fp_out = fopen(filename, "w");
     assert(fp_out);
@@ -917,24 +976,29 @@ void print_mgl_init_dispatch(ezxml_t registry)
 
     fprintf(fp_out, "#include \"mgl.h\"\n\n");
 
+    /* The pipeline-draw wrappers swap themselves over the table once it is
+       filled in. Leaving this call out silently drops every wrapper, so it is
+       generated rather than added by hand afterwards. */
+    fprintf(fp_out, "void mglWrapPipelineDraws(GLMContext ctx);\n\n");
+
     for (int version=0; version<2; version++)
     {
-        
-        if (version == 0)
-        {
-            fprintf(fp_out, "void init_dispatch(GLMContext ctx)\n");
-        }
-        else
-        {
-            fprintf(fp_out, "void init_es_dispatch(GLMContext ctx)\n");
-        }
-        
+        /* core and ES are two builds of the same driver, not two functions in
+           one binary, so each defines init_dispatch behind its own guard */
+        fprintf(fp_out, "#ifdef %s\n", version == 0 ? "MGL_GL_CORE" : "MGL_GL_ES");
+
+        fprintf(fp_out, "void init_dispatch(GLMContext ctx)\n");
+
         fprintf(fp_out, "{\n");
         
+        reset_seen();
+
         // print the required commands
         print_required_commands(registry, kMGLDispatchInit, fp_out, version);
-        
-        fprintf(fp_out, "};\n");
+
+        fprintf(fp_out, "\n    mglWrapPipelineDraws(ctx);\n");
+        fprintf(fp_out, "}\n");
+        fprintf(fp_out, "#endif\n\n");
     }
     
     fclose(fp_out);
@@ -943,7 +1007,7 @@ void print_mgl_init_dispatch(ezxml_t registry)
 void print_mgl_header(ezxml_t registry)
 {
     FILE *fp_out;
-    const char *filename = "/tmp/mgl.h";
+    const char *filename = out_path(g_include_dir, "mgl.h");
 
     fp_out = fopen(filename, "w");
     assert(fp_out);
@@ -951,8 +1015,28 @@ void print_mgl_header(ezxml_t registry)
     // print mgl_core.h header
     print_about(fp_out, filename);
 
+    fprintf(fp_out, "#ifndef mgl_h\n");
+    fprintf(fp_out, "#define mgl_h\n\n");
+    fprintf(fp_out, "#include <stdio.h>\n");
+    fprintf(fp_out, "#include <stdlib.h>\n");
+    fprintf(fp_out, "#include <strings.h>\n");
+    fprintf(fp_out, "#include <assert.h>\n\n");
+    fprintf(fp_out, "#include \"gltypes.h\"\n");
+    fprintf(fp_out, "#include \"glcorearb.h\"\n");
+    fprintf(fp_out, "#include \"glm_context.h\"\n\n");
+
+    reset_seen();
+
     // print the required commands
     print_required_commands(registry, kMGLHeaders, fp_out, 0);
+
+    /* ES adds a handful of entry points core does not have. The tally is not
+       reset, so only those extras come out here. */
+    fprintf(fp_out, "\n#ifdef MGL_GL_ES\n");
+    print_required_commands(registry, kMGLHeaders, fp_out, 1);
+    fprintf(fp_out, "#endif\n");
+
+    fprintf(fp_out, "\n#endif /* mgl_h */\n");
 
     fclose(fp_out);
 }
@@ -968,8 +1052,16 @@ void print_mgl_functions(ezxml_t registry)
     // print mgl_core.h header
     print_about(fp_out, filename);
 
+    fprintf(fp_out, "#include \"mgl.h\"\n\n");
+
+    reset_seen();
+
     // print the required commands
     print_required_commands(registry, kMGLFuncs, fp_out, 0);
+
+    fprintf(fp_out, "\n#ifdef MGL_GL_ES\n");
+    print_required_commands(registry, kMGLFuncs, fp_out, 1);
+    fprintf(fp_out, "#endif\n");
 
     fclose(fp_out);
 }
@@ -978,9 +1070,30 @@ void print_mgl_functions(ezxml_t registry)
 int main(int argc, char **argv)
 {
     ezxml_t registry;
+    const char *xml = "gl.xml";
 
-    registry = ezxml_parse_file("gl.xml");
-    assert(registry);
+    if (argc > 1)
+        xml = argv[1];
+
+    if (argc > 2)
+        g_src_dir = argv[2];
+
+    if (argc > 3)
+        g_include_dir = argv[3];
+
+    if (argc > 1 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")))
+    {
+        fprintf(stderr, "usage: %s [gl.xml [src_dir [include_dir]]]\n", argv[0]);
+        return 2;
+    }
+
+    registry = ezxml_parse_file(xml);
+
+    if (registry == NULL)
+    {
+        fprintf(stderr, "%s: cannot read %s\n", argv[0], xml);
+        return 1;
+    }
 
     // mgl gl exported enums and prototypes
     print_mgl_core_header(registry);
@@ -1004,4 +1117,6 @@ int main(int argc, char **argv)
     print_mgl_functions(registry);
 
     ezxml_free(registry);
+
+    return 0;
 }

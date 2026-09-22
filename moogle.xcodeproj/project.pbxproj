@@ -11,7 +11,7 @@
 		FF2DC2612D2C9A830040B838 /* uniforms.c in Sources */ = {isa = PBXBuildFile; fileRef = FF2DC25F2D2C9A830040B838 /* uniforms.c */; };
 		FF2DC2632D2C9B040040B838 /* programs.h in Headers */ = {isa = PBXBuildFile; fileRef = FF2DC2622D2C9B040040B838 /* programs.h */; };
 		FF2DC2642D2C9B040040B838 /* programs.h in Headers */ = {isa = PBXBuildFile; fileRef = FF2DC2622D2C9B040040B838 /* programs.h */; };
-		FF4810152772B23400BBF7C7 /* libMGL.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = FFA83000276F97DE003F1EA0 /* libMGL.dylib */; };
+		FF4810152772B23400BBF7C7 /* libmoogle.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = FFA83000276F97DE003F1EA0 /* libmoogle.dylib */; };
 		FF4811722776963E00BBF7C7 /* tex_param.c in Sources */ = {isa = PBXBuildFile; fileRef = FF4811712776963E00BBF7C7 /* tex_param.c */; };
 		FF7B77A52771054F00C2028F /* ezxml.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B77A32771054F00C2028F /* ezxml.c */; };
 		FF7B77AF2771056B00C2028F /* enum_parser.c in Sources */ = {isa = PBXBuildFile; fileRef = FFA83037276F9D10003F1EA0 /* enum_parser.c */; };
@@ -57,13 +57,13 @@
 		FF7B7AD727728C3200C2028F /* glm_params.h in Headers */ = {isa = PBXBuildFile; fileRef = FF7B7AC727728C3100C2028F /* glm_params.h */; };
 		FF7B7AD827728C3200C2028F /* glm_limits.h in Headers */ = {isa = PBXBuildFile; fileRef = FF7B7AC827728C3100C2028F /* glm_limits.h */; };
 		FF7B7AF7277290EB00C2028F /* gl_core.c in Sources */ = {isa = PBXBuildFile; fileRef = FF7B7AF6277290EB00C2028F /* gl_core.c */; };
-		FF85F2142D28658200A5BDCD /* libMGL.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = FFA83000276F97DE003F1EA0 /* libMGL.dylib */; };
+		FF85F2142D28658200A5BDCD /* libmoogle.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = FFA83000276F97DE003F1EA0 /* libmoogle.dylib */; };
 		FF85F21B2D286AB100A5BDCD /* wgl.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = FF7B77E827710FE100C2028F /* wgl.h */; };
 		FF85F21C2D286AB100A5BDCD /* wglext.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = FF7B77E927710FE100C2028F /* wglext.h */; };
 		FF85F21D2D286AB100A5BDCD /* glext.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = FF7B77EA27710FE100C2028F /* glext.h */; };
 		FF85F21E2D286AB100A5BDCD /* glxext.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = FF7B77EB27710FE100C2028F /* glxext.h */; };
 		FF85F21F2D286AB100A5BDCD /* glcorearb.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = FF7B77EC27710FE100C2028F /* glcorearb.h */; };
-		FF85F2212D286AD400A5BDCD /* libMGL.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = FFA83000276F97DE003F1EA0 /* libMGL.dylib */; };
+		FF85F2212D286AD400A5BDCD /* libmoogle.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = FFA83000276F97DE003F1EA0 /* libmoogle.dylib */; };
 		FF8F91A82780FBBD00A1E546 /* samplers.c in Sources */ = {isa = PBXBuildFile; fileRef = FF8F91A72780FBBD00A1E546 /* samplers.c */; };
 		FF99BF6D2ADF27ED008AE33A /* vertex_arrays.h in Headers */ = {isa = PBXBuildFile; fileRef = FF99BF6C2ADF27ED008AE33A /* vertex_arrays.h */; };
 		FF99BF6E2ADF304A008AE33A /* libglslang.a in Frameworks */ = {isa = PBXBuildFile; fileRef = FF7B788F27717FA400C2028F /* libglslang.a */; };
@@ -163,7 +163,7 @@
 		FFD4EE842F14585E0023B6C3 /* glext.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = FF7B77EA27710FE100C2028F /* glext.h */; };
 		FFD4EE852F14585E0023B6C3 /* glxext.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = FF7B77EB27710FE100C2028F /* glxext.h */; };
 		FFD4EE862F14585E0023B6C3 /* glcorearb.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = FF7B77EC27710FE100C2028F /* glcorearb.h */; };
-		FFD4EE8D2F1459640023B6C3 /* libMGL_ES.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = FFD4EE8C2F14585E0023B6C3 /* libMGL_ES.dylib */; };
+		FFD4EE8D2F1459640023B6C3 /* libmoogle_es.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = FFD4EE8C2F14585E0023B6C3 /* libmoogle_es.dylib */; };
 		FFE8B2C92D29B4CA006B1015 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FFE8B2C82D29B4CA006B1015 /* AppKit.framework */; };
 /* End PBXBuildFile section */
 
@@ -264,7 +264,7 @@
 			dstPath = lib;
 			dstSubfolderSpec = 16;
 			files = (
-				FF85F2212D286AD400A5BDCD /* libMGL.dylib in CopyFiles */,
+				FF85F2212D286AD400A5BDCD /* libmoogle.dylib in CopyFiles */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -307,7 +307,7 @@
 			dstPath = lib;
 			dstSubfolderSpec = 16;
 			files = (
-				FFD4EE8D2F1459640023B6C3 /* libMGL_ES.dylib in CopyFiles */,
+				FFD4EE8D2F1459640023B6C3 /* libmoogle_es.dylib in CopyFiles */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -326,7 +326,7 @@
 		DFC728FA2894855E00990595 /* libSPIRV-Tools-shared.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = "libSPIRV-Tools-shared.dylib"; path = "external/SPIRV-Tools/build/source/libSPIRV-Tools-shared.dylib"; sourceTree = "<group>"; };
 		DFC728FC289485A000990595 /* libSPIRV-Tools.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libSPIRV-Tools.a"; path = "external/SPIRV-Tools/build/source/libSPIRV-Tools.a"; sourceTree = "<group>"; };
 		DFC729002894933400990595 /* test_mgl_glfw.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = test_mgl_glfw.entitlements; sourceTree = SOURCE_ROOT; };
-		FF2DC2592D2C64B20040B838 /* MetalGL.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = MetalGL.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		FF2DC2592D2C64B20040B838 /* MooGLe.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = MooGLe.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		FF2DC25F2D2C9A830040B838 /* uniforms.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = uniforms.c; sourceTree = "<group>"; };
 		FF2DC2622D2C9B040040B838 /* programs.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = programs.h; sourceTree = "<group>"; };
 		FF4811712776963E00BBF7C7 /* tex_param.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = tex_param.c; sourceTree = "<group>"; };
@@ -396,7 +396,7 @@
 		FF7B7AC727728C3100C2028F /* glm_params.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = glm_params.h; sourceTree = "<group>"; };
 		FF7B7AC827728C3100C2028F /* glm_limits.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = glm_limits.h; sourceTree = "<group>"; };
 		FF7B7AF6277290EB00C2028F /* gl_core.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = gl_core.c; sourceTree = "<group>"; };
-		FF85F2102D28658200A5BDCD /* MGL Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "MGL Tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FF85F2102D28658200A5BDCD /* MooGLe Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "MooGLe Tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		FF86AEA92794DD0A00C51A88 /* README.md */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		FF8F91A72780FBBD00A1E546 /* samplers.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = samplers.c; sourceTree = "<group>"; };
 		FF99BF6C2ADF27ED008AE33A /* vertex_arrays.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = vertex_arrays.h; sourceTree = "<group>"; };
@@ -408,23 +408,22 @@
 		FF99BF782ADF30E0008AE33A /* libSPIRV-Tools-reduce.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libSPIRV-Tools-reduce.a"; path = "external/SPIRV-Tools/build/source/reduce/libSPIRV-Tools-reduce.a"; sourceTree = "<group>"; };
 		FF99BF852ADF3145008AE33A /* libglfw3.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libglfw3.a; path = external/glfw/build/src/libglfw3.a; sourceTree = "<group>"; };
 		FFA1EB702782851500EEE5AD /* compute.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = compute.c; sourceTree = "<group>"; };
-		FFA83000276F97DE003F1EA0 /* libMGL.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libMGL.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		FFA83000276F97DE003F1EA0 /* libmoogle.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libmoogle.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		FFA8302C276F9CE4003F1EA0 /* enum_parser */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = enum_parser; sourceTree = BUILT_PRODUCTS_DIR; };
 		FFA83037276F9D10003F1EA0 /* enum_parser.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = enum_parser.c; sourceTree = "<group>"; };
-		FFA83044276F9EBE003F1EA0 /* test_mgl_glfw */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = test_mgl_glfw; sourceTree = BUILT_PRODUCTS_DIR; };
+		FFA83044276F9EBE003F1EA0 /* moogle_glfw_test */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = moogle_glfw_test; sourceTree = BUILT_PRODUCTS_DIR; };
 		FFA83046276F9EBF003F1EA0 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = main.cpp; sourceTree = "<group>"; };
 		FFA83091277026B6003F1EA0 /* gl.xml */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xml; name = gl.xml; path = "external/OpenGL-Registry/xml/gl.xml"; sourceTree = SOURCE_ROOT; };
 		FFD4EE2B2F1429700023B6C3 /* hash_table.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = hash_table.m; sourceTree = "<group>"; };
 		FFD4EE2C2F1429700023B6C3 /* mgl_safety.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = mgl_safety.h; sourceTree = "<group>"; };
 		FFD4EE2D2F1429700023B6C3 /* mgl_toolchain.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = mgl_toolchain.c; sourceTree = "<group>"; };
 		FFD4EE322F1454E70023B6C3 /* gl_es.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = gl_es.c; sourceTree = "<group>"; };
-		FFD4EE8C2F14585E0023B6C3 /* libMGL_ES.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libMGL_ES.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		FFD4EE8C2F14585E0023B6C3 /* libmoogle_es.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libmoogle_es.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		FFE8B2C82D29B4CA006B1015 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		FF2DC2652D2DCA490040B838 /* TestImages */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = TestImages; sourceTree = "<group>"; };
-		FF85F2112D28658200A5BDCD /* MGL Tests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = "MGL Tests"; sourceTree = "<group>"; };
+		FF85F2112D28658200A5BDCD /* xctest */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = tests/xctest; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -440,7 +439,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				FFE8B2C92D29B4CA006B1015 /* AppKit.framework in Frameworks */,
-				FF85F2142D28658200A5BDCD /* libMGL.dylib in Frameworks */,
+				FF85F2142D28658200A5BDCD /* libmoogle.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -482,7 +481,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FF4810152772B23400BBF7C7 /* libMGL.dylib in Frameworks */,
+				FF4810152772B23400BBF7C7 /* libmoogle.dylib in Frameworks */,
 				FF7B7A6627728A0B00C2028F /* Cocoa.framework in Frameworks */,
 				FF7B7A542772898700C2028F /* IOKit.framework in Frameworks */,
 				FF7B7A4E2772897500C2028F /* QuartzCore.framework in Frameworks */,
@@ -545,7 +544,7 @@
 			children = (
 				FF7B784A27714BE700C2028F /* spec_parser.c */,
 			);
-			path = spec_parser;
+			path = tools/spec_parser;
 			sourceTree = "<group>";
 		};
 		FF7B7A8127728C1D00C2028F /* src */ = {
@@ -612,15 +611,14 @@
 		FFA82FF7276F97DE003F1EA0 = {
 			isa = PBXGroup;
 			children = (
-				FF2DC2652D2DCA490040B838 /* TestImages */,
 				FF86AEA92794DD0A00C51A88 /* README.md */,
 				FF6C4D5F2D2375E600945F18 /* Makefile */,
 				FF7B77E727710FE100C2028F /* GL */,
 				FF7B784927714BE700C2028F /* spec_parser */,
 				FFA8302D276F9CE4003F1EA0 /* enum_parser */,
 				FFA83035276F9CEF003F1EA0 /* MGL */,
-				FFA83045276F9EBF003F1EA0 /* test_mgl_glfw */,
-				FF85F2112D28658200A5BDCD /* MGL Tests */,
+				FFA83045276F9EBF003F1EA0 /* moogle_glfw_test */,
+				FF85F2112D28658200A5BDCD /* xctest */,
 				FFA83001276F97DE003F1EA0 /* Products */,
 				FFA83096277026E1003F1EA0 /* Frameworks */,
 			);
@@ -629,13 +627,13 @@
 		FFA83001276F97DE003F1EA0 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				FFA83000276F97DE003F1EA0 /* libMGL.dylib */,
+				FFA83000276F97DE003F1EA0 /* libmoogle.dylib */,
 				FFA8302C276F9CE4003F1EA0 /* enum_parser */,
-				FFA83044276F9EBE003F1EA0 /* test_mgl_glfw */,
+				FFA83044276F9EBE003F1EA0 /* moogle_glfw_test */,
 				FF7B784827714BE700C2028F /* spec_parser */,
-				FF85F2102D28658200A5BDCD /* MGL Tests.xctest */,
-				FF2DC2592D2C64B20040B838 /* MetalGL.framework */,
-				FFD4EE8C2F14585E0023B6C3 /* libMGL_ES.dylib */,
+				FF85F2102D28658200A5BDCD /* MooGLe Tests.xctest */,
+				FF2DC2592D2C64B20040B838 /* MooGLe.framework */,
+				FFD4EE8C2F14585E0023B6C3 /* libmoogle_es.dylib */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -648,7 +646,7 @@
 				FF7B77A32771054F00C2028F /* ezxml.c */,
 				FFA83037276F9D10003F1EA0 /* enum_parser.c */,
 			);
-			path = enum_parser;
+			path = tools/enum_parser;
 			sourceTree = "<group>";
 		};
 		FFA83035276F9CEF003F1EA0 /* MGL */ = {
@@ -657,17 +655,17 @@
 				FF7B7AB827728C3100C2028F /* include */,
 				FF7B7A8127728C1D00C2028F /* src */,
 			);
-			path = MGL;
+			name = MGL;
 			sourceTree = "<group>";
 		};
-		FFA83045276F9EBF003F1EA0 /* test_mgl_glfw */ = {
+		FFA83045276F9EBF003F1EA0 /* moogle_glfw_test */ = {
 			isa = PBXGroup;
 			children = (
 				DFC729002894933400990595 /* test_mgl_glfw.entitlements */,
 				FFA83046276F9EBF003F1EA0 /* main.cpp */,
 			);
 			name = test_mgl_glfw;
-			path = test_mgl;
+			path = tests/glfw_app;
 			sourceTree = "<group>";
 		};
 		FFA83096277026E1003F1EA0 /* Frameworks */ = {
@@ -836,14 +834,14 @@
 			);
 			dependencies = (
 			);
-			name = spec_parser;
-			productName = spec_parser;
+			name = "Spec Parser";
+			productName = "Spec Parser";
 			productReference = FF7B784827714BE700C2028F /* spec_parser */;
 			productType = "com.apple.product-type.tool";
 		};
-		FF85F20F2D28658200A5BDCD /* MGL Tests */ = {
+		FF85F20F2D28658200A5BDCD /* MooGLe Tests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = FF85F2172D28658200A5BDCD /* Build configuration list for PBXNativeTarget "MGL Tests" */;
+			buildConfigurationList = FF85F2172D28658200A5BDCD /* Build configuration list for PBXNativeTarget "MooGLe Tests" */;
 			buildPhases = (
 				FF85F20C2D28658200A5BDCD /* Sources */,
 				FF85F20D2D28658200A5BDCD /* Frameworks */,
@@ -855,13 +853,13 @@
 				FF85F2162D28658200A5BDCD /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				FF85F2112D28658200A5BDCD /* MGL Tests */,
+				FF85F2112D28658200A5BDCD /* xctest */,
 			);
-			name = "MGL Tests";
+			name = "MooGLe Tests";
 			packageProductDependencies = (
 			);
-			productName = "MGL Tests";
-			productReference = FF85F2102D28658200A5BDCD /* MGL Tests.xctest */;
+			productName = "MooGLe Tests";
+			productReference = FF85F2102D28658200A5BDCD /* MooGLe Tests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
 		FFA82FFF276F97DE003F1EA0 /* MGL */ = {
@@ -881,9 +879,9 @@
 				FF8F9182277E30F600A1E546 /* PBXTargetDependency */,
 				FF8F9184277E30F800A1E546 /* PBXTargetDependency */,
 			);
-			name = MGL;
-			productName = MGL;
-			productReference = FFA83000276F97DE003F1EA0 /* libMGL.dylib */;
+			name = "MooGLe OpenGL";
+			productName = "MooGLe OpenGL";
+			productReference = FFA83000276F97DE003F1EA0 /* libmoogle.dylib */;
 			productType = "com.apple.product-type.library.dynamic";
 		};
 		FFA8302B276F9CE4003F1EA0 /* enum_parser */ = {
@@ -898,12 +896,12 @@
 			);
 			dependencies = (
 			);
-			name = enum_parser;
-			productName = enum_parser;
+			name = "Enum Parser";
+			productName = "Enum Parser";
 			productReference = FFA8302C276F9CE4003F1EA0 /* enum_parser */;
 			productType = "com.apple.product-type.tool";
 		};
-		FFA83043276F9EBE003F1EA0 /* test_mgl_glfw */ = {
+		FFA83043276F9EBE003F1EA0 /* moogle_glfw_test */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = FFA83048276F9EBF003F1EA0 /* Build configuration list for PBXNativeTarget "test_mgl_glfw" */;
 			buildPhases = (
@@ -915,9 +913,9 @@
 			);
 			dependencies = (
 			);
-			name = test_mgl_glfw;
-			productName = test_mgl_glfw;
-			productReference = FFA83044276F9EBE003F1EA0 /* test_mgl_glfw */;
+			name = "MooGLe GLFW Test";
+			productName = "MooGLe GLFW Test";
+			productReference = FFA83044276F9EBE003F1EA0 /* moogle_glfw_test */;
 			productType = "com.apple.product-type.tool";
 		};
 		FFD4EE342F14585E0023B6C3 /* MGL_ES */ = {
@@ -937,14 +935,14 @@
 				FFD4EE372F14585E0023B6C3 /* PBXTargetDependency */,
 				FFD4EE392F14585E0023B6C3 /* PBXTargetDependency */,
 			);
-			name = MGL_ES;
-			productName = MGL;
-			productReference = FFD4EE8C2F14585E0023B6C3 /* libMGL_ES.dylib */;
+			name = "MooGLe OpenGL ES";
+			productName = "MooGLe OpenGL ES";
+			productReference = FFD4EE8C2F14585E0023B6C3 /* libmoogle_es.dylib */;
 			productType = "com.apple.product-type.library.dynamic";
 		};
-		FFE8B2CE2D29B60D006B1015 /* MetalGL */ = {
+		FFE8B2CE2D29B60D006B1015 /* MooGLe Framework */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = FFE8B2DF2D29B60E006B1015 /* Build configuration list for PBXNativeTarget "MetalGL" */;
+			buildConfigurationList = FFE8B2DF2D29B60E006B1015 /* Build configuration list for PBXNativeTarget "MooGLe Framework" */;
 			buildPhases = (
 				FFE8B2CA2D29B60D006B1015 /* Headers */,
 				FFE8B2CB2D29B60D006B1015 /* Sources */,
@@ -955,11 +953,11 @@
 			);
 			dependencies = (
 			);
-			name = MetalGL;
+			name = "MooGLe Framework";
 			packageProductDependencies = (
 			);
-			productName = MetalGL;
-			productReference = FF2DC2592D2C64B20040B838 /* MetalGL.framework */;
+			productName = "MooGLe Framework";
+			productReference = FF2DC2592D2C64B20040B838 /* MooGLe.framework */;
 			productType = "com.apple.product-type.framework";
 		};
 /* End PBXNativeTarget section */
@@ -1018,11 +1016,11 @@
 				FF8F9173277E30D500A1E546 /* SPIRV-Cross */,
 				FFA82FFF276F97DE003F1EA0 /* MGL */,
 				FFD4EE342F14585E0023B6C3 /* MGL_ES */,
-				FFE8B2CE2D29B60D006B1015 /* MetalGL */,
-				FFA83043276F9EBE003F1EA0 /* test_mgl_glfw */,
+				FFE8B2CE2D29B60D006B1015 /* MooGLe Framework */,
+				FFA83043276F9EBE003F1EA0 /* moogle_glfw_test */,
 				FFA8302B276F9CE4003F1EA0 /* enum_parser */,
 				FF7B784727714BE700C2028F /* spec_parser */,
-				FF85F20F2D28658200A5BDCD /* MGL Tests */,
+				FF85F20F2D28658200A5BDCD /* MooGLe Tests */,
 			);
 		};
 /* End PBXProject section */
@@ -1211,12 +1209,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				ENABLE_HARDENED_RUNTIME = YES;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = spec_parser;
 			};
 			name = Debug;
 		};
@@ -1224,12 +1221,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				ENABLE_HARDENED_RUNTIME = YES;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = spec_parser;
 			};
 			name = Release;
 		};
@@ -1238,17 +1234,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/MGL/include";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/include";
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.1;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Team-Larson.MGL-Tests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = "MooGLe.OpenGL-Tests";
+				PRODUCT_NAME = "MooGLe Tests";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 			};
 			name = Debug;
@@ -1258,17 +1253,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/MGL/include";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/include";
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.1;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Team-Larson.MGL-Tests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = "MooGLe.OpenGL-Tests";
+				PRODUCT_NAME = "MooGLe Tests";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 			};
 			name = Release;
@@ -1276,11 +1270,10 @@
 		FF8F9166277E309900A1E546 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUGGING_SYMBOLS = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
@@ -1293,10 +1286,9 @@
 		FF8F9167277E309900A1E546 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				OTHER_CFLAGS = "";
 				OTHER_LDFLAGS = "";
@@ -1307,11 +1299,10 @@
 		FF8F9175277E30D500A1E546 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUGGING_SYMBOLS = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
@@ -1324,10 +1315,9 @@
 		FF8F9176277E30D500A1E546 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				OTHER_CFLAGS = "";
 				OTHER_LDFLAGS = "";
@@ -1338,11 +1328,10 @@
 		FF8F918C277E312E00A1E546 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUGGING_SYMBOLS = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
@@ -1355,10 +1344,9 @@
 		FF8F918D277E312E00A1E546 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				OTHER_CFLAGS = "";
 				OTHER_LDFLAGS = "";
@@ -1487,9 +1475,8 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "compiler-default";
 				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
 				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				EXECUTABLE_PREFIX = lib;
@@ -1501,7 +1488,7 @@
 					"$(SRCROOT)/external/SPIRV-Tools/include",
 					"$(SRCROOT)/submodules/SPIRV-Cross/",
 					"$(SRCROOT)/external/glslang/glslang/Include",
-					"$(SRCROOT)/MGL/include",
+					"$(SRCROOT)/include",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/external/glslang/build/StandAlone",
@@ -1530,7 +1517,7 @@
 					"-lstdc++",
 					"-v",
 				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = moogle;
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
 				SYSTEM_HEADER_SEARCH_PATHS = "";
@@ -1543,9 +1530,8 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "compiler-default";
 				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
 				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				EXECUTABLE_PREFIX = lib;
@@ -1557,7 +1543,7 @@
 					"$(SRCROOT)/external/SPIRV-Tools/include",
 					"$(SRCROOT)/submodules/SPIRV-Cross/",
 					"$(SRCROOT)/external/glslang/glslang/Include",
-					"$(SRCROOT)/MGL/include",
+					"$(SRCROOT)/include",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/external/glslang/build/StandAlone",
@@ -1586,7 +1572,7 @@
 					"-lstdc++",
 					"-v",
 				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = moogle;
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
 				SYSTEM_HEADER_SEARCH_PATHS = "";
@@ -1597,9 +1583,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				ENABLE_HARDENED_RUNTIME = YES;
 				HEADER_SEARCH_PATHS = "";
 				LIBRARY_SEARCH_PATHS = (
@@ -1607,7 +1592,7 @@
 					"$(PROJECT_DIR)/external/ezxml",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = enum_parser;
 			};
 			name = Debug;
 		};
@@ -1615,9 +1600,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				ENABLE_HARDENED_RUNTIME = YES;
 				HEADER_SEARCH_PATHS = "";
 				LIBRARY_SEARCH_PATHS = (
@@ -1625,7 +1609,7 @@
 					"$(PROJECT_DIR)/external/ezxml",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = enum_parser;
 			};
 			name = Release;
 		};
@@ -1633,19 +1617,18 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = test_mgl_glfw.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				ENABLE_HARDENED_RUNTIME = YES;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/MGL/include",
+					"$(SRCROOT)/include",
 					"$(SRCROOT)/external/glfw/include",
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/external/glfw/build/src";
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				OTHER_LDFLAGS = "-lglfw3";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = moogle_glfw_test;
 				SYSTEM_HEADER_SEARCH_PATHS = "";
 				USER_HEADER_SEARCH_PATHS = "";
 			};
@@ -1655,19 +1638,18 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = test_mgl_glfw.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				ENABLE_HARDENED_RUNTIME = YES;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/MGL/include",
+					"$(SRCROOT)/include",
 					"$(SRCROOT)/external/glfw/include",
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/external/glfw/build/src";
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				OTHER_LDFLAGS = "-lglfw3";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = moogle_glfw_test;
 				SYSTEM_HEADER_SEARCH_PATHS = "";
 				USER_HEADER_SEARCH_PATHS = "";
 			};
@@ -1679,9 +1661,8 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "compiler-default";
 				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
 				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				EXECUTABLE_PREFIX = lib;
@@ -1693,7 +1674,7 @@
 					"$(SRCROOT)/external/SPIRV-Tools/include",
 					"$(SRCROOT)/submodules/SPIRV-Cross/",
 					"$(SRCROOT)/external/glslang/glslang/Include",
-					"$(SRCROOT)/MGL/include",
+					"$(SRCROOT)/include",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/external/glslang/build/StandAlone",
@@ -1722,7 +1703,7 @@
 					"-lstdc++",
 					"-v",
 				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = moogle_es;
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
 				SYSTEM_HEADER_SEARCH_PATHS = "";
@@ -1735,9 +1716,8 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "compiler-default";
 				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
 				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				EXECUTABLE_PREFIX = lib;
@@ -1749,7 +1729,7 @@
 					"$(SRCROOT)/external/SPIRV-Tools/include",
 					"$(SRCROOT)/submodules/SPIRV-Cross/",
 					"$(SRCROOT)/external/glslang/glslang/Include",
-					"$(SRCROOT)/MGL/include",
+					"$(SRCROOT)/include",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/external/glslang/build/StandAlone",
@@ -1778,7 +1758,7 @@
 					"-lstdc++",
 					"-v",
 				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = moogle_es;
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
 				SYSTEM_HEADER_SEARCH_PATHS = "";
@@ -1791,11 +1771,10 @@
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CLANG_WARN_STRICT_PROTOTYPES = YES;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEFINES_MODULE = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
@@ -1814,8 +1793,8 @@
 				MARKETING_VERSION = 1.0;
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
-				PRODUCT_BUNDLE_IDENTIFIER = "Team-Larson.MetalGL";
-				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				PRODUCT_BUNDLE_IDENTIFIER = "MooGLe.OpenGL";
+				PRODUCT_NAME = MooGLe;
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -1829,11 +1808,10 @@
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CLANG_WARN_STRICT_PROTOTYPES = YES;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEFINES_MODULE = YES;
-				DEVELOPMENT_TEAM = A54HA75PNX;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
@@ -1852,8 +1830,8 @@
 				MARKETING_VERSION = 1.0;
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
-				PRODUCT_BUNDLE_IDENTIFIER = "Team-Larson.MetalGL";
-				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				PRODUCT_BUNDLE_IDENTIFIER = "MooGLe.OpenGL";
+				PRODUCT_NAME = MooGLe;
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -1873,7 +1851,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		FF85F2172D28658200A5BDCD /* Build configuration list for PBXNativeTarget "MGL Tests" */ = {
+		FF85F2172D28658200A5BDCD /* Build configuration list for PBXNativeTarget "MooGLe Tests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				FF85F2182D28658200A5BDCD /* Debug */,
@@ -1954,7 +1932,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		FFE8B2DF2D29B60E006B1015 /* Build configuration list for PBXNativeTarget "MetalGL" */ = {
+		FFE8B2DF2D29B60E006B1015 /* Build configuration list for PBXNativeTarget "MooGLe Framework" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				FFE8B2E02D29B60E006B1015 /* Debug */,

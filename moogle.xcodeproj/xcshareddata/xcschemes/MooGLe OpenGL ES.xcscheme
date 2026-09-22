@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "FFD4EE342F14585E0023B6C3"
-               BuildableName = "libMGL_ES.dylib"
-               BlueprintName = "MGL_ES"
-               ReferencedContainer = "container:MGL.xcodeproj">
+               BuildableName = "libmoogle_es.dylib"
+               BlueprintName = "MooGLe OpenGL ES"
+               ReferencedContainer = "container:moogle.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -51,9 +51,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "FFD4EE342F14585E0023B6C3"
-            BuildableName = "libMGL_ES.dylib"
-            BlueprintName = "MGL_ES"
-            ReferencedContainer = "container:MGL.xcodeproj">
+            BuildableName = "libmoogle_es.dylib"
+            BlueprintName = "MooGLe OpenGL ES"
+            ReferencedContainer = "container:moogle.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
    </ProfileAction>

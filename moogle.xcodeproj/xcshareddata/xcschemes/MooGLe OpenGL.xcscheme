@@ -7,17 +7,17 @@
       buildImplicitDependencies = "YES">
       <BuildActionEntries>
          <BuildActionEntry
-            buildForTesting = "YES"
+            buildForTesting = "NO"
             buildForRunning = "YES"
             buildForProfiling = "YES"
             buildForArchiving = "YES"
-            buildForAnalyzing = "YES">
+            buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "FFA83043276F9EBE003F1EA0"
-               BuildableName = "test_mgl_glfw"
-               BlueprintName = "test_mgl_glfw"
-               ReferencedContainer = "container:MGL.xcodeproj">
+               BlueprintIdentifier = "FFA82FFF276F97DE003F1EA0"
+               BuildableName = "libmoogle.dylib"
+               BlueprintName = "MooGLe OpenGL"
+               ReferencedContainer = "container:moogle.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -34,7 +34,6 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      disableMainThreadChecker = "YES"
       launchStyle = "0"
       useCustomWorkingDirectory = "NO"
       ignoresPersistentStateOnLaunch = "NO"
@@ -43,16 +42,6 @@
       enableGPUValidationMode = "1"
       enableGPUShaderValidationMode = "2"
       allowLocationSimulation = "YES">
-      <BuildableProductRunnable
-         runnableDebuggingMode = "0">
-         <BuildableReference
-            BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FFA83043276F9EBE003F1EA0"
-            BuildableName = "test_mgl_glfw"
-            BlueprintName = "test_mgl_glfw"
-            ReferencedContainer = "container:MGL.xcodeproj">
-         </BuildableReference>
-      </BuildableProductRunnable>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -60,16 +49,15 @@
       savedToolIdentifier = ""
       useCustomWorkingDirectory = "NO"
       debugDocumentVersioning = "YES">
-      <BuildableProductRunnable
-         runnableDebuggingMode = "0">
+      <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FFA83043276F9EBE003F1EA0"
-            BuildableName = "test_mgl_glfw"
-            BlueprintName = "test_mgl_glfw"
-            ReferencedContainer = "container:MGL.xcodeproj">
+            BlueprintIdentifier = "FFA82FFF276F97DE003F1EA0"
+            BuildableName = "libmoogle.dylib"
+            BlueprintName = "MooGLe OpenGL"
+            ReferencedContainer = "container:moogle.xcodeproj">
          </BuildableReference>
-      </BuildableProductRunnable>
+      </MacroExpansion>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">

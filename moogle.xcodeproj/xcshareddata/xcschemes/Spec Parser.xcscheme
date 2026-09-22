@@ -7,17 +7,17 @@
       buildImplicitDependencies = "YES">
       <BuildActionEntries>
          <BuildActionEntry
-            buildForTesting = "NO"
+            buildForTesting = "YES"
             buildForRunning = "YES"
             buildForProfiling = "YES"
             buildForArchiving = "YES"
-            buildForAnalyzing = "NO">
+            buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "FFA82FFF276F97DE003F1EA0"
-               BuildableName = "libMGL.dylib"
-               BlueprintName = "MGL"
-               ReferencedContainer = "container:MGL.xcodeproj">
+               BlueprintIdentifier = "FF7B784727714BE700C2028F"
+               BuildableName = "spec_parser"
+               BlueprintName = "Spec Parser"
+               ReferencedContainer = "container:moogle.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -39,9 +39,17 @@
       ignoresPersistentStateOnLaunch = "NO"
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
-      enableGPUValidationMode = "1"
-      enableGPUShaderValidationMode = "2"
       allowLocationSimulation = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "FF7B784727714BE700C2028F"
+            BuildableName = "spec_parser"
+            BlueprintName = "Spec Parser"
+            ReferencedContainer = "container:moogle.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -49,15 +57,16 @@
       savedToolIdentifier = ""
       useCustomWorkingDirectory = "NO"
       debugDocumentVersioning = "YES">
-      <MacroExpansion>
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FFA82FFF276F97DE003F1EA0"
-            BuildableName = "libMGL.dylib"
-            BlueprintName = "MGL"
-            ReferencedContainer = "container:MGL.xcodeproj">
+            BlueprintIdentifier = "FF7B784727714BE700C2028F"
+            BuildableName = "spec_parser"
+            BlueprintName = "Spec Parser"
+            ReferencedContainer = "container:moogle.xcodeproj">
          </BuildableReference>
-      </MacroExpansion>
+      </BuildableProductRunnable>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">

@@ -14,10 +14,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "FF7B784727714BE700C2028F"
-               BuildableName = "spec_parser"
-               BlueprintName = "spec_parser"
-               ReferencedContainer = "container:MGL.xcodeproj">
+               BlueprintIdentifier = "FFA83043276F9EBE003F1EA0"
+               BuildableName = "moogle_glfw_test"
+               BlueprintName = "MooGLe GLFW Test"
+               ReferencedContainer = "container:moogle.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -34,20 +34,23 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      disableMainThreadChecker = "YES"
       launchStyle = "0"
       useCustomWorkingDirectory = "NO"
       ignoresPersistentStateOnLaunch = "NO"
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
+      enableGPUValidationMode = "1"
+      enableGPUShaderValidationMode = "2"
       allowLocationSimulation = "YES">
       <BuildableProductRunnable
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FF7B784727714BE700C2028F"
-            BuildableName = "spec_parser"
-            BlueprintName = "spec_parser"
-            ReferencedContainer = "container:MGL.xcodeproj">
+            BlueprintIdentifier = "FFA83043276F9EBE003F1EA0"
+            BuildableName = "moogle_glfw_test"
+            BlueprintName = "MooGLe GLFW Test"
+            ReferencedContainer = "container:moogle.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -61,10 +64,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FF7B784727714BE700C2028F"
-            BuildableName = "spec_parser"
-            BlueprintName = "spec_parser"
-            ReferencedContainer = "container:MGL.xcodeproj">
+            BlueprintIdentifier = "FFA83043276F9EBE003F1EA0"
+            BuildableName = "moogle_glfw_test"
+            BlueprintName = "MooGLe GLFW Test"
+            ReferencedContainer = "container:moogle.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

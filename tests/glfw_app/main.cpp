@@ -3434,7 +3434,7 @@ int main_sdl(int argc, const char * argv[])
 
     fprintf(stderr, "creating window...\n");
 
-    SDL_GL_LoadLibrary ("/Users/conversy/recherche/istar/code/misc/MGL/build/libmgl.dylib"); // this will make SDL_GL_GetProcAdress work as expected
+    SDL_GL_LoadLibrary ("build/libmoogle.dylib"); // this will make SDL_GL_GetProcAdress work as expected
 
     SDL_Window * window = SDL_CreateWindow (
         "MGL Test", 

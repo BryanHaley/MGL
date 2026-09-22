@@ -52,9 +52,8 @@ CFLAGS += -I$(glslang_include_path)
 # CFLAGS += $(shell pkg-config --cflags SPIRV-Tools)
 # CFLAGS += $(shell pkg-config --cflags glm)
 
-CFLAGS += -IMGL/include
-CFLAGS += -IMGL/include/GL # "glcorearb.h"
-CFLAGS += -IMGL/SPIRV/SPIRV-Cross
+CFLAGS += -Iinclude
+CFLAGS += -Iinclude/GL # "glcorearb.h"
 CFLAGS += -DENABLE_OPT=0 -DSPIRV_CROSS_C_API_MSL=1 -DSPIRV_CROSS_C_API_GLSL=1 -DSPIRV_CROSS_C_API_CPP=1 -DSPIRV_CROSS_C_API_REFLECT=1
 
 # GLFW configuration for shared library build
@@ -64,8 +63,8 @@ CXXFLAGS += -I./external/glfw/include -I./external/glfw/src
 # macOS specific compile definitions for GLFW
 CFLAGS += -D_COCOA -D_GLFW_COCOA
 CXXFLAGS += -D_COCOA -D_GLFW_COCOA
-CXXFLAGS += -I./external/SPIRV-Tools/include -IMGL/include -std=c++17
-CXXFLAGS += -I./external/glslang -IMGL/include/GL
+CXXFLAGS += -I./external/SPIRV-Tools/include -Iinclude -std=c++17
+CXXFLAGS += -I./external/glslang -Iinclude/GL
 
 # GL_CORE SPECIFIC FLAGS
 CFLAGS_GL_CORE := $(CFLAGS) -DMGL_GL_CORE
@@ -142,16 +141,31 @@ default: lib
 
 brew_prefix := $(shell brew --prefix)
 
+# --- generated sources ---------------------------------------------------
+# These five come out of tools/spec_parser and are not checked in. They are
+# listed by hand rather than picked up by the wildcard below, because on a
+# clean tree they do not exist yet when make expands it.
+gen_src_dir := src
+gen_inc_dir := include
+
+generated_srcs := $(gen_src_dir)/gl_core.c $(gen_src_dir)/gl_es.c $(gen_src_dir)/glm_dispatch.c
+generated_hdrs := $(gen_inc_dir)/glm_dispatch.h $(gen_inc_dir)/mgl.h
+generated := $(generated_srcs) $(generated_hdrs)
+
+registry_xml := tools/spec_parser/gl.xml
+spec_parser := $(build_dir)/spec_parser
+
 # mgl
-#mgl_srcs_c := $(wildcard MGL/src/*.c)
-mgl_srcs_c := $(filter-out %/gl_core.c  %/gl_es.c, $(wildcard MGL/src/*.c))
+#mgl_srcs_c := $(wildcard src/*.c)
+mgl_srcs_c := $(filter-out $(generated_srcs), $(wildcard src/*.c))
+mgl_srcs_c += $(gen_src_dir)/glm_dispatch.c
 
-mgl_srcs_cpp := $(wildcard MGL/src/*.cpp)
+mgl_srcs_cpp := $(wildcard src/*.cpp)
 
-mgl_srcs_objc := $(wildcard MGL/src/*.m)
+mgl_srcs_objc := $(wildcard src/*.m)
 
-mgl_core_c := MGL/src/gl_core.c
-mgl_es_c := MGL/src/gl_es.c
+mgl_core_c := src/gl_core.c
+mgl_es_c := src/gl_es.c
 
 mgl_core_obj := $(mgl_core_c:.c=.o)
 mgl_core_obj := $(addprefix $(build_core_dir)/,$(mgl_core_obj))
@@ -179,6 +193,27 @@ mgl_es_objs := $(addprefix $(build_es_dir)/,$(mgl_es_objs))
 mgl_es_arc_objs := $(mgl_srcs_objc:.m=.o)
 mgl_es_arc_objs := $(addprefix $(build_es_dir)/arc/,$(mgl_es_arc_objs))
 
+
+# --- generating them -----------------------------------------------------
+# The registry copy lives in the tree so a build needs no network. Refresh it
+# from external/OpenGL-Registry when Khronos publishes a new one.
+$(spec_parser): tools/spec_parser/spec_parser.c tools/enum_parser/ezxml.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -o $@ $^ -Itools/enum_parser -w
+
+# One run writes all five, so the work hangs off a stamp rather than off each
+# file; the per-file rule only re-runs it when a file has gone missing.
+gen_stamp := $(build_dir)/.generated
+
+$(gen_stamp): $(spec_parser) $(registry_xml)
+	@mkdir -p $(dir $@)
+	$(spec_parser) $(registry_xml) $(gen_src_dir) $(gen_inc_dir)
+	@touch $@
+
+$(generated): $(gen_stamp)
+	@test -f $@ || $(spec_parser) $(registry_xml) $(gen_src_dir) $(gen_inc_dir)
+
+generate: $(generated)
 
 # Define the directories and repositories
 # SPIRV-Cross and SPIRV-Headers are submodules; only these are cloned
@@ -237,23 +272,23 @@ deps += $(mgl_es_obj:.o=.d)
 deps += $(glfw_objs:.o=.d)
 
 
-mgl_lib := $(build_dir)/libmgl.dylib
-mgl_es_lib := $(build_dir)/libmgl_es.dylib
+mgl_lib := $(build_dir)/libmoogle.dylib
+mgl_es_lib := $(build_dir)/libmoogle_es.dylib
 
-mgl_toolchain_obj := $(build_dir)/MGL/src/mgl_toolchain.o
-mgl_toolchain_lib := $(build_dir)/libmgl_toolchain.a
+mgl_toolchain_obj := $(build_dir)/src/mgl_toolchain.o
+mgl_toolchain_lib := $(build_dir)/libmoogle_toolchain.a
 
 $(mgl_lib): $(mgl_core_objs) $(mgl_core_arc_objs) $(mgl_core_obj)
 	@mkdir -p $(dir $@)
 	$(CC) -D$(CFLAGS_GL_CORE) -dynamiclib -o $@ $^ $(LIBS) \
-		-install_name @rpath/libmgl.dylib
+		-install_name @rpath/libmoogle.dylib
 	# loading dynamic library requires this
 	ln -fs $(mgl_lib) .
 
 $(mgl_es_lib): $(mgl_es_objs) $(mgl_es_arc_objs) $(mgl_es_obj)
 	@mkdir -p $(dir $@)
 	$(CC) -D$(CFLAGS_GL_ES) -dynamiclib -o $@ $^ $(LIBS) \
-		-install_name @rpath/libmgl_es.dylib
+		-install_name @rpath/libmoogle_es.dylib
 	# loading dynamic library requires this
 	ln -fs $(mgl_es_lib) .
 
@@ -268,7 +303,7 @@ $(build_dir)/libglfw.dylib: external/glfw/build/src/libglfw3.a $(mgl_lib)
 	@mkdir -p $(dir $@)
 	$(CC) -shared -fPIC -dynamiclib \
 		-Wl,-force_load,$(word 1,$^) \
-		-L$(build_dir) -lmgl \
+		-L$(build_dir) -lmoogle \
 		-o $@ \
 		$(GLFW_FRAMEWORKS) \
 		-Wl,-rpath,@loader_path \
@@ -295,7 +330,7 @@ test_exe  := $(build_dir)/mgl_tests
 deps += $(test_objs:.o=.d)
 
 TEST_CFLAGS := -Wall -g -O1 -arch $(shell uname -m) -std=c11 \
-  -IMGL/include -IMGL/include/GL -I$(test_dir) -I$(gears_dir) -DMGL_GL_CORE \
+  -Iinclude -Iinclude/GL -I$(test_dir) -I$(gears_dir) -DMGL_GL_CORE \
   -I$(glslang_include_path) -I./submodules/SPIRV-Cross
 ifneq ($(SDK_ROOT),)
 TEST_CFLAGS += -isysroot $(SDK_ROOT)
@@ -308,7 +343,7 @@ $(test_build_dir)/%.o: $(test_dir)/%.c
 $(test_exe): $(test_objs) $(mgl_lib)
 	@mkdir -p $(dir $@)
 	$(CC) -arch $(shell uname -m) -o $@ $(test_objs) \
-	  -L$(build_dir) -lmgl -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
+	  -L$(build_dir) -lmoogle -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
 	  -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore
 
 # --- gears demos: two ports of the classic gears, both runnable as tests ---
@@ -323,7 +358,7 @@ GEARS_CFLAGS := $(TEST_CFLAGS) -I$(gears_dir) -I./external/glfw/include
 # DYLD_LIBRARY_PATH or a Homebrew libglfw silently replaces the MGL-aware
 # build with a stock one that has no MGL backend.
 glfw_static := external/glfw/build/src/libglfw3.a
-GEARS_LIBS := $(glfw_static) -L$(build_dir) -lmgl -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
+GEARS_LIBS := $(glfw_static) -L$(build_dir) -lmoogle -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
   -framework Cocoa -framework Foundation -framework Metal -framework QuartzCore -framework IOKit
 
 $(gears_build_dir)/%.o: $(gears_dir)/%.c
@@ -349,7 +384,7 @@ probe_srcs := $(wildcard $(test_dir)/probes/*.c)
 probe_exes := $(patsubst $(test_dir)/probes/%.c,$(build_dir)/%,$(probe_srcs))
 
 $(build_dir)/%: $(test_dir)/probes/%.c $(mgl_lib)
-	$(CC) $(CFLAGS) -o $@ $< -L$(build_dir) -lmgl -Wl,-rpath,$(abspath $(build_dir))
+	$(CC) $(CFLAGS) -o $@ $< -L$(build_dir) -lmoogle -Wl,-rpath,$(abspath $(build_dir))
 
 # Roadmap finish criteria you can run. A phase is done when its gates are clear.
 probe: $(probe_exes)
@@ -369,17 +404,17 @@ dbg: $(test_exe)
 #
 # core build
 #
-$(build_core_dir)/%.o: %.c
+$(build_core_dir)/%.o: %.c | $(generated)
 	@mkdir -p $(dir $@)
 	$(CC) -MMD $(CFLAGS_GL_CORE) -c $< -o $@
 
 #-std=gnu17 
-$(build_core_dir)/%.o: %.cpp
+$(build_core_dir)/%.o: %.cpp | $(generated)
 	@mkdir -p $(dir $@)
 	$(CXX) -MMD $(CXXFLAGS_GL_CORE) -c $< -o $@
 
 #-std=c++14
-$(build_core_dir)/arc/%.o: %.m
+$(build_core_dir)/arc/%.o: %.m | $(generated)
 	@mkdir -p $(dir $@)
 	clang -fobjc-arc -fmodules -MMD $(CFLAGS_GL_CORE) \
 		-framework Cocoa -framework CoreFoundation -framework CoreGraphics \
@@ -387,7 +422,7 @@ $(build_core_dir)/arc/%.o: %.m
 		-framework Metal -framework OpenGL \
 		-c $< -o $@
 
-$(build_core_dir)/%.o: %.m
+$(build_core_dir)/%.o: %.m | $(generated)
 	@mkdir -p $(dir $@)
 	clang -fmodules -MMD $(CFLAGS_GL_CORE) -c $< -o $@
 
@@ -395,17 +430,17 @@ $(build_core_dir)/%.o: %.m
 #
 # es build
 #
-$(build_es_dir)/%.o: %.c
+$(build_es_dir)/%.o: %.c | $(generated)
 	@mkdir -p $(dir $@)
 	$(CC) -MMD $(CFLAGS_GL_ES) -c $< -o $@
 
 #-std=gnu17
-$(build_es_dir)/%.o: %.cpp
+$(build_es_dir)/%.o: %.cpp | $(generated)
 	@mkdir -p $(dir $@)
 	$(CXX) -MMD $(CXXFLAGS_GL_ES) -c $< -o $@
 
 #-std=c++14
-$(build_es_dir)/arc/%.o: %.m
+$(build_es_dir)/arc/%.o: %.m | $(generated)
 	@mkdir -p $(dir $@)
 	clang -fobjc-arc -fmodules -MMD $(CFLAGS_GL_ES) \
 		-framework Cocoa -framework CoreFoundation -framework CoreGraphics \
@@ -413,7 +448,7 @@ $(build_es_dir)/arc/%.o: %.m
 		-framework Metal -framework OpenGL \
 		-c $< -o $@
 
-$(build_dir)/%.o: %.m
+$(build_dir)/%.o: %.m | $(generated)
 	@mkdir -p $(dir $@)
 	clang -fmodules -MMD $(CXXFLAGS_GL_ES) -c $< -o $@
 
@@ -431,8 +466,9 @@ $(GLFW_BUILD_DIR)/%.o: $(GLFW_SRC_DIR)/%.m
 
 clean:
 	rm -rf $(build_dir)
-	rm -f libmgl.dylib
-	rm -f libmgl_es.dylib
+	rm -f $(generated)
+	rm -f libmoogle.dylib
+	rm -f libmoogle_es.dylib
 	rm -f libglfw.dylib
 
 install-pkgdeps: download-pkgdeps compile-pkgdeps
@@ -451,6 +487,6 @@ update-pkdeps:
 test-make:
 	@echo $(glfw_objs)
 
-.PHONY: default test tests gears gears-test dbg lib clean insall-pkgdeps test-make 
+.PHONY: default test tests gears gears-test dbg lib clean generate insall-pkgdeps test-make 
 
 -include $(deps)
