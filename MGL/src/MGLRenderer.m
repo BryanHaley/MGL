@@ -2592,6 +2592,16 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 
 #pragma mark bindless
 
+// Metal paces presents to the display unless it is told not to. An
+// application that asked for no vsync gets frames as fast as they are drawn.
+- (void) mtlSetSwapInterval: (int) interval
+{
+    if (_layer == nil)
+        return;
+
+    _layer.displaySyncEnabled = interval > 0;
+}
+
 - (bool) makeBindlessTables
 {
     if (_bindlessTex)
@@ -8452,6 +8462,12 @@ void mtlBindBuffer(GLMContext glm_ctx, Buffer *ptr)
     [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindMTLBuffer:ptr];
 }
 
+#pragma mark C interface to mtlSetSwapInterval
+void mtlSetSwapInterval(GLMContext glm_ctx, int interval)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlSetSwapInterval: interval];
+}
+
 #pragma mark C interface to bindless
 GLuint mtlBindlessSampler(GLMContext glm_ctx, TextureParameter *params, GLenum target)
 {
@@ -10431,6 +10447,7 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
 
     glm_ctx->mtl_funcs.mtlBindBuffer = mtlBindBuffer;
     glm_ctx->mtl_funcs.mtlBindTexture = mtlBindTexture;
+    glm_ctx->mtl_funcs.mtlSetSwapInterval = mtlSetSwapInterval;
     glm_ctx->mtl_funcs.mtlBindlessSampler = mtlBindlessSampler;
     glm_ctx->mtl_funcs.mtlBindlessRelease = mtlBindlessRelease;
     glm_ctx->mtl_funcs.mtlBindProgram = mtlBindProgram;
@@ -10781,6 +10798,10 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     _layer.framebufferOnly = NO; // enable blitting to main color buffer
     _layer.magnificationFilter = kCAFilterNearest;
     _layer.presentsWithTransaction = NO;
+
+    // an application that turned vsync off before the layer existed still meant it
+    if (ctx)
+        _layer.displaySyncEnabled = ctx->swap_interval > 0;
 
     // view.layer is nil until the view is layer backed
     CGRect bounds = [view bounds];

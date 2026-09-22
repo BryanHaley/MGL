@@ -117,6 +117,8 @@ typedef UInt8 (*PFN_LMGetKbdType)(void);
 typedef struct _GLFWcontextMGL
 {
     GLMContext          ctx;
+    int                 interval;
+    double              last_swap;
 #if defined(__OBJC__)
     id              object;
     id              renderer;

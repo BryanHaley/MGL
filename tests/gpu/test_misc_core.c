@@ -10,6 +10,7 @@
 
 #include "mgl_test.h"
 #include "harness.h"
+#include "MGLContext.h"
 #include <string.h>
 
 /* ---------- dispatch compute ---------- */
@@ -484,4 +485,23 @@ GPU_TEST(misc_core, tex_buffer_attach_and_query)
     glBindTexture(GL_TEXTURE_BUFFER, 0);
     glDeleteTextures(1, &tex);
     glDeleteBuffers(1, &b);
+}
+
+// glfwSwapInterval reached MGL and stopped there, so an application that asked
+// for no vsync still waited for the display on every frame
+GPU_TEST(misc_core, swap_interval_is_remembered)
+{
+    unsigned int before = 1, off = 1, on = 0;
+
+    MGLget(NULL, MGL_SWAP_INTERVAL, &before);
+    CHECK_EQ_UINT(before, 1u);      // vsync unless the application says otherwise
+
+    MGLsetSwapInterval(NULL, 0);
+    MGLget(NULL, MGL_SWAP_INTERVAL, &off);
+    CHECK_EQ_UINT(off, 0u);
+
+    MGLsetSwapInterval(NULL, 1);
+    MGLget(NULL, MGL_SWAP_INTERVAL, &on);
+    CHECK_EQ_UINT(on, 1u);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 }

@@ -27,6 +27,7 @@ GLMContext createGLMContext(GLenum format, GLenum type,
 
 void MGLsetCurrentContext(GLMContext ctx);
 void MGLswapBuffers(GLMContext ctx);
+void MGLsetSwapInterval(GLMContext ctx, int interval);
 
 static void makeContextCurrentMGL(_GLFWwindow* window)
 {
@@ -51,12 +52,54 @@ static void makeContextCurrentMGL(_GLFWwindow* window)
 
 static void swapBuffersMGL(_GLFWwindow* window)
 {
+    @autoreleasepool {
+
+    // Metal only paces a layer the system is showing, and a window that is
+    // hidden or on another space is not, so the frame is paced here instead.
+    // Measuring from the last present means this adds nothing when Metal
+    // already did the waiting.
+    if (window->context.mgl.interval > 0)
+    {
+        double framerate = 60.0;
+
+        if (@available(macOS 12.0, *))
+        {
+            NSScreen *screen = ((NSWindow *) window->ns.object).screen;
+            NSInteger screen_rate = screen ? screen.maximumFramesPerSecond : 0;
+
+            if (screen_rate > 0)
+                framerate = (double) screen_rate;
+        }
+
+        const double period = window->context.mgl.interval / framerate;
+        const uint64_t frequency = _glfwPlatformGetTimerFrequency();
+        const double now = _glfwPlatformGetTimerValue() / (double) frequency;
+        double due = window->context.mgl.last_swap;
+
+        // a deadline rather than a delay, so sleeping a little long once does
+        // not push every later frame out with it
+        if (due <= 0.0 || due + period < now)
+            due = now;
+        else if (now < due)
+            usleep((useconds_t) ((due - now) * 1e6));
+
+        window->context.mgl.last_swap = due + period;
+    }
+
     MGLswapBuffers(window->context.mgl.ctx);
+
+    } // autoreleasepool
 }
 
 static void swapIntervalMGL(int interval)
 {
+    _GLFWwindow* window = _glfwPlatformGetTls(&_glfw.contextSlot);
 
+    if (window == NULL)
+        return;
+
+    window->context.mgl.interval = interval;
+    MGLsetSwapInterval(window->context.mgl.ctx, interval);
 }
 
 static int extensionSupportedMGL(const char* extension)

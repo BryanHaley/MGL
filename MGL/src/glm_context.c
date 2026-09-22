@@ -86,6 +86,10 @@ GLMContext createGLMContext(GLenum format, GLenum type,
 
     _ctx = ctx;
 
+    // vsync on unless the application asks for something else, which is what
+    // MGL did before there was a way to ask
+    ctx->swap_interval = 1;
+
     ctx->pixel_format.format = format;
     ctx->pixel_format.type = type;
 
@@ -349,6 +353,7 @@ void MGLget(GLMContext ctx, GLenum param, GLuint *data)
         case MGL_STENCIL_FORMAT: *data = ctx->stencil_format.format; break;
         case MGL_STENCIL_TYPE: *data = ctx->stencil_format.type; break;
         case MGL_CONTEXT_FLAGS: *data = ctx->context_flags; break;
+        case MGL_SWAP_INTERVAL: *data = ctx->swap_interval; break;
 
         default:
             // MGLget is an MGL entry point, not GL, so there is no error to set
@@ -365,6 +370,21 @@ void MGLswapBuffers(GLMContext ctx)
         return;
 
     ctx->mtl_funcs.mtlSwapBuffers(ctx);
+}
+
+// Zero means present as fast as the GPU draws; anything else paces the
+// presents to the display, which is all Metal offers
+void MGLsetSwapInterval(GLMContext ctx, int interval)
+{
+    if (ctx == NULL)
+        ctx = _ctx;
+
+    if (ctx == NULL)
+        return;
+
+    ctx->swap_interval = interval;
+    if (ctx->mtl_funcs.mtlSetSwapInterval)
+        ctx->mtl_funcs.mtlSetSwapInterval(ctx, interval);
 }
 
 // CRITICAL FIX: Proper context destruction to prevent memory leaks

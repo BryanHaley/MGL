@@ -1181,6 +1181,7 @@ struct GLMMetalFuncs {
 
     void (*mtlBindBuffer)(GLMContext glm_ctx, Buffer *ptr);
     void (*mtlBindTexture)(GLMContext glm_ctx, Texture *ptr);
+    void (*mtlSetSwapInterval)(GLMContext glm_ctx, int interval);
     GLuint (*mtlBindlessSampler)(GLMContext glm_ctx, TextureParameter *params, GLenum target);
     void (*mtlBindlessRelease)(GLMContext glm_ctx, MglHandle *h);
     bool (*mtlBindProgram)(GLMContext glm_ctx, Program *ptr);
@@ -1273,6 +1274,8 @@ typedef struct GLMContextRec_t {
 
     MglBindless bindless;
 
+    int swap_interval;
+
     GLMState    state;
     GLboolean   assert_on_error;
     // A shader that will not compile is reported through COMPILE_STATUS and
@@ -1304,7 +1307,8 @@ enum {
     MGL_DEPTH_TYPE,
     MGL_STENCIL_FORMAT,
     MGL_STENCIL_TYPE,
-    MGL_CONTEXT_FLAGS
+    MGL_CONTEXT_FLAGS,
+    MGL_SWAP_INTERVAL
 };
 
 #ifdef __cplusplus
