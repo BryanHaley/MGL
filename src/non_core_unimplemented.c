@@ -1551,11 +1551,41 @@ void mglEvalPoint2(GLMContext ctx, GLint i, GLint j)
     ERROR_RETURN(GL_INVALID_OPERATION);
 }
 
+#ifdef MGL_COMPAT_PROFILE
+// Fixed-function alpha test. Metal has no such stage, so the state is kept
+// here and the fragment shader does the compare; see rewriteAlphaTest.
+void mglAlphaFunc(GLMContext ctx, GLenum func, GLfloat ref)
+{
+    switch(func)
+    {
+        case GL_NEVER:
+        case GL_LESS:
+        case GL_EQUAL:
+        case GL_LEQUAL:
+        case GL_GREATER:
+        case GL_NOTEQUAL:
+        case GL_GEQUAL:
+        case GL_ALWAYS:
+            break;
+
+        default:
+            ERROR_RETURN(GL_INVALID_ENUM);
+    }
+
+    // GL clamps the reference to [0, 1] when it is stored
+    if (ref < 0.0f) ref = 0.0f;
+    if (ref > 1.0f) ref = 1.0f;
+
+    ctx->state.var.alpha_test_func = func;
+    ctx->state.var.alpha_test_ref = ref;
+}
+#else
 void mglAlphaFunc(GLMContext ctx, GLenum func, GLfloat ref)
 {
     // not in the core profile
     ERROR_RETURN(GL_INVALID_OPERATION);
 }
+#endif
 
 void mglPixelZoom(GLMContext ctx, GLfloat xfactor, GLfloat yfactor)
 {

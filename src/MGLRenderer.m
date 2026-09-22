@@ -2521,31 +2521,21 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         }
     }
 
-    if ((tex_param->border_color[0] == 0.0) &&
-        (tex_param->border_color[1] == 0.0) &&
-        (tex_param->border_color[2] == 0.0))
+    // GL takes any RGBA border colour and Metal offers three, so anything
+    // else snaps to the nearest. Refusing the sampler instead would lose the
+    // whole draw over the colour of pixels outside the texture.
     {
-        if (tex_param->border_color[3] == 0.0)
-        {
+        float r = tex_param->border_color[0];
+        float g = tex_param->border_color[1];
+        float b = tex_param->border_color[2];
+        float a = tex_param->border_color[3];
+
+        if (a < 0.5f)
             samplerDescriptor.borderColor = MTLSamplerBorderColorTransparentBlack;
-        }
-        else if (tex_param->border_color[3] == 1.0)
-        {
+        else if ((r + g + b) / 3.0f < 0.5f)
             samplerDescriptor.borderColor = MTLSamplerBorderColorOpaqueBlack;
-        }
-    }
-    else    if ((tex_param->border_color[0] == 1.0) &&
-                (tex_param->border_color[1] == 1.0) &&
-                (tex_param->border_color[2] == 1.0) &&
-                (tex_param->border_color[3] == 1.0))
-    {
-        samplerDescriptor.borderColor = MTLSamplerBorderColorOpaqueWhite;
-    }
-    else
-    {
-        // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
-            return NULL;
+        else
+            samplerDescriptor.borderColor = MTLSamplerBorderColorOpaqueWhite;
     }
 
     if (target == GL_TEXTURE_RECTANGLE)
@@ -7669,6 +7659,14 @@ static MTLWinding mtlWindingFor(const Program *p)
 
         // and GL ignores gl_SampleMask entirely when there is only one sample
         mglWriteSampleMaskOff(ctx, ctx->state.program, n > 1 ? 0 : 1);
+
+#ifdef MGL_COMPAT_PROFILE
+        // the alpha test is state, not a uniform the application sets, so the
+        // shader learns about it here. Zero is the test switched off.
+        mglWriteAlphaTest(ctx, ctx->state.program,
+                          ctx->state.caps.alpha_test ? (GLint)ctx->state.var.alpha_test_func : 0,
+                          ctx->state.var.alpha_test_ref);
+#endif
     }
 
     // since a clear is embedded into a render encoder

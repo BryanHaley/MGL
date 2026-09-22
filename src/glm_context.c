@@ -231,6 +231,11 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     STATE(color_clear_value[2]) = 0.0f;
     STATE(color_clear_value[3]) = 1.0f;
 
+#ifdef MGL_COMPAT_PROFILE
+    STATE(var.alpha_test_func) = GL_ALWAYS;
+    STATE(var.alpha_test_ref) = 0.0f;
+#endif
+
     STATE(var.logic_op) = GL_COPY;
     STATE(var.stencil_func) = GL_ALWAYS;
 

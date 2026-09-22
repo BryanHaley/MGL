@@ -37,6 +37,12 @@ CFLAGS += -O2
 # Disable AddressSanitizer for production - causes crashes when loaded via dlopen()
 #CFLAGS += -fsanitize=address
 #LIBS += -fsanitize=address
+# The compatibility profile leftovers old games need are on by default.
+# make MGL_NO_COMPAT=1 builds a driver that answers only for core.
+ifdef MGL_NO_COMPAT
+CFLAGS += -DMGL_NO_COMPAT_PROFILE
+endif
+
 CFLAGS += -arch $(shell uname -m)
 LIBS += -arch $(shell uname -m)
 
@@ -330,7 +336,7 @@ test_exe  := $(build_dir)/mgl_tests
 deps += $(test_objs:.o=.d)
 
 TEST_CFLAGS := -Wall -g -O1 -arch $(shell uname -m) -std=c11 \
-  -Iinclude -Iinclude/GL -I$(test_dir) -I$(gears_dir) -DMGL_GL_CORE \
+  -Iinclude -Iinclude/GL -I$(test_dir) -I$(gears_dir) -DMGL_GL_CORE $(if $(MGL_NO_COMPAT),-DMGL_NO_COMPAT_PROFILE) \
   -I$(glslang_include_path) -I./submodules/SPIRV-Cross
 ifneq ($(SDK_ROOT),)
 TEST_CFLAGS += -isysroot $(SDK_ROOT)

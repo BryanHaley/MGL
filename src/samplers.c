@@ -250,6 +250,9 @@ static bool sampler_value_ok(GLenum pname, GLint value)
                 case GL_MIRRORED_REPEAT:
                 case GL_MIRROR_CLAMP_TO_EDGE:
                 case GL_REPEAT:
+#ifdef MGL_COMPAT_PROFILE
+                case GL_CLAMP:
+#endif
                     return true;
             }
             return false;
@@ -326,9 +329,9 @@ static bool setSamplerScalar(GLMContext ctx, Sampler *ptr, GLenum pname, GLint i
 
     switch(pname)
     {
-        case GL_TEXTURE_WRAP_S: params->wrap_s = iv; break;
-        case GL_TEXTURE_WRAP_T: params->wrap_t = iv; break;
-        case GL_TEXTURE_WRAP_R: params->wrap_r = iv; break;
+        case GL_TEXTURE_WRAP_S: params->wrap_s = mglNormalizeWrapMode(iv); break;
+        case GL_TEXTURE_WRAP_T: params->wrap_t = mglNormalizeWrapMode(iv); break;
+        case GL_TEXTURE_WRAP_R: params->wrap_r = mglNormalizeWrapMode(iv); break;
         case GL_TEXTURE_MIN_FILTER: params->min_filter = iv; break;
         case GL_TEXTURE_MAG_FILTER: params->mag_filter = iv; break;
         case GL_TEXTURE_COMPARE_MODE: params->compare_mode = iv; break;

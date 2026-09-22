@@ -3711,6 +3711,9 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         }
         pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
         pptr->sample_mask_off_loc = mglFindSampleMaskOffLocation(pptr);
+#ifdef MGL_COMPAT_PROFILE
+        mglFindAlphaTestLocations(pptr);
+#endif
         pptr->tess.patches_loc = mglFindUniformByName(pptr, "mglPatchesU");
 
         pptr->geom.prims_loc   = mglFindUniformByName(pptr, "mglGsPrimsU");
@@ -3830,6 +3833,9 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
     pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
     pptr->sample_mask_off_loc = mglFindSampleMaskOffLocation(pptr);
+#ifdef MGL_COMPAT_PROFILE
+    mglFindAlphaTestLocations(pptr);
+#endif
     pptr->tess.patches_loc = mglFindUniformByName(pptr, "mglPatchesU");
 
     // Hand the MSL to Metal now rather than at the first draw. GL callers expect
@@ -4110,6 +4116,10 @@ static int programResourceCount(Program *ptr, int res_type)
                 continue;
             }
 
+            // MGL's own rewrite uniforms are not the application's
+            if (mglIsDriverUniform(list->list[i].name))
+                continue;
+
             n++;
         }
     }
@@ -4143,7 +4153,12 @@ static int programLongestName(Program *ptr, int res_type)
 
         for (GLuint i = 0; i < list->count; i++)
         {
-            int len = (int)strlen(list->list[i].name) + 1;
+            int len;
+
+            if (mglIsDriverUniform(list->list[i].name))
+                continue;
+
+            len = (int)strlen(list->list[i].name) + 1;
 
             if (len > longest) longest = len;
         }

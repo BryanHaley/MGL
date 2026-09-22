@@ -79,6 +79,9 @@ void mglDisable(GLMContext ctx, GLenum cap)
         case GL_DEBUG_OUTPUT_SYNCHRONOUS: DISABLE_CAP(debug_output_synchronous);
         case GL_DEBUG_OUTPUT: DISABLE_CAP(debug_output);
         case GL_PROGRAM_POINT_SIZE: DISABLE_CAP(program_point_size);
+#ifdef MGL_COMPAT_PROFILE
+        case GL_ALPHA_TEST: DISABLE_CAP(alpha_test);
+#endif
         case GL_TEXTURE_2D:
         case GL_TEXTURE_3D:
         case GL_TEXTURE_CUBE_MAP:
@@ -131,6 +134,9 @@ void mglEnable(GLMContext ctx, GLenum cap)
         case GL_PRIMITIVE_RESTART_FIXED_INDEX: ENABLE_CAP(primitive_restart_fixed_index);
         case GL_DEBUG_OUTPUT_SYNCHRONOUS: ENABLE_CAP(debug_output_synchronous);
         case GL_DEBUG_OUTPUT: ENABLE_CAP(debug_output);
+#ifdef MGL_COMPAT_PROFILE
+        case GL_ALPHA_TEST: ENABLE_CAP(alpha_test);
+#endif
         case GL_TEXTURE_2D:
         case GL_TEXTURE_3D:
         case GL_TEXTURE_CUBE_MAP:
@@ -549,6 +555,9 @@ GLboolean mglIsEnabled(GLMContext ctx, GLenum cap)
 
     switch(cap)
     {
+#ifdef MGL_COMPAT_PROFILE
+        case GL_ALPHA_TEST: RET_CAP(alpha_test);
+#endif
         case GL_BLEND: RET_CAP(blend);
         case GL_COLOR_LOGIC_OP: RET_CAP(color_logic_op);
         case GL_CULL_FACE: RET_CAP(cull_face);

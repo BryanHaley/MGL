@@ -17,7 +17,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "FFD4EE342F14585E0023B6C3"
                BuildableName = "libmoogles.dylib"
-               BlueprintName = "MooGLes"
+               BlueprintName = "MooGLes (OpenGL ES)"
                ReferencedContainer = "container:moogl.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -52,7 +52,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "FFD4EE342F14585E0023B6C3"
             BuildableName = "libmoogles.dylib"
-            BlueprintName = "MooGLes"
+            BlueprintName = "MooGLes (OpenGL ES)"
             ReferencedContainer = "container:moogl.xcodeproj">
          </BuildableReference>
       </MacroExpansion>

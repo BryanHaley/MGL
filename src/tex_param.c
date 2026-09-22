@@ -200,15 +200,15 @@ bool setTexParmi(GLMContext ctx, TextureParameter *tex_params, GLenum pname, con
             break;
 
         case GL_TEXTURE_WRAP_S:
-            tex_params->wrap_s = *param;
+            tex_params->wrap_s = mglNormalizeWrapMode(*param);
             break;
 
         case GL_TEXTURE_WRAP_T:
-            tex_params->wrap_t = *param;
+            tex_params->wrap_t = mglNormalizeWrapMode(*param);
             break;
 
         case GL_TEXTURE_WRAP_R:
-            tex_params->wrap_r = *param;
+            tex_params->wrap_r = mglNormalizeWrapMode(*param);
             break;
 
         default:

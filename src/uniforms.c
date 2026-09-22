@@ -100,8 +100,10 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
                 SpirvResource *r = &list->list[i];
                 GLint n;
 
-                // a struct is not a uniform; only the leaves inside it are
-                if (r->gl_type == 0 || r->name == NULL || r->location == MGL_NO_LOCATION)
+                // a struct is not a uniform; only the leaves inside it are,
+                // and MGL's own are not the application's to find
+                if (r->gl_type == 0 || r->name == NULL || r->location == MGL_NO_LOCATION ||
+                    mglIsDriverUniform(r->name))
                     continue;
 
                 if (!strcmp(r->name, name))
@@ -233,7 +235,7 @@ static GLuint plainUniformCount(Program *ptr, int stage)
     GLuint n = 0;
 
     for (GLuint i = 0; i < list->count; i++)
-        if (!uniformIsStructOwner(&list->list[i]))
+        if (!uniformIsStructOwner(&list->list[i]) && !mglIsDriverUniform(list->list[i].name))
             n++;
 
     return n;
@@ -246,7 +248,7 @@ static SpirvResource *plainUniformAt(Program *ptr, int stage, GLuint index)
 
     for (GLuint i = 0; i < list->count; i++)
     {
-        if (uniformIsStructOwner(&list->list[i]))
+        if (uniformIsStructOwner(&list->list[i]) || mglIsDriverUniform(list->list[i].name))
             continue;
 
         if (n == index)
@@ -1199,6 +1201,34 @@ void mglWriteSampleMaskOff(GLMContext ctx, Program *pptr, GLint off)
 
     programUniformWrite(ctx, pptr, pptr->sample_mask_off_loc, &off, sizeof(GLint));
 }
+
+#ifdef MGL_COMPAT_PROFILE
+// The two uniforms the alpha test rewrite left behind. Both are -1 when the
+// fragment shader had no colour output to test, and the writes below then do
+// nothing.
+void mglFindAlphaTestLocations(Program *pptr)
+{
+    if (pptr == NULL)
+        return;
+
+    pptr->alpha_func_loc = mglFindUniformByName(pptr, MGL_ALPHA_FUNC_NAME);
+    pptr->alpha_ref_loc = mglFindUniformByName(pptr, MGL_ALPHA_REF_NAME);
+}
+
+// The application sets the alpha test with glEnable and glAlphaFunc, so it
+// reaches the shader at draw time rather than through glUniform.
+void mglWriteAlphaTest(GLMContext ctx, Program *pptr, GLint func, GLfloat ref)
+{
+    if (pptr == NULL)
+        return;
+
+    if (pptr->alpha_func_loc >= 0)
+        programUniformWrite(ctx, pptr, pptr->alpha_func_loc, &func, sizeof(GLint));
+
+    if (pptr->alpha_ref_loc >= 0)
+        programUniformWrite(ctx, pptr, pptr->alpha_ref_loc, &ref, sizeof(GLfloat));
+}
+#endif
 
 void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size)
 {

@@ -967,6 +967,219 @@ static char *rewriteSampleMask(const char *src)
     return out;
 }
 
+#ifdef MGL_COMPAT_PROFILE
+// ---------------------------------------------------------------------------
+// The alpha test
+//
+// glAlphaFunc discards a fragment on its own alpha, and Metal has no such
+// stage, so the shader does it. The compare and the reference arrive as two
+// uniforms the driver writes per draw, which keeps one compiled shader good
+// for every alpha state the application sets.
+// ---------------------------------------------------------------------------
+
+// Walk back over "name" or "name[3]" and copy the identifier out.
+static bool trailingIdent(const char *start, const char *end, char *name, size_t cap)
+{
+    const char *p = end - 1;
+
+    while (p > start && isspace((unsigned char)*p))
+        p--;
+
+    if (*p == ']')
+    {
+        while (p > start && *p != '[')
+            p--;
+
+        p--;
+
+        while (p > start && isspace((unsigned char)*p))
+            p--;
+    }
+
+    const char *last = p;
+
+    while (p >= start && (isalnum((unsigned char)*p) || *p == '_'))
+        p--;
+
+    p++;
+
+    if (p > last || !(isalpha((unsigned char)*p) || *p == '_'))
+        return false;
+
+    size_t n = (size_t)(last - p) + 1;
+
+    if (n >= cap)
+        return false;
+
+    memcpy(name, p, n);
+    name[n] = 0;
+
+    return true;
+}
+
+// The output the test reads. GL tests colour number zero, so an explicit
+// location zero wins and otherwise the first vec4 output stands in.
+static bool fragmentOutputName(const char *src, char *name, size_t cap)
+{
+    int depth = 0;
+    int paren = 0;
+    bool found = false;
+
+    for (const char *p = src; *p; p++)
+    {
+        if (*p == '{') { depth++; continue; }
+        if (*p == '}') { depth--; continue; }
+        if (*p == '(') { paren++; continue; }
+        if (*p == ')') { paren--; continue; }
+
+        // a parameter list has its own "out", and it is not an output
+        if (depth != 0 || paren != 0 || !isWord(p, src, "out"))
+            continue;
+
+        const char *end = strchr(p, ';');
+
+        if (end == NULL)
+            break;
+
+        // an interface block is not a plain output declaration
+        if (memchr(p, '{', (size_t)(end - p)) != NULL)
+            continue;
+
+        // back up to whatever ended the statement before this one
+        const char *begin = p;
+
+        while (begin > src && begin[-1] != ';' && begin[-1] != '}' && begin[-1] != '{')
+            begin--;
+
+        bool is_vec4 = false;
+        bool at_zero = false;
+
+        for (const char *q = begin; q < end; q++)
+        {
+            if (isWord(q, begin, "vec4"))
+                is_vec4 = true;
+
+            if (isWord(q, begin, "location"))
+            {
+                const char *v = strchr(q, '=');
+
+                if (v && v < end)
+                {
+                    v++;
+
+                    while (v < end && isspace((unsigned char)*v))
+                        v++;
+
+                    at_zero = (*v == '0' && !isdigit((unsigned char)v[1]));
+                }
+            }
+        }
+
+        if (!is_vec4)
+        {
+            p = end;
+            continue;
+        }
+
+        if (trailingIdent(begin, end, name, cap))
+        {
+            if (at_zero)
+                return true;
+
+            found = true;
+        }
+
+        p = end;
+    }
+
+    return found;
+}
+
+static char *rewriteAlphaTest(const char *src)
+{
+    static const char decl[] =
+        "\nuniform int " MGL_ALPHA_FUNC_NAME ";\nuniform float " MGL_ALPHA_REF_NAME ";\n";
+    char out_name[128];
+    char tail[1024];
+    char *out;
+
+    // a shader with no colour output has no alpha to test
+    if (!fragmentOutputName(src, out_name, sizeof out_name))
+        return NULL;
+
+    // zero is the test off; the rest are GL's compare functions in order
+    snprintf(tail, sizeof tail,
+             "\nvoid main()\n{\n"
+             "    " MGL_ALPHA_BODY "();\n"
+             "    if (" MGL_ALPHA_FUNC_NAME " != 0)\n"
+             "    {\n"
+             "        float mglA = %s.a;\n"
+             "        float mglR = " MGL_ALPHA_REF_NAME ";\n"
+             "        bool mglPass = true;\n"
+             "        if (" MGL_ALPHA_FUNC_NAME " == 512) mglPass = false;\n"
+             "        else if (" MGL_ALPHA_FUNC_NAME " == 513) mglPass = (mglA <  mglR);\n"
+             "        else if (" MGL_ALPHA_FUNC_NAME " == 514) mglPass = (mglA == mglR);\n"
+             "        else if (" MGL_ALPHA_FUNC_NAME " == 515) mglPass = (mglA <= mglR);\n"
+             "        else if (" MGL_ALPHA_FUNC_NAME " == 516) mglPass = (mglA >  mglR);\n"
+             "        else if (" MGL_ALPHA_FUNC_NAME " == 517) mglPass = (mglA != mglR);\n"
+             "        else if (" MGL_ALPHA_FUNC_NAME " == 518) mglPass = (mglA >= mglR);\n"
+             "        if (!mglPass) discard;\n"
+             "    }\n"
+             "}\n", out_name);
+
+    out = (char *)malloc(strlen(src) + sizeof(decl) + sizeof(tail) + 64);
+
+    if (out == NULL)
+        return NULL;
+
+    strcpy(out, src);
+
+    // main becomes the body the new one calls
+    for (char *m = strstr(out, "main"); m; m = strstr(m + 4, "main"))
+    {
+        char before = (m == out) ? ' ' : m[-1];
+        char *after = m + 4;
+
+        if (isalnum((unsigned char)before) || before == '_')
+            continue;
+
+        while (*after == ' ' || *after == '\t') after++;
+
+        if (*after != '(')
+            continue;
+
+        {
+            size_t body_len = sizeof(MGL_ALPHA_BODY) - 1;
+
+            memmove(m + body_len, m + 4, strlen(m + 4) + 1);
+            memcpy(m, MGL_ALPHA_BODY, body_len);
+        }
+        break;
+    }
+
+    strcat(out, tail);
+
+    {
+        char *ins = strstr(out, "#version");
+
+        if (ins)
+        {
+            ins = strchr(ins, '\n');
+            ins = ins ? ins + 1 : out;
+        }
+        else
+        {
+            ins = out;
+        }
+
+        memmove(ins + sizeof(decl) - 1, ins, strlen(ins) + 1);
+        memcpy(ins, decl, sizeof(decl) - 1);
+    }
+
+    return out;
+}
+#endif /* MGL_COMPAT_PROFILE */
+
 // ---------------------------------------------------------------------------
 // Preprocessor rules glslang lets slide
 //
@@ -1361,6 +1574,16 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                         free(fixed);
                         fixed = masked;
                     }
+
+#ifdef MGL_COMPAT_PROFILE
+                    char *tested = rewriteAlphaTest(fixed);
+
+                    if (tested)
+                    {
+                        free(fixed);
+                        fixed = tested;
+                    }
+#endif
                 }
 
                 glslang_shader_set_preprocessed_code(glsl_shader, fixed);

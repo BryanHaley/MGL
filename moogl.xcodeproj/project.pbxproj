@@ -862,9 +862,9 @@
 			productReference = FF85F2102D28658200A5BDCD /* MooGL Tests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		FFA82FFF276F97DE003F1EA0 /* MGL */ = {
+		FFA82FFF276F97DE003F1EA0 /* MooGL (OpenGL) */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = FFA83004276F97DE003F1EA0 /* Build configuration list for PBXNativeTarget "MGL" */;
+			buildConfigurationList = FFA83004276F97DE003F1EA0 /* Build configuration list for PBXNativeTarget "MooGL (OpenGL)" */;
 			buildPhases = (
 				FFA82FFC276F97DE003F1EA0 /* Headers */,
 				FFA82FFD276F97DE003F1EA0 /* Sources */,
@@ -879,8 +879,8 @@
 				FF8F9182277E30F600A1E546 /* PBXTargetDependency */,
 				FF8F9184277E30F800A1E546 /* PBXTargetDependency */,
 			);
-			name = "MooGL OpenGL";
-			productName = "MooGL OpenGL";
+			name = "MooGL (OpenGL)";
+			productName = "MooGL (OpenGL)";
 			productReference = FFA83000276F97DE003F1EA0 /* libmoogl.dylib */;
 			productType = "com.apple.product-type.library.dynamic";
 		};
@@ -903,7 +903,7 @@
 		};
 		FFA83043276F9EBE003F1EA0 /* moogl_glfw_test */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = FFA83048276F9EBF003F1EA0 /* Build configuration list for PBXNativeTarget "test_mgl_glfw" */;
+			buildConfigurationList = FFA83048276F9EBF003F1EA0 /* Build configuration list for PBXNativeTarget "MooGL GLFW Test" */;
 			buildPhases = (
 				FFA83040276F9EBE003F1EA0 /* Sources */,
 				FFA83041276F9EBE003F1EA0 /* Frameworks */,
@@ -918,9 +918,9 @@
 			productReference = FFA83044276F9EBE003F1EA0 /* moogl_glfw_test */;
 			productType = "com.apple.product-type.tool";
 		};
-		FFD4EE342F14585E0023B6C3 /* MGL_ES */ = {
+		FFD4EE342F14585E0023B6C3 /* MooGLes (OpenGL ES) */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = FFD4EE892F14585E0023B6C3 /* Build configuration list for PBXNativeTarget "MGL_ES" */;
+			buildConfigurationList = FFD4EE892F14585E0023B6C3 /* Build configuration list for PBXNativeTarget "MooGLes (OpenGL ES)" */;
 			buildPhases = (
 				FFD4EE3B2F14585E0023B6C3 /* Headers */,
 				FFD4EE4D2F14585E0023B6C3 /* Sources */,
@@ -935,8 +935,8 @@
 				FFD4EE372F14585E0023B6C3 /* PBXTargetDependency */,
 				FFD4EE392F14585E0023B6C3 /* PBXTargetDependency */,
 			);
-			name = "MooGLes";
-			productName = "MooGLes";
+			name = "MooGLes (OpenGL ES)";
+			productName = "MooGLes (OpenGL ES)";
 			productReference = FFD4EE8C2F14585E0023B6C3 /* libmoogles.dylib */;
 			productType = "com.apple.product-type.library.dynamic";
 		};
@@ -1014,8 +1014,8 @@
 				FF8F918A277E312E00A1E546 /* SPIRV-Headers */,
 				FF8F9165277E309800A1E546 /* SPIRV-Tools */,
 				FF8F9173277E30D500A1E546 /* SPIRV-Cross */,
-				FFA82FFF276F97DE003F1EA0 /* MGL */,
-				FFD4EE342F14585E0023B6C3 /* MGL_ES */,
+				FFA82FFF276F97DE003F1EA0 /* MooGL (OpenGL) */,
+				FFD4EE342F14585E0023B6C3 /* MooGLes (OpenGL ES) */,
 				FFE8B2CE2D29B60D006B1015 /* MooGL Framework */,
 				FFA83043276F9EBE003F1EA0 /* moogl_glfw_test */,
 				FFA8302B276F9CE4003F1EA0 /* enum_parser */,
@@ -1159,7 +1159,7 @@
 /* Begin PBXTargetDependency section */
 		FF85F2162D28658200A5BDCD /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = FFA82FFF276F97DE003F1EA0 /* MGL */;
+			target = FFA82FFF276F97DE003F1EA0 /* MooGL (OpenGL) */;
 			targetProxy = FF85F2152D28658200A5BDCD /* PBXContainerItemProxy */;
 		};
 		FF8F9182277E30F600A1E546 /* PBXTargetDependency */ = {
@@ -1896,7 +1896,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		FFA83004276F97DE003F1EA0 /* Build configuration list for PBXNativeTarget "MGL" */ = {
+		FFA83004276F97DE003F1EA0 /* Build configuration list for PBXNativeTarget "MooGL (OpenGL)" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				FFA83005276F97DE003F1EA0 /* Debug */,
@@ -1914,7 +1914,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		FFA83048276F9EBF003F1EA0 /* Build configuration list for PBXNativeTarget "test_mgl_glfw" */ = {
+		FFA83048276F9EBF003F1EA0 /* Build configuration list for PBXNativeTarget "MooGL GLFW Test" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				FFA83049276F9EBF003F1EA0 /* Debug */,
@@ -1923,7 +1923,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		FFD4EE892F14585E0023B6C3 /* Build configuration list for PBXNativeTarget "MGL_ES" */ = {
+		FFD4EE892F14585E0023B6C3 /* Build configuration list for PBXNativeTarget "MooGLes (OpenGL ES)" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				FFD4EE8A2F14585E0023B6C3 /* Debug */,

@@ -166,7 +166,7 @@ typedef struct GLMParams_t {
     GLuint projection_matrix;
     GLuint attrib_stack_depth;
     GLuint alpha_test_func;
-    GLuint alpha_test_ref;
+    GLfloat alpha_test_ref;
     GLuint logic_op;
     GLuint aux_buffers;
     GLuint index_clear_value;

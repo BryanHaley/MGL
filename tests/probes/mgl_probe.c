@@ -14,6 +14,17 @@
 #include <string.h>
 #include <GL/glcorearb.h>
 
+/* Compatibility profile enums the core header dropped. The gates below hold
+   whether or not the driver was built with them. */
+#ifndef GL_ALPHA_TEST
+#define GL_ALPHA_TEST      0x0BC0
+#define GL_ALPHA_TEST_FUNC 0x0BC1
+#define GL_ALPHA_TEST_REF  0x0BC2
+#endif
+#ifndef GL_CLAMP
+#define GL_CLAMP           0x2900
+#endif
+
 /* --- the slice of GL this file drives ------------------------------------ */
 extern const GLubyte *glGetString(GLenum);
 extern const GLubyte *glGetStringi(GLenum, GLuint);
@@ -82,6 +93,9 @@ extern void  glDrawElements(GLenum, GLsizei, GLenum, const void *);
 extern void  glGetQueryObjectuiv(GLuint, GLenum, GLuint *);
 extern GLuint glGetSubroutineIndex(GLuint, GLenum, const GLchar *);
 extern void  glUniformSubroutinesuiv(GLenum, GLsizei, const GLuint *);
+extern GLboolean glIsEnabled(GLenum);
+extern void  glAlphaFunc(GLenum, GLfloat);
+extern void  glDeleteProgram(GLuint);
 
 /* --- reporting ----------------------------------------------------------- */
 static int  g_gates;
@@ -1066,6 +1080,165 @@ static void phase8(void)
         gate(want[i], hasExt(want[i]), NULL);
 }
 
+/* --- phase 10: the compatibility profile games still ask for ------------- */
+/*
+ * MGL is a core profile driver. A full compatibility profile is not worth
+ * building, but a handful of removed features still turn up in shipped games,
+ * and each gate below is one of them. Built with -DMGL_NO_COMPAT_PROFILE
+ * every gate here stands, which is the point of the switch.
+ */
+static void phase10(void)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    /* green at a quarter alpha, so a reference of a half decides it */
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(0.0, 1.0, 0.0, 0.25); }\n";
+    GLuint fbo, tex, prog;
+    GLint func = 0;
+    GLfloat ref = -1.0f;
+    int accepted, stored, discarded = 0, kept = 0;
+
+    phase("PHASE 10  the compatibility profile games still ask for");
+
+    /* --- the alpha test --- */
+    drain();
+    glEnable(GL_ALPHA_TEST);
+    accepted = (glGetError() == GL_NO_ERROR) && glIsEnabled(GL_ALPHA_TEST);
+
+    gate("glEnable(GL_ALPHA_TEST) is a state MGL keeps", accepted,
+         "the fixed function stage old engines use for foliage and fences");
+
+    drain();
+    glAlphaFunc(GL_GREATER, 0.5f);
+    glGetIntegerv(GL_ALPHA_TEST_FUNC, &func);
+    glGetFloatv(GL_ALPHA_TEST_REF, &ref);
+    stored = (glGetError() == GL_NO_ERROR) && func == GL_GREATER &&
+             ref > 0.49f && ref < 0.51f;
+
+    gate("glAlphaFunc stores its compare and reference", stored, NULL);
+
+    fbo = probeTarget(&tex);
+    probeQuadVAO();
+    prog = buildProgram(vs, NULL, NULL, NULL, fs);
+
+    if (prog && accepted)
+    {
+        glViewport(0, 0, 64, 64);
+        glUseProgram(prog);
+
+        /* a quarter is not greater than a half, so nothing should survive */
+        glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glFinish();
+        discarded = (greenPixels() == 0);
+
+        /* and with the compare reversed every fragment should land */
+        glAlphaFunc(GL_LESS, 0.5f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glFinish();
+        kept = (greenPixels() == 64 * 64);
+
+        glUseProgram(0);
+    }
+
+    gate("the alpha test discards what it should", prog && discarded && kept,
+         "fragment alpha 0.25 against a reference of 0.5, both ways round");
+
+    glDisable(GL_ALPHA_TEST);
+
+    /* --- the wrap mode that came before the two --- */
+    {
+        GLint got = 0;
+
+        drain();
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &got);
+
+        gate("GL_CLAMP is taken as clamp to border",
+             glGetError() == GL_NO_ERROR && got == GL_CLAMP_TO_BORDER,
+             "shadow maps and old UI code still set it");
+    }
+
+    /* --- the rest of the list, none of it built yet --- */
+    gate("a border colour Metal does not hold is exact", 0,
+         "Metal keeps three; anything else snaps to the nearest");
+
+    {
+        /* a client pointer with no array buffer bound is still an error */
+        GLfloat verts[6] = { 0 };
+
+        drain();
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, verts);
+
+        gate("a vertex array in client memory draws", glGetError() == GL_NO_ERROR,
+             "engines written before VBOs stream straight out of malloc");
+    }
+
+    {
+        /* a rectangle texture is read at [0, width], not [0, 1] */
+        static const char *rect_fs =
+            "#version 460 core\n"
+            "uniform sampler2DRect r;\n"
+            "out vec4 o;\n"
+            "void main() { o = texture(r, vec2(1.5, 0.5)); }\n";
+        static const GLubyte texels[8] = { 255,0,0,255,  0,255,0,255 };
+        GLuint rect = 0, rp;
+        int read_green = 0;
+
+        drain();
+        glGenTextures(1, &rect);
+        glBindTexture(GL_TEXTURE_RECTANGLE, rect);
+        glTexImage2D(GL_TEXTURE_RECTANGLE, 0, GL_RGBA8, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+        glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        rp = buildProgram(vs, NULL, NULL, NULL, rect_fs);
+
+        if (rp && glGetError() == GL_NO_ERROR)
+        {
+            glUseProgram(rp);
+            glUniform1i(glGetUniformLocation(rp, "r"), 0);
+            glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glFinish();
+            /* texel one is green, and only unnormalised coordinates reach it */
+            read_green = (greenPixels() == 64 * 64);
+            glUseProgram(0);
+            glDeleteProgram(rp);
+        }
+
+        glDeleteTextures(1, &rect);
+
+        gate("GL_TEXTURE_RECTANGLE takes unnormalised coordinates", read_green,
+             "console ports and UI layers used it to dodge power of two sizes");
+    }
+
+    drain();
+    glEnable(0x0B50 /* GL_LIGHTING */);
+    gate("fixed function lighting has an uber shader behind it",
+         glGetError() == GL_NO_ERROR,
+         "retro titles and modding tools light geometry this way");
+
+    gate("the modelview and projection matrix stacks are emulated", 0,
+         "glPushMatrix, glLoadIdentity, glMultMatrixf and the rest");
+
+    glDeleteProgram(prog);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    (void)fbo;
+}
+
 int main(void)
 {
     printf("MGL phase probe -- %s\n", (const char *)glGetString(GL_VERSION));
@@ -1075,6 +1248,7 @@ int main(void)
     phase5();
     phase6();
     phase8();
+    phase10();
 
     printf("    %s\n\n", g_phase_gates ? "-> gates remaining" : "-> PHASE COMPLETE");
     printf("%d gate(s) remaining across the probed phases.\n", g_gates);

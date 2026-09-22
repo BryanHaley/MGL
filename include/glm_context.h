@@ -34,6 +34,8 @@
 
 #include "hash_table.h"
 
+#include "mgl_compat.h"
+
 // defines above set sizes in glm_params
 #include "glm_params.h"
 #include "mgl_reflect.h"
@@ -811,6 +813,10 @@ typedef struct Program_t {
     // where the rewritten gl_NumSamples lives, or -1 when the shader never asked
     GLint num_samples_loc;
     GLint sample_mask_off_loc;
+#ifdef MGL_COMPAT_PROFILE
+    GLint alpha_func_loc;
+    GLint alpha_ref_loc;
+#endif
     // the subroutine index chosen per subroutine uniform location, per stage
     GLuint *subroutine_values[_MAX_SHADER_TYPES];
     // what the subroutine rewrite found, copied at link so the program keeps
@@ -1043,6 +1049,46 @@ size_t mglPixelStoreSkipBytes2D(const PixelStore *ps, GLuint pixel_size, size_t 
 #define MGL_SAMPLE_MASK_TMP   "mglSMaskValue"
 #define MGL_SAMPLE_MASK_BODY  "mglSampleMaskBody"
 
+#ifdef MGL_COMPAT_PROFILE
+// The alpha test is fixed-function state with nowhere to live in Metal, so a
+// fragment shader carries it: these two uniforms hold the compare and the
+// reference, and the driver writes them before every draw. A func of zero is
+// the test switched off.
+#define MGL_ALPHA_FUNC_NAME "mglAlphaTestFunc"
+#define MGL_ALPHA_REF_NAME  "mglAlphaTestRef"
+#define MGL_ALPHA_BODY      "mglAlphaTestBody"
+#endif
+
+// Uniforms MGL's own shader rewrites created. GL never declared them, so
+// nothing the application can enumerate should report them.
+static inline bool mglIsDriverUniform(const char *name)
+{
+    if (name == NULL)
+        return false;
+
+    if (!strcmp(name, MGL_NUM_SAMPLES_NAME) || !strcmp(name, MGL_SAMPLE_MASK_FORCE))
+        return true;
+
+#ifdef MGL_COMPAT_PROFILE
+    if (!strcmp(name, MGL_ALPHA_FUNC_NAME) || !strcmp(name, MGL_ALPHA_REF_NAME))
+        return true;
+#endif
+
+    return false;
+}
+
+// GL_CLAMP is the compatibility profile's old wrap mode, and it clamped to
+// the border colour. Store it as the modern spelling so nothing downstream
+// has to know it existed.
+static inline GLenum mglNormalizeWrapMode(GLenum wrap)
+{
+#ifdef MGL_COMPAT_PROFILE
+    if (wrap == GL_CLAMP)
+        return GL_CLAMP_TO_BORDER;
+#endif
+    return wrap;
+}
+
 // The two targets whose storage holds more than one sample per pixel.
 static inline bool mglTargetIsMultisample(GLenum target)
 {
@@ -1060,6 +1106,10 @@ GLint mglFindUniformByName(Program *pptr, const char *name);
 void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples);
 GLint mglFindSampleMaskOffLocation(Program *pptr);
 void mglWriteSampleMaskOff(GLMContext ctx, Program *pptr, GLint off);
+#ifdef MGL_COMPAT_PROFILE
+void mglFindAlphaTestLocations(Program *pptr);
+void mglWriteAlphaTest(GLMContext ctx, Program *pptr, GLint func, GLfloat ref);
+#endif
 void mglWriteProgramUniform(GLMContext ctx, Program *pptr, GLint location, GLint value);
 
 

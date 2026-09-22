@@ -16,7 +16,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "FFA82FFF276F97DE003F1EA0"
                BuildableName = "libmoogl.dylib"
-               BlueprintName = "MooGL OpenGL"
+               BlueprintName = "MooGL (OpenGL)"
                ReferencedContainer = "container:moogl.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -54,7 +54,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "FFA82FFF276F97DE003F1EA0"
             BuildableName = "libmoogl.dylib"
-            BlueprintName = "MooGL OpenGL"
+            BlueprintName = "MooGL (OpenGL)"
             ReferencedContainer = "container:moogl.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
