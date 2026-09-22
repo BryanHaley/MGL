@@ -5,6 +5,7 @@
  * glCopyImageSubData: the copy itself, and the errors the spec lists for it.
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "mgl_test.h"
@@ -165,4 +166,55 @@ GPU_TEST(copy_image, accepts_a_renderbuffer_as_either_end)
 
     glDeleteRenderbuffers(1, &rb);
     glDeleteTextures(1, &tex);
+}
+
+/* ---------------------------------------------------------------------------
+ * Two different internal formats of the same size class.
+ *
+ * GL allows it; Metal's texture-to-texture blit wants one pixel format, so the
+ * bytes take a detour through a buffer. The point of the test is that the bits
+ * arrive unchanged -- the copy reinterprets, it does not convert.
+ */
+
+static GLuint packed_tex(GLenum internalformat, GLenum format, GLenum type,
+                         GLsizei w, GLsizei h, const GLuint *px)
+{
+    GLuint tex = 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, (GLint)internalformat, w, h, 0, format, type, px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+
+    return tex;
+}
+
+GPU_TEST(copy_image, copies_between_two_formats_of_one_size_class)
+{
+    /* four texels of RGBA8UI, which is 32 bits like R32UI, and both read back
+       exactly -- so any difference is the copy's, not the readback's */
+    static const GLuint src_px[4] = { 0x11223344u, 0x55667788u, 0x0BADF00Du, 0xFEEDFACEu };
+    static const GLuint dst_px[4] = { 0u, 0u, 0u, 0u };
+    GLuint src = packed_tex(GL_RGBA8UI, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, 2, 2, src_px);
+    GLuint dst = packed_tex(GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, 2, 2, dst_px);
+    GLuint back[4] = { 0u, 0u, 0u, 0u };
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glCopyImageSubData(src, GL_TEXTURE_2D, 0, 0, 0, 0,
+                       dst, GL_TEXTURE_2D, 0, 0, 0, 0, 2, 2, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindTexture(GL_TEXTURE_2D, dst);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, back);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    for (int i = 0; i < 4; i++)
+        CHECK_MSG(back[i] == src_px[i],
+                  "texel %d came back 0x%08X, the source bits are 0x%08X",
+                  i, back[i], src_px[i]);
+
+    glDeleteTextures(1, &src);
+    glDeleteTextures(1, &dst);
 }

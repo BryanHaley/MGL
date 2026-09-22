@@ -1050,10 +1050,13 @@ static GLboolean encode_plain(GLubyte *d, GLenum format, GLenum type, const MGLT
 
 /* ---------- entry point ---------- */
 
+static GLboolean identity_pair(MGLNativeFormat fmt, GLenum *format, GLenum *type);
+
 GLboolean mglConvertPixels(const void *src, size_t src_row_pitch, MGLNativeFormat src_fmt,
                            void *dst, size_t dst_row_pitch, GLenum format, GLenum type,
                            GLsizei width, GLsizei height, GLboolean flip_vertical)
 {
+    GLenum same_format, same_type;
     GLuint src_bpp = mglNativeFormatBytesPerPixel(src_fmt);
     GLuint dst_bpp = mglPackedPixelSize(format, type);
     GLboolean packed = packed_type_size(type) != 0;
@@ -1067,6 +1070,24 @@ GLboolean mglConvertPixels(const void *src, size_t src_row_pitch, MGLNativeForma
 
     if (width == 0 || height == 0)
         return GL_TRUE;
+
+    // the caller asked for the layout the texture already holds, so the bytes
+    // go straight across. Decoding and re-encoding would be slower and, for a
+    // format with more than one encoding per colour, not even the same bits.
+    if (identity_pair(src_fmt, &same_format, &same_type) == GL_TRUE &&
+        format == same_format && type == same_type && src_bpp == dst_bpp)
+    {
+        for (row = 0; row < height; row++)
+        {
+            GLsizei drow = flip_vertical ? (height - 1 - row) : row;
+
+            memcpy((GLubyte *)dst + (size_t)drow * dst_row_pitch,
+                   (const GLubyte *)src + (size_t)row * src_row_pitch,
+                   (size_t)width * src_bpp);
+        }
+
+        return GL_TRUE;
+    }
 
     for (row = 0; row < height; row++)
     {
@@ -1741,6 +1762,15 @@ static GLboolean identity_pair(MGLNativeFormat fmt, GLenum *format, GLenum *type
         case MGL_NF_R32_FLOAT:    *format = GL_RED;  *type = GL_FLOAT; return GL_TRUE;
         case MGL_NF_RG32_FLOAT:   *format = GL_RG;   *type = GL_FLOAT; return GL_TRUE;
         case MGL_NF_RGBA32_FLOAT: *format = GL_RGBA; *type = GL_FLOAT; return GL_TRUE;
+
+        case MGL_NF_RGB10A2_UNORM: *format = GL_RGBA;         *type = GL_UNSIGNED_INT_2_10_10_10_REV; return GL_TRUE;
+        case MGL_NF_RGB10A2_UINT:  *format = GL_RGBA_INTEGER; *type = GL_UNSIGNED_INT_2_10_10_10_REV; return GL_TRUE;
+
+        // the shared exponent and the small floats are stored exactly as the
+        // client type spells them, and RGB9_E5 has more than one encoding for
+        // the same colour -- so going through a float loses the one it had
+        case MGL_NF_RG11B10_FLOAT: *format = GL_RGB; *type = GL_UNSIGNED_INT_10F_11F_11F_REV; return GL_TRUE;
+        case MGL_NF_RGB9E5_FLOAT:  *format = GL_RGB; *type = GL_UNSIGNED_INT_5_9_9_9_REV; return GL_TRUE;
 
         case MGL_NF_DEPTH16_UNORM: *format = GL_DEPTH_COMPONENT; *type = GL_UNSIGNED_SHORT; return GL_TRUE;
         case MGL_NF_DEPTH32_FLOAT: *format = GL_DEPTH_COMPONENT; *type = GL_FLOAT; return GL_TRUE;

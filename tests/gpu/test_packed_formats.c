@@ -405,3 +405,56 @@ GPU_TEST(packed_formats, rgb_integer_takes_the_packed_rgb_types)
 
     glDeleteTextures(1, &tex);
 }
+
+/* RGB9_E5 can spell the same colour more than one way -- any exponent works
+   when all three channels are zero -- so a driver that decodes to float and
+   re-encodes hands back different bits than it was given. The stored layout is
+   already what the client type spells, so the bytes have to travel untouched. */
+GPU_TEST(packed_formats, rgb9e5_keeps_the_bits_it_was_given)
+{
+    static const GLuint in[4] = { 0x60000000u, 0x60000030u, 0x0BADF00Du, 0x1234ABCDu };
+    GLuint out[4] = { 0u, 0u, 0u, 0u };
+    GLuint tex = 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    mgl_drain_errors();
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB9_E5, 2, 2, 0,
+                 GL_RGB, GL_UNSIGNED_INT_5_9_9_9_REV, in);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_INT_5_9_9_9_REV, out);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    for (int i = 0; i < 4; i++)
+        CHECK_MSG(out[i] == in[i], "texel %d went in as 0x%08X and came back 0x%08X",
+                  i, in[i], out[i]);
+
+    glDeleteTextures(1, &tex);
+}
+
+/* The same rule for the other packed float format. */
+GPU_TEST(packed_formats, r11f_g11f_b10f_keeps_the_bits_it_was_given)
+{
+    static const GLuint in[4] = { 0x11223344u, 0x55667788u, 0x0BADF00Du, 0x1234ABCDu };
+    GLuint out[4] = { 0u, 0u, 0u, 0u };
+    GLuint tex = 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    mgl_drain_errors();
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R11F_G11F_B10F, 2, 2, 0,
+                 GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, in);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, out);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    for (int i = 0; i < 4; i++)
+        CHECK_MSG(out[i] == in[i], "texel %d went in as 0x%08X and came back 0x%08X",
+                  i, in[i], out[i]);
+
+    glDeleteTextures(1, &tex);
+}

@@ -26,6 +26,7 @@
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 #include "glm_context.h"
+#include "mgl_format_table.h"
 
 // Private MGLRenderer methods reachable through mtl_funcs.mtlObj.
 @interface NSObject (MGLBlitInternal)
@@ -76,6 +77,96 @@ void mtlCopyTexSubImage(GLMContext glm_ctx, Texture *tex, GLint level,
     [blit endEncoding];
 }
 
+// How a format's region is measured: one block covers block_w by block_h
+// texels and takes bytes_per_block bytes.
+static void blockShape(GLenum internalformat, GLuint *bw, GLuint *bh, GLuint *bytes)
+{
+    const MGLFormatDesc *d = mglFormatDesc(internalformat);
+
+    *bw = (d && d->block_w) ? d->block_w : 1;
+    *bh = (d && d->block_h) ? d->block_h : 1;
+    *bytes = (d && d->bytes_per_block) ? d->bytes_per_block : 4;
+}
+
+static NSUInteger roundUp16(NSUInteger v)
+{
+    return (v + 15) & ~(NSUInteger)15;
+}
+
+// GL lets glCopyImageSubData copy between two different internal formats as
+// long as they are the same size class; Metal's texture to texture blit wants
+// one pixel format. So the bytes go out to a buffer and come back in, which is
+// format blind. Only the mismatched case pays for it.
+static void copyThroughBuffer(id<MTLBlitCommandEncoder> blit,
+    id<MTLTexture> srcMetal, Texture *srcTex, GLint srcLevel, GLint srcX, GLint srcY,
+    id<MTLTexture> dstMetal, Texture *dstTex, GLint dstLevel, GLint dstX, GLint dstY,
+    GLsizei width, GLsizei height,
+    NSUInteger layers, NSUInteger copyDepth,
+    bool srcIs3D, bool dstIs3D, GLint srcZ, GLint dstZ)
+{
+    GLuint sbw, sbh, sbytes, dbw, dbh, dbytes;
+    NSUInteger blocksX, blocksY, bpr, bpi, stride, dstW, dstH;
+    id<MTLBuffer> staging;
+
+    blockShape(srcTex->internalformat, &sbw, &sbh, &sbytes);
+    blockShape(dstTex->internalformat, &dbw, &dbh, &dbytes);
+
+    // the region is given in the source's texels; what travels is whole blocks
+    blocksX = ((NSUInteger)width  + sbw - 1) / sbw;
+    blocksY = ((NSUInteger)height + sbh - 1) / sbh;
+
+    // and the same blocks land as that many of the destination's own texels
+    dstW = blocksX * dbw;
+    dstH = blocksY * dbh;
+
+    if (dstX + (NSUInteger)dstW > (NSUInteger)dstMetal.width)
+        dstW = (NSUInteger)dstMetal.width - (NSUInteger)dstX;
+    if (dstY + (NSUInteger)dstH > (NSUInteger)dstMetal.height)
+        dstH = (NSUInteger)dstMetal.height - (NSUInteger)dstY;
+
+    bpr = blocksX * sbytes;
+    bpi = bpr * blocksY;
+
+    if (bpr == 0 || bpi == 0 || dstW == 0 || dstH == 0)
+        return;
+
+    stride = (copyDepth > 1) ? bpi : roundUp16(bpi);
+    staging = [srcMetal.device newBufferWithLength:stride * layers * copyDepth
+                                           options:MTLResourceStorageModePrivate];
+
+    if (staging == nil)
+        return;
+
+    for (NSUInteger i = 0; i < layers; i++)
+    {
+        NSUInteger srcSlice   = srcIs3D ? 0 : (NSUInteger)srcZ + i;
+        NSUInteger dstSlice   = dstIs3D ? 0 : (NSUInteger)dstZ + i;
+        NSUInteger srcZOrigin = srcIs3D ? (NSUInteger)srcZ + i : 0;
+        NSUInteger dstZOrigin = dstIs3D ? (NSUInteger)dstZ + i : 0;
+        NSUInteger at = i * stride;
+
+        [blit copyFromTexture:srcMetal
+                  sourceSlice:srcSlice
+                  sourceLevel:(NSUInteger)srcLevel
+                 sourceOrigin:MTLOriginMake((NSUInteger)srcX, (NSUInteger)srcY, srcZOrigin)
+                   sourceSize:MTLSizeMake((NSUInteger)width, (NSUInteger)height, copyDepth)
+                     toBuffer:staging
+            destinationOffset:at
+       destinationBytesPerRow:bpr
+     destinationBytesPerImage:bpi];
+
+        [blit copyFromBuffer:staging
+                sourceOffset:at
+           sourceBytesPerRow:bpr
+         sourceBytesPerImage:bpi
+                  sourceSize:MTLSizeMake(dstW, dstH, copyDepth)
+                   toTexture:dstMetal
+            destinationSlice:dstSlice
+            destinationLevel:(NSUInteger)dstLevel
+           destinationOrigin:MTLOriginMake((NSUInteger)dstX, (NSUInteger)dstY, dstZOrigin)];
+    }
+}
+
 void mtlCopyImageSubData(GLMContext glm_ctx,
     Texture *srcTex, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ,
     Texture *dstTex, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ,
@@ -105,6 +196,16 @@ void mtlCopyImageSubData(GLMContext glm_ctx,
     // or cube face needs one call per layer, or only the first one is copied.
     NSUInteger layers = (srcIs3D && dstIs3D) ? 1 : (NSUInteger)depth;
     NSUInteger copyDepth = (srcIs3D && dstIs3D) ? (NSUInteger)depth : 1;
+
+    if (srcMetal.pixelFormat != dstMetal.pixelFormat)
+    {
+        copyThroughBuffer(blit, srcMetal, srcTex, srcLevel, srcX, srcY,
+                          dstMetal, dstTex, dstLevel, dstX, dstY,
+                          width, height, layers, copyDepth,
+                          srcIs3D, dstIs3D, srcZ, dstZ);
+        [blit endEncoding];
+        return;
+    }
 
     for (NSUInteger i = 0; i < layers; i++)
     {

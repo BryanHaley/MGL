@@ -144,12 +144,25 @@ typedef struct {
     char type[32];
     char name[64];
     char qualifier[32];   // flat / noperspective, kept for the pass-through
+    int  array;           // elements, or 0 when this is not an array
+    char builtin[64];     // the gl_ name this stands in for, empty otherwise
 } GsVarying;
 
 typedef struct {
     GsVarying in[MAX_GS_VARYINGS];  int in_count;
     GsVarying out[MAX_GS_VARYINGS]; int out_count;
 } GsScan;
+
+// gl_ClipDistance and gl_CullDistance travel through the generated structs
+// under an mgl name; this finds the one standing in for a gl_ spelling.
+static const GsVarying *builtinVarying(const GsVarying *v, int count, const char *gl_name)
+{
+    for (int i = 0; i < count; i++)
+        if (!strcmp(v[i].builtin, gl_name))
+            return &v[i];
+
+    return NULL;
+}
 
 // "in gl_PerVertex { ... } gl_in[];" -- a geometry shader may redeclare the
 // built-in block to say which built-ins it reads. The compute shader this turns
@@ -228,6 +241,11 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
         {
             if (s[i] == '[')
             {
+                size_t n = skipSpace(s, i + 1);
+
+                if (isdigit((unsigned char)s[n]))
+                    v->array = atoi(s + n);
+
                 i = matchBracket(s, i);
                 continue;
             }
@@ -270,6 +288,18 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
 
     snprintf(v->type, sizeof(v->type), "%s", prev2);
     snprintf(v->name, sizeof(v->name), "%s", prev);
+
+    // gl_ClipDistance and gl_CullDistance are redeclared like varyings but are
+    // built-ins, so they travel under a name the generated struct can hold and
+    // are put back to their own spelling where the shader reads them.
+    if (!strncmp(prev, "gl_", 3))
+    {
+        snprintf(v->builtin, sizeof(v->builtin), "%s", prev);
+        snprintf(v->name, sizeof(v->name), "mgl%s", prev + 3);
+
+        if (v->array == 0)
+            v->array = MAX_CLIP_DISTANCES;
+    }
 
     *is_varying = true;
 
@@ -332,6 +362,11 @@ static int structStride(GsVarying *v, int count, bool is_out)
 
         if (align > worst)
             worst = align;
+
+        // std430 gives an array's elements the element's own alignment, so a
+        // vec3 in an array takes 16 bytes where a lone one takes 12
+        if (v[i].array)
+            size = roundUp(size, align) * v[i].array;
 
         offset = roundUp(offset, align) + size;
     }
@@ -498,6 +533,11 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
 
             if (is_varying && end && sc->in_count < MAX_GS_VARYINGS)
             {
+                // an input varying is declared as an array over the input
+                // vertices, and the struct this becomes holds one vertex
+                if (v.builtin[0] == 0)
+                    v.array = 0;
+
                 sc->in[sc->in_count++] = v;
 
                 if (!bufAddN(body, src + copied, i - copied))
@@ -600,6 +640,26 @@ static bool rewriteBody(const char *src, GsScan *sc, Buf *out)
         else if (wordAt(src, i, "gl_PointSize"))       { simple = "mglCur.mglPointSize"; skip = 12; }
         else if (wordAt(src, i, "gl_Layer"))           { simple = "mglCur.mglLayer"; skip = 8; }
         else if (wordAt(src, i, "gl_PrimitiveID"))     { simple = "mglCur.mglPrimitiveID"; skip = 14; }
+        else if (wordAt(src, i, "gl_ClipDistance") || wordAt(src, i, "gl_CullDistance"))
+        {
+            const char *gl_name = src[i + 3] == 'C' && src[i + 4] == 'l' ?
+                                  "gl_ClipDistance" : "gl_CullDistance";
+            const GsVarying *b = builtinVarying(sc->out, sc->out_count, gl_name);
+
+            if (b)
+            {
+                char member[128];
+
+                snprintf(member, sizeof(member), "mglCur.%s", b->name);
+
+                if (!bufAddN(out, src + copied, i - copied) || !bufAdd(out, member))
+                    return false;
+
+                i += strlen(gl_name);
+                copied = i;
+                continue;
+            }
+        }
         else if (wordAt(src, i, "gl_in"))
         {
             // gl_in[EXPR].member -> mglGsIn[mglFetch(EXPR)].member
@@ -636,6 +696,25 @@ static bool rewriteBody(const char *src, GsScan *sc, Buf *out)
                         if (!bufAdd(out, ".mglPointSize")) return false;
                         i = m + 12;
                         copied = i;
+                    }
+                    else
+                    {
+                        for (int v = 0; v < sc->in_count; v++)
+                        {
+                            const GsVarying *b = &sc->in[v];
+                            char member[128];
+
+                            if (b->builtin[0] == 0 || !wordAt(src, m, b->builtin))
+                                continue;
+
+                            snprintf(member, sizeof(member), ".%s", b->name);
+
+                            if (!bufAdd(out, member)) return false;
+
+                            i = m + strlen(b->builtin);
+                            copied = i;
+                            break;
+                        }
                     }
                 }
 
@@ -748,6 +827,16 @@ static bool rewriteBody(const char *src, GsScan *sc, Buf *out)
 // the shared vertex struct, declared identically everywhere it is used
 // ---------------------------------------------------------------------------
 
+static const char *memberDecl(char *line, size_t cap, const GsVarying *v)
+{
+    if (v->array)
+        snprintf(line, cap, "  %s %s[%d];\n", v->type, v->name, v->array);
+    else
+        snprintf(line, cap, "  %s %s;\n", v->type, v->name);
+
+    return line;
+}
+
 static bool emitStructs(GsScan *sc, Buf *b)
 {
     char line[256];
@@ -757,9 +846,7 @@ static bool emitStructs(GsScan *sc, Buf *b)
 
     for (int i = 0; i < sc->in_count; i++)
     {
-        snprintf(line, sizeof(line), "  %s %s;\n", sc->in[i].type, sc->in[i].name);
-
-        if (!bufAdd(b, line))
+        if (!bufAdd(b, memberDecl(line, sizeof(line), &sc->in[i])))
             return false;
     }
 
@@ -769,9 +856,7 @@ static bool emitStructs(GsScan *sc, Buf *b)
 
     for (int i = 0; i < sc->out_count; i++)
     {
-        snprintf(line, sizeof(line), "  %s %s;\n", sc->out[i].type, sc->out[i].name);
-
-        if (!bufAdd(b, line))
+        if (!bufAdd(b, memberDecl(line, sizeof(line), &sc->out[i])))
             return false;
     }
 
@@ -797,6 +882,37 @@ void mglFreeGeometryInfo(GeometryInfo *gi)
 // Turns a geometry shader into a compute shader, and generates the vertex
 // shader that draws what it produced. Returns false when the source has no
 // geometry shader shape this understands.
+static bool accessesMember(const char *src, const char *array, const char *member);
+
+// A geometry shader reads the vertex stage's clip and cull distances through
+// gl_in, which it never declares, so the input side has to be inferred from
+// what the body touches.
+static void addReadBuiltins(const char *src, GsScan *sc)
+{
+    static const char *names[] = { "gl_ClipDistance", "gl_CullDistance" };
+
+    for (int n = 0; n < 2; n++)
+    {
+        const GsVarying *out;
+        GsVarying v;
+
+        if (!accessesMember(src, "gl_in", names[n]) ||
+            builtinVarying(sc->in, sc->in_count, names[n]) ||
+            sc->in_count >= MAX_GS_VARYINGS)
+            continue;
+
+        out = builtinVarying(sc->out, sc->out_count, names[n]);
+
+        memset(&v, 0, sizeof(v));
+        snprintf(v.type, sizeof(v.type), "float");
+        snprintf(v.builtin, sizeof(v.builtin), "%s", names[n]);
+        snprintf(v.name, sizeof(v.name), "mgl%s", names[n] + 3);
+        v.array = out ? out->array : MAX_CLIP_DISTANCES;
+
+        sc->in[sc->in_count++] = v;
+    }
+}
+
 bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 {
     GsScan sc;
@@ -810,6 +926,8 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
     if (!scanGeometry(src, gi, &sc, &stripped))
         goto done;
+
+    addReadBuiltins(src, &sc);
 
     if (!rewriteBody(stripped.s ? stripped.s : "", &sc, &body))
         goto done;
@@ -882,6 +1000,29 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     if (!bufAdd(&out, line))
         goto done;
 
+    // A primitive the geometry stage culled never reaches the buffer at all,
+    // so its slot stays invalid and the pass-through pushes it off screen.
+    {
+        const GsVarying *cull = builtinVarying(sc.out, sc.out_count, "gl_CullDistance");
+
+        if (cull)
+            snprintf(line, sizeof(line),
+                "bool mglCulled(MglGsOutV a, MglGsOutV b, MglGsOutV c, int n)\n{\n"
+                "  for (int i = 0; i < %d; i++)\n  {\n"
+                "    if (a.%s[i] >= 0.0) continue;\n"
+                "    if (n > 1 && b.%s[i] >= 0.0) continue;\n"
+                "    if (n > 2 && c.%s[i] >= 0.0) continue;\n"
+                "    return true;\n  }\n  return false;\n}\n\n",
+                cull->array, cull->name, cull->name, cull->name);
+        else
+            snprintf(line, sizeof(line),
+                "bool mglCulled(MglGsOutV a, MglGsOutV b, MglGsOutV c, int n)\n"
+                "{\n  return false;\n}\n\n");
+
+        if (!bufAdd(&out, line))
+            goto done;
+    }
+
     if (!bufAdd(&out,
         "int mglPrimitiveID;\nint mglInvocationID;\nint mglBase;\nint mglWritten;\n"
         "MglGsOutV mglCur;\nMglGsOutV mglStrip[3];\nint mglStripLen;\nbool mglStripFlip;\n\n"
@@ -894,11 +1035,14 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
         "  mglGsOut[mglBase + mglWritten] = v;\n"
         "  mglWritten++;\n}\n\n"
         "void mglEmitVertex()\n{\n"
-        "  if (mglGsOutVerts == 1) { mglPut(mglCur); return; }\n"
+        "  if (mglGsOutVerts == 1) { if (!mglCulled(mglCur, mglCur, mglCur, 1)) mglPut(mglCur); return; }\n"
         "  if (mglStripLen < mglGsOutVerts - 1) { mglStrip[mglStripLen] = mglCur; mglStripLen++; return; }\n"
-        "  if (mglGsOutVerts == 2) { mglPut(mglStrip[0]); mglPut(mglCur); mglStrip[0] = mglCur; return; }\n"
-        "  if (mglStripFlip) { mglPut(mglStrip[1]); mglPut(mglStrip[0]); mglPut(mglCur); }\n"
-        "  else { mglPut(mglStrip[0]); mglPut(mglStrip[1]); mglPut(mglCur); }\n"
+        "  if (mglGsOutVerts == 2)\n  {\n"
+        "    if (!mglCulled(mglStrip[0], mglCur, mglCur, 2)) { mglPut(mglStrip[0]); mglPut(mglCur); }\n"
+        "    mglStrip[0] = mglCur;\n    return;\n  }\n"
+        "  if (!mglCulled(mglStrip[0], mglStrip[1], mglCur, 3))\n  {\n"
+        "    if (mglStripFlip) { mglPut(mglStrip[1]); mglPut(mglStrip[0]); mglPut(mglCur); }\n"
+        "    else { mglPut(mglStrip[0]); mglPut(mglStrip[1]); mglPut(mglCur); }\n  }\n"
         "  mglStrip[0] = mglStrip[1];\n  mglStrip[1] = mglCur;\n"
         "  mglStripFlip = !mglStripFlip;\n}\n\n"
         "void mglEndPrimitive()\n{\n  mglStripLen = 0;\n  mglStripFlip = false;\n}\n\n"
@@ -945,14 +1089,30 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
     for (int i = 0, loc = 0; i < sc.out_count; i++)
     {
-        snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s;\n", loc,
-                 sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
-                 sc.out[i].type, sc.out[i].name);
+        if (sc.out[i].builtin[0])
+        {
+            snprintf(line, sizeof(line), "out %s %s[%d];\n",
+                     sc.out[i].type, sc.out[i].builtin, sc.out[i].array);
+
+            if (!bufAdd(&pass, line))
+                goto done;
+
+            continue;
+        }
+
+        if (sc.out[i].array)
+            snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s[%d];\n", loc,
+                     sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
+                     sc.out[i].type, sc.out[i].name, sc.out[i].array);
+        else
+            snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s;\n", loc,
+                     sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
+                     sc.out[i].type, sc.out[i].name);
 
         if (!bufAdd(&pass, line))
             goto done;
 
-        loc += locationsFor(sc.out[i].type);
+        loc += locationsFor(sc.out[i].type) * (sc.out[i].array ? sc.out[i].array : 1);
     }
 
     if (!bufAdd(&pass, "\nvoid main()\n{\n  MglGsOutV v = mglGsOut[gl_VertexID];\n"))
@@ -960,7 +1120,16 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
     for (int i = 0; i < sc.out_count; i++)
     {
-        snprintf(line, sizeof(line), "  %s = v.%s;\n", sc.out[i].name, sc.out[i].name);
+        const char *dst = sc.out[i].builtin[0] ? sc.out[i].builtin : sc.out[i].name;
+
+        // SPIRV-Cross has no lowering for a whole-array copy between a
+        // built-in and a struct member, so arrays move one element at a time
+        if (sc.out[i].array)
+            snprintf(line, sizeof(line),
+                     "  for (int mglI = 0; mglI < %d; mglI++) %s[mglI] = v.%s[mglI];\n",
+                     sc.out[i].array, dst, sc.out[i].name);
+        else
+            snprintf(line, sizeof(line), "  %s = v.%s;\n", dst, sc.out[i].name);
 
         if (!bufAdd(&pass, line))
             goto done;
@@ -990,8 +1159,15 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
     for (int i = 0; i < sc.in_count; i++)
     {
-        snprintf(line, sizeof(line), "  mglGsIn[gl_VertexID].%s = %s;\n",
-                 sc.in[i].name, sc.in[i].name);
+        const char *src_name = sc.in[i].builtin[0] ? sc.in[i].builtin : sc.in[i].name;
+
+        if (sc.in[i].array)
+            snprintf(line, sizeof(line),
+                     "  for (int mglI = 0; mglI < %d; mglI++) mglGsIn[gl_VertexID].%s[mglI] = %s[mglI];\n",
+                     sc.in[i].array, sc.in[i].name, src_name);
+        else
+            snprintf(line, sizeof(line), "  mglGsIn[gl_VertexID].%s = %s;\n",
+                     sc.in[i].name, src_name);
 
         if (!bufAdd(&decl, line))
             goto done;

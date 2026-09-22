@@ -154,3 +154,143 @@ GPU_TEST(cull_distance, the_limits_are_answered)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
     CHECK_MSG(v >= 8, "GL_MAX_COMBINED_CLIP_AND_CULL_DISTANCES is %d, the 4.6 floor is 8", v);
 }
+
+/* ---------------------------------------------------------------------------
+ * Through a geometry stage.
+ *
+ * The geometry shader is rewritten into a compute pass, so gl_CullDistance has
+ * to travel through the generated structs rather than through GL's own
+ * plumbing, and the primitive is dropped inside the emitter.
+ */
+
+static GLuint compileStage(GLenum stage, const char *src, char *log, int log_size)
+{
+    GLuint sh = glCreateShader(stage);
+    GLint ok = 0;
+
+    glShaderSource(sh, 1, &src, NULL);
+    glCompileShader(sh);
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+
+    if (!ok && log && log_size)
+        glGetShaderInfoLog(sh, log_size, NULL, log);
+
+    return ok ? sh : 0;
+}
+
+static GLuint linkVGF(const char *vs, const char *gs, const char *fs,
+                      char *log, int log_size)
+{
+    GLuint prog = glCreateProgram();
+    GLuint v, g, f;
+    GLint ok = 0;
+
+    if (log && log_size)
+        log[0] = 0;
+
+    v = compileStage(GL_VERTEX_SHADER, vs, log, log_size);
+    g = compileStage(GL_GEOMETRY_SHADER, gs, log, log_size);
+    f = compileStage(GL_FRAGMENT_SHADER, fs, log, log_size);
+
+    if (!v || !g || !f)
+        return 0;
+
+    glAttachShader(prog, v);
+    glAttachShader(prog, g);
+    glAttachShader(prog, f);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+
+    if (!ok && log && log_size)
+        glGetProgramInfoLog(prog, log_size, NULL, log);
+
+    return ok ? prog : 0;
+}
+
+/* passes the vertex stage's cull distance straight through */
+static const char *GS_PASS_CULL =
+    "#version 450\n"
+    "layout(triangles) in;\n"
+    "layout(triangle_strip, max_vertices = 3) out;\n"
+    "out float gl_CullDistance[1];\n"
+    "void main()\n"
+    "{\n"
+    "    for (int i = 0; i < 3; i++)\n"
+    "    {\n"
+    "        gl_Position = gl_in[i].gl_Position;\n"
+    "        gl_CullDistance[0] = gl_in[i].gl_CullDistance[0];\n"
+    "        EmitVertex();\n"
+    "    }\n"
+    "    EndPrimitive();\n"
+    "}\n";
+
+/* ignores what came in and culls on its own terms */
+static const char *GS_OWN_CULL =
+    "#version 450\n"
+    "layout(triangles) in;\n"
+    "layout(triangle_strip, max_vertices = 3) out;\n"
+    "out float gl_CullDistance[1];\n"
+    "uniform float bias;\n"
+    "void main()\n"
+    "{\n"
+    "    for (int i = 0; i < 3; i++)\n"
+    "    {\n"
+    "        gl_Position = gl_in[i].gl_Position;\n"
+    "        gl_CullDistance[0] = bias;\n"
+    "        EmitVertex();\n"
+    "    }\n"
+    "    EndPrimitive();\n"
+    "}\n";
+
+GPU_TEST(cull_distance, a_geometry_stage_passes_the_distance_through)
+{
+    char log[2048];
+    GLuint prog = linkVGF(VS, GS_PASS_CULL, FS, log, sizeof log);
+    int all_positive, one_negative, all_negative;
+
+    CHECK_MSG(prog != 0, "the geometry cull program did not build: %s", log);
+
+    if (!prog)
+        return;
+
+    all_positive = drawWithDistances(prog, 1.0f, 1.0f, 1.0f);
+    one_negative = drawWithDistances(prog, -1.0f, 1.0f, 1.0f);
+    all_negative = drawWithDistances(prog, -1.0f, -1.0f, -1.0f);
+
+    CHECK_MSG(all_positive > 400, "the geometry stage drew %d pixels with nothing culled", all_positive);
+    CHECK_MSG(one_negative == all_positive,
+              "one negative corner cut the triangle to %d of %d pixels -- that is clipping, not culling",
+              one_negative, all_positive);
+    CHECK_EQ_INT(all_negative, 0);
+
+    glDeleteProgram(prog);
+}
+
+GPU_TEST(cull_distance, a_geometry_stage_can_cull_on_its_own)
+{
+    char log[2048];
+    GLuint prog = linkVGF(VS, GS_OWN_CULL, FS, log, sizeof log);
+    GLint bias;
+
+    CHECK_MSG(prog != 0, "the geometry cull program did not build: %s", log);
+
+    if (!prog)
+        return;
+
+    glUseProgram(prog);
+    bias = glGetUniformLocation(prog, "bias");
+    CHECK_MSG(bias >= 0, "the geometry shader's own uniform has no location");
+
+    /* the vertex stage says keep, the geometry stage says drop */
+    glUniform1f(bias, -1.0f);
+    glUseProgram(0);
+    CHECK_EQ_INT(drawWithDistances(prog, 1.0f, 1.0f, 1.0f), 0);
+
+    glUseProgram(prog);
+    glUniform1f(bias, 1.0f);
+    glUseProgram(0);
+    CHECK_MSG(drawWithDistances(prog, -1.0f, -1.0f, -1.0f) > 400,
+              "the geometry stage kept the primitive and it still did not draw");
+
+    glDeleteProgram(prog);
+}
