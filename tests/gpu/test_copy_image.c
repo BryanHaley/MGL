@@ -1,6 +1,6 @@
 /*
  * test_copy_image.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * glCopyImageSubData: the copy itself, and the errors the spec lists for it.
  */

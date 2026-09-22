@@ -272,23 +272,23 @@ deps += $(mgl_es_obj:.o=.d)
 deps += $(glfw_objs:.o=.d)
 
 
-mgl_lib := $(build_dir)/libmoogle.dylib
-mgl_es_lib := $(build_dir)/libmoogle_es.dylib
+mgl_lib := $(build_dir)/libmoogl.dylib
+mgl_es_lib := $(build_dir)/libmoogles.dylib
 
 mgl_toolchain_obj := $(build_dir)/src/mgl_toolchain.o
-mgl_toolchain_lib := $(build_dir)/libmoogle_toolchain.a
+mgl_toolchain_lib := $(build_dir)/libmoogl_toolchain.a
 
 $(mgl_lib): $(mgl_core_objs) $(mgl_core_arc_objs) $(mgl_core_obj)
 	@mkdir -p $(dir $@)
 	$(CC) -D$(CFLAGS_GL_CORE) -dynamiclib -o $@ $^ $(LIBS) \
-		-install_name @rpath/libmoogle.dylib
+		-install_name @rpath/libmoogl.dylib
 	# loading dynamic library requires this
 	ln -fs $(mgl_lib) .
 
 $(mgl_es_lib): $(mgl_es_objs) $(mgl_es_arc_objs) $(mgl_es_obj)
 	@mkdir -p $(dir $@)
 	$(CC) -D$(CFLAGS_GL_ES) -dynamiclib -o $@ $^ $(LIBS) \
-		-install_name @rpath/libmoogle_es.dylib
+		-install_name @rpath/libmoogles.dylib
 	# loading dynamic library requires this
 	ln -fs $(mgl_es_lib) .
 
@@ -303,7 +303,7 @@ $(build_dir)/libglfw.dylib: external/glfw/build/src/libglfw3.a $(mgl_lib)
 	@mkdir -p $(dir $@)
 	$(CC) -shared -fPIC -dynamiclib \
 		-Wl,-force_load,$(word 1,$^) \
-		-L$(build_dir) -lmoogle \
+		-L$(build_dir) -lmoogl \
 		-o $@ \
 		$(GLFW_FRAMEWORKS) \
 		-Wl,-rpath,@loader_path \
@@ -343,7 +343,7 @@ $(test_build_dir)/%.o: $(test_dir)/%.c
 $(test_exe): $(test_objs) $(mgl_lib)
 	@mkdir -p $(dir $@)
 	$(CC) -arch $(shell uname -m) -o $@ $(test_objs) \
-	  -L$(build_dir) -lmoogle -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
+	  -L$(build_dir) -lmoogl -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
 	  -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore
 
 # --- gears demos: two ports of the classic gears, both runnable as tests ---
@@ -358,7 +358,7 @@ GEARS_CFLAGS := $(TEST_CFLAGS) -I$(gears_dir) -I./external/glfw/include
 # DYLD_LIBRARY_PATH or a Homebrew libglfw silently replaces the MGL-aware
 # build with a stock one that has no MGL backend.
 glfw_static := external/glfw/build/src/libglfw3.a
-GEARS_LIBS := $(glfw_static) -L$(build_dir) -lmoogle -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
+GEARS_LIBS := $(glfw_static) -L$(build_dir) -lmoogl -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
   -framework Cocoa -framework Foundation -framework Metal -framework QuartzCore -framework IOKit
 
 $(gears_build_dir)/%.o: $(gears_dir)/%.c
@@ -384,7 +384,7 @@ probe_srcs := $(wildcard $(test_dir)/probes/*.c)
 probe_exes := $(patsubst $(test_dir)/probes/%.c,$(build_dir)/%,$(probe_srcs))
 
 $(build_dir)/%: $(test_dir)/probes/%.c $(mgl_lib)
-	$(CC) $(CFLAGS) -o $@ $< -L$(build_dir) -lmoogle -Wl,-rpath,$(abspath $(build_dir))
+	$(CC) $(CFLAGS) -o $@ $< -L$(build_dir) -lmoogl -Wl,-rpath,$(abspath $(build_dir))
 
 # Roadmap finish criteria you can run. A phase is done when its gates are clear.
 probe: $(probe_exes)
@@ -484,8 +484,8 @@ $(GLFW_BUILD_DIR)/%.o: $(GLFW_SRC_DIR)/%.m
 clean:
 	rm -rf $(build_dir)
 	rm -f $(generated)
-	rm -f libmoogle.dylib
-	rm -f libmoogle_es.dylib
+	rm -f libmoogl.dylib
+	rm -f libmoogles.dylib
 	rm -f libglfw.dylib
 
 install-pkgdeps: download-pkgdeps compile-pkgdeps

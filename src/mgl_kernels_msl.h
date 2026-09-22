@@ -16,7 +16,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by The Moogle Project for MGL: taken from MoltenVK's
+ * Modified by The MooGL Project for MGL: taken from MoltenVK's
  * MVKCommandPipelineStateFactoryShaderSource.h. Vulkan-specific types and the
  * blit/clear/resolve/tessellation kernels were removed; the multiview
  * (viewCount) parameters were dropped; restart-index remap kernels and

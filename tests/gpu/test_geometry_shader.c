@@ -1,6 +1,6 @@
 /*
  * test_geometry_shader.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Geometry shaders. Metal has no geometry stage, so MGL rewrites the shader
  * into a compute kernel with a generated vertex shader in front of the

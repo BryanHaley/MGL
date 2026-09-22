@@ -1,6 +1,6 @@
 /*
  * mgl_probe.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Finish criteria for the roadmap, as something you can run.
  *

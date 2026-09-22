@@ -1,6 +1,6 @@
 /*
  * test_vertex_texture.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Sampling from a vertex shader. Textures were only ever handed to the
  * fragment stage, so every vertex fetch read black -- which is most of what

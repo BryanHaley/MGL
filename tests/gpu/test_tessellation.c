@@ -1,6 +1,6 @@
 /*
  * test_tessellation.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Tessellation: what links, what the program reports about the domain, and
  * what the tessellator actually produces.

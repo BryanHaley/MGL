@@ -1,6 +1,6 @@
 /*
  * test_packed_formats.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Formats whose components do not land on byte boundaries. Each one is a
  * separate encode and decode in pixel_convert.c, and a missing one shows up

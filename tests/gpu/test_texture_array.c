@@ -1,6 +1,6 @@
 /*
  * test_texture_array.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Array textures, end to end. Every one of these used to come back as the
  * renderer's emergency gradient: an unbraced else in the array branch of

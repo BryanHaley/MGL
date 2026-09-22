@@ -3,8 +3,8 @@
  * MGL
  *
  * Reports what a GL entry point resolves to at runtime. GLFW's MGL backend
- * dlopens "libmoogle.dylib" by bare name and pulls entry points out with dlsym,
- * and libmoogle itself links the system OpenGL framework, so both a real macOS GL
+ * dlopens "libmoogl.dylib" by bare name and pulls entry points out with dlsym,
+ * and libmoogl itself links the system OpenGL framework, so both a real macOS GL
  * and MGL's own symbols exist in the process. This says which one wins.
  */
 
@@ -48,13 +48,13 @@ int main(void)
 
     printf("\n--- dlopen, the way GLFW's MGL backend does it ---\n");
 
-    h = dlopen("libmoogle.dylib", RTLD_LAZY | RTLD_LOCAL);
+    h = dlopen("libmoogl.dylib", RTLD_LAZY | RTLD_LOCAL);
     printf("  dlopen         %s\n", h ? "ok" : dlerror());
 
     if (!h)
     {
-        printf("\nGLFW cannot find libmoogle.dylib from this directory.\n"
-               "Run from the repo root, where the build drops a libmoogle.dylib symlink.\n");
+        printf("\nGLFW cannot find libmoogl.dylib from this directory.\n"
+               "Run from the repo root, where the build drops a libmoogl.dylib symlink.\n");
         return 1;
     }
 

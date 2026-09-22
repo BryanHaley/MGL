@@ -1,6 +1,6 @@
 /*
  * test_transform_feedback.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Transform feedback capture. Metal has no feedback stage, so MGL rewrites the
  * vertex shader to copy the recorded varyings into the bound buffers itself.

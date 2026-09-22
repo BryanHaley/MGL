@@ -1,6 +1,6 @@
 /*
  * test_readback_rules.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * GL 4.6 section 8.11.4: a readback's client format has to agree with the
  * texture's base internal format about two things Metal cannot reinterpret --

@@ -1,6 +1,6 @@
 /*
  * test_multisample.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Multisample rasterisation: storage, the sample count GL reports, resolving
  * through glBlitFramebuffer, and the shader-side sample variables.

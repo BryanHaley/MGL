@@ -1,6 +1,6 @@
 /*
  * probe_fsr2.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Phase 9 finish criterion: can FidelityFX FSR 2.2.1's OpenGL backend
  * initialise and dispatch against MGL? Each check below is something

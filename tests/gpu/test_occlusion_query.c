@@ -1,6 +1,6 @@
 /*
  * test_occlusion_query.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Occlusion queries and the counters that go with them. Metal counts fragments
  * into a buffer rather than into a query object, so a query that survives more

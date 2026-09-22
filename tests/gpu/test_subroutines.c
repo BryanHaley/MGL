@@ -1,6 +1,6 @@
 /*
  * test_subroutines.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * GLSL subroutines. glslang refuses the keyword outright when it is targeting
  * SPIR-V, so MGL rewrites them into a plain int selector and a switch before

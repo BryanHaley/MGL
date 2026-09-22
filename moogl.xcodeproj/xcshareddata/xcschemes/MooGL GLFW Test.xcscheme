@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "FFA83043276F9EBE003F1EA0"
-               BuildableName = "moogle_glfw_test"
-               BlueprintName = "MooGLe GLFW Test"
-               ReferencedContainer = "container:moogle.xcodeproj">
+               BuildableName = "moogl_glfw_test"
+               BlueprintName = "MooGL GLFW Test"
+               ReferencedContainer = "container:moogl.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -48,9 +48,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "FFA83043276F9EBE003F1EA0"
-            BuildableName = "moogle_glfw_test"
-            BlueprintName = "MooGLe GLFW Test"
-            ReferencedContainer = "container:moogle.xcodeproj">
+            BuildableName = "moogl_glfw_test"
+            BlueprintName = "MooGL GLFW Test"
+            ReferencedContainer = "container:moogl.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -65,9 +65,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "FFA83043276F9EBE003F1EA0"
-            BuildableName = "moogle_glfw_test"
-            BlueprintName = "MooGLe GLFW Test"
-            ReferencedContainer = "container:moogle.xcodeproj">
+            BuildableName = "moogl_glfw_test"
+            BlueprintName = "MooGL GLFW Test"
+            ReferencedContainer = "container:moogl.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

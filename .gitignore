@@ -1,7 +1,7 @@
 config.mk
 build/
-libmoogle.dylib
-libmoogle_es.dylib
+libmoogl.dylib
+libmoogles.dylib
 libglfw.dylib
 external/OpenGL-Registry/
 external/SPIRV-Cross/
@@ -13,7 +13,7 @@ external/glslang/
 *.DS_Store
 /SPIRV-Headers
 /SPIRV-Cross
-/moogle.gputrace
+/moogl.gputrace
 /Info.plist
 .claude/
 .vscode/

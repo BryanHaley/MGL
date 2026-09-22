@@ -1,6 +1,6 @@
 /*
  * test_uniform_block_names.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * GL 4.6 section 7.3.1: a member of a uniform block declared with an instance
  * name is called "Block.member" through the API. MGL reported the bare member

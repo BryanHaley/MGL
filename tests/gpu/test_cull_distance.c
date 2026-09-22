@@ -1,6 +1,6 @@
 /*
  * test_cull_distance.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * gl_CullDistance throws a primitive away only when every one of its vertices
  * says to. Metal has no such thing, so MGL records the distances in a pass of

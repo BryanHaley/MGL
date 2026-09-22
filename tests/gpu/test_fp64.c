@@ -1,6 +1,6 @@
 /*
  * test_fp64.c
- * Copyright (C) The Moogle Project
+ * Copyright (C) The MooGL Project
  *
  * Metal has no double. SPIRV-Cross carries every one as three floats that add
  * up to it, so these check the bits a single float would have thrown away.
