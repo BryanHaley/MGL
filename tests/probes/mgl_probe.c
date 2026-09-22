@@ -1124,14 +1124,14 @@ static void phase8(void)
         gate(want[i], hasExt(want[i]), NULL);
 }
 
-/* --- phase 10: the compatibility profile games still ask for ------------- */
+/* --- phase 11: the compatibility profile games still ask for ------------- */
 /*
  * MGL is a core profile driver. A full compatibility profile is not worth
  * building, but a handful of removed features still turn up in shipped games,
  * and each gate below is one of them. Built with -DMGL_NO_COMPAT_PROFILE
  * every gate here stands, which is the point of the switch.
  */
-static void phase10(void)
+static void phase11(void)
 {
     static const char *vs =
         "#version 460 core\n"
@@ -1147,7 +1147,7 @@ static void phase10(void)
     GLfloat ref = -1.0f;
     int accepted, stored, discarded = 0, kept = 0;
 
-    phase("PHASE 10  the compatibility profile games still ask for");
+    phase("PHASE 11  the compatibility profile games still ask for");
 
     /* --- the alpha test --- */
     drain();
@@ -1283,15 +1283,15 @@ static void phase10(void)
     (void)fbo;
 }
 
-/* --- phase 10B: the software that is not a Steam game ------------------- */
+/* --- phase 11A: the software that is not a Steam game -------------------- */
 /*
  * CAD packages, scientific viewers, modding utilities and the GoldSrc engine
- * ask for a compatibility profile for reasons phase 10 does not cover. The
- * matrix stack, which GoldSrc also needs, is gated in phase 10.
+ * ask for a compatibility profile for reasons phase 11 does not cover. The
+ * matrix stack, which GoldSrc also needs, is gated in phase 11.
  */
-static void phase10B(void)
+static void phase11A(void)
 {
-    phase("PHASE 10B  legacy desktop software and the GoldSrc line");
+    phase("PHASE 11A  legacy desktop software and the GoldSrc line");
 
     drain();
     glDrawBuffer(GL_FRONT);
@@ -1346,12 +1346,12 @@ static void phase10B(void)
          "GoldSrc looks for the extension string, not the core entry point");
 }
 
-/* --- phase 10C: the rest of the vintage stack --------------------------- */
+/* --- phase 11B: the rest of the vintage stack ---------------------------- */
 /*
- * What is left after phase 10B before an application stops needing a
+ * What is left after phase 11A before an application stops needing a
  * compatibility profile at all.
  */
-static void phase10C(void)
+static void phase11B(void)
 {
     static const char *vs =
         "#version 460 core\n"
@@ -1367,7 +1367,7 @@ static void phase10C(void)
     GLuint passed = 0;
     int quads_drew = 0;
 
-    phase("PHASE 10C  the rest of the vintage stack");
+    phase("PHASE 11B  the rest of the vintage stack");
 
     /* a real draw, so the gate answers about the mode and not the setup */
     probeTarget(NULL);
@@ -1426,17 +1426,17 @@ static void phase10C(void)
          "flight sims cull scenery by asking what the depth test passed");
 }
 
-/* --- phase 10D: early Mac OS X ------------------------------------------ */
+/* --- phase 11C: early Mac OS X ------------------------------------------- */
 /*
  * Screen savers, iTunes visualisers and vintage ports from the PowerPC and
  * early Intel years, which leaned on Apple's own extensions.
  */
-static void phase10D(void)
+static void phase11C(void)
 {
     GLuint tex = 0;
     static const GLubyte bgra[4] = { 0, 0, 255, 255 };
 
-    phase("PHASE 10D  early Mac OS X");
+    phase("PHASE 11C  early Mac OS X");
 
     gate("GL_EXT_texture_rectangle aliases the core rectangle target",
          hasExt("GL_EXT_texture_rectangle"),
@@ -1476,10 +1476,10 @@ int main(void)
     phase5();
     phase6();
     phase8();
-    phase10();
-    phase10B();
-    phase10C();
-    phase10D();
+    phase11();
+    phase11A();
+    phase11B();
+    phase11C();
 
     printf("    %s\n\n", g_phase_gates ? "-> gates remaining" : "-> PHASE COMPLETE");
     printf("%d gate(s) remaining across the probed phases.\n", g_gates);
