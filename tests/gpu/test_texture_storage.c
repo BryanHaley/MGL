@@ -6,6 +6,7 @@
  * and binding, texture views, texture buffers, and image unit binding.
  */
 
+#include <string.h>
 #include "mgl_test.h"
 #include "harness.h"
 
@@ -657,4 +658,108 @@ GPU_TEST(texture_storage, dsa_cube_map_gets_six_faces)
     CHECK(memcmp(back + 3 * sizeof(face3), face3, sizeof(face3)) == 0);
 
     glDeleteTextures(1, &tex);
+}
+
+/* Every layer of a 3D texture has to come back the way it went in. A copy into
+   one layer must leave the others alone, which is what glCopyImageSubData's
+   functional cases check and what this pins down without them. */
+GPU_TEST(texture_storage, tex_image_3D_layers_round_trip)
+{
+    enum { W = 7, H = 7, D = 4 };
+    GLuint t = 0;
+    unsigned char src[W * H * D * 4];
+    unsigned char dst[W * H * D * 4];
+
+    for (int z = 0; z < D; z++)
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+            {
+                int i = ((z * H + y) * W + x) * 4;
+
+                src[i + 0] = (unsigned char)(x * 10);
+                src[i + 1] = (unsigned char)(y * 10);
+                src[i + 2] = (unsigned char)(z * 10 + 1);
+                src[i + 3] = 255;
+            }
+
+    memset(dst, 0, sizeof dst);
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_3D, t);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, W, H, D, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RGBA, GL_UNSIGNED_BYTE, dst);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    /* the corner of every layer, which is where a wrong image stride shows */
+    for (int z = 0; z < D; z++)
+    {
+        int i = ((z * H + (H - 1)) * W + (W - 1)) * 4;
+
+        CHECK_EQ_INT(dst[i + 0], (W - 1) * 10);
+        CHECK_EQ_INT(dst[i + 1], (H - 1) * 10);
+        CHECK_EQ_INT(dst[i + 2], z * 10 + 1);
+    }
+
+    CHECK(memcmp(src, dst, sizeof src) == 0);
+
+    glDeleteTextures(1, &t);
+}
+
+/* A copy into one layer of a 3D texture leaves every other layer as it was. */
+GPU_TEST(texture_storage, copy_into_one_3D_layer_spares_the_rest)
+{
+    enum { W = 7, H = 7, D = 4 };
+    GLuint src_tex = 0, dst_tex = 0;
+    unsigned char fill[W * H * D * 4];
+    unsigned char one[4] = { 9, 9, 9, 255 };
+    unsigned char dst[W * H * D * 4];
+
+    for (size_t i = 0; i < sizeof fill; i += 4)
+    {
+        fill[i + 0] = (unsigned char)(i / 4);
+        fill[i + 1] = 7;
+        fill[i + 2] = (unsigned char)(i / (4 * W * H) + 1);
+        fill[i + 3] = 255;
+    }
+
+    glGenTextures(1, &dst_tex);
+    glBindTexture(GL_TEXTURE_3D, dst_tex);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, W, H, D, 0, GL_RGBA, GL_UNSIGNED_BYTE, fill);
+    /* one level only, so the texture counts as complete to copy from */
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 0);
+
+    glGenTextures(1, &src_tex);
+    glBindTexture(GL_TEXTURE_3D, src_tex);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, one);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glCopyImageSubData(src_tex, GL_TEXTURE_3D, 0, 0, 0, 0,
+                       dst_tex, GL_TEXTURE_3D, 0, 6, 6, 0, 1, 1, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    memset(dst, 0, sizeof dst);
+    glBindTexture(GL_TEXTURE_3D, dst_tex);
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RGBA, GL_UNSIGNED_BYTE, dst);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    /* the one texel that was copied */
+    {
+        int i = ((0 * H + 6) * W + 6) * 4;
+        CHECK_EQ_INT(dst[i + 0], 9);
+    }
+
+    /* and every layer above it, untouched */
+    for (int z = 1; z < D; z++)
+    {
+        int i = ((z * H + 6) * W + 6) * 4;
+
+        CHECK_EQ_INT(dst[i + 1], 7);
+        CHECK_EQ_INT(dst[i + 2], z + 1);
+    }
+
+    glDeleteTextures(1, &src_tex);
+    glDeleteTextures(1, &dst_tex);
 }

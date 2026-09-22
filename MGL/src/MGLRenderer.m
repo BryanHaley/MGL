@@ -6932,7 +6932,11 @@ static MTLWinding mtlWindingFor(const Program *p)
     vertexFunction = (__bridge id<MTLFunction>)(program->spirv[_VERTEX_SHADER].mtl_function);
     fragmentFunction = (__bridge id<MTLFunction>)(program->spirv[_FRAGMENT_SHADER].mtl_function);
 
-    if (!vertexFunction || !fragmentFunction)
+    // With the raster off nothing reaches a fragment stage, and GL lets a
+    // program that only feeds transform feedback leave it out.
+    bool raster_off = ctx->state.caps.rasterizer_discard;
+
+    if (!vertexFunction || (!fragmentFunction && !raster_off))
     {
         MGL_NSERR(@"MGL ERROR: program %u has no linked %s stage", program->name,
               vertexFunction ? "fragment" : "vertex");
@@ -6946,6 +6950,10 @@ static MTLWinding mtlWindingFor(const Program *p)
     pipelineStateDescriptor.label = @"GLSL Pipeline";
     pipelineStateDescriptor.vertexFunction = vertexFunction;
     pipelineStateDescriptor.fragmentFunction = fragmentFunction;
+
+    if (!fragmentFunction)
+        pipelineStateDescriptor.rasterizationEnabled = NO;
+
     if (program->tess.active)
     {
         pipelineStateDescriptor.maxTessellationFactor = 64;
@@ -9293,10 +9301,22 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
 
     id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
 
+    // An array texture keeps its layers in slices; a 3D texture has one slice
+    // and counts depth in the origin instead. Asking a 3D texture for slice N
+    // read image zero back every time.
+    NSUInteger source_slice = slice;
+    MTLOrigin origin = region.origin;
+
+    if (texture.textureType == MTLTextureType3D)
+    {
+        origin.z = slice;
+        source_slice = 0;
+    }
+
     [blit copyFromTexture: texture
-              sourceSlice: slice
+              sourceSlice: source_slice
               sourceLevel: level
-             sourceOrigin: region.origin
+             sourceOrigin: origin
                sourceSize: MTLSizeMake(w, h, region.size.depth ? region.size.depth : 1)
                  toBuffer: staging
         destinationOffset: 0

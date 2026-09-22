@@ -118,6 +118,11 @@ static int componentsOf(const char *type, char *base_kind)
         { "mat2x2", 4, 'f' },{ "mat2x3", 6, 'f' },{ "mat2x4", 8, 'f' },
         { "mat3x2", 6, 'f' },{ "mat3x3", 9, 'f' },{ "mat3x4", 12, 'f' },
         { "mat4x2", 8, 'f' },{ "mat4x3", 12, 'f' },{ "mat4x4", 16, 'f' },
+        { "double", 1, 'd' },{ "dvec2", 2, 'd' },{ "dvec3", 3, 'd' },{ "dvec4", 4, 'd' },
+        { "dmat2", 4, 'd' }, { "dmat3", 9, 'd' },{ "dmat4", 16, 'd' },
+        { "dmat2x2", 4, 'd' },{ "dmat2x3", 6, 'd' },{ "dmat2x4", 8, 'd' },
+        { "dmat3x2", 6, 'd' },{ "dmat3x3", 9, 'd' },{ "dmat3x4", 12, 'd' },
+        { "dmat4x2", 8, 'd' },{ "dmat4x3", 12, 'd' },{ "dmat4x4", 16, 'd' },
     };
 
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++)
@@ -136,6 +141,9 @@ static int componentsOf(const char *type, char *base_kind)
 static void matrixShape(const char *type, int *cols, int *rows)
 {
     *cols = *rows = 0;
+
+    if (type[0] == 'd')
+        type++;
 
     if (strncmp(type, "mat", 3))
         return;
@@ -302,7 +310,8 @@ static int itemsFromVaryings(const char *src, char *const *varyings, GLsizei cou
         items[n].rows = cols ? rows : 0;
         n++;
 
-        offset += 4 * comps;
+        // A double takes two slots, the same way the capture writes it.
+        offset += (kind == 'd' ? 8 : 4) * comps;
 
         if (offset > stride_bytes[buffer])
             stride_bytes[buffer] = offset;
@@ -364,7 +373,7 @@ static bool buildCapture(const char *src, const MglXfbItem *items, int count,
             if (it->kind == 'd')
             {
                 snprintf(line, sizeof(line),
-                         "  { uvec2 w = packDouble2x32(%s);\n"
+                         "  { uvec2 w = unpackDouble2x32(%s);\n"
                          "    mglXfbBuf%d[mglSlot * %d + %d] = w.x;\n"
                          "    mglXfbBuf%d[mglSlot * %d + %d] = w.y; }\n",
                          access, it->buffer, stride_words, word + 2 * c,

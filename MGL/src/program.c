@@ -1594,6 +1594,17 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
+    // A program with no fragment stage can only be drawn with the raster off,
+    // and Metal wants a vertex function that returns nothing for that.
+    if (stage != _FRAGMENT_SHADER && stage != _COMPUTE_SHADER && ptr &&
+        ptr->shader_slots[_FRAGMENT_SHADER] == NULL)
+    {
+        if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION, SPVC_TRUE) != SPVC_SUCCESS) {
+            MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION) failed\n");
+            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        }
+    }
+
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS, SPVC_FALSE) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS, SPVC_FALSE) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS) failed\n");
