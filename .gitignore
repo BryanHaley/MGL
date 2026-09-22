@@ -16,4 +16,5 @@ external/glslang/
 /MGL.gputrace
 /Info.plist
 .claude/
+.vscode/
 scratchpad/
