@@ -325,7 +325,7 @@
 		DFB50A9E28B09F1E0084D12B /* buffers.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = buffers.h; sourceTree = "<group>"; };
 		DFC728FA2894855E00990595 /* libSPIRV-Tools-shared.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = "libSPIRV-Tools-shared.dylib"; path = "external/SPIRV-Tools/build/source/libSPIRV-Tools-shared.dylib"; sourceTree = "<group>"; };
 		DFC728FC289485A000990595 /* libSPIRV-Tools.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = "libSPIRV-Tools.a"; path = "external/SPIRV-Tools/build/source/libSPIRV-Tools.a"; sourceTree = "<group>"; };
-		DFC729002894933400990595 /* test_mgl_glfw.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = test_mgl_glfw.entitlements; sourceTree = SOURCE_ROOT; };
+		DFC729002894933400990595 /* moogle_glfw_test.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "tests/glfw_app/moogle_glfw_test.entitlements"; sourceTree = SOURCE_ROOT; };
 		FF2DC2592D2C64B20040B838 /* MooGLe.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = MooGLe.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		FF2DC25F2D2C9A830040B838 /* uniforms.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = uniforms.c; sourceTree = "<group>"; };
 		FF2DC2622D2C9B040040B838 /* programs.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = programs.h; sourceTree = "<group>"; };
@@ -661,7 +661,7 @@
 		FFA83045276F9EBF003F1EA0 /* moogle_glfw_test */ = {
 			isa = PBXGroup;
 			children = (
-				DFC729002894933400990595 /* test_mgl_glfw.entitlements */,
+				DFC729002894933400990595 /* moogle_glfw_test.entitlements */,
 				FFA83046276F9EBF003F1EA0 /* main.cpp */,
 			);
 			name = test_mgl_glfw;
@@ -1616,7 +1616,7 @@
 		FFA83049276F9EBF003F1EA0 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = test_mgl_glfw.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "tests/glfw_app/moogle_glfw_test.entitlements";
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
@@ -1637,7 +1637,7 @@
 		FFA8304A276F9EBF003F1EA0 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = test_mgl_glfw.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "tests/glfw_app/moogle_glfw_test.entitlements";
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;

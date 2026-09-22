@@ -395,6 +395,23 @@ tests: $(test_exe)
 test: $(test_exe)
 	$(test_exe)
 
+# --- conformance ---------------------------------------------------------
+# glcts drops TestResults.qpa in whatever directory it is run from, so the
+# log path is passed explicitly to keep it out of the repo root.
+# Override the case filter: make cts CTS_CASE='KHR-GL46.clear_tex_image.*'
+cts_dir := tests/results
+cts_bin := submodules/VK-GL-CTS/build/external/openglcts/modules/glcts
+CTS_CASE ?= KHR-GL46.*
+
+cts: $(mgl_lib)
+	@mkdir -p $(cts_dir)
+	MGL_LIBRARY_PATH=$(abspath $(mgl_lib)) $(cts_bin) \
+	  --deqp-case='$(CTS_CASE)' \
+	  --deqp-log-filename=$(abspath $(cts_dir))/TestResults.qpa \
+	  --deqp-surface-type=fbo \
+	  --deqp-surface-width=256 --deqp-surface-height=256 \
+	  --deqp-watchdog=disable
+
 dbg: $(test_exe)
 	lldb -o run $(test_exe)
 
@@ -487,6 +504,6 @@ update-pkdeps:
 test-make:
 	@echo $(glfw_objs)
 
-.PHONY: default test tests gears gears-test dbg lib clean generate insall-pkgdeps test-make 
+.PHONY: default test tests cts gears gears-test dbg lib clean generate insall-pkgdeps test-make 
 
 -include $(deps)
