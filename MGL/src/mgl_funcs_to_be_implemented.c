@@ -590,18 +590,52 @@ void mglGenTransformFeedbacks(GLMContext ctx, GLsizei n, GLuint *ids)
 
 
 
+// Where Metal puts the samples. These are the patterns the hardware uses by
+// default, and they are what gl_SamplePosition reports in a shader, so the
+// query has to answer the same thing. Saying 0.5, 0.5 for every sample made
+// the two disagree, which is the one thing GL does pin down.
+static const GLfloat mgl_sample_positions_2[2][2] = {
+	{ 0.75f, 0.75f }, { 0.25f, 0.25f }
+};
+
+static const GLfloat mgl_sample_positions_4[4][2] = {
+	{ 0.375f, 0.125f }, { 0.875f, 0.375f }, { 0.125f, 0.625f }, { 0.625f, 0.875f }
+};
+
+static const GLfloat mgl_sample_positions_8[8][2] = {
+	{ 0.5625f, 0.3125f }, { 0.4375f, 0.6875f }, { 0.8125f, 0.5625f }, { 0.3125f, 0.1875f },
+	{ 0.1875f, 0.8125f }, { 0.0625f, 0.4375f }, { 0.6875f, 0.9375f }, { 0.9375f, 0.0625f }
+};
+
 void mglGetMultisamplefv(GLMContext ctx, GLenum pname, GLuint index, GLfloat *val)
 {
-	// Get sample positions for multisample rendering
-	if (pname != GL_SAMPLE_POSITION) {
-		STATE(error) = GL_INVALID_ENUM;
-		return;
+	GLsizei samples;
+
+	ERROR_CHECK_RETURN(pname == GL_SAMPLE_POSITION, GL_INVALID_ENUM);
+	ERROR_CHECK_RETURN(val, GL_INVALID_VALUE);
+
+	samples = mglDrawFramebufferSamples(ctx);
+
+	if (samples < 1)
+		samples = 1;
+
+	ERROR_CHECK_RETURN((GLsizei)index < samples, GL_INVALID_VALUE);
+
+	switch (samples)
+	{
+		case 2:  val[0] = mgl_sample_positions_2[index][0];
+		         val[1] = mgl_sample_positions_2[index][1];
+		         break;
+		case 4:  val[0] = mgl_sample_positions_4[index][0];
+		         val[1] = mgl_sample_positions_4[index][1];
+		         break;
+		case 8:  val[0] = mgl_sample_positions_8[index][0];
+		         val[1] = mgl_sample_positions_8[index][1];
+		         break;
+		default: val[0] = 0.5f;     // one sample sits in the middle
+		         val[1] = 0.5f;
+		         break;
 	}
-	
-	// Metal uses fixed sample positions based on sample count
-	// Return reasonable default positions (center for simplicity)
-	val[0] = 0.5f;
-	val[1] = 0.5f;
 }
 
 void mglGetObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label)

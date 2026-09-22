@@ -1346,7 +1346,14 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         tex_desc.usage |= MTLTextureUsageRenderTarget;
     }
 
-    if (tex->samples > 1)
+    // GL will take a one-sample multisample texture, and a shader still reaches
+    // it through a sampler2DMS, so the Metal texture has to be a multisample
+    // one whatever the count says.
+    bool wants_multisample = tex->samples > 1 ||
+                             tex->target == GL_TEXTURE_2D_MULTISAMPLE ||
+                             tex->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+
+    if (wants_multisample)
     {
         // A multisample surface is only ever drawn into, so it gets one level,
         // the sample count GL asked for, and the render-target usage bit. A
@@ -1357,8 +1364,10 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
                              : MTLTextureType2DMultisample;
 
         // GL takes any sample count and lets the driver round up; Metal
-        // asserts on a count it does not have, so round up here
-        NSUInteger want = tex->samples;
+        // asserts on a count it does not have, so round up here. Metal has no
+        // one-sample multisample texture at all, and GL allows the count to
+        // come back higher than asked, so one becomes two.
+        NSUInteger want = tex->samples < 2 ? 2 : tex->samples;
         while (want <= 32 && ![_device supportsTextureSampleCount: want])
             want++;
         if (want > 32)
@@ -4415,13 +4424,30 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     if (ctx->state.clear_bitmask && ctx->state.clear_framebuffer != ctx->state.framebuffer)
         ctx->state.clear_bitmask = 0;
 
+    // glClearBuffer* records its request on the attachment it names rather
+    // than in the state-wide mask, so a program that only ever calls it left
+    // nothing for this to do and the clear never happened at all.
+    Framebuffer *clear_fbo = ctx->state.framebuffer;
+    GLbitfield attachment_clear = 0;
+
+    if (clear_fbo)
+    {
+        for (int i = 0; i < STATE(max_color_attachments); i++)
+            attachment_clear |= clear_fbo->color_attachments[i].clear_bitmask;
+
+        attachment_clear |= clear_fbo->depth.clear_bitmask;
+        attachment_clear |= clear_fbo->stencil.clear_bitmask;
+    }
+
+    GLbitfield wanted_clear = ctx->state.clear_bitmask | attachment_clear;
+
     // A load action always covers the whole attachment, so a clipped scissor
     // has to be done with a draw after the encoder exists.
-    bool scissored_clear = ctx->state.clear_bitmask && [self scissorClipsTarget];
+    bool scissored_clear = wanted_clear && [self scissorClipsTarget];
 
-    _pendingScissorClear = scissored_clear ? ctx->state.clear_bitmask : 0;
+    _pendingScissorClear = scissored_clear ? wanted_clear : 0;
 
-    if (ctx->state.clear_bitmask && !scissored_clear)
+    if (wanted_clear && !scissored_clear)
     {
         if (ctx->state.clear_bitmask & GL_COLOR_BUFFER_BIT)
         {
@@ -4481,6 +4507,13 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
 
             _renderPassDescriptor.depthAttachment.loadAction = MTLLoadActionClear;
         }
+        else if (clear_fbo && (clear_fbo->depth.clear_bitmask & GL_DEPTH_BUFFER_BIT))
+        {
+            _renderPassDescriptor.depthAttachment.clearDepth = clear_fbo->depth.clear_color[0];
+
+            _renderPassDescriptor.depthAttachment.loadAction = MTLLoadActionClear;
+            clear_fbo->depth.clear_bitmask &= ~GL_DEPTH_BUFFER_BIT;
+        }
         else
         {
             _renderPassDescriptor.depthAttachment.loadAction = MTLLoadActionLoad;
@@ -4491,6 +4524,13 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
             _renderPassDescriptor.stencilAttachment.clearStencil = STATE_VAR(stencil_clear_value);
 
             _renderPassDescriptor.stencilAttachment.loadAction = MTLLoadActionClear;
+        }
+        else if (clear_fbo && (clear_fbo->stencil.clear_bitmask & GL_STENCIL_BUFFER_BIT))
+        {
+            _renderPassDescriptor.stencilAttachment.clearStencil = (GLint)clear_fbo->stencil.clear_color[0];
+
+            _renderPassDescriptor.stencilAttachment.loadAction = MTLLoadActionClear;
+            clear_fbo->stencil.clear_bitmask &= ~GL_STENCIL_BUFFER_BIT;
         }
         else
         {
@@ -4518,6 +4558,16 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
                     _renderPassDescriptor.colorAttachments[i].loadAction = MTLLoadActionLoad;
 
             ctx->state.clear_bitmask = 0;
+
+            // the draw below stands in for these, so they are spent either way
+            if (clear_fbo)
+            {
+                for (int i = 0; i < STATE(max_color_attachments); i++)
+                    clear_fbo->color_attachments[i].clear_bitmask = 0;
+
+                clear_fbo->depth.clear_bitmask = 0;
+                clear_fbo->stencil.clear_bitmask = 0;
+            }
         }
     }
 
@@ -7591,6 +7641,9 @@ static MTLWinding mtlWindingFor(const Program *p)
         GLsizei n = mglDrawFramebufferSamples(ctx);
 
         mglWriteNumSamples(ctx, ctx->state.program, n > 1 ? n : 1);
+
+        // and GL ignores gl_SampleMask entirely when there is only one sample
+        mglWriteSampleMaskOff(ctx, ctx->state.program, n > 1 ? 0 : 1);
     }
 
     // since a clear is embedded into a render encoder

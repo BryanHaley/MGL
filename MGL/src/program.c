@@ -3703,6 +3703,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
                 pptr->log = strdup(uniformLocationProblem(pptr));
         }
         pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
+        pptr->sample_mask_off_loc = mglFindSampleMaskOffLocation(pptr);
         pptr->tess.patches_loc = mglFindUniformByName(pptr, "mglPatchesU");
 
         pptr->geom.prims_loc   = mglFindUniformByName(pptr, "mglGsPrimsU");
@@ -3826,6 +3827,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     resolveTransformCaptureUniforms(pptr);
 
     pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
+    pptr->sample_mask_off_loc = mglFindSampleMaskOffLocation(pptr);
     pptr->tess.patches_loc = mglFindUniformByName(pptr, "mglPatchesU");
 
     // Hand the MSL to Metal now rather than at the first draw. GL callers expect

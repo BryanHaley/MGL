@@ -794,6 +794,7 @@ typedef struct Program_t {
     GLboolean binary_retrievable_hint;
     // where the rewritten gl_NumSamples lives, or -1 when the shader never asked
     GLint num_samples_loc;
+    GLint sample_mask_off_loc;
     // the subroutine index chosen per subroutine uniform location, per stage
     GLuint *subroutine_values[_MAX_SHADER_TYPES];
     // what the subroutine rewrite found, copied at link so the program keeps
@@ -1015,6 +1016,10 @@ size_t mglPixelStoreSkipBytes2D(const PixelStore *ps, GLuint pixel_size, size_t 
 // gl_NumSamples reaches the shader as an ordinary uniform of this name, which
 // is deliberately the same length as gl_NumSamples so the rename is in place.
 #define MGL_NUM_SAMPLES_NAME "mglNumSamples"
+#define MGL_SAMPLE_MASK_FORCE "mglSampleMaskOff"
+// same length as gl_SampleMask, so the rewrite swaps it in place
+#define MGL_SAMPLE_MASK_TMP   "mglSMaskValue"
+#define MGL_SAMPLE_MASK_BODY  "mglSampleMaskBody"
 
 // The two targets whose storage holds more than one sample per pixel.
 static inline bool mglTargetIsMultisample(GLenum target)
@@ -1031,6 +1036,8 @@ TransformFeedback *getTransformFeedback(GLMContext ctx, GLuint name);
 GLint mglFindNumSamplesLocation(Program *pptr);
 GLint mglFindUniformByName(Program *pptr, const char *name);
 void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples);
+GLint mglFindSampleMaskOffLocation(Program *pptr);
+void mglWriteSampleMaskOff(GLMContext ctx, Program *pptr, GLint off);
 void mglWriteProgramUniform(GLMContext ctx, Program *pptr, GLint location, GLint value);
 
 

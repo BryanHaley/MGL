@@ -834,6 +834,139 @@ static char *rewriteNumSamples(const char *src)
     return out;
 }
 
+// A fragment shader's gl_SampleMask only counts when the target is
+// multisampled; GL ignores it otherwise. Metal always applies it, so a shader
+// that masks a sample off threw the fragment away on a single-sampled target
+// when GL says to keep it.
+//
+// The write goes into a copy instead, and a new main hands that to the real
+// builtin -- or all ones when the driver says the target has one sample. Only
+// shaders that actually assign gl_SampleMask are touched.
+static bool assignsSampleMask(const char *src)
+{
+    static const char name[] = "gl_SampleMask";
+    const size_t n = sizeof(name) - 1;
+
+    for (const char *p = strstr(src, name); p; p = strstr(p + n, name))
+    {
+        char before = (p == src) ? ' ' : p[-1];
+        const char *q = p + n;
+
+        if (isalnum((unsigned char)before) || before == '_')
+            continue;
+
+        // gl_SampleMaskIn reads; only a subscript that is assigned to writes
+        if (isalnum((unsigned char)*q) || *q == '_')
+            continue;
+
+        while (*q == ' ' || *q == '\t') q++;
+
+        if (*q == '[')
+        {
+            int depth = 0;
+
+            while (*q)
+            {
+                if (*q == '[') depth++;
+                else if (*q == ']' && --depth == 0) { q++; break; }
+                q++;
+            }
+        }
+
+        while (*q == ' ' || *q == '\t') q++;
+
+        if (*q == '=' && q[1] != '=')
+            return true;
+    }
+
+    return false;
+}
+
+static char *rewriteSampleMask(const char *src)
+{
+    static const char gl_name[] = "gl_SampleMask";
+    static const char my_name[] = MGL_SAMPLE_MASK_TMP;
+    static const char decl[] =
+        "\nuniform int " MGL_SAMPLE_MASK_FORCE ";\nint " MGL_SAMPLE_MASK_TMP "[1];\n";
+    static const char tail[] =
+        "\nvoid main()\n{\n"
+        "    " MGL_SAMPLE_MASK_TMP "[0] = -1;\n"
+        "    " MGL_SAMPLE_MASK_BODY "();\n"
+        "    gl_SampleMask[0] = (" MGL_SAMPLE_MASK_FORCE " != 0) ? -1 : " MGL_SAMPLE_MASK_TMP "[0];\n"
+        "}\n";
+    const size_t n = sizeof(gl_name) - 1;
+    char *out, *q;
+
+    if (!assignsSampleMask(src))
+        return NULL;
+
+    // the copy's name is the same length, so the swap is in place
+    out = (char *)malloc(strlen(src) + sizeof(decl) + sizeof(tail) + 64);
+
+    if (out == NULL)
+        return NULL;
+
+    strcpy(out, src);
+
+    for (q = strstr(out, gl_name); q; q = strstr(q + n, gl_name))
+    {
+        char before = (q == out) ? ' ' : q[-1];
+
+        if (isalnum((unsigned char)before) || before == '_')
+            continue;
+
+        // leave gl_SampleMaskIn alone, it is an input
+        if (isalnum((unsigned char)q[n]) || q[n] == '_')
+            continue;
+
+        memcpy(q, my_name, n);
+    }
+
+    // main becomes the body the new one calls
+    for (char *m = strstr(out, "main"); m; m = strstr(m + 4, "main"))
+    {
+        char before = (m == out) ? ' ' : m[-1];
+        char *after = m + 4;
+
+        if (isalnum((unsigned char)before) || before == '_')
+            continue;
+
+        while (*after == ' ' || *after == '\t') after++;
+
+        if (*after != '(')
+            continue;
+
+        {
+            size_t body_len = sizeof(MGL_SAMPLE_MASK_BODY) - 1;
+
+            memmove(m + body_len, m + 4, strlen(m + 4) + 1);
+            memcpy(m, MGL_SAMPLE_MASK_BODY, body_len);
+        }
+        break;
+    }
+
+    strcat(out, tail);
+
+    {
+        char *ins = strstr(out, "#version");
+
+        if (ins)
+        {
+            ins = strchr(ins, '\n');
+            ins = ins ? ins + 1 : out;
+        }
+        else
+        {
+            ins = out;
+        }
+
+        memmove(ins + sizeof(decl) - 1, ins, strlen(ins) + 1);
+        memcpy(ins, decl, sizeof(decl) - 1);
+    }
+
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // Preprocessor rules glslang lets slide
 //
@@ -1219,6 +1352,14 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                     {
                         free(fixed);
                         fixed = numbered;
+                    }
+
+                    char *masked = rewriteSampleMask(fixed);
+
+                    if (masked)
+                    {
+                        free(fixed);
+                        fixed = masked;
                     }
                 }
 

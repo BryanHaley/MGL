@@ -1163,6 +1163,13 @@ GLint mglFindNumSamplesLocation(Program *pptr)
     return mglFindUniformByName(pptr, MGL_NUM_SAMPLES_NAME);
 }
 
+// And the one the gl_SampleMask rewrite created; -1 when the shader never
+// assigned a sample mask and so was left alone.
+GLint mglFindSampleMaskOffLocation(Program *pptr)
+{
+    return mglFindUniformByName(pptr, MGL_SAMPLE_MASK_FORCE);
+}
+
 // Write one int into a program's uniform storage without going through the
 // current-program checks; the driver's own uniforms are not the application's.
 void mglWriteProgramUniform(GLMContext ctx, Program *pptr, GLint location, GLint value)
@@ -1181,6 +1188,16 @@ void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples)
         return;
 
     programUniformWrite(ctx, pptr, pptr->num_samples_loc, &samples, sizeof(GLint));
+}
+
+// One means the draw target has a single sample, where GL ignores whatever the
+// shader put in gl_SampleMask.
+void mglWriteSampleMaskOff(GLMContext ctx, Program *pptr, GLint off)
+{
+    if (pptr == NULL || pptr->sample_mask_off_loc < 0)
+        return;
+
+    programUniformWrite(ctx, pptr, pptr->sample_mask_off_loc, &off, sizeof(GLint));
 }
 
 void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size)
