@@ -483,6 +483,8 @@ void mglBindImageTexture(GLMContext ctx, GLuint unit, GLuint texture, GLint leve
     ctx->state.dirty_bits |= DIRTY_IMAGE_UNIT_STATE;
 }
 
+void mglBindlessForgetTexture(GLMContext ctx, Texture *tex);
+
 void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
 {
     // negative n would run past the caller's array
@@ -529,6 +531,8 @@ void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
                     ctx->state.dirty_bits |= DIRTY_IMAGE_UNIT_STATE;
                 }
             }
+
+            mglBindlessForgetTexture(ctx, tex);
 
             if (tex->mtl_data)
             {
@@ -2281,6 +2285,22 @@ void texSubImage3D(GLMContext ctx, Texture *tex, GLint level, GLint xoffset, GLi
 
     ERROR_CHECK_RETURN(width + xoffset <= (GLint)tex->faces[0].levels[level].width, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(height + yoffset <= (GLint)tex->faces[0].levels[level].height, GL_INVALID_VALUE);
+
+    // GL 4.5 lets the DSA call address a cube map's faces as its z; each face
+    // is its own image here, one client image apart
+    if (tex->target == GL_TEXTURE_CUBE_MAP)
+    {
+        ERROR_CHECK_RETURN(depth + zoffset <= 6, GL_INVALID_VALUE);
+
+        size_t row = mglPixelStoreRowPitch(&ctx->state.unpack, width, sizeForFormatType(format, type));
+        size_t rows = ctx->state.unpack.image_height > 0 ? (size_t)ctx->state.unpack.image_height : (size_t)height;
+
+        for (GLsizei f = 0; f < depth; f++)
+            texSubImage(ctx, tex, (GLuint)(zoffset + f), level, xoffset, yoffset, 0, width, height, 1,
+                        format, type, (char *)pixels + (size_t)f * row * rows);
+        return;
+    }
+
     ERROR_CHECK_RETURN(depth + zoffset <= (GLint)tex->faces[0].levels[level].depth, GL_INVALID_VALUE);
 
     texSubImage(ctx, tex, 0, level, xoffset, yoffset, zoffset, width, height, depth, format, type, (void *)pixels);
@@ -2486,8 +2506,14 @@ void mglTextureStorage2D(GLMContext ctx, GLuint texture, GLsizei levels, GLenum 
     ERROR_CHECK_RETURN(height > 0, GL_INVALID_VALUE);
 
     tex = getTex(ctx, texture, 0);
+    ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
 
-    texStorage(ctx, tex, 1, levels, false, internalformat, width, height, 1, false);
+    // the texture's own target decides the shape: a cube map has six faces
+    // and a 1D array keeps its layers in height
+    GLuint faces = tex->target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
+    GLboolean is_array = tex->target == GL_TEXTURE_1D_ARRAY;
+
+    texStorage(ctx, tex, faces, levels, is_array, internalformat, width, height, 1, false);
 }
 
 // TextureStorage2DMultisample moved to texture_multisample.c
@@ -2561,7 +2587,9 @@ void mglTextureStorage3D(GLMContext ctx, GLuint texture, GLsizei levels, GLenum 
 
     ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
 
-    texStorage(ctx, tex, 1, levels, tex->target == GL_TEXTURE_2D_ARRAY, internalformat, width, height, depth, false);
+    texStorage(ctx, tex, 1, levels,
+               tex->target == GL_TEXTURE_2D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY,
+               internalformat, width, height, depth, false);
 }
 
 // TextureStorage3DMultisample moved to texture_multisample.c
@@ -3369,7 +3397,8 @@ bool mglReadbackFormatAgrees(GLenum internalformat, GLenum format)
     return mglClientFormatIsInteger(format) == want_int;
 }
 
-static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum format, GLenum type, GLsizei bufSize, GLboolean check_size, void *pixels)
+// face picks one face of a cube map; -1 reads all of them, one after another
+static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLint face, GLenum format, GLenum type, GLsizei bufSize, GLboolean check_size, void *pixels)
 {
     TextureLevel *lvl;
     size_t pixel_size, bytes_per_row;
@@ -3420,9 +3449,16 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
     GLsizei height = lvl->height ? (GLsizei)lvl->height : 1;
     GLsizei depth = lvl->depth ? (GLsizei)lvl->depth : 1;
 
+    GLsizei first = 0;
+
     // an array keeps the same number of layers at every level
     if (tex->target == GL_TEXTURE_2D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY)
         depth = tex->depth ? (GLsizei)tex->depth : 1;
+    else if (tex->target == GL_TEXTURE_CUBE_MAP)
+    {
+        first = face >= 0 ? face : 0;
+        depth = face >= 0 ? 1 : 6;
+    }
     else if (tex->target == GL_TEXTURE_1D_ARRAY)
     {
         // GL puts the layer count in height here, and one layer is one row
@@ -3510,7 +3546,7 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLenum f
         // the CPU side holds, so an image that never reached the GPU still reads back
         ctx->mtl_funcs.mtlGetTexImage(ctx, tex, (GLubyte *)pixels + (size_t)slice * image_bytes,
                                       (GLuint)bytes_per_row, format, type,
-                                      0, 0, width, height, level, slice);
+                                      0, 0, width, height, level, (GLuint)(first + slice));
 
         if (ctx->state.pack.swap_bytes)
             mglSwapPixelBytes((GLubyte *)pixels + (size_t)slice * image_bytes,
@@ -3550,7 +3586,10 @@ void mglGetTexImage(GLMContext ctx, GLenum target, GLint level, GLenum format, G
         return;
     }
 
-    getTexImageLevel(ctx, tex, level, format, type, 0, GL_FALSE, pixels);
+    GLint face = (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)
+               ? (GLint)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : -1;
+
+    getTexImageLevel(ctx, tex, level, face, format, type, 0, GL_FALSE, pixels);
 }
 
 void mglGetTextureImage(GLMContext ctx, GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void *pixels)
@@ -3561,7 +3600,7 @@ void mglGetTextureImage(GLMContext ctx, GLuint texture, GLint level, GLenum form
 
     ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
 
-    getTexImageLevel(ctx, tex, level, format, type, bufSize, GL_TRUE, pixels);
+    getTexImageLevel(ctx, tex, level, -1, format, type, bufSize, GL_TRUE, pixels);
 }
 
 void mglGetTextureSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, GLsizei bufSize, void *pixels)

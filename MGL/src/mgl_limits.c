@@ -66,6 +66,7 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_uniform_buffer_bindings, 84);
     at_least(&v->max_uniform_locations, 1024);
     at_least(&v->max_shader_storage_block_size, 134217728);
+    at_least(&v->max_shader_storage_buffer_bindings, MAX_SHADER_STORAGE_BUFFER_BINDINGS);
     at_least(&v->min_map_buffer_alignment, 64);
 
     at_least(&v->max_vertex_attribs, 16);

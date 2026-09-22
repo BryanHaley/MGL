@@ -216,6 +216,15 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     // the last command buffer that drew from them, waited on before they
     // are written again
     id<MTLCommandBuffer> _tessGenInFlight;
+    // bindless: the tables of texture and sampler IDs handles point into,
+    // the sampler states behind them, and the encoder last told what to keep
+    // resident
+    id<MTLBuffer> _bindlessTex, _bindlessSmp;
+    NSMutableDictionary<NSData *, NSNumber *> *_bindlessSamplerSlots;
+    NSMutableArray<id<MTLSamplerState>> *_bindlessSamplers;
+    bool _makingBindlessSampler;
+    __weak id _bindlessEncoder;
+    GLuint _bindlessEncoderSerial;
     // transform feedback behind a geometry stage: count what came out, copy it
     id<MTLComputePipelineState> _gsCountPipeline;
     id<MTLComputePipelineState> _gsGatherPipeline;
@@ -684,6 +693,8 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 
                         if (buf == NULL)
                         {
+                            MGL_NSERR(@"MGL: stage %d reads %s at binding %u, and nothing is bound there",
+                                      stage, res->name ? res->name : "?", slot_binding);
                             ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
 
                             return false;
@@ -2569,10 +2580,251 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
             break;
     }
 
+    // a sampler a shader reaches through a table has to say so up front
+    if (_makingBindlessSampler)
+        samplerDescriptor.supportArgumentBuffers = YES;
+
     id<MTLSamplerState> sampler = [_device newSamplerStateWithDescriptor:samplerDescriptor];
     MTL_CHECK_RETURN_VALUE(sampler, GL_OUT_OF_MEMORY, nil);
 
     return sampler;
+}
+
+#pragma mark bindless
+
+- (bool) makeBindlessTables
+{
+    if (_bindlessTex)
+        return true;
+
+    _bindlessTex = [_device newBufferWithLength: MGL_BINDLESS_TEXTURES * sizeof(MTLResourceID)
+                                        options: MTLResourceStorageModeShared];
+    _bindlessSmp = [_device newBufferWithLength: MGL_BINDLESS_SAMPLERS * sizeof(MTLResourceID)
+                                        options: MTLResourceStorageModeShared];
+    _bindlessSamplerSlots = [NSMutableDictionary new];
+    _bindlessSamplers = [NSMutableArray new];
+
+    if (_bindlessTex == nil || _bindlessSmp == nil)
+        return false;
+
+    memset(_bindlessTex.contents, 0, _bindlessTex.length);
+    memset(_bindlessSmp.contents, 0, _bindlessSmp.length);
+    _bindlessTex.label = @"MGL bindless textures";
+    _bindlessSmp.label = @"MGL bindless samplers";
+
+    // slot 0 is what a handle nobody made reads
+    TextureParameter plain;
+
+    memset(&plain, 0, sizeof(plain));
+    plain.min_filter = GL_NEAREST;
+    plain.mag_filter = GL_NEAREST;
+    plain.wrap_s = plain.wrap_t = plain.wrap_r = GL_REPEAT;
+    plain.compare_func = GL_LEQUAL;
+    [self bindlessSamplerSlot: &plain target: GL_TEXTURE_2D];
+
+    return true;
+}
+
+// Handles with the same sampling state share one sampler slot
+- (GLuint) bindlessSamplerSlot: (TextureParameter *) params target: (GLenum) target
+{
+    if ([self makeBindlessTables] == false)
+        return 0;
+
+    TextureParameter key = *params;
+
+    key.mtl_data = NULL;
+
+    NSData *k = [NSData dataWithBytes: &key length: sizeof(key)];
+    NSNumber *found = _bindlessSamplerSlots[k];
+
+    if (found)
+        return found.unsignedIntValue;
+
+    if (_bindlessSamplers.count >= MGL_BINDLESS_SAMPLERS)
+    {
+        MGL_NSERR(@"MGL ERROR: out of bindless sampler slots");
+        return 0;
+    }
+
+    _makingBindlessSampler = true;
+    id<MTLSamplerState> state = [self createMTLSamplerForTexParam: &key target: target];
+    _makingBindlessSampler = false;
+
+    if (state == nil)
+        return 0;
+
+    GLuint slot = (GLuint)_bindlessSamplers.count;
+
+    [_bindlessSamplers addObject: state];
+    ((MTLResourceID *)_bindlessSmp.contents)[slot] = state.gpuResourceID;
+    _bindlessSamplerSlots[k] = @(slot);
+
+    return slot;
+}
+
+// Puts what a handle names into its table slot, again whenever the texture
+// has been given a new Metal object since.
+- (bool) realizeBindless: (MglHandle *) h
+{
+    Texture *tex = h->tex;
+
+    if (tex == NULL || [self makeBindlessTables] == false)
+        return false;
+
+    if ([self bindMTLTexture: tex] == false || tex->mtl_data == NULL)
+        return false;
+
+    if (h->mtl_texture && h->mtl_base == tex->mtl_data)
+        return true;
+
+    id<MTLTexture> base = (__bridge id<MTLTexture>)(tex->mtl_data);
+    id<MTLTexture> use;
+
+    if (h->image)
+    {
+        ImageUnit iu;
+
+        memset(&iu, 0, sizeof(iu));
+        iu.tex = tex;
+        iu.level = (GLuint)h->level;
+        iu.layered = h->layered;
+        iu.layer = h->layer;
+        use = [self imageTexture: &iu];
+    }
+    else
+        use = [self samplingTexture: tex from: base];
+
+    if (use == nil)
+        return false;
+
+    if (h->mtl_texture)
+        CFBridgingRelease(h->mtl_texture);
+
+    h->mtl_texture = (void *)CFBridgingRetain(use);
+    h->mtl_base = tex->mtl_data;
+    ((MTLResourceID *)_bindlessTex.contents)[h->tex_slot] = use.gpuResourceID;
+    ctx->bindless.serial++;
+
+    return true;
+}
+
+static bool usesBindless(Program *program, int first, int last)
+{
+    if (program == NULL)
+        return false;
+
+    for (int stage = first; stage <= last; stage++)
+        if (program->bindless[stage].count > 0)
+            return true;
+
+    return false;
+}
+
+// Before any encoder exists: making a texture real may need a blit
+- (void) refreshBindless
+{
+    MglBindless *b = &ctx->bindless;
+
+    for (GLuint i = 0; i < b->count; i++)
+    {
+        MglHandle *h = &b->handles[i];
+
+        if (h->resident && h->tex && [self realizeBindless: h] == false)
+            MGL_NSERR(@"MGL: bindless handle for texture %u could not be made resident", h->tex->name);
+    }
+}
+
+// Metal only lets a shader reach a texture through a table if the encoder was
+// told about it
+- (void) useBindlessOn: (id) encoder render: (bool) render
+{
+    MglBindless *b = &ctx->bindless;
+
+    if (encoder == nil || (_bindlessEncoder == encoder && _bindlessEncoderSerial == b->serial))
+        return;
+
+    NSMutableArray<id<MTLResource>> *read = [NSMutableArray new];
+    NSMutableArray<id<MTLResource>> *write = [NSMutableArray new];
+
+    for (GLuint i = 0; i < b->count; i++)
+    {
+        MglHandle *h = &b->handles[i];
+
+        if (!h->resident || h->mtl_texture == NULL)
+            continue;
+
+        id<MTLResource> r = (__bridge id<MTLResource>)(h->mtl_texture);
+
+        if (h->image && h->access != GL_READ_ONLY)
+            [write addObject: r];
+        else
+            [read addObject: r];
+    }
+
+    if (read.count == 0 && write.count == 0)
+        return;
+
+    id<MTLResource> __unsafe_unretained list[read.count > write.count ? read.count : write.count];
+
+    for (int pass = 0; pass < 2; pass++)
+    {
+        NSArray<id<MTLResource>> *which = pass ? write : read;
+        MTLResourceUsage usage = pass ? (MTLResourceUsageRead | MTLResourceUsageWrite) : MTLResourceUsageRead;
+
+        if (which.count == 0)
+            continue;
+
+        for (NSUInteger k = 0; k < which.count; k++)
+            list[k] = which[k];
+
+        if (render)
+            [(id<MTLRenderCommandEncoder>)encoder useResources: list count: which.count usage: usage
+                                                        stages: MTLRenderStageVertex | MTLRenderStageFragment];
+        else
+            [(id<MTLComputeCommandEncoder>)encoder useResources: list count: which.count usage: usage];
+    }
+
+    _bindlessEncoder = encoder;
+    _bindlessEncoderSerial = b->serial;
+}
+
+- (void) bindBindlessToRenderEncoder
+{
+    Program *program = ctx->state.program;
+
+    if (_currentRenderEncoder == nil || !usesBindless(program, _VERTEX_SHADER, _MAX_SHADER_TYPES - 1))
+        return;
+
+    // a tessellation program draws with the evaluation stage as its vertex function
+    int vertex_stage = program->tess.active ? _TESS_EVALUATION_SHADER : _VERTEX_SHADER;
+    MglBindlessSets *vs = &program->bindless[vertex_stage];
+    MglBindlessSets *fs = &program->bindless[_FRAGMENT_SHADER];
+
+    for (int i = 0; i < vs->count; i++)
+        [_currentRenderEncoder setVertexBuffer: vs->is_sampler[i] ? _bindlessSmp : _bindlessTex
+                                        offset: 0 atIndex: vs->slot[i]];
+
+    for (int i = 0; i < fs->count; i++)
+        [_currentRenderEncoder setFragmentBuffer: fs->is_sampler[i] ? _bindlessSmp : _bindlessTex
+                                          offset: 0 atIndex: fs->slot[i]];
+
+    [self useBindlessOn: _currentRenderEncoder render: true];
+}
+
+- (void) bindBindlessToComputeEncoder: (id<MTLComputeCommandEncoder>) enc
+{
+    Program *program = ctx->state.program;
+
+    if (enc == nil || !usesBindless(program, _COMPUTE_SHADER, _COMPUTE_SHADER))
+        return;
+
+    MglBindlessSets *cs = &program->bindless[_COMPUTE_SHADER];
+
+    for (int i = 0; i < cs->count; i++)
+        [enc setBuffer: cs->is_sampler[i] ? _bindlessSmp : _bindlessTex offset: 0 atIndex: cs->slot[i]];
+
+    [self useBindlessOn: enc render: false];
 }
 
 // A vertex shader may sample too -- GL has had vertex texture fetch since 2.0,
@@ -3253,7 +3505,12 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
         // A texture Metal will not make is not a texture. Standing in a
         // gradient for it hands the application a picture nothing drew.
         if (tex->mtl_data == NULL)
+        {
+            MGL_NSERR(@"MGL: no Metal texture for texture %u (target 0x%x, format 0x%x, %ux%ux%u, %u levels)",
+                      tex->name, tex->target, tex->internalformat, tex->width, tex->height, tex->depth,
+                      tex->mipmap_levels);
             return false;
+        }
     }
 
     if (tex->params.mtl_data == NULL)
@@ -3905,6 +4162,8 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     {
         [_currentRenderEncoder setTriangleFillMode: MTLTriangleFillModeLines];
     }
+
+    [self bindBindlessToRenderEncoder];
 }
 
 - (bool) newRenderEncoder
@@ -7386,6 +7645,9 @@ static MTLWinding mtlWindingFor(const Program *p)
         return false;
     }
 
+    if (draw_command && usesBindless(ctx->state.program, _VERTEX_SHADER, _MAX_SHADER_TYPES - 1))
+        [self refreshBindless];
+
     if (ctx->state.dirty_bits)
     {
         // branches below clear bits, so remember what was dirty
@@ -7689,6 +7951,8 @@ static MTLWinding mtlWindingFor(const Program *p)
         }
     }
 
+    [self bindBindlessToRenderEncoder];
+
     // Create a render command encoder.
     if (_pipelineState && !mglProgramHasGeometry(ctx->state.program))
         [_currentRenderEncoder setRenderPipelineState: _pipelineState];
@@ -7799,6 +8063,9 @@ static MTLWinding mtlWindingFor(const Program *p)
     if (program == NULL)
         return true;
 
+    if (usesBindless(program, _COMPUTE_SHADER, _COMPUTE_SHADER))
+        [self refreshBindless];
+
     for (int kind = 0; kind < 2; kind++)
     {
         int type = kind ? SPVC_RESOURCE_TYPE_STORAGE_IMAGE : SPVC_RESOURCE_TYPE_SAMPLED_IMAGE;
@@ -7868,6 +8135,7 @@ static MTLWinding mtlWindingFor(const Program *p)
     //setTexture:atIndex:
     //setTextures:withRange:
     RETURN_FALSE_ON_FAILURE([self bindTexturesToComputeEncoder: computeCommandEncoder]);
+    [self bindBindlessToComputeEncoder: computeCommandEncoder];
 
     // setSamplerState:atIndex:
     // setSamplerState:lodMinClamp:lodMaxClamp:atIndex:
@@ -8182,6 +8450,21 @@ void mtlBindBuffer(GLMContext glm_ctx, Buffer *ptr)
 {
     // Call the Objective-C method using Objective-C syntax
     [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindMTLBuffer:ptr];
+}
+
+#pragma mark C interface to bindless
+GLuint mtlBindlessSampler(GLMContext glm_ctx, TextureParameter *params, GLenum target)
+{
+    return [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindlessSamplerSlot: params target: target];
+}
+
+void mtlBindlessRelease(GLMContext glm_ctx, MglHandle *h)
+{
+    if (h->mtl_texture)
+        CFBridgingRelease(h->mtl_texture);
+
+    h->mtl_texture = NULL;
+    h->mtl_base = NULL;
 }
 
 #pragma mark C interface to mtlBindTexture
@@ -10148,6 +10431,8 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
 
     glm_ctx->mtl_funcs.mtlBindBuffer = mtlBindBuffer;
     glm_ctx->mtl_funcs.mtlBindTexture = mtlBindTexture;
+    glm_ctx->mtl_funcs.mtlBindlessSampler = mtlBindlessSampler;
+    glm_ctx->mtl_funcs.mtlBindlessRelease = mtlBindlessRelease;
     glm_ctx->mtl_funcs.mtlBindProgram = mtlBindProgram;
 
     glm_ctx->mtl_funcs.mtlDeleteMTLObj = mtlDeleteMTLObj;

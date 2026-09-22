@@ -804,6 +804,8 @@ static const char * const mgl_extensions[] = {
     "GL_ARB_ES2_compatibility",
     "GL_ARB_ES3_compatibility",
     "GL_ARB_ES3_1_compatibility",
+    "GL_ARB_bindless_texture",
+    "GL_EXT_shader_image_load_formatted",
     "GL_ARB_cull_distance",
     // the rest of what 4.6 core took in, so tests that look for the name run
     "GL_ARB_arrays_of_arrays",

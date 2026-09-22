@@ -236,7 +236,7 @@ typedef struct BufferBaseTarget_t {
 // The indexed buffer targets each have their own binding space and their own
 // spec minimum, so they get their own ceilings rather than one shared number.
 #define MAX_UNIFORM_BUFFER_BINDINGS         96
-#define MAX_SHADER_STORAGE_BUFFER_BINDINGS  16
+#define MAX_SHADER_STORAGE_BUFFER_BINDINGS  32
 #define MAX_ATOMIC_COUNTER_BUFFER_BINDINGS  16
 #define MAX_TRANSFORM_FEEDBACK_BUFFERS      16
 
@@ -472,6 +472,48 @@ int mglTessellate(int domain, int spacing, bool point_mode, bool cw,
 // Cull distance needs a pass of its own before the draw, and five buffers.
 #define MGL_CULL_FIRST_BINDING  20
 #define MGL_CULL_FIRST_MSL_SLOT 24
+
+// Bindless handles are slots in one table of Metal texture IDs and one of
+// sampler IDs. Each texture type a shader reads by handle is its own argument
+// buffer. They take the lowest Metal buffer slots; SPIRV-Cross numbers the
+// shader's other buffers after them.
+#define MGL_BINDLESS_FIRST_MSL_SLOT 0
+#define MGL_BINDLESS_MAX_SETS       6
+#define MGL_BINDLESS_TEXTURES       32768
+#define MGL_BINDLESS_SAMPLERS       1024
+
+// One handle from glGetTextureHandleARB, glGetTextureSamplerHandleARB or
+// glGetImageHandleARB. The value is the texture slot in the low half and the
+// sampler slot, tagged, in the high half.
+typedef struct MglHandle_t {
+    GLuint64 value;
+    struct Texture_t *tex;          // NULL once the texture is deleted
+    GLuint sampler_name;            // 0 for the texture's own sampling state
+    GLboolean image;
+    GLint level;
+    GLboolean layered;
+    GLint layer;
+    GLenum format;
+    GLboolean resident;
+    GLenum access;
+    GLuint tex_slot;
+    GLuint smp_slot;
+    void *mtl_texture;              // what the table slot holds now, retained
+    void *mtl_base;                 // the texture's Metal object at that time
+} MglHandle;
+
+typedef struct MglBindless_t {
+    MglHandle *handles;
+    GLuint count, cap;
+    GLuint next_slot;
+    GLuint serial;                  // changes whenever what must be resident does
+} MglBindless;
+
+typedef struct MglBindlessSets_t {
+    int count;
+    GLuint slot[MGL_BINDLESS_MAX_SETS];
+    GLboolean is_sampler[MGL_BINDLESS_MAX_SETS];
+} MglBindlessSets;
 
 // What the cull distance rewrite found and built.
 typedef struct CullInfo_t {
@@ -735,6 +777,7 @@ typedef struct Program_t {
     // indexed by the SPIRV-Cross resource enum, whose highest value has grown
     // over time; sized to cover it rather than to MGL's own shorter list
     SpirvResourceList spirv_resources_list[_MAX_SHADER_TYPES][MAX_SPVC_RESOURCE_TYPES];
+    MglBindlessSets bindless[_MAX_SHADER_TYPES];
     // the uniforms declared inside uniform blocks, which GL lists as active
     // uniforms in their own right
     SpirvResourceList block_uniforms[_MAX_SHADER_TYPES];
@@ -1138,6 +1181,8 @@ struct GLMMetalFuncs {
 
     void (*mtlBindBuffer)(GLMContext glm_ctx, Buffer *ptr);
     void (*mtlBindTexture)(GLMContext glm_ctx, Texture *ptr);
+    GLuint (*mtlBindlessSampler)(GLMContext glm_ctx, TextureParameter *params, GLenum target);
+    void (*mtlBindlessRelease)(GLMContext glm_ctx, MglHandle *h);
     bool (*mtlBindProgram)(GLMContext glm_ctx, Program *ptr);
 
     void (*mtlDeleteMTLObj)(GLMContext glm_ctx, void *obj);
@@ -1225,6 +1270,8 @@ typedef struct GLMContextRec_t {
 #endif
 
     struct GLMMetalFuncs mtl_funcs;
+
+    MglBindless bindless;
 
     GLMState    state;
     GLboolean   assert_on_error;

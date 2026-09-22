@@ -1756,6 +1756,65 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         }
     }
 
+    // A shader that reads textures by handle gets them through tables of its
+    // own, one descriptor set each, which Metal sees as argument buffers
+    ptr->bindless[stage].count = 0;
+    {
+        static const spvc_resource_type kinds[] = {
+            SPVC_RESOURCE_TYPE_SEPARATE_IMAGE, SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS, SPVC_RESOURCE_TYPE_STORAGE_IMAGE
+        };
+        spvc_resources br;
+
+        if (spvc_compiler_create_shader_resources(compiler_msl, &br) == SPVC_SUCCESS)
+        {
+            for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++)
+            {
+                const spvc_reflected_resource *list = NULL;
+                size_t count = 0;
+
+                if (spvc_resources_get_resource_list_for_type(br, kinds[k], &list, &count) != SPVC_SUCCESS)
+                    continue;
+
+                for (size_t r = 0; r < count; r++)
+                {
+                    MglBindlessSets *bs = &ptr->bindless[stage];
+
+                    if (strncmp(list[r].name, "mglBindless", 11) != 0)
+                        continue;
+
+                    if (bs->count >= MGL_BINDLESS_MAX_SETS)
+                    {
+                        MGL_ERR("MGL Error: this shader reads more kinds of texture by handle than MGL can bind\n");
+                        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+                    }
+
+                    unsigned set = spvc_compiler_get_decoration(compiler_msl, list[r].id, SpvDecorationDescriptorSet);
+                    spvc_msl_resource_binding rb;
+
+                    bs->slot[bs->count] = MGL_BINDLESS_FIRST_MSL_SLOT + bs->count;
+                    bs->is_sampler[bs->count] = kinds[k] == SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS;
+
+                    spvc_msl_resource_binding_init(&rb);
+                    rb.stage = spvc_compiler_get_execution_model(compiler_msl);
+                    rb.desc_set = set;
+                    rb.binding = SPVC_MSL_ARGUMENT_BUFFER_BINDING;
+                    rb.msl_buffer = bs->slot[bs->count];
+                    spvc_compiler_msl_add_resource_binding(compiler_msl, &rb);
+                    spvc_compiler_msl_set_argument_buffer_device_address_space(compiler_msl, set, SPVC_TRUE);
+                    bs->count++;
+                }
+            }
+        }
+
+        if (ptr->bindless[stage].count > 0)
+        {
+            spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS, SPVC_TRUE);
+            spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS_TIER, 1);
+            spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 0);
+            spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 1);
+        }
+    }
+
     //ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_GLSL_VERSION, 4.5) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_install_compiler_options(compiler_msl, options) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_install_compiler_options(compiler_msl, options) != SPVC_SUCCESS) {
@@ -2151,6 +2210,26 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
             ssbo->count = kept;
         }
+    }
+
+    // the bindless tables are bound by the draw path, not through GL units
+    for (int res_type = 0; res_type < MAX_SPVC_RESOURCE_TYPES; res_type++)
+    {
+        SpirvResourceList *rlist = &ptr->spirv_resources_list[stage][res_type];
+        GLuint kept = 0;
+
+        for (GLuint i = 0; i < rlist->count; i++)
+        {
+            if (rlist->list[i].name && strncmp(rlist->list[i].name, "mglBindless", 11) == 0)
+            {
+                free((void *)rlist->list[i].name);
+                continue;
+            }
+
+            rlist->list[kept++] = rlist->list[i];
+        }
+
+        rlist->count = kept;
     }
 
     // MSL slots are not a dense run -- an arrayed uniform reserves one index

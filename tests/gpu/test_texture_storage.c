@@ -635,3 +635,26 @@ GPU_TEST(texture_storage, texture_view_stub)
     glDeleteTextures(1, &src);
     glDeleteTextures(1, &dst);
 }
+
+// glTextureStorage2D on a cube map allocated one face, so Metal refused the
+// texture and every shadow map and sky box in a DSA engine went missing
+GPU_TEST(texture_storage, dsa_cube_map_gets_six_faces)
+{
+    GLuint tex = 0;
+    unsigned char face3[4 * 4 * 4], back[6 * 4 * 4 * 4];
+
+    for (int i = 0; i < (int)sizeof(face3); i++)
+        face3[i] = (unsigned char)(i * 3);
+
+    glCreateTextures(GL_TEXTURE_CUBE_MAP, 1, &tex);
+    glTextureStorage2D(tex, 1, GL_RGBA8, 4, 4);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glTextureSubImage3D(tex, 0, 0, 0, 3, 4, 4, 1, GL_RGBA, GL_UNSIGNED_BYTE, face3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glGetTextureImage(tex, 0, GL_RGBA, GL_UNSIGNED_BYTE, sizeof(back), back);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK(memcmp(back + 3 * sizeof(face3), face3, sizeof(face3)) == 0);
+
+    glDeleteTextures(1, &tex);
+}
