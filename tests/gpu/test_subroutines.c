@@ -218,3 +218,185 @@ GPU_TEST(subroutines, extension_and_limits)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
     CHECK_MSG(v >= 1024, "GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS reports %d, floor is 1024", v);
 }
+
+/* ---------- a subroutine in the vertex stage ---------- */
+
+static const char *VS_PICK =
+    "#version 400\n"
+    "layout(location = 0) in vec2 p;\n"
+    "subroutine vec4 place();\n"
+    "subroutine uniform place where;\n"
+    "subroutine(place) vec4 here()  { return vec4(0, 0, 0, 1); }\n"
+    "subroutine(place) vec4 there() { return vec4(1, 1, 0, 1); }\n"
+    "void main() { gl_Position = vec4(p, 0.0, 1.0) + where() * 0.0; }\n";
+
+static const char *FS_PLAIN =
+    "#version 400\n"
+    "out vec4 o;\n"
+    "void main() { o = vec4(0, 1, 0, 1); }\n";
+
+GPU_TEST(subroutines, the_vertex_stage_lists_its_own)
+{
+    GLuint prog;
+    GLint v = -1;
+    GLuint idx;
+    char log[2048];
+    char name[64];
+    GLsizei len = -1;
+
+    prog = mgl_build_program(VS_PICK, FS_PLAIN, log, sizeof log);
+
+    if (!prog)
+    {
+        CHECK_MSG(0, "vertex subroutine program did not link: %s", log);
+        return;
+    }
+
+    glGetProgramStageiv(prog, GL_VERTEX_SHADER, GL_ACTIVE_SUBROUTINES, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, 2);
+
+    glGetProgramInterfaceiv(prog, GL_VERTEX_SUBROUTINE, GL_ACTIVE_RESOURCES, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, 2);
+
+    glGetProgramInterfaceiv(prog, GL_VERTEX_SUBROUTINE_UNIFORM, GL_ACTIVE_RESOURCES, &v);
+    CHECK_EQ_INT(v, 1);
+
+    glGetProgramInterfaceiv(prog, GL_VERTEX_SUBROUTINE_UNIFORM, GL_MAX_NUM_COMPATIBLE_SUBROUTINES, &v);
+    CHECK_EQ_INT(v, 2);
+
+    idx = glGetProgramResourceIndex(prog, GL_VERTEX_SUBROUTINE_UNIFORM, "where");
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(idx != GL_INVALID_INDEX, "the vertex stage does not list \"where\"");
+
+    if (idx != GL_INVALID_INDEX)
+    {
+        GLenum prop = GL_COMPATIBLE_SUBROUTINES;
+        GLint compat[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+
+        name[0] = 0;
+        glGetProgramResourceName(prog, GL_VERTEX_SUBROUTINE_UNIFORM, idx, sizeof name, &len, name);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+        CHECK_MSG(!strcmp(name, "where"), "uniform %u is named \"%s\"", idx, name);
+        CHECK_EQ_INT(len, 5);
+
+        // the test that used to take the process down read this length back
+        // and indexed with it, so it has to be written even on the error path
+        len = -1;
+        glGetProgramResourceiv(prog, GL_VERTEX_SUBROUTINE_UNIFORM, idx, 1, &prop,
+                               8, &len, compat);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+        CHECK_EQ_INT(len, 2);
+    }
+
+    idx = glGetProgramResourceIndex(prog, GL_VERTEX_SUBROUTINE, "there");
+    CHECK_MSG(idx != GL_INVALID_INDEX, "the vertex stage does not list \"there\"");
+
+    glDeleteProgram(prog);
+}
+
+/* ---------- every stage keeps its own subroutines ---------- */
+
+static const char *TCS_PICK =
+    "#version 400\n"
+    "layout(vertices = 3) out;\n"
+    "subroutine vec4 place();\n"
+    "subroutine uniform place where;\n"
+    "subroutine(place) vec4 here() { return vec4(1); }\n"
+    "void main() {\n"
+    "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position + where() * 0.0;\n"
+    "    gl_TessLevelInner[0] = 1.0;\n"
+    "    gl_TessLevelInner[1] = 1.0;\n"
+    "    gl_TessLevelOuter[0] = 1.0;\n"
+    "    gl_TessLevelOuter[1] = 1.0;\n"
+    "    gl_TessLevelOuter[2] = 1.0;\n"
+    "}\n";
+
+static const char *TES_PICK =
+    "#version 400\n"
+    "layout(triangles, equal_spacing) in;\n"
+    "subroutine vec4 place();\n"
+    "subroutine uniform place where;\n"
+    "subroutine(place) vec4 here() { return vec4(1); }\n"
+    "void main() { gl_Position = gl_in[0].gl_Position + where() * 0.0; }\n";
+
+static const char *GS_PICK =
+    "#version 400\n"
+    "layout(triangles) in;\n"
+    "layout(triangle_strip, max_vertices = 3) out;\n"
+    "subroutine vec4 place();\n"
+    "subroutine uniform place where;\n"
+    "subroutine(place) vec4 here() { return vec4(1); }\n"
+    "void main() {\n"
+    "    for (int i = 0; i < 3; ++i) {\n"
+    "        gl_Position = gl_in[i].gl_Position + where() * 0.0;\n"
+    "        EmitVertex();\n"
+    "    }\n"
+    "    EndPrimitive();\n"
+    "}\n";
+
+static const char *FS_PICK_ONE =
+    "#version 400\n"
+    "out vec4 o;\n"
+    "subroutine vec4 place();\n"
+    "subroutine uniform place where;\n"
+    "subroutine(place) vec4 here() { return vec4(0, 1, 0, 1); }\n"
+    "void main() { o = where(); }\n";
+
+GPU_TEST(subroutines, all_five_stages_keep_theirs)
+{
+    const char *srcs[5] = { VS_PICK, TCS_PICK, TES_PICK, GS_PICK, FS_PICK_ONE };
+    const GLenum stages[5] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER,
+                               GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER };
+    const GLenum ifaces[5] = { GL_VERTEX_SUBROUTINE, GL_TESS_CONTROL_SUBROUTINE, GL_TESS_EVALUATION_SUBROUTINE,
+                               GL_GEOMETRY_SUBROUTINE, GL_FRAGMENT_SUBROUTINE };
+    const GLenum uniform_ifaces[5] = { GL_VERTEX_SUBROUTINE_UNIFORM, GL_TESS_CONTROL_SUBROUTINE_UNIFORM,
+                                       GL_TESS_EVALUATION_SUBROUTINE_UNIFORM, GL_GEOMETRY_SUBROUTINE_UNIFORM,
+                                       GL_FRAGMENT_SUBROUTINE_UNIFORM };
+    // the vertex stage declares two, everything else declares one
+    const GLint want[5] = { 2, 1, 1, 1, 1 };
+    GLuint prog = glCreateProgram();
+    GLint linked = 0;
+
+    for (int i = 0; i < 5; i++)
+    {
+        GLuint sh = glCreateShader(stages[i]);
+
+        glShaderSource(sh, 1, &srcs[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(prog, sh);
+        glDeleteShader(sh);
+    }
+
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+
+    if (!linked)
+    {
+        char log[2048] = "";
+
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
+        CHECK_MSG(0, "five stage subroutine program did not link: %s", log);
+        glDeleteProgram(prog);
+        return;
+    }
+
+    for (int i = 0; i < 5; i++)
+    {
+        GLint v = -1;
+
+        glGetProgramInterfaceiv(prog, ifaces[i], GL_ACTIVE_RESOURCES, &v);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+        CHECK_MSG(v == want[i], "stage %d lists %d subroutines, expected %d", i, v, want[i]);
+
+        v = -1;
+        glGetProgramInterfaceiv(prog, uniform_ifaces[i], GL_ACTIVE_RESOURCES, &v);
+        CHECK_MSG(v == 1, "stage %d lists %d subroutine uniforms, expected 1", i, v);
+
+        CHECK_MSG(glGetProgramResourceIndex(prog, uniform_ifaces[i], "where") != GL_INVALID_INDEX,
+                  "stage %d does not list \"where\"", i);
+    }
+
+    glDeleteProgram(prog);
+}

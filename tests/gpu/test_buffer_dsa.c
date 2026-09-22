@@ -609,3 +609,58 @@ GPU_TEST(buffer_dsa, full_dsa_lifecycle_without_bind)
     glDeleteBuffers(1, &b);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 }
+
+/* ---------- a persistent mapping is still a mapping ---------- */
+
+GPU_TEST(buffer_dsa, persistent_map_can_be_unmapped)
+{
+    GLuint buf = 0;
+    GLint mapped = -1;
+    void *p;
+
+    glCreateBuffers(1, &buf);
+    glNamedBufferStorage(buf, 64, NULL,
+                         GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    p = glMapNamedBufferRange(buf, 0, 32, GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK(p != NULL);
+
+    glGetNamedBufferParameteriv(buf, GL_BUFFER_MAPPED, &mapped);
+    CHECK_MSG(mapped == GL_TRUE, "a persistent mapping reports GL_BUFFER_MAPPED as %d", mapped);
+
+    CHECK_EQ_INT(glUnmapNamedBuffer(buf), GL_TRUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    mapped = -1;
+    glGetNamedBufferParameteriv(buf, GL_BUFFER_MAPPED, &mapped);
+    CHECK_EQ_INT(mapped, GL_FALSE);
+
+    glDeleteBuffers(1, &buf);
+}
+
+/* ---------- a three channel clear texel is three channels wide ---------- */
+
+GPU_TEST(buffer_dsa, clear_named_buffer_packs_rgb_tightly)
+{
+    GLuint buf = 0;
+    const GLfloat fill[3] = { 1.0f, 2.0f, 3.0f };
+    GLfloat back[3] = { 0, 0, 0 };
+
+    glCreateBuffers(1, &buf);
+    glNamedBufferData(buf, sizeof fill, NULL, GL_DYNAMIC_COPY);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    // RGB32F reaches Metal as an RGBA32Float, but in a buffer it is 12 bytes
+    glClearNamedBufferData(buf, GL_RGB32F, GL_RGB, GL_FLOAT, fill);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetNamedBufferSubData(buf, 0, sizeof back, back);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    CHECK_MSG(back[0] == 1.0f && back[1] == 2.0f && back[2] == 3.0f,
+              "the RGB32F clear wrote %g %g %g", back[0], back[1], back[2]);
+
+    glDeleteBuffers(1, &buf);
+}

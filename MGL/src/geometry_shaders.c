@@ -901,7 +901,12 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
         "  else { mglPut(mglStrip[0]); mglPut(mglStrip[1]); mglPut(mglCur); }\n"
         "  mglStrip[0] = mglStrip[1];\n  mglStrip[1] = mglCur;\n"
         "  mglStripFlip = !mglStripFlip;\n}\n\n"
-        "void mglEndPrimitive()\n{\n  mglStripLen = 0;\n  mglStripFlip = false;\n}\n\n"))
+        "void mglEndPrimitive()\n{\n  mglStripLen = 0;\n  mglStripFlip = false;\n}\n\n"
+        // EmitStreamVertex and EndStreamPrimitive name a stream. Only stream
+        // zero is rasterised, and it is the only one MGL records; anything
+        // written to another stream is dropped here.
+        "void mglEmitVertex(int mglStream)\n{\n  if (mglStream == 0) mglEmitVertex();\n}\n\n"
+        "void mglEndPrimitive(int mglStream)\n{\n  if (mglStream == 0) mglEndPrimitive();\n}\n\n"))
         goto done;
 
     // the body carries the shader's own #version, which cannot appear in the

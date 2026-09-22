@@ -330,6 +330,10 @@ static bool queryObjectValue(GLMContext ctx, GLuint id, GLenum pname, GLuint64 *
         case GL_QUERY_RESULT_AVAILABLE:
             *out = q->have_result ? 1 : 0;
             return true;
+
+        case GL_QUERY_TARGET:
+            *out = q->target;
+            return true;
     }
 
     ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);

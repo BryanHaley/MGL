@@ -2,8 +2,8 @@
  * transform_feedback.c
  * MGL
  *
- * Object model, bindings and queries. Metal has no capture stage, so the draw
- * calls that replay captured vertices validate and then report failure.
+ * Object model, bindings and queries, and the draws that replay what a
+ * feedback object captured.
  */
 
 #include <string.h>
@@ -13,6 +13,8 @@
 
 Buffer *findBuffer(GLMContext ctx, GLuint buffer);
 Program *findProgram(GLMContext ctx, GLuint program);
+bool validate_vao(GLMContext ctx, bool uses_elements);
+bool validate_program(GLMContext ctx, GLenum mode);
 #include "buffers.h"
 #include "programs.h"
 
@@ -263,10 +265,21 @@ static void drawTransformFeedbackCommon(GLMContext ctx, GLenum mode, GLuint id, 
     t = findTransformFeedback(ctx, id);
 
     ERROR_CHECK_RETURN(t, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(t->active == GL_FALSE, GL_INVALID_OPERATION);
 
-    // nothing was ever captured, so there is nothing to replay
-    ERROR_RETURN(GL_INVALID_OPERATION);
+    // GL 4.6 section 10.5: the object has to have finished a capture at least
+    // once, and it draws as many vertices as that capture came to. Being
+    // active again right now is allowed, and is what a feedback loop does.
+    ERROR_CHECK_RETURN(t->ever_ended, GL_INVALID_OPERATION);
+
+    GLsizei count = (GLsizei)t->vertices_captured;
+
+    if (count == 0 || instancecount == 0)
+        return;
+
+    ERROR_CHECK_RETURN(validate_vao(ctx, false), GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
+
+    ctx->mtl_funcs.mtlDrawArraysInstanced(ctx, mode, 0, count, instancecount);
 }
 
 void mglDrawTransformFeedback(GLMContext ctx, GLenum mode, GLuint id)

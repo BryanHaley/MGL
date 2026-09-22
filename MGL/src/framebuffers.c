@@ -1391,7 +1391,25 @@ void mglFramebufferParameteri(GLMContext ctx, GLenum target, GLenum pname, GLint
 static void getFramebufferParameter(GLMContext ctx, Framebuffer *fbo, GLenum pname, GLint *params)
 {
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
+    // The window's own framebuffer has no object behind it. It still answers
+    // the questions that are about the surface rather than about an
+    // attachment; the rest belong to a framebuffer object only.
+    if (fbo == NULL)
+    {
+        switch(pname)
+        {
+            case GL_DOUBLEBUFFER:            *params = GL_FALSE; return;
+            case GL_STEREO:                  *params = GL_FALSE; return;
+            case GL_SAMPLES:                 *params = 0;        return;
+            case GL_SAMPLE_BUFFERS:          *params = 0;        return;
+            case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;          return;
+            case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return;
+
+            default:
+                ERROR_RETURN(GL_INVALID_OPERATION);
+        }
+    }
 
     switch(pname)
     {
@@ -1706,9 +1724,10 @@ GLenum mglCheckNamedFramebufferStatus(GLMContext ctx, GLuint framebuffer, GLenum
 
 void mglGetNamedFramebufferParameteriv(GLMContext ctx, GLuint framebuffer, GLenum pname, GLint *params)
 {
-    Framebuffer *fbo = findFrameBuffer(ctx, framebuffer);
+    // zero names the window's own framebuffer here, not a missing object
+    Framebuffer *fbo = framebuffer ? findFrameBuffer(ctx, framebuffer) : NULL;
 
-    ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(framebuffer == 0 || fbo, GL_INVALID_OPERATION);
 
     getFramebufferParameter(ctx, fbo, pname, params);
 }

@@ -59,18 +59,11 @@ bool bindVertexBuffer(GLMContext ctx, GLuint vaobj, GLuint bindingindex, GLuint 
         buf = NULL;
     }
 
-    // AGX Driver Compatibility: Store buffer binding information
-    // Find all attributes that use this binding index and update their buffer pointer and stride
-    for (int i = 0; i < ctx->state.max_vertex_attribs; i++)
-    {
-        if (vao->attrib[i].buffer_bindingindex == bindingindex)
-        {
-            vao->attrib[i].buffer = buf;
-            vao->attrib[i].stride = stride;
-        }
-    }
+    vao->bindings[bindingindex].buffer = buf;
+    vao->bindings[bindingindex].offset = offset;
+    vao->bindings[bindingindex].stride = stride;
 
-    vao->dirty_bits |= DIRTY_VAO_BUFFER_BASE;
+    vao->dirty_bits |= DIRTY_VAO | DIRTY_VAO_BUFFER_BASE;
 
     return true;
 }
@@ -79,6 +72,8 @@ void mglBindVertexBuffer(GLMContext ctx, GLuint bindingindex, GLuint buffer, GLi
 {
     ERROR_CHECK_RETURN(ctx->state.vao, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(bindingindex < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(offset >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(stride >= 0, GL_INVALID_VALUE);
 
     bindVertexBuffer(ctx, 0, bindingindex, buffer, offset, stride);
 }
@@ -135,6 +130,8 @@ void mglVertexArrayVertexBuffer(GLMContext ctx, GLuint vaobj, GLuint bindinginde
     }
 
     ERROR_CHECK_RETURN(bindingindex < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(offset >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(stride >= 0, GL_INVALID_VALUE);
 
     bindVertexBuffer(ctx, vaobj, bindingindex, buffer, offset, stride);
 }

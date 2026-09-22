@@ -323,3 +323,161 @@ GPU_TEST(transform_feedback, varyings_belong_to_the_program)
 
     glDeleteProgram(prog);
 }
+
+/* ---------- the object model around the capture ---------- */
+
+GPU_TEST(transform_feedback, gen_reserves_a_name_and_bind_makes_the_object)
+{
+    GLuint ids[2] = { 0, 0 };
+    GLint binding = -1;
+
+    glGenTransformFeedbacks(2, ids);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK(ids[0] != 0 && ids[1] != 0);
+
+    // glGen hands out a name; the object itself is not there yet
+    CHECK_EQ_INT(glIsTransformFeedback(ids[0]), GL_FALSE);
+
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, ids[0]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(glIsTransformFeedback(ids[0]), GL_TRUE);
+
+    glGetIntegerv(GL_TRANSFORM_FEEDBACK_BINDING, &binding);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_UINT((GLuint)binding, ids[0]);
+
+    // deleting the bound one falls back to the default object, not to nothing
+    glDeleteTransformFeedbacks(1, &ids[0]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    binding = -1;
+    glGetIntegerv(GL_TRANSFORM_FEEDBACK_BINDING, &binding);
+    CHECK_EQ_INT(binding, 0);
+
+    // glCreate makes the object outright
+    {
+        GLuint made = 0;
+
+        glCreateTransformFeedbacks(1, &made);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+        CHECK_EQ_INT(glIsTransformFeedback(made), GL_TRUE);
+
+        binding = -1;
+        glGetIntegerv(GL_TRANSFORM_FEEDBACK_BINDING, &binding);
+        CHECK_MSG(binding == 0, "glCreateTransformFeedbacks bound %d", binding);
+
+        glDeleteTransformFeedbacks(1, &made);
+    }
+
+    glDeleteTransformFeedbacks(1, &ids[1]);
+}
+
+/* ---------- a replay draws what the last capture came to ---------- */
+
+GPU_TEST(transform_feedback, draw_replays_the_recorded_vertices)
+{
+    static const GLfloat pts[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
+    static const char *vs =
+        "#version 410 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out vec2 captured;\n"
+        "void main() { captured = p; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 410 core\n"
+        "in vec2 captured;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(captured, 0.0, 1.0); }\n";
+    static const char *const varyings[1] = { "captured" };
+
+    GLuint prog, vao = 0, vbo = 0, tfb = 0, xfb = 0;
+    GLint active = -1;
+    char log[2048];
+
+    prog = linkRecording(vs, fs, varyings, 1, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+
+    if (!prog)
+    {
+        CHECK_MSG(0, "recording program did not link: %s", log);
+        return;
+    }
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof pts, pts, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glGenTransformFeedbacks(1, &xfb);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb);
+    tfb = recordingBuffer(0, (GLsizeiptr)(sizeof(GLfloat) * 2 * 4));
+
+    glUseProgram(prog);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+
+    glGetIntegerv(GL_TRANSFORM_FEEDBACK_ACTIVE, &active);
+    CHECK_EQ_INT(active, GL_TRUE);
+
+    glDrawArrays(GL_POINTS, 0, 4);
+    glEndTransformFeedback();
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    active = -1;
+    glGetIntegerv(GL_TRANSFORM_FEEDBACK_ACTIVE, &active);
+    CHECK_EQ_INT(active, GL_FALSE);
+
+    // and now the replay: four vertices were recorded, so four are drawn
+    {
+        MGLTestTarget t;
+
+        if (mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+        {
+            GLuint counter = 0;
+
+            glDisable(GL_RASTERIZER_DISCARD);
+            mgl_target_bind(&t);
+            glViewport(0, 0, t.width, t.height);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+
+            glGenQueries(1, &counter);
+            glBeginQuery(GL_PRIMITIVES_GENERATED, counter);
+            glDrawTransformFeedback(GL_POINTS, xfb);
+            CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+            glEndQuery(GL_PRIMITIVES_GENERATED);
+
+            {
+                GLuint drawn = 0;
+
+                glGetQueryObjectuiv(counter, GL_QUERY_RESULT, &drawn);
+                CHECK_MSG(drawn == 4, "the replay drew %u points, expected the 4 that were recorded", drawn);
+            }
+
+            glDeleteQueries(1, &counter);
+            mgl_target_destroy(&t);
+        }
+    }
+
+    // an object that never finished a capture has nothing to replay
+    {
+        GLuint fresh = 0;
+
+        glCreateTransformFeedbacks(1, &fresh);
+        mgl_drain_errors();
+        glDrawTransformFeedback(GL_POINTS, fresh);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+        glDeleteTransformFeedbacks(1, &fresh);
+    }
+
+    glUseProgram(0);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+    glDeleteTransformFeedbacks(1, &xfb);
+    glDeleteBuffers(1, &tfb);
+    glDeleteBuffers(1, &vbo);
+    glBindVertexArray(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+}

@@ -28,6 +28,7 @@
 #include "glm_context.h"
 #include "buffers.h"
 #include "pixel_utils.h"
+#include "mgl_format_table.h"
 #include "pixel_convert.h"
 #include "mgl_safety.h"
 #include "mgl_log.h"
@@ -389,8 +390,20 @@ static bool clearBufferData(GLMContext ctx, Buffer *ptr, GLenum internalformat, 
     MGLNativeFormat native = mglNativeFormatForGLInternalFormat(internalformat);
     ERROR_CHECK_RETURN_VALUE(native != MGL_NF_UNKNOWN, GL_INVALID_ENUM, false);
 
-    GLuint texel_size = mglNativeFormatBytesPerPixel(native);
-    ERROR_CHECK_RETURN_VALUE(texel_size > 0 && texel_size <= 16, GL_INVALID_ENUM, false);
+    GLuint native_size = mglNativeFormatBytesPerPixel(native);
+    ERROR_CHECK_RETURN_VALUE(native_size > 0 && native_size <= 16, GL_INVALID_ENUM, false);
+
+    // A buffer texel is packed the way GL counts the format's own channels,
+    // with no padding. Metal's nearest format may be wider -- RGB32F lives in
+    // an RGBA32Float -- and a buffer must not inherit that extra channel.
+    const MGLFormatDesc *fd = mglFormatDesc(internalformat);
+    GLuint texel_bits = (GLuint)fd->bits[0] + fd->bits[1] + fd->bits[2] + fd->bits[3];
+    GLuint texel_size = texel_bits ? (texel_bits + 7) / 8 : native_size;
+
+    if (texel_size > native_size)
+        texel_size = native_size;
+
+    ERROR_CHECK_RETURN_VALUE(texel_size > 0, GL_INVALID_ENUM, false);
 
     // format/type has to describe a legal client pixel
     ERROR_CHECK_RETURN_VALUE(mglPackedPixelSize(format, type) > 0, GL_INVALID_ENUM, false);
@@ -547,10 +560,10 @@ void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
 
             if (VAO())
             {
-                for(int a=0; a<MAX_ATTRIBS; a++)
+                for(int a=0; a<MAX_BINDABLE_BUFFERS; a++)
                 {
-                    if (VAO_ATTRIB_STATE(a).buffer == ptr)
-                        VAO_ATTRIB_STATE(a).buffer = NULL;
+                    if (VAO_STATE(bindings[a]).buffer == ptr)
+                        VAO_STATE(bindings[a]).buffer = NULL;
                 }
 
                 if (VAO()->element_array.buffer == ptr)
@@ -1522,10 +1535,15 @@ static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsize
         if (ptr->storage_flags & GL_MAP_PERSISTENT_BIT)
         {
             ptr->access_flags = access_flags;
+            ptr->access = access_flags;
 
             ptr->data.dirty_bits |= DIRTY_BUFFER_DATA;
 
-            // return a pointer to the backing data without marking it as mapped
+            // A persistent mapping is still a mapping: GL_BUFFER_MAPPED reads
+            // true and glUnmapBuffer has to work. What it does not do is stop
+            // the buffer being used, which the checks elsewhere allow for.
+            ptr->mapped = GL_TRUE;
+
             return (void *)ptr->data.buffer_data;
         }
 

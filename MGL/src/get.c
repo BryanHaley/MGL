@@ -196,6 +196,28 @@ int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *
             out[1] = ctx->state.depth_range[index].zfar;
             return 2;
 
+        case GL_VERTEX_BINDING_BUFFER:
+        case GL_VERTEX_BINDING_OFFSET:
+        case GL_VERTEX_BINDING_STRIDE:
+        case GL_VERTEX_BINDING_DIVISOR:
+        {
+            if (!ctx->state.vao) return -1;
+            if (index >= MAX_BINDABLE_BUFFERS) return -1;
+
+            BufferBinding *binding = &ctx->state.vao->bindings[index];
+
+            switch(pname)
+            {
+                case GL_VERTEX_BINDING_BUFFER:
+                    out[0] = binding->buffer ? (GLdouble)binding->buffer->name : 0.0;
+                    break;
+                case GL_VERTEX_BINDING_OFFSET:  out[0] = (GLdouble)binding->offset;  break;
+                case GL_VERTEX_BINDING_STRIDE:  out[0] = (GLdouble)binding->stride;  break;
+                default:                        out[0] = (GLdouble)binding->divisor; break;
+            }
+            return 1;
+        }
+
         case GL_CURRENT_VERTEX_ATTRIB:
             if (index >= ctx->state.max_vertex_attribs) return -1;
             for(int i=0; i<4; i++)
@@ -635,6 +657,14 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x8C8B: RET_TYPE_VAR(type, max_transform_feedback_separate_attribs); break; // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS
         case 0x8E70: RET_TYPE_VAR(type, max_transform_feedback_buffers); break; // GL_MAX_TRANSFORM_FEEDBACK_BUFFERS
 
+        // GL_TRANSFORM_FEEDBACK_BINDING, and whether it is recording
+        case 0x8E25: RET_TYPE_CONST(type, (GLint)(ctx->state.transform_feedback ?
+                                          ctx->state.transform_feedback->name : 0u)); break;
+        case 0x8E23: RET_TYPE_CONST(type, (GLint)(ctx->state.transform_feedback &&
+                                          ctx->state.transform_feedback->paused)); break;
+        case 0x8E24: RET_TYPE_CONST(type, (GLint)(ctx->state.transform_feedback &&
+                                          ctx->state.transform_feedback->active)); break;
+
         case 0x9143: RET_TYPE_CONST(type, 1024); break; // GL_MAX_DEBUG_MESSAGE_LENGTH
         case 0x9144: RET_TYPE_CONST(type, 64); break;   // GL_MAX_DEBUG_LOGGED_MESSAGES
 
@@ -687,8 +717,6 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x92D1: RET_TYPE_VAR(type, max_combined_atomic_counter_buffers); break; // GL_MAX_COMBINED_ATOMIC_COUNTER_BUFFERS
 
         case 0x8E22: RET_TYPE_CONST(type, 0); break;    // GL_TRANSFORM_FEEDBACK
-        case 0x8E23: RET_TYPE_CONST(type, GL_FALSE); break; // GL_TRANSFORM_FEEDBACK_PAUSED
-        case 0x8E24: RET_TYPE_CONST(type, GL_FALSE); break; // GL_TRANSFORM_FEEDBACK_ACTIVE
 
         case 0x8E5A: RET_TYPE_VAR(type, max_geometry_shader_invocations); break; // GL_MAX_GEOMETRY_SHADER_INVOCATIONS
         case 0x8DE1: RET_TYPE_VAR(type, max_geometry_total_output_components); break; // GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS

@@ -28,6 +28,7 @@
 Buffer *findBuffer(GLMContext ctx, GLuint buffer);
 
 static int readAttribConstant(GLMContext ctx, GLuint index, GLdouble *out);
+void setBindingDivisor(GLMContext ctx, VertexArray *vao, GLuint bindingindex, GLuint divisor);
 
 GLsizei typeSize(GLenum type)
 {
@@ -93,9 +94,9 @@ VertexArray *newVAO(GLMContext ctx, GLuint vao)
         ptr->attrib[i].size = 4;
         ptr->attrib[i].type = GL_FLOAT;
         ptr->attrib[i].stride = 0;
-        ptr->attrib[i].divisor = 0;
         ptr->attrib[i].relativeoffset = 0;
-        ptr->attrib[i].buffer_bindingindex = 0;
+        // GL starts every attribute on the binding of the same number
+        ptr->attrib[i].buffer_bindingindex = i;
     }
 
     return ptr;
@@ -248,7 +249,7 @@ void mglGetVertexAttribdv(GLMContext ctx, GLuint index, GLenum pname, GLdouble *
     ERROR_CHECK_RETURN(ctx->state.vao, GL_INVALID_OPERATION);
 
     vao = ctx->state.vao;
-    buf = vao->attrib[index].buffer;
+    buf = VAO_BINDING(vao, index)->buffer;
 
     switch(pname)
     {
@@ -291,7 +292,7 @@ void mglGetVertexAttribdv(GLMContext ctx, GLuint index, GLenum pname, GLdouble *
             break;
 
         case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
-            *params = vao->attrib[index].divisor;
+            *params = VAO_BINDING(vao, index)->divisor;
             break;
 
         case GL_VERTEX_ATTRIB_BINDING:
@@ -355,23 +356,36 @@ void mglGetVertexAttribfv(GLMContext ctx, GLuint index, GLenum pname, GLfloat *p
 
 void setVertexAttrib(GLMContext ctx, GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer)
 {
+    GLsizei walk_stride = stride;
 
-    if (stride == 0)
-        stride = genStrideFromTypeSize(type, size);
+    // zero means tightly packed, so work the real one out from the format
+    if (walk_stride == 0)
+        walk_stride = genStrideFromTypeSize(type, size);
 
-    ERROR_CHECK_RETURN(stride, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(walk_stride, GL_INVALID_ENUM);
+
+    ERROR_CHECK_RETURN(index < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
 
     VAO_ATTRIB_STATE(index).size = size;
     VAO_ATTRIB_STATE(index).type = type;
     VAO_ATTRIB_STATE(index).normalized = normalized;
+    // GL hands these two straight back as they came in
     VAO_ATTRIB_STATE(index).stride = stride;
-    VAO_ATTRIB_STATE(index).relativeoffset = (GLubyte *)pointer - (GLubyte *)NULL;
+    VAO_ATTRIB_STATE(index).pointer = (GLubyte *)pointer - (GLubyte *)NULL;
+    VAO_ATTRIB_STATE(index).relativeoffset = 0;
+    VAO_ATTRIB_STATE(index).buffer_bindingindex = index;
 
-    // bind current array buffer to attrib
-    VAO_ATTRIB_STATE(index).buffer = STATE(buffers[_ARRAY_BUFFER]);
-    ERROR_CHECK_RETURN(VAO_ATTRIB_STATE(index).buffer, GL_INVALID_OPERATION);
+    // this call is the binding API underneath: the pointer is the binding's
+    // offset and the array buffer is what the binding holds
+    BufferBinding *binding = &VAO_STATE(bindings[index]);
 
-    VAO_STATE(dirty_bits) |= DIRTY_VAO;
+    binding->buffer = STATE(buffers[_ARRAY_BUFFER]);
+    ERROR_CHECK_RETURN(binding->buffer, GL_INVALID_OPERATION);
+
+    binding->offset = (GLubyte *)pointer - (GLubyte *)NULL;
+    binding->stride = walk_stride;
+
+    VAO_STATE(dirty_bits) |= DIRTY_VAO | DIRTY_VAO_BUFFER_BASE;
 }
 
 void mglVertexAttribPointer(GLMContext ctx, GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer)
@@ -495,7 +509,7 @@ void mglGetVertexAttribPointerv(GLMContext ctx, GLuint index, GLenum pname, void
     switch(pname)
     {
         case GL_VERTEX_ATTRIB_ARRAY_POINTER:
-            *pointer = (void **)VAO_ATTRIB_STATE(index).relativeoffset;
+            *pointer = (void *)VAO_ATTRIB_STATE(index).pointer;
             break;
 
         default:
@@ -816,14 +830,16 @@ void mglVertexAttribDivisor(GLMContext ctx, GLuint index, GLuint divisor)
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
-    ptr->attrib[index].divisor = divisor;
+    // this one is the binding call too, on the binding of the same number
+    ptr->attrib[index].buffer_bindingindex = index;
+    setBindingDivisor(ctx, ptr, index, divisor);
 }
 
 void setBindingDivisor(GLMContext ctx, VertexArray *vao, GLuint bindingindex, GLuint divisor)
 {
     ERROR_CHECK_RETURN(bindingindex < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
 
-    vao->attrib[bindingindex].divisor = divisor;
+    vao->bindings[bindingindex].divisor = divisor;
 
     vao->dirty_bits |= DIRTY_VAO_ATTRIB | DIRTY_VAO_BUFFER_BASE;
 }
@@ -881,9 +897,34 @@ static bool vertexArrayIndexedParam(GLMContext ctx, VertexArray *vao, GLuint ind
         case GL_VERTEX_ATTRIB_ARRAY_SIZE:      *out = att->size; return true;
         case GL_VERTEX_ATTRIB_ARRAY_TYPE:      *out = att->type; return true;
         case GL_VERTEX_ATTRIB_ARRAY_STRIDE:    *out = att->stride; return true;
-        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:   *out = att->divisor; return true;
         case GL_VERTEX_ATTRIB_RELATIVE_OFFSET: *out = att->relativeoffset; return true;
-        case GL_VERTEX_BINDING_OFFSET:         *out = att->relativeoffset; return true;
+        case GL_VERTEX_ATTRIB_BINDING:         *out = att->buffer_bindingindex; return true;
+
+        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
+            *out = VAO_BINDING(vao, index)->divisor;
+            return true;
+
+        // these four are asked by binding number, not by attribute number
+        case GL_VERTEX_BINDING_BUFFER:
+        case GL_VERTEX_BINDING_OFFSET:
+        case GL_VERTEX_BINDING_STRIDE:
+        case GL_VERTEX_BINDING_DIVISOR:
+        {
+            ERROR_CHECK_RETURN_VALUE(index < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE, false);
+
+            BufferBinding *binding = &vao->bindings[index];
+
+            switch(pname)
+            {
+                case GL_VERTEX_BINDING_BUFFER:
+                    *out = binding->buffer ? (GLint64)binding->buffer->name : 0;
+                    break;
+                case GL_VERTEX_BINDING_OFFSET:  *out = binding->offset;  break;
+                case GL_VERTEX_BINDING_STRIDE:  *out = binding->stride;  break;
+                default:                        *out = binding->divisor; break;
+            }
+            return true;
+        }
 
         case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:
             *out = att->normalized ? GL_TRUE : GL_FALSE;
@@ -895,8 +936,11 @@ static bool vertexArrayIndexedParam(GLMContext ctx, VertexArray *vao, GLuint ind
             return true;
 
         case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
-            *out = att->buffer ? (GLint64)att->buffer->name : 0;
+        {
+            Buffer *buf = VAO_BINDING(vao, index)->buffer;
+            *out = buf ? (GLint64)buf->name : 0;
             return true;
+        }
 
         default:
             ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);

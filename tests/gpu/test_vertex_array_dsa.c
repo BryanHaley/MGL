@@ -834,3 +834,167 @@ GPU_TEST(vertex_array_dsa, full_separate_format_pipeline)
     glDeleteBuffers(1, &buf);
     glDeleteVertexArrays(1, &vao);
 }
+
+/* ---------- a binding is state of its own ---------- */
+
+GPU_TEST(vertex_array_dsa, binding_state_is_not_attribute_state)
+{
+    GLuint vao = 0, buf = 0;
+    GLint iv = -1;
+    GLint64 i64 = -1;
+
+    glCreateVertexArrays(1, &vao);
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_ARRAY_BUFFER, buf);
+    glBufferData(GL_ARRAY_BUFFER, 4096, NULL, GL_STATIC_DRAW);
+    glBindVertexArray(vao);
+
+    glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, 0);
+    glVertexAttribBinding(0, 5);
+    glBindVertexBuffer(5, buf, 1024, 128);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetIntegeri_v(GL_VERTEX_BINDING_STRIDE, 5, &iv);
+    CHECK_EQ_INT(iv, 128);
+
+    glGetInteger64i_v(GL_VERTEX_BINDING_OFFSET, 5, &i64);
+    CHECK_EQ_INT((GLint)i64, 1024);
+
+    glGetIntegeri_v(GL_VERTEX_BINDING_BUFFER, 5, &iv);
+    CHECK_EQ_UINT((GLuint)iv, buf);
+
+    // glBindVertexBuffer touches none of these
+    glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &iv);
+    CHECK_EQ_INT(iv, 0);
+
+    glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_BINDING, &iv);
+    CHECK_EQ_INT(iv, 5);
+
+    // the attribute reaches the buffer through its binding
+    glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &iv);
+    CHECK_EQ_UINT((GLuint)iv, buf);
+
+    // and an attribute on an empty binding sees no buffer at all
+    glGetVertexAttribiv(1, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &iv);
+    CHECK_EQ_INT(iv, 0);
+
+    // a divisor belongs to the binding too
+    glVertexBindingDivisor(5, 3);
+    glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_DIVISOR, &iv);
+    CHECK_EQ_INT(iv, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteVertexArrays(1, &vao);
+}
+
+/* ---------- the binding offset and a stride of zero both reach the draw ---------- */
+
+static const char *BIND_VS =
+    "#version 410 core\n"
+    "layout(location = 0) in vec2 pos;\n"
+    "layout(location = 1) in float walks;\n"
+    "layout(location = 2) in float stays;\n"
+    "out float vwalks;\n"
+    "out float vstays;\n"
+    "void main() {\n"
+    "    vwalks = walks;\n"
+    "    vstays = stays;\n"
+    "    gl_Position = vec4(pos, 0.0, 1.0);\n"
+    "}\n";
+
+static const char *BIND_FS =
+    "#version 410 core\n"
+    "in float vwalks;\n"
+    "in float vstays;\n"
+    "out vec4 o;\n"
+    "void main() { o = vec4(vwalks, vstays, 0.0, 1.0); }\n";
+
+GPU_TEST(vertex_array_dsa, binding_offset_and_zero_stride_reach_the_draw)
+{
+    MGLTestTarget t;
+    GLuint prog, vao = 0, geom = 0, data = 0;
+    char log[2048];
+    unsigned char *px, c[4] = { 0, 0, 0, 0 };
+
+    // two triangles covering the target, so every fragment is drawn
+    const float quad[12] = { -1, -1,  1, -1, -1, 1,   -1, 1,  1, -1,  1, 1 };
+    // the first float is skipped by the binding's offset; the walking
+    // attribute then reads 0.25 for every vertex and the still one reads 0.75
+    const float values[7] = { 0.0f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f };
+    const float still[2] = { 0.0f, 0.75f };
+
+    prog = mgl_build_program(BIND_VS, BIND_FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+    {
+        CHECK(0);
+        return;
+    }
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    glGenBuffers(1, &geom);
+    glBindBuffer(GL_ARRAY_BUFFER, geom);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+
+    glGenBuffers(1, &data);
+    glBindBuffer(GL_ARRAY_BUFFER, data);
+    glBufferData(GL_ARRAY_BUFFER, sizeof values, values, GL_STATIC_DRAW);
+
+    glVertexAttribFormat(1, 1, GL_FLOAT, GL_FALSE, 0);
+    glVertexAttribBinding(1, 1);
+    glBindVertexBuffer(1, data, 4, 4);          // starts one float in
+    glEnableVertexAttribArray(1);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    {
+        GLuint fixed = 0;
+
+        glGenBuffers(1, &fixed);
+        glBindBuffer(GL_ARRAY_BUFFER, fixed);
+        glBufferData(GL_ARRAY_BUFFER, sizeof still, still, GL_STATIC_DRAW);
+        glVertexAttribFormat(2, 1, GL_FLOAT, GL_FALSE, 4);
+        glVertexAttribBinding(2, 2);
+        glBindVertexBuffer(2, fixed, 0, 0);     // stride zero: one value for all
+        glEnableVertexAttribArray(2);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        mgl_target_bind(&t);
+        glViewport(0, 0, t.width, t.height);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(prog);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        px = mgl_read_rgba8(&t);
+
+        if (px)
+        {
+            mgl_pixel_at(px, &t, t.width / 2, t.height / 2, c);
+            free(px);
+        }
+
+        CHECK_MSG(c[0] > 50 && c[0] < 78, "the offset binding read %u, expected about 64", c[0]);
+        CHECK_MSG(c[1] > 178 && c[1] < 204, "the zero-stride binding read %u, expected about 191", c[1]);
+
+        glDeleteBuffers(1, &fixed);
+    }
+
+    glUseProgram(0);
+    glBindVertexArray(0);
+    glDeleteBuffers(1, &geom);
+    glDeleteBuffers(1, &data);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

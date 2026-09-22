@@ -925,13 +925,22 @@ static bool getTexLevelParameter(GLMContext ctx, Texture *tex, GLint level, GLen
         case GL_TEXTURE_STENCIL_SIZE:
             *out = bitcountForInternalFormat(tex->internalformat, GL_STENCIL_INDEX); return true;
 
+        // a channel the format does not have answers GL_NONE
         case GL_TEXTURE_RED_TYPE:
         case GL_TEXTURE_GREEN_TYPE:
         case GL_TEXTURE_BLUE_TYPE:
         case GL_TEXTURE_ALPHA_TYPE:
         case GL_TEXTURE_DEPTH_TYPE:
-            *out = GL_UNSIGNED_NORMALIZED;
+        {
+            GLenum channel = pname == GL_TEXTURE_RED_TYPE   ? GL_RED :
+                             pname == GL_TEXTURE_GREEN_TYPE ? GL_GREEN :
+                             pname == GL_TEXTURE_BLUE_TYPE  ? GL_BLUE :
+                             pname == GL_TEXTURE_ALPHA_TYPE ? GL_ALPHA : GL_DEPTH_COMPONENT;
+
+            *out = bitcountForInternalFormat(tex->internalformat, channel)
+                 ? (GLint)mglFormatComponentType(tex->internalformat) : GL_NONE;
             return true;
+        }
 
         default:
             ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);

@@ -25,6 +25,64 @@
 #include "glm_context.h"
 #include "mgl_log.h"
 
+extern Buffer *newBuffer(GLMContext ctx, GLenum target, GLuint name);
+extern kern_return_t initBufferData(GLMContext ctx, Buffer *ptr, GLsizeiptr size, const void *data, bool isUniformConstant);
+
+static size_t indexTypeSize(GLenum type)
+{
+    switch(type)
+    {
+        case GL_UNSIGNED_BYTE:  return 1;
+        case GL_UNSIGNED_SHORT: return 2;
+        case GL_UNSIGNED_INT:   return 4;
+    }
+
+    return 0;
+}
+
+// A core profile has no client-side arrays, but plenty of code -- the
+// conformance suite included -- still hands a draw its indices as a plain
+// pointer. Metal can only read them out of a buffer, so copy them into one
+// of MGL's own and bind that for the draw.
+//
+// Returns true when it staged something, and the caller then reads from
+// offset zero and must call endClientIndices when the draw is over.
+static bool beginClientIndices(GLMContext ctx, GLsizei count, GLenum type, const void **indices)
+{
+    size_t elem = indexTypeSize(type);
+    size_t bytes;
+
+    if (!ctx->state.vao || ctx->state.vao->element_array.buffer)
+        return false;
+
+    if (*indices == NULL || count <= 0 || elem == 0)
+        return false;
+
+    bytes = (size_t)count * elem;
+
+    if (ctx->state.client_indices == NULL)
+    {
+        ctx->state.client_indices = newBuffer(ctx, GL_ELEMENT_ARRAY_BUFFER, 0);
+
+        if (ctx->state.client_indices == NULL)
+            return false;
+    }
+
+    if (initBufferData(ctx, ctx->state.client_indices, (GLsizeiptr)bytes, *indices, false) != 0)
+        return false;
+
+    ctx->state.vao->element_array.buffer = ctx->state.client_indices;
+    *indices = NULL;
+
+    return true;
+}
+
+static void endClientIndices(GLMContext ctx, bool staged)
+{
+    if (staged && ctx->state.vao)
+        ctx->state.vao->element_array.buffer = NULL;
+}
+
 bool check_draw_modes(GLenum mode)
 {
     switch(mode)
@@ -84,7 +142,7 @@ bool processVAO(GLMContext ctx)
         {
             if (vao->enabled_attribs & (0x1 << i))
             {
-                if (vao->attrib[i].buffer == NULL)
+                if (VAO_BINDING(vao, i)->buffer == NULL)
                 {
                     // no buffer bound to active attrib...
                     return false;
@@ -132,7 +190,15 @@ bool validate_vao(GLMContext ctx, bool uses_elements)
         if (enabled_attribs & 0x1)
         {
             // mapped buffers cannot be used during draw calls
-            if (VAO_ATTRIB_STATE(i).buffer->mapped) {
+            Buffer *attrib_buffer = VAO_ATTRIB_BINDING(i)->buffer;
+
+            if (attrib_buffer == NULL) {
+                MGL_ERR("MGL Error: validate_vao: attrib %d has no buffer\n", i);
+                return false;
+            }
+
+            // a persistent mapping is meant to stay up while the draw runs
+            if (attrib_buffer->mapped && !(attrib_buffer->access & GL_MAP_PERSISTENT_BIT)) {
                 MGL_ERR("MGL Error: validate_vao: attrib %d buffer mapped\n", i);
                 return false;
             }
@@ -273,15 +339,20 @@ void mglDrawElements(GLMContext ctx, GLenum mode, GLsizei count, GLenum type, co
 
     if (!check_element_type(type)) { ERROR_RETURN(GL_INVALID_ENUM); return; }
 
+    bool staged = beginClientIndices(ctx, count, type, &indices);
+
     if(validate_vao(ctx, true) == false)
     {
+        endClientIndices(ctx, staged);
         ERROR_RETURN(GL_INVALID_OPERATION);
         return;
     }
 
-    if (!validate_program(ctx, mode)) { ERROR_RETURN(GL_INVALID_OPERATION); return; }
+    if (!validate_program(ctx, mode)) { endClientIndices(ctx, staged); ERROR_RETURN(GL_INVALID_OPERATION); return; }
 
     ctx->mtl_funcs.mtlDrawElements(ctx, mode, count, type, indices);
+
+    endClientIndices(ctx, staged);
 }
 
 void mglDrawRangeElements(GLMContext ctx, GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices)
@@ -295,15 +366,20 @@ void mglDrawRangeElements(GLMContext ctx, GLenum mode, GLuint start, GLuint end,
 
     if (!check_element_type(type)) { ERROR_RETURN(GL_INVALID_ENUM); return; }
 
+    bool staged = beginClientIndices(ctx, count, type, &indices);
+
     if(validate_vao(ctx, true) == false)
     {
+        endClientIndices(ctx, staged);
         ERROR_RETURN(GL_INVALID_OPERATION);
         return;
     }
 
-    if (!validate_program(ctx, mode)) { ERROR_RETURN(GL_INVALID_OPERATION); return; }
+    if (!validate_program(ctx, mode)) { endClientIndices(ctx, staged); ERROR_RETURN(GL_INVALID_OPERATION); return; }
 
     ctx->mtl_funcs.mtlDrawRangeElements(ctx, mode, start, end, count, type, indices);
+
+    endClientIndices(ctx, staged);
 }
 
 void mglDrawArraysInstanced(GLMContext ctx, GLenum mode, GLint first, GLsizei count, GLsizei instancecount)
@@ -353,15 +429,20 @@ void mglDrawElementsInstanced(GLMContext ctx, GLenum mode, GLsizei count, GLenum
 
     if (instancecount == 0) { return; }
 
+    bool staged = beginClientIndices(ctx, count, type, &indices);
+
     if(validate_vao(ctx, true) == false)
     {
+        endClientIndices(ctx, staged);
         ERROR_RETURN(GL_INVALID_OPERATION);
         return;
     }
 
-    if (!validate_program(ctx, mode)) { ERROR_RETURN(GL_INVALID_OPERATION); return; }
+    if (!validate_program(ctx, mode)) { endClientIndices(ctx, staged); ERROR_RETURN(GL_INVALID_OPERATION); return; }
 
     ctx->mtl_funcs.mtlDrawElementsInstanced(ctx, mode, count, type, indices, instancecount);
+
+    endClientIndices(ctx, staged);
 }
 
 void mglDrawElementsBaseVertex(GLMContext ctx, GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex)
@@ -373,14 +454,19 @@ void mglDrawElementsBaseVertex(GLMContext ctx, GLenum mode, GLsizei count, GLenu
 
     ERROR_CHECK_RETURN(check_element_type(type), GL_INVALID_ENUM);
 
+    bool staged = beginClientIndices(ctx, count, type, &indices);
+
     if(validate_vao(ctx, true) == false)
     {
+        endClientIndices(ctx, staged);
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
-    ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
+    if (!validate_program(ctx, mode)) { endClientIndices(ctx, staged); ERROR_RETURN(GL_INVALID_OPERATION); }
 
     ctx->mtl_funcs.mtlDrawElementsBaseVertex(ctx, mode, count, type, indices, basevertex);
+
+    endClientIndices(ctx, staged);
 }
 
 void mglDrawRangeElementsBaseVertex(GLMContext ctx, GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices, GLint basevertex)
@@ -395,12 +481,15 @@ void mglDrawRangeElementsBaseVertex(GLMContext ctx, GLenum mode, GLuint start, G
 
     if (count == 0) { return; }
 
+    bool staged = beginClientIndices(ctx, count, type, &indices);
+
     if(validate_vao(ctx, true) == false)
     {
+        endClientIndices(ctx, staged);
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
-    ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
+    if (!validate_program(ctx, mode)) { endClientIndices(ctx, staged); ERROR_RETURN(GL_INVALID_OPERATION); }
 
     ctx->mtl_funcs.mtlDrawRangeElementsBaseVertex(ctx, mode, start, end, count, type, indices, basevertex);
 }
@@ -417,14 +506,19 @@ void mglDrawElementsInstancedBaseVertex(GLMContext ctx, GLenum mode, GLsizei cou
 
     if (count == 0 || instancecount == 0) { return; }
 
+    bool staged = beginClientIndices(ctx, count, type, &indices);
+
     if(validate_vao(ctx, true) == false)
     {
+        endClientIndices(ctx, staged);
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
-    ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
+    if (!validate_program(ctx, mode)) { endClientIndices(ctx, staged); ERROR_RETURN(GL_INVALID_OPERATION); }
 
     ctx->mtl_funcs.mtlDrawElementsInstancedBaseVertex(ctx, mode, count, type, indices, instancecount, basevertex);
+
+    endClientIndices(ctx, staged);
 }
 
 void mglDrawArraysIndirect(GLMContext ctx, GLenum mode, const void *indirect)
@@ -495,14 +589,19 @@ void mglDrawElementsInstancedBaseInstance(GLMContext ctx, GLenum mode, GLsizei c
 
     if (count == 0 || instancecount == 0) { return; }
 
+    bool staged = beginClientIndices(ctx, count, type, &indices);
+
     if(validate_vao(ctx, true) == false)
     {
+        endClientIndices(ctx, staged);
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
-    ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
+    if (!validate_program(ctx, mode)) { endClientIndices(ctx, staged); ERROR_RETURN(GL_INVALID_OPERATION); }
 
     ctx->mtl_funcs.mtlDrawElementsInstancedBaseInstance(ctx, mode, count, type, indices, instancecount, baseinstance);
+
+    endClientIndices(ctx, staged);
 }
 
 void mglDrawElementsInstancedBaseVertexBaseInstance(GLMContext ctx, GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance)
@@ -517,14 +616,19 @@ void mglDrawElementsInstancedBaseVertexBaseInstance(GLMContext ctx, GLenum mode,
 
     if (count == 0 || instancecount == 0) { return; }
 
+    bool staged = beginClientIndices(ctx, count, type, &indices);
+
     if(validate_vao(ctx, true) == false)
     {
+        endClientIndices(ctx, staged);
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
-    ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
+    if (!validate_program(ctx, mode)) { endClientIndices(ctx, staged); ERROR_RETURN(GL_INVALID_OPERATION); }
 
     ctx->mtl_funcs.mtlDrawElementsInstancedBaseVertexBaseInstance(ctx, mode, count, type, indices, instancecount, basevertex, baseinstance);
+
+    endClientIndices(ctx, staged);
 }
 
 // every entry of a multi-draw count array has to be zero or more

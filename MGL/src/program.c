@@ -3606,6 +3606,13 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     // object. A stage that will not build sets LINK_STATUS false instead.
     ctx->error_suppress++;
 
+    // the subroutines the rewrite found belong to the program from here on.
+    // This sits ahead of everything else because a geometry or separable
+    // program leaves by its own door further down and would never reach it.
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+        if (pptr->shader_slots[stage])
+            mglCopySubroutineInfo(&pptr->subroutines[stage], &pptr->shader_slots[stage]->subroutines);
+
     // Point-mode isolines on their own get a geometry stage that passes each
     // point through, since Metal cannot draw isolines at all.
     freeSyntheticGeometry(pptr);
@@ -3805,11 +3812,6 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     // a program with no stage, or one whose stage failed, did not link
     if (stages_linked == 0)
         pptr->link_status = GL_FALSE;
-
-    // the subroutines the rewrite found belong to the program from here on
-    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
-        if (pptr->shader_slots[stage])
-            mglCopySubroutineInfo(&pptr->subroutines[stage], &pptr->shader_slots[stage]->subroutines);
 
     linkTransformCapture(ctx, pptr);
 

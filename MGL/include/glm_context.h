@@ -63,6 +63,9 @@
 #define VAO()   ctx->state.vao
 #define VAO_STATE(_val_)   ctx->state.vao->_val_
 #define VAO_ATTRIB_STATE(_index_) ctx->state.vao->attrib[_index_]
+// the buffer an attribute reads from, which GL reaches through its binding
+#define VAO_BINDING(_vao_, _index_) (&(_vao_)->bindings[(_vao_)->attrib[_index_].buffer_bindingindex])
+#define VAO_ATTRIB_BINDING(_index_) VAO_BINDING(ctx->state.vao, _index_)
 
 // These really do return. Without that, every error path fell through and kept
 // running with the arguments it had just rejected.
@@ -238,7 +241,10 @@ typedef struct BufferBaseTarget_t {
 #define MAX_UNIFORM_BUFFER_BINDINGS         96
 #define MAX_SHADER_STORAGE_BUFFER_BINDINGS  32
 #define MAX_ATOMIC_COUNTER_BUFFER_BINDINGS  16
-#define MAX_TRANSFORM_FEEDBACK_BUFFERS      16
+// what the capture machinery can really lay out, which is the spec minimum;
+// MGL_XFB_MAX_BUFFERS and MAX_TF_BUFFERS are the same number seen from the
+// shader-rewrite and the binding side
+#define MAX_TRANSFORM_FEEDBACK_BUFFERS      4
 
 // one array wide enough for the largest of them
 #define MAX_BUFFER_BASE_BINDINGS            MAX_UNIFORM_BUFFER_BINDINGS
@@ -369,12 +375,15 @@ typedef struct BufferBinding_t {
 } BufferBinding;
 
 typedef struct VertexAttrib_t {
-    Buffer  *buffer;
     GLuint  size;
     GLenum  type;
     GLuint  normalized;
+    // the stride glVertexAttribPointer was handed, which GL reports back
+    // unchanged; the stride the hardware walks lives on the binding
     GLuint  stride;
-    GLuint  divisor;
+    // what glVertexAttribPointer was handed, which GL hands back; the offset
+    // the hardware reads from lives on the binding
+    GLintptr  pointer;
     GLintptr  relativeoffset;
     GLuint  buffer_bindingindex;
 } VertexAttrib;
@@ -422,6 +431,7 @@ typedef struct VertexArray_t {
     unsigned name;
     unsigned enabled_attribs;
     VertexAttrib attrib[MAX_ATTRIBS];
+    BufferBinding bindings[MAX_BINDABLE_BUFFERS];
     VertexElementArray element_array;
     void *mtl_data;
 } VertexArray;
@@ -466,7 +476,7 @@ int mglTessellate(int domain, int spacing, bool point_mode, bool cw,
 
 // Transform feedback writes through storage blocks of its own, starting here.
 #define MGL_XFB_FIRST_BINDING 16
-#define MGL_XFB_MAX_BUFFERS   4
+#define MGL_XFB_MAX_BUFFERS   MAX_TRANSFORM_FEEDBACK_BUFFERS
 #define MGL_XFB_FIRST_MSL_SLOT 22
 
 // Cull distance needs a pass of its own before the draw, and five buffers.
@@ -756,6 +766,12 @@ typedef struct BufferMap_t {
     Buffer      *buf;
     GLintptr    offset;
     GLuint      stride;     // vertex stride of the attributes sharing this slot
+    GLuint      divisor;    // how many instances share one element, 0 for none
+    // what Metal is told the slot's stride is. GL's stride of zero means every
+    // vertex reads the same element, which Metal spells as a constant step and
+    // a stride that still has to cover the attribute
+    GLuint      layout_stride;
+    GLubyte     constant_step;
     // which GL buffer kind this slot came from. A shader can write a storage
     // buffer, so it must be a real MTLBuffer; a uniform can go through setBytes.
     GLubyte     gl_buffer_type;
@@ -914,7 +930,7 @@ typedef struct DebugState_t {
     GLuint group_depth;
 } DebugState;
 
-#define MAX_TF_BUFFERS 4
+#define MAX_TF_BUFFERS MAX_TRANSFORM_FEEDBACK_BUFFERS
 
 typedef struct TransformFeedback_t {
     GLuint name;
@@ -928,6 +944,12 @@ typedef struct TransformFeedback_t {
     GLenum buffer_mode;
     // where the next draw appends, in vertices
     GLuint vertices_recorded;
+    // what the last finished capture came to, which is what a replay draws
+    GLuint vertices_captured;
+    GLboolean ever_ended;
+    // glGen only reserves the name; the object itself starts existing when
+    // something binds it, or when glCreate makes it outright
+    GLboolean created;
 } TransformFeedback;
 
 typedef struct Renderbuffer_t {
@@ -1112,6 +1134,10 @@ typedef struct {
     GLfloat color_clear_value[4]; // GL_COLOR_CLEAR_VALUE
 
     Buffer *buffers[MAX_BINDABLE_BUFFERS];
+
+    // where indices handed to a draw as a plain pointer are staged, since
+    // Metal only ever reads them out of a buffer
+    Buffer *client_indices;
 
     VertexArray *vao;
     Texture     *tex;

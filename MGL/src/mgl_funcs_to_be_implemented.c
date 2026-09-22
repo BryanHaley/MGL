@@ -160,6 +160,7 @@ void mglBindTransformFeedback(GLMContext ctx, GLenum target, GLuint id)
     if (ptr)
     {
         ptr->target = target;
+        ptr->created = GL_TRUE;
         STATE(transform_feedback) = ptr;
     }
 }
@@ -501,7 +502,15 @@ void mglCreateTransformFeedbacks(GLMContext ctx, GLsizei n, GLuint *ids)
 
 	for (GLsizei i = 0; i < n; i++)
 	{
+		TransformFeedback *ptr;
+
 		mglGenTransformFeedbacks(ctx, 1, &ids[i]);
+
+		// unlike glGen, this one makes the object, without binding it
+		ptr = getTransformFeedback(ctx, ids[i]);
+
+		if (ptr)
+			ptr->created = GL_TRUE;
 	}
 }
 
@@ -527,10 +536,11 @@ void mglDeleteTransformFeedbacks(GLMContext ctx, GLsizei n, const GLuint *ids)
             continue;
         }
             
-        // If deleting currently bound transform feedback, unbind it
+        // deleting the bound one falls back to the default object, not to
+        // nothing -- a null binding kills the next draw in any later test
         if (STATE(transform_feedback) && STATE(transform_feedback)->name == ids[i])
         {
-            STATE(transform_feedback) = NULL;
+            STATE(transform_feedback) = getTransformFeedback(ctx, 0);
         }
         
         // Remove from hash table and free
@@ -563,6 +573,11 @@ void mglEndTransformFeedback(GLMContext ctx)
 
 	STATE(transform_feedback)->active = GL_FALSE;
 	STATE(transform_feedback)->paused = GL_FALSE;
+
+	// a replay draws what this capture came to, and the next Begin is about
+	// to reset the cursor
+	STATE(transform_feedback)->vertices_captured = STATE(transform_feedback)->vertices_recorded;
+	STATE(transform_feedback)->ever_ended = GL_TRUE;
 }
 
 
@@ -769,7 +784,7 @@ void mglGetnPixelMapusv(GLMContext ctx, GLenum map, GLsizei bufSize, GLushort *v
 GLboolean mglIsTransformFeedback(GLMContext ctx, GLuint id)
 {
 	TransformFeedback *ptr = findTransformFeedback(ctx, id);
-	return ptr ? GL_TRUE : GL_FALSE;
+	return (ptr && ptr->created) ? GL_TRUE : GL_FALSE;
 }
 
 

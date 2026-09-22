@@ -1769,10 +1769,16 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
     texture_size = page_size_align(internal_size);
     assert(texture_size);
 
+    bool depth_only = false;
+
     switch(mtlFormatForGLInternalFormat(internalformat))
     {
         case MTLPixelFormatDepth16Unorm:
         case MTLPixelFormatDepth32Float:
+            tex->mtl_requires_private_storage = true;
+            depth_only = true;
+            break;
+
         case MTLPixelFormatDepth24Unorm_Stencil8:
         case MTLPixelFormatDepth32Float_Stencil8:
             tex->mtl_requires_private_storage = true;
@@ -1783,7 +1789,11 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
             break;
     }
 
-    if (tex->mtl_requires_private_storage == false)
+    // Private storage is about how Metal holds the texture, not about whether
+    // GL can write it. A plain depth level still needs its own copy here, or
+    // glTexSubImage and glClearTexImage have nowhere to put the pixels; the
+    // upload stages through a buffer and blits, which private storage allows.
+    if (tex->mtl_requires_private_storage == false || depth_only)
     {
         // Allocate directly from VM
         err = vm_allocate((vm_map_t) mach_task_self(),
@@ -2595,20 +2605,78 @@ void mglTextureStorage3D(GLMContext ctx, GLuint texture, GLsizei levels, GLenum 
 // TextureStorage3DMultisample moved to texture_multisample.c
 
 
+// The format a clear value may be handed in. GL 4.6 section 8.20 says it has
+// to name the same kind of data the texture holds: depth into depth, integer
+// into integer, and colour into colour.
+static bool clearFormatMatchesTexture(GLenum internalformat, GLenum format)
+{
+    const MGLFormatDesc *d = mglFormatDesc(internalformat);
+    bool format_is_integer;
+    bool format_is_depth = format == GL_DEPTH_COMPONENT;
+    bool format_is_stencil = format == GL_STENCIL_INDEX;
+    bool format_is_depth_stencil = format == GL_DEPTH_STENCIL;
+
+    switch (format)
+    {
+        case GL_RED_INTEGER:
+        case GL_GREEN_INTEGER:
+        case GL_BLUE_INTEGER:
+        case GL_RG_INTEGER:
+        case GL_RGB_INTEGER:
+        case GL_RGBA_INTEGER:
+        case GL_BGR_INTEGER:
+        case GL_BGRA_INTEGER:
+            format_is_integer = true;
+            break;
+
+        default:
+            format_is_integer = false;
+            break;
+    }
+
+    switch (d->kind)
+    {
+        case MGL_FMT_DEPTH:         return format_is_depth;
+        case MGL_FMT_STENCIL:       return format_is_stencil;
+        case MGL_FMT_DEPTH_STENCIL: return format_is_depth_stencil;
+        case MGL_FMT_COLOR_INT:
+        case MGL_FMT_COLOR_UINT:    return format_is_integer;
+
+        default:
+            return !format_is_integer && !format_is_depth &&
+                   !format_is_stencil && !format_is_depth_stencil;
+    }
+}
+
+// the checks glClearTexImage and glClearTexSubImage share
+static Texture *clearableTexture(GLMContext ctx, GLuint texture, GLint level, GLenum format)
+{
+    Texture *tex = findTexture(ctx, texture);
+
+    // zero is not a texture name here, and neither is a name nobody made
+    ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);
+
+    // a buffer texture holds someone else's buffer, so there is nothing to clear
+    ERROR_CHECK_RETURN_VALUE(tex->target != GL_TEXTURE_BUFFER, GL_INVALID_OPERATION, NULL);
+
+    ERROR_CHECK_RETURN_VALUE(level >= 0, GL_INVALID_VALUE, NULL);
+    ERROR_CHECK_RETURN_VALUE(texLevelDefined(tex, 0, level), GL_INVALID_OPERATION, NULL);
+    ERROR_CHECK_RETURN_VALUE(!mglFormatIsCompressed(tex->internalformat), GL_INVALID_OPERATION, NULL);
+    ERROR_CHECK_RETURN_VALUE(clearFormatMatchesTexture(tex->internalformat, format),
+                             GL_INVALID_OPERATION, NULL);
+
+    return tex;
+}
+
 #pragma mark clear tex image
 void mglClearTexImage(GLMContext ctx, GLuint texture, GLint level, GLenum format, GLenum type, const void *data)
 {
     MGL_INFO("MGL: glClearTexImage called - texture=%u level=%d\n", texture, level);
 
-    // zero is not a texture name here, and neither is a name nobody made
-    Texture *tex = findTexture(ctx, texture);
-    if (!tex) {
-        ERROR_RETURN(GL_INVALID_OPERATION);
-    }
+    Texture *tex = clearableTexture(ctx, texture, level, format);
 
-    if (texLevelDefined(tex, 0, level) == false) {
-        ERROR_RETURN(GL_INVALID_OPERATION);
-    }
+    if (!tex)
+        return;
 
     // For now, use texSubImage to clear - fill with the clear data
     GLsizei width = tex->width >> level;
@@ -2662,25 +2730,29 @@ void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoff
     MGL_INFO("MGL: glClearTexSubImage called - texture=%u %dx%dx%d at (%d,%d,%d)\n",
             texture, width, height, depth, xoffset, yoffset, zoffset);
     
-    Texture *tex = findTexture(ctx, texture);
-    if (!tex) {
-        ERROR_RETURN(GL_INVALID_OPERATION);
-    }
+    ERROR_CHECK_RETURN(width >= 0 && height >= 0 && depth >= 0, GL_INVALID_VALUE);
 
-    if (texLevelDefined(tex, 0, level) == false) {
-        ERROR_RETURN(GL_INVALID_OPERATION);
-    }
+    Texture *tex = clearableTexture(ctx, texture, level, format);
+
+    if (!tex)
+        return;
+
+    // GL 4.6 section 8.20: an empty region is a no-op, not an error
+    if (width == 0 || height == 0 || depth == 0)
+        return;
 
     size_t pixel_size = sizeForFormatType(format, type);
 
+    ERROR_CHECK_RETURN(pixel_size, GL_INVALID_ENUM);
+
     // CRITICAL SECURITY FIX: Prevent integer overflow in texture subimage allocation
-    if (width > SIZE_MAX / height / depth / pixel_size) {
+    if ((size_t)width > SIZE_MAX / (size_t)height / (size_t)depth / pixel_size) {
         MGL_ERR("MGL SECURITY ERROR: Texture subimage allocation would overflow: %dx%dx%dx%zu\n", width, height, depth, pixel_size);
         STATE(error) = GL_OUT_OF_MEMORY;
         return;
     }
 
-    size_t size = width * height * depth * pixel_size;
+    size_t size = (size_t)width * height * depth * pixel_size;
     
     // a cubemap keeps every face in its own allocation, so z selects a face
     GLuint first_face = 0;
@@ -2705,7 +2777,8 @@ void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoff
     }
 
     if (data) {
-        for (size_t i = 0; i < (size_t)width * height * depth * face_count; i++) {
+        // one face's worth: every face is filled from the same buffer
+        for (size_t i = 0; i < (size_t)width * height * depth; i++) {
             memcpy((char*)fill_data + i * pixel_size, data, pixel_size);
         }
     }
@@ -3938,12 +4011,27 @@ static bool getTextureLevelParam(GLMContext ctx, Texture *tex, GLint level, GLen
         case GL_TEXTURE_STENCIL_SIZE:
             *out = mglFormatComponentBits(tex->internalformat, GL_STENCIL_INDEX); return true;
 
+        // a channel the format does not have answers GL_NONE, and the rest
+        // answer how the format stores them
         case GL_TEXTURE_RED_TYPE:
+            *out = mglFormatComponentBits(tex->internalformat, GL_RED)
+                 ? (GLint)mglFormatComponentType(tex->internalformat) : GL_NONE;
+            return true;
         case GL_TEXTURE_GREEN_TYPE:
+            *out = mglFormatComponentBits(tex->internalformat, GL_GREEN)
+                 ? (GLint)mglFormatComponentType(tex->internalformat) : GL_NONE;
+            return true;
         case GL_TEXTURE_BLUE_TYPE:
+            *out = mglFormatComponentBits(tex->internalformat, GL_BLUE)
+                 ? (GLint)mglFormatComponentType(tex->internalformat) : GL_NONE;
+            return true;
         case GL_TEXTURE_ALPHA_TYPE:
+            *out = mglFormatComponentBits(tex->internalformat, GL_ALPHA)
+                 ? (GLint)mglFormatComponentType(tex->internalformat) : GL_NONE;
+            return true;
         case GL_TEXTURE_DEPTH_TYPE:
-            *out = GL_UNSIGNED_NORMALIZED;
+            *out = mglFormatComponentBits(tex->internalformat, GL_DEPTH_COMPONENT)
+                 ? (GLint)mglFormatComponentType(tex->internalformat) : GL_NONE;
             return true;
 
         default:

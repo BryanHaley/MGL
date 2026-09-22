@@ -446,3 +446,85 @@ GPU_TEST(draw_variants, xfb_draw_validates_arguments)
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
     glDeleteTransformFeedbacks(1, &t);
 }
+
+/* ---------- indices handed over as a plain pointer ---------- */
+
+GPU_TEST(draw_variants, client_side_indices_reach_the_draw)
+{
+    // no element array buffer is bound; the indices are ordinary memory
+    static const GLushort idx[6] = { 0, 1, 2, 2, 1, 3 };
+    static const GLfloat quad[8] = { -1, -1,  1, -1,  -1, 1,  1, 1 };
+
+    MGLTestTarget t;
+    GLuint prog, vao = 0, vbo = 0;
+    char log[2048];
+    unsigned char *px, c[4] = { 0, 0, 0, 0 };
+
+    prog = mgl_build_program(VS_TRI, FS_RED, log, sizeof log);
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+    {
+        CHECK(0);
+        return;
+    }
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, t.width, t.height);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, idx);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, t.width / 2, t.height / 2, c);
+        free(px);
+    }
+
+    CHECK_MSG(c[0] > 200, "the client-side index draw left red %u at the centre", c[0]);
+
+    // and the element buffer binding is the application's again afterwards
+    {
+        GLint bound = -1;
+
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &bound);
+        CHECK_EQ_INT(bound, 0);
+    }
+
+    // the same through the instanced entry point
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, idx, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, t.width / 2, t.height / 2, c);
+        free(px);
+    }
+
+    CHECK_MSG(c[0] > 200, "the instanced client-side index draw left red %u at the centre", c[0]);
+
+    glUseProgram(0);
+    glBindVertexArray(0);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

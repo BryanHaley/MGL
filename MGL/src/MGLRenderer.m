@@ -50,6 +50,7 @@
 #define TRACE_FUNCTION()    DEBUG_PRINT("%s\n", __FUNCTION__);
 
 extern void mglDrawBuffer(GLMContext ctx, GLenum buf);
+extern GLsizei genStrideFromTypeSize(GLenum type, GLint size);
 
 // for resource types SPVC_RESOURCE_TYPE_UNIFORM_BUFFER..
 #import "spirv_cross_c.h"
@@ -751,15 +752,22 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         {
             if (VAO_STATE(enabled_attribs) & (0x1 << att))
             {
+                BufferBinding *binding = VAO_ATTRIB_BINDING(att);
+
                 // CRITICAL SECURITY FIX: Check buffer instead of using assert()
-                if (!VAO_ATTRIB_STATE(att).buffer) {
+                if (!binding->buffer) {
                     MGL_NSERR(@"MGL SECURITY ERROR: NULL buffer for enabled vertex attribute %d", att);
                     return false;
                 }
 
-                Buffer *gl_buffer = VAO_ATTRIB_STATE(att).buffer;
-                GLuint stride = VAO_ATTRIB_STATE(att).stride;
-                GLintptr base = VAO_ATTRIB_STATE(att).relativeoffset;
+                Buffer *gl_buffer = binding->buffer;
+                GLuint stride = binding->stride;
+                GLuint divisor = binding->divisor;
+                // the binding says where the array starts, the format says how
+                // far into one element this attribute sits
+                GLintptr base = binding->offset + VAO_ATTRIB_STATE(att).relativeoffset;
+                GLuint extent = (GLuint)genStrideFromTypeSize(VAO_ATTRIB_STATE(att).type,
+                                                              VAO_ATTRIB_STATE(att).size);
 
                 // Metal reads an attribute at (buffer offset + stride*vertex +
                 // attribute offset), and the attribute offset has to sit inside
@@ -770,7 +778,9 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                 // the first reads the wrong array.
                 bool found_buffer = false;
 
-                for (int map=vao_buffer_start; map<buffer_map->count; map++)
+                // a stride of zero is not a slot anything else can share: the
+                // slot is pointed straight at the one element it reads
+                for (int map=vao_buffer_start; stride && map<buffer_map->count; map++)
                 {
                     Buffer *map_buffer = buffer_map->buffers[map].buf;
 
@@ -783,6 +793,12 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                         continue;
 
                     if (buffer_map->buffers[map].stride != stride)
+                        continue;
+
+                    if (buffer_map->buffers[map].divisor != divisor)
+                        continue;
+
+                    if (buffer_map->buffers[map].constant_step)
                         continue;
 
                     GLintptr delta = base - buffer_map->buffers[map].offset;
@@ -808,6 +824,12 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                     buffer_map->buffers[buffer_map->count].buf = gl_buffer;
                     buffer_map->buffers[buffer_map->count].offset = base;
                     buffer_map->buffers[buffer_map->count].stride = stride;
+                    buffer_map->buffers[buffer_map->count].divisor = divisor;
+                    buffer_map->buffers[buffer_map->count].constant_step = stride ? 0 : 1;
+                    // Metal wants a stride even where nothing steps, and it has
+                    // to be a multiple of four that covers the attribute
+                    buffer_map->buffers[buffer_map->count].layout_stride =
+                        stride ? stride : ((extent + 3u) & ~3u);
                     buffer_map->buffers[buffer_map->count].buffer_base_index = attrib_slot++;
                     buffer_map->count++;
 
@@ -1197,32 +1219,24 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     }
 
     // verify completeness of texture when used
-    if (tex->num_levels > 1)
+    if (tex->num_levels >= 1)
     {
-        // An application may define only the first few levels of a chain and
-        // set MAX_LEVEL to match. Demanding the whole chain here threw the
-        // texture away and handed back the emergency gradient instead.
-        for(int face=0; face<num_faces; face++)
-        {
-            for (int i=0; i<tex->num_levels; i++)
-            {
-                // incomplete texture
-                if (tex->faces[face].levels[i].complete == false)
-                    return NULL;
-            }
-        }
+        // An application may define only some of the chain -- the first few
+        // levels, or a single level well down it -- and GL still lets it read
+        // and clear what it did define. So one defined level is enough to
+        // build the Metal texture; the rest are simply left alone.
+        GLuint defined = 0;
 
-        tex->mipmapped = true;
-    }
-    else if (tex->num_levels == 1)
-    {
-        // single level texture
-        // incomplete texture
         for(int face=0; face<num_faces; face++)
-        {
-            if (tex->faces[face].levels[0].complete == false)
-                return NULL;
-        }
+            for (int i=0; i<tex->num_levels; i++)
+                if (tex->faces[face].levels[i].complete)
+                    defined++;
+
+        if (defined == 0)
+            return NULL;
+
+        if (tex->num_levels > 1)
+            tex->mipmapped = true;
     }
     else
     {
@@ -1437,6 +1451,10 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         {
             for (int level=0; level<tex->num_levels; level++)
             {
+                // a level the application never defined has nothing to upload
+                if (tex->faces[face].levels[level].complete == false)
+                    continue;
+
                 width = tex->faces[face].levels[level].width;
                 height = tex->faces[face].levels[level].height;
                 depth = tex->faces[face].levels[level].depth;
@@ -7145,7 +7163,7 @@ static MTLWinding mtlWindingFor(const Program *p)
         {
             MTLVertexFormat format;
 
-            if (VAO_ATTRIB_STATE(i).buffer == NULL)
+            if (VAO_ATTRIB_BINDING(i)->buffer == NULL)
             {
                 MGL_NSERR(@"Error: Invalid VAO defined enabled but no buffer bound\n");
                 return NULL;
@@ -7165,25 +7183,32 @@ static MTLWinding mtlWindingFor(const Program *p)
 
             mapped_buffer_index = [self getVertexBufferIndexWithAttributeSet: i];
 
-            GLintptr slot_offset = ctx->state.vertex_buffer_map_list.buffers[mapped_buffer_index].offset;
-            GLuint   slot_index  = ctx->state.vertex_buffer_map_list.buffers[mapped_buffer_index].buffer_base_index;
+            BufferMap *slot = &ctx->state.vertex_buffer_map_list.buffers[mapped_buffer_index];
 
-            vertexDescriptor.attributes[i].bufferIndex = slot_index;
+            GLintptr attrib_base = VAO_ATTRIB_BINDING(i)->offset + VAO_ATTRIB_STATE(i).relativeoffset;
+
+            vertexDescriptor.attributes[i].bufferIndex = slot->buffer_base_index;
             // the slot is bound at its own offset, so this is the rest of the way in
-            vertexDescriptor.attributes[i].offset = ctx->state.vao->attrib[i].relativeoffset - slot_offset;
+            vertexDescriptor.attributes[i].offset = attrib_base - slot->offset;
             vertexDescriptor.attributes[i].format = format;
 
-            vertexDescriptor.layouts[slot_index].stride = VAO_ATTRIB_STATE(i).stride;
+            vertexDescriptor.layouts[slot->buffer_base_index].stride = slot->layout_stride;
 
-            if (ctx->state.vao->attrib[i].divisor)
+            if (slot->constant_step)
             {
-                vertexDescriptor.layouts[slot_index].stepRate = ctx->state.vao->attrib[i].divisor;
-                vertexDescriptor.layouts[slot_index].stepFunction = MTLVertexStepFunctionPerInstance;
+                // GL's stride of zero: every vertex reads the same element
+                vertexDescriptor.layouts[slot->buffer_base_index].stepRate = 0;
+                vertexDescriptor.layouts[slot->buffer_base_index].stepFunction = MTLVertexStepFunctionConstant;
+            }
+            else if (slot->divisor)
+            {
+                vertexDescriptor.layouts[slot->buffer_base_index].stepRate = slot->divisor;
+                vertexDescriptor.layouts[slot->buffer_base_index].stepFunction = MTLVertexStepFunctionPerInstance;
             }
             else
             {
-                vertexDescriptor.layouts[slot_index].stepRate = 1;
-                vertexDescriptor.layouts[slot_index].stepFunction = MTLVertexStepFunctionPerVertex;
+                vertexDescriptor.layouts[slot->buffer_base_index].stepRate = 1;
+                vertexDescriptor.layouts[slot->buffer_base_index].stepFunction = MTLVertexStepFunctionPerVertex;
             }
         }
 
@@ -9766,8 +9791,12 @@ Buffer *getIndirectBuffer(GLMContext ctx)
         return;
     }
 
-    ctx->state.transform_feedback->vertices_recorded +=
-        [self setUpTransformFeedback: mode count: count first: first];
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: first];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self drawGeometry: mode count: count first: first instances: 1 indices: NULL])
         return;
@@ -9836,8 +9865,12 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
-    ctx->state.transform_feedback->vertices_recorded +=
-        [self setUpTransformFeedback: mode count: count first: 0];
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: 0];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self drawGeometry: mode count: count first: 0 instances: 1 indices: &src])
         return;
@@ -9926,8 +9959,12 @@ void mtlDrawRangeElements(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint 
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
-    ctx->state.transform_feedback->vertices_recorded +=
-        [self setUpTransformFeedback: mode count: count first: first];
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: first];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self drawGeometry: mode count: count first: first instances: instancecount indices: NULL])
         return;

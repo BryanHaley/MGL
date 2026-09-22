@@ -305,6 +305,10 @@ GLMContext createGLMContext(GLenum format, GLenum type,
 
     // the default transform feedback object is bound from the start
     STATE(transform_feedback) = getTransformFeedback(ctx, 0);
+
+    // the default object is always there
+    if (STATE(transform_feedback))
+        STATE(transform_feedback)->created = GL_TRUE;
     initHashTable(&STATE(renderbuffer_table), 32);
     initHashTable(&STATE(framebuffer_table), 32);
     initHashTable(&STATE(sampler_table), 32);

@@ -603,3 +603,51 @@ GPU_TEST(texture_query, texture_level_parameter_fv_dsa)
 
     glDeleteTextures(1, &tex);
 }
+
+/* ---------- a channel the format has not got answers GL_NONE ---------- */
+
+GPU_TEST(texture_query, level_parameter_component_types)
+{
+    GLuint tex = 0;
+    GLint v = -1;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 4, 4, 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_RED_TYPE, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, GL_UNSIGNED_NORMALIZED);
+
+    v = -1;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_GREEN_TYPE, &v);
+    CHECK_MSG(v == GL_NONE, "GL_R8 has no green channel, but its type reads 0x%x", v);
+
+    v = -1;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_ALPHA_TYPE, &v);
+    CHECK_MSG(v == GL_NONE, "GL_R8 has no alpha channel, but its type reads 0x%x", v);
+
+    v = -1;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_DEPTH_TYPE, &v);
+    CHECK_MSG(v == GL_NONE, "GL_R8 has no depth channel, but its type reads 0x%x", v);
+
+    // a float format says so, and an integer one says so too
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 4, 4, 0, GL_RGBA, GL_FLOAT, NULL);
+    mgl_drain_errors();
+    v = -1;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_BLUE_TYPE, &v);
+    CHECK_EQ_INT(v, GL_FLOAT);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16UI, 4, 4, 0, GL_RG_INTEGER, GL_UNSIGNED_SHORT, NULL);
+    mgl_drain_errors();
+    v = -1;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_RED_TYPE, &v);
+    CHECK_EQ_INT(v, GL_UNSIGNED_INT);
+    v = -1;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_BLUE_TYPE, &v);
+    CHECK_MSG(v == GL_NONE, "GL_RG16UI has no blue channel, but its type reads 0x%x", v);
+
+    glDeleteTextures(1, &tex);
+}
