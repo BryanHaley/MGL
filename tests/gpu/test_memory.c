@@ -90,3 +90,35 @@ GPU_TEST(memory, deleted_textures_are_given_back)
     CHECK_MSG(before != 0, "could not read the process footprint");
     CHECK_MSG(grew < 24, "forty rounds grew the process by %ld MB", grew);
 }
+
+// A compile that fails used to keep glslang's whole memory pool for the
+// shader. Conformance compiles thousands of broken shaders in one case and
+// reached 11 GB on it.
+GPU_TEST(memory, failed_compiles_are_given_back)
+{
+    static const char *bad =
+        "#version 460 core\n"
+        "float gl_reserved;\n"
+        "void main() { gl_Position = vec4(gl_reserved); }\n";
+    GLuint sh = glCreateShader(GL_VERTEX_SHADER);
+    GLint ok = 1;
+
+    glShaderSource(sh, 1, &bad, NULL);
+
+    for (int i = 0; i < 20; i++)
+        glCompileShader(sh);
+
+    size_t before = footprint();
+
+    for (int i = 0; i < 400; i++)
+        glCompileShader(sh);
+
+    size_t after = footprint();
+    long grew = (long)(after > before ? after - before : 0) / (1024 * 1024);
+
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    CHECK_MSG(!ok, "a shader using a reserved name compiled");
+    CHECK_MSG(grew < 16, "400 failed compiles grew the process by %ld MB", grew);
+
+    glDeleteShader(sh);
+}

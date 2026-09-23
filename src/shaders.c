@@ -1585,6 +1585,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         len += strlen(glslang_shader_get_info_log(glsl_shader));
         len += strlen(glslang_shader_get_info_debug_log(glsl_shader));
 
+        free(ptr->log);
         ptr->log = (char *)malloc(len);
 
         ptr->log[0] = 0;
@@ -1599,6 +1600,8 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 glslang_shader_get_info_log(glsl_shader),
                 glslang_shader_get_info_debug_log(glsl_shader));
 
+        // nothing linked this one, and it holds a whole memory pool
+        glslang_shader_delete(glsl_shader);
         free(desub);
         free(raised);
         free(ended);
@@ -1627,6 +1630,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         len += strlen(glslang_shader_get_info_log(glsl_shader));
         len += strlen(glslang_shader_get_info_debug_log(glsl_shader));
 
+        free(ptr->log);
         ptr->log = (char *)malloc(len);
 
         ptr->log[0] = 0;
@@ -1641,6 +1645,8 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                 glslang_shader_get_info_log(glsl_shader),
                 glslang_shader_get_info_debug_log(glsl_shader));
 
+        // nothing linked this one, and it holds a whole memory pool
+        glslang_shader_delete(glsl_shader);
         free(desub);
         free(raised);
         free(ended);
