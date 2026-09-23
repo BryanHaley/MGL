@@ -98,6 +98,20 @@ static size_t matchBracket(const char *s, size_t i)
     return i;
 }
 
+// index just past the '}' that closes the '{' at i, or 0 if it never closes
+static size_t matchBrace(const char *s, size_t i)
+{
+    int depth = 0;
+
+    for (; s[i]; i++)
+    {
+        if (s[i] == '{') depth++;
+        else if (s[i] == '}' && --depth == 0) return i + 1;
+    }
+
+    return 0;
+}
+
 typedef struct {
     char *s;
     size_t len;
@@ -146,6 +160,11 @@ typedef struct {
     char qualifier[32];   // flat / noperspective, kept for the pass-through
     int  array;           // elements, or 0 when this is not an array
     char builtin[64];     // the gl_ name this stands in for, empty otherwise
+    // an interface block member travels flattened, and these put it back
+    char block[64];       // the block's name, empty when this is a plain varying
+    char instance[64];    // what the shader calls the block
+    char member[64];      // its own name inside the block
+    int  loc;             // layout(location=) it asked for, or -1
 } GsVarying;
 
 typedef struct {
@@ -213,14 +232,19 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
 
     *is_varying = false;
 
-    // a layout(...) prefix is allowed and carries nothing this needs
+    // a layout(...) prefix carries one thing this needs: an explicit location,
+    // which the generated pass-through has to reproduce or the fragment stage
+    // matches the wrong varying
+    int want_loc = -1;
+
     if (wordAt(s, i, "layout"))
     {
-        size_t j = skipSpace(s, i + 6);
+        size_t open = skipSpace(s, i + 6);
 
-        if (s[j] != '(')
+        if (s[open] != '(')
             return 0;
 
+        size_t j = open;
         int depth = 0;
 
         for (; s[j]; j++)
@@ -229,10 +253,32 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
             else if (s[j] == ')' && --depth == 0) { j++; break; }
         }
 
+        {
+            char inner[256];
+            size_t n = (j - open >= 2) ? j - open - 2 : 0;
+
+            if (n > sizeof(inner) - 1)
+                n = sizeof(inner) - 1;
+
+            memcpy(inner, s + open + 1, n);
+            inner[n] = 0;
+
+            const char *at = strstr(inner, "location");
+
+            if (at)
+            {
+                const char *eq = strchr(at, '=');
+
+                if (eq)
+                    want_loc = atoi(eq + 1);
+            }
+        }
+
         i = skipSpace(s, j);
     }
 
     memset(v, 0, sizeof(*v));
+    v->loc = want_loc;
 
     // walk the words up to the semicolon, remembering the last two
     while (s[i] && s[i] != ';' && s[i] != '{' && s[i] != '(')
@@ -306,6 +352,225 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
     return i + 1 > start ? i + 1 : 0;
 }
 
+// one "[layout(...)] [flat] TYPE name[N];" inside an interface block
+static size_t readBlockMember(const char *s, size_t i, GsVarying *v)
+{
+    char word[64], prev[64] = "", prev2[64] = "";
+
+    memset(v, 0, sizeof(*v));
+    v->loc = -1;
+
+    i = skipSpace(s, i);
+
+    if (s[i] == 0 || s[i] == '}')
+        return 0;
+
+    if (wordAt(s, i, "layout"))
+    {
+        size_t j = skipSpace(s, i + 6);
+
+        if (s[j] != '(')
+            return 0;
+
+        int depth = 0;
+
+        for (; s[j]; j++)
+        {
+            if (s[j] == '(') depth++;
+            else if (s[j] == ')' && --depth == 0) { j++; break; }
+        }
+
+        i = skipSpace(s, j);
+    }
+
+    while (s[i] && s[i] != ';' && s[i] != '}')
+    {
+        if (!identChar(s[i]))
+        {
+            if (s[i] == '[')
+            {
+                size_t n = skipSpace(s, i + 1);
+
+                if (isdigit((unsigned char)s[n]))
+                    v->array = atoi(s + n);
+
+                i = matchBracket(s, i);
+                continue;
+            }
+
+            i++;
+            continue;
+        }
+
+        i = readIdent(s, i, word, sizeof(word));
+        i = skipSpace(s, i);
+
+        if (!strcmp(word, "flat") || !strcmp(word, "smooth") ||
+            !strcmp(word, "noperspective") || !strcmp(word, "centroid") ||
+            !strcmp(word, "sample") || !strcmp(word, "precise") ||
+            !strcmp(word, "highp") || !strcmp(word, "mediump") || !strcmp(word, "lowp"))
+        {
+            if (!strcmp(word, "flat") || !strcmp(word, "noperspective"))
+                snprintf(v->qualifier, sizeof(v->qualifier), "%s", word);
+
+            continue;
+        }
+
+        snprintf(prev2, sizeof(prev2), "%s", prev);
+        snprintf(prev, sizeof(prev), "%s", word);
+    }
+
+    if (s[i] != ';' || prev[0] == 0 || prev2[0] == 0)
+        return 0;
+
+    snprintf(v->type, sizeof(v->type), "%s", prev2);
+    snprintf(v->name, sizeof(v->name), "%s", prev);
+
+    return i + 1;
+}
+
+// A user-defined interface block -- "layout(location = 1) in Goku { flat vec4
+// member; } goku[];" -- is not legal in the compute shader this stage becomes,
+// so every member travels as its own field called <instance>_<member> and the
+// block is put back on the far side. Returns the index past the semicolon.
+static size_t readBlockDecl(const char *s, size_t i, bool want_out,
+                            GsVarying *out, int *count, int max)
+{
+    size_t start = i;
+    char word[64], block[64] = "", inst[64] = "";
+    int loc = -1;
+    bool seen_dir = false;
+
+    if (wordAt(s, i, "layout"))
+    {
+        size_t open = skipSpace(s, i + 6);
+
+        if (s[open] != '(')
+            return 0;
+
+        size_t j = open;
+        int depth = 0;
+
+        for (; s[j]; j++)
+        {
+            if (s[j] == '(') depth++;
+            else if (s[j] == ')' && --depth == 0) { j++; break; }
+        }
+
+        // only the location has to survive; the rest described the geometry
+        // stage's own interface and means nothing to the generated one
+        {
+            char inner[256];
+            size_t n = (j - open >= 2) ? j - open - 2 : 0;
+
+            if (n > sizeof(inner) - 1)
+                n = sizeof(inner) - 1;
+
+            memcpy(inner, s + open + 1, n);
+            inner[n] = 0;
+
+            const char *at = strstr(inner, "location");
+
+            if (at)
+            {
+                const char *eq = strchr(at, '=');
+
+                if (eq)
+                    loc = atoi(eq + 1);
+            }
+        }
+
+        i = skipSpace(s, j);
+    }
+
+    while (s[i] && identChar(s[i]))
+    {
+        size_t after = readIdent(s, i, word, sizeof(word));
+
+        after = skipSpace(s, after);
+
+        if (!strcmp(word, "in") || !strcmp(word, "out"))
+        {
+            if (strcmp(word, want_out ? "out" : "in"))
+                return 0;
+
+            seen_dir = true;
+            i = after;
+            continue;
+        }
+
+        if (!strcmp(word, "flat") || !strcmp(word, "smooth") ||
+            !strcmp(word, "noperspective") || !strcmp(word, "centroid") ||
+            !strcmp(word, "sample") || !strcmp(word, "invariant") ||
+            !strcmp(word, "precise"))
+        {
+            i = after;
+            continue;
+        }
+
+        snprintf(block, sizeof(block), "%s", word);
+        i = after;
+        break;
+    }
+
+    // gl_PerVertex has its own handling and must not arrive here
+    if (!seen_dir || block[0] == 0 || s[i] != '{' || !strncmp(block, "gl_", 3))
+        return 0;
+
+    size_t close = matchBrace(s, i);
+
+    if (close == 0)
+        return 0;
+
+    size_t j = skipSpace(s, close);
+
+    if (identChar(s[j]))
+        j = readIdent(s, j, inst, sizeof(inst));
+
+    j = skipSpace(s, j);
+
+    // the input side is an array over the incoming vertices; that dimension
+    // belongs to the buffer, not to the struct, so it is read and dropped
+    if (s[j] == '[')
+        j = skipSpace(s, matchBracket(s, j));
+
+    // An anonymous block's members are named bare in the body, which this
+    // rewrite has no way to tell apart from anything else -- leave it alone
+    // rather than get it wrong.
+    if (s[j] != ';' || inst[0] == 0)
+        return 0;
+
+    int added = 0;
+    size_t m = i + 1;
+
+    while (m + 1 < close)
+    {
+        GsVarying v;
+        size_t e = readBlockMember(s, m, &v);
+
+        if (e == 0)
+            break;
+
+        if (*count >= max)
+            return 0;
+
+        snprintf(v.block, sizeof(v.block), "%s", block);
+        snprintf(v.instance, sizeof(v.instance), "%s", inst);
+        snprintf(v.member, sizeof(v.member), "%s", v.name);
+        snprintf(v.name, sizeof(v.name), "%s_%s", inst, v.member);
+        v.loc = loc;
+
+        out[(*count)++] = v;
+        added++;
+        m = e;
+    }
+
+    if (added == 0)
+        return 0;
+
+    return j + 1 > start ? j + 1 : 0;
+}
+
 // std430 layout for the handful of types a varying can have. Returns the size
 // and sets *align; zero means MGL does not know the type.
 static int std430Size(const char *type, int *align)
@@ -320,6 +585,16 @@ static int std430Size(const char *type, int *align)
         { "mat3x2", 24, 8 },{ "mat3x3", 48, 16 },{ "mat3x4", 48, 16 },
         { "mat4x2", 32, 8 },{ "mat4x3", 64, 16 },{ "mat4x4", 64, 16 },
         { "double", 8, 8 }, { "dvec2", 16, 16 },{ "dvec3", 24, 32 },{ "dvec4", 32, 32 },
+        // a matrix is an array of its columns, each padded to the column's own
+        // alignment -- so a dmat2x3 is two dvec3 slots of 32, not two of 24
+        { "dmat2", 32, 16 },   { "dmat2x2", 32, 16 }, { "dmat2x3", 64, 32 },
+        { "dmat2x4", 64, 32 }, { "dmat3", 96, 32 },   { "dmat3x2", 48, 16 },
+        { "dmat3x3", 96, 32 }, { "dmat3x4", 96, 32 }, { "dmat4", 128, 32 },
+        { "dmat4x2", 64, 16 }, { "dmat4x3", 128, 32 },{ "dmat4x4", 128, 32 },
+        { "int64_t", 8, 8 },   { "uint64_t", 8, 8 },
+        { "i64vec2", 16, 16 }, { "u64vec2", 16, 16 },
+        { "i64vec3", 24, 32 }, { "u64vec3", 24, 32 },
+        { "i64vec4", 32, 32 }, { "u64vec4", 32, 32 },
     };
 
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++)
@@ -341,6 +616,10 @@ static int roundUp(int v, int a)
 
 // The size of the shared vertex struct, laid out the way glslang will lay it
 // out, so the driver can size the buffers it allocates for these shaders.
+// when a type cannot be sized, which one it was -- the message used to say
+// only that one of them could not be, which named nothing to go and fix
+static char g_unsized_type[32];
+
 static int structStride(GsVarying *v, int count, bool is_out)
 {
     int offset = 0, worst = 16;
@@ -358,7 +637,11 @@ static int structStride(GsVarying *v, int count, bool is_out)
         int size = std430Size(v[i].type, &align);
 
         if (size == 0)
+        {
+            snprintf(g_unsized_type, sizeof(g_unsized_type), "%s", v[i].type);
+
             return 0;
+        }
 
         if (align > worst)
             worst = align;
@@ -525,6 +808,31 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
             }
         }
 
+        // ---- a user-defined interface block ----
+        {
+            int before_in = sc->in_count, before_out = sc->out_count;
+            size_t end = readBlockDecl(src, i, false, sc->in, &sc->in_count, MAX_GS_VARYINGS);
+
+            if (end == 0)
+            {
+                sc->in_count = before_in;
+                end = readBlockDecl(src, i, true, sc->out, &sc->out_count, MAX_GS_VARYINGS);
+
+                if (end == 0)
+                    sc->out_count = before_out;
+            }
+
+            if (end)
+            {
+                if (!bufAddN(body, src + copied, i - copied))
+                    return false;
+
+                i = end;
+                copied = i;
+                continue;
+            }
+        }
+
         // ---- a varying declaration ----
         {
             GsVarying v;
@@ -563,6 +871,28 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
             }
         }
 
+        // Nothing claimed it. If it is a layout list, step over the whole
+        // group: its contents are qualifier names, and walking into one reads
+        // "xfb_stride = 32" as a declaration.
+        if (wordAt(src, i, "layout"))
+        {
+            size_t j = skipSpace(src, i + 6);
+
+            if (src[j] == '(')
+            {
+                int depth = 0;
+
+                for (; src[j]; j++)
+                {
+                    if (src[j] == '(') depth++;
+                    else if (src[j] == ')' && --depth == 0) { j++; break; }
+                }
+
+                i = j;
+                continue;
+            }
+        }
+
         while (src[i] && identChar(src[i])) i++;
     }
 
@@ -589,8 +919,12 @@ static int locationsFor(const char *type)
     }
     else if (!strncmp(t, "mat", 3))
         cols = t[3] - '0';
-    else if (!strncmp(t, "dvec", 4))
-        wide = t[4] - '2' > 0 ? 2 : 1;
+    else if (!strncmp(t, "dvec", 4) || !strncmp(t, "i64vec", 6) || !strncmp(t, "u64vec", 6))
+    {
+        char n = t[0] == 'd' ? t[4] : t[6];
+
+        wide = n - '2' > 0 ? 2 : 1;
+    }
 
     return cols * wide;
 }
@@ -613,6 +947,42 @@ static int locationsFor(const char *type)
 // ---------------------------------------------------------------------------
 // pass 2: rewrite what the body says into what the compute shader means
 // ---------------------------------------------------------------------------
+
+#define MGL_GS_MAX_LOCATIONS 128
+
+// how many locations one output takes: a block takes its members' total
+static int gsLocationSpan(const GsScan *sc, int i)
+{
+    if (sc->out[i].block[0] == 0)
+        return locationsFor(sc->out[i].type) *
+               (sc->out[i].array ? sc->out[i].array : 1);
+
+    int n = 0;
+
+    for (int k = 0; k < sc->out_count; k++)
+        if (!strcmp(sc->out[k].instance, sc->out[i].instance))
+            n += locationsFor(sc->out[k].type) *
+                 (sc->out[k].array ? sc->out[k].array : 1);
+
+    return n ? n : 1;
+}
+
+// the lowest run of `span` locations nothing has claimed
+static int gsFirstFree(const bool *used, int span)
+{
+    for (int at = 0; at + span <= MGL_GS_MAX_LOCATIONS; at++)
+    {
+        int k = 0;
+
+        while (k < span && !used[at + k])
+            k++;
+
+        if (k == span)
+            return at;
+    }
+
+    return -1;
+}
 
 static bool rewriteBody(const char *src, GsScan *sc, Buf *out)
 {
@@ -744,6 +1114,98 @@ static bool rewriteBody(const char *src, GsScan *sc, Buf *out)
             i += skip;
             copied = i;
             continue;
+        }
+
+        // a block member is reached through the block's instance name:
+        // goku[i].member on the way in, vegeta.member on the way out
+        {
+            int hit = -1;
+
+            for (int v = 0; v < sc->in_count; v++)
+                if (sc->in[v].instance[0] && wordAt(src, i, sc->in[v].instance)) { hit = v; break; }
+
+            if (hit >= 0)
+            {
+                size_t k = skipSpace(src, i + strlen(sc->in[hit].instance));
+                size_t idx_open = 0, idx_close = 0;
+
+                if (src[k] == '[')
+                {
+                    idx_open = k;
+                    idx_close = matchBracket(src, k);
+                    k = skipSpace(src, idx_close);
+                }
+
+                if (src[k] == '.')
+                {
+                    char mem[64];
+                    size_t after = readIdent(src, skipSpace(src, k + 1), mem, sizeof(mem));
+                    int which = -1;
+
+                    for (int v = 0; v < sc->in_count; v++)
+                        if (!strcmp(sc->in[v].instance, sc->in[hit].instance) &&
+                            !strcmp(sc->in[v].member, mem)) { which = v; break; }
+
+                    if (which >= 0)
+                    {
+                        if (!bufAddN(out, src + copied, i - copied) ||
+                            !bufAdd(out, "mglGsIn[mglFetch("))
+                            return false;
+
+                        if (idx_open)
+                        {
+                            if (!bufAddN(out, src + idx_open + 1, idx_close - idx_open - 2))
+                                return false;
+                        }
+                        else if (!bufAdd(out, "0"))
+                        {
+                            return false;
+                        }
+
+                        if (!bufAdd(out, ")].") || !bufAdd(out, sc->in[which].name))
+                            return false;
+
+                        i = after;
+                        copied = i;
+                        continue;
+                    }
+                }
+            }
+
+            hit = -1;
+
+            for (int v = 0; v < sc->out_count; v++)
+                if (sc->out[v].instance[0] && wordAt(src, i, sc->out[v].instance)) { hit = v; break; }
+
+            if (hit >= 0)
+            {
+                size_t k = skipSpace(src, i + strlen(sc->out[hit].instance));
+
+                if (src[k] == '.')
+                {
+                    char mem[64];
+                    size_t after = readIdent(src, skipSpace(src, k + 1), mem, sizeof(mem));
+                    int which = -1;
+
+                    for (int v = 0; v < sc->out_count; v++)
+                        if (!strcmp(sc->out[v].instance, sc->out[hit].instance) &&
+                            !strcmp(sc->out[v].member, mem)) { which = v; break; }
+
+                    if (which >= 0)
+                    {
+                        char m[160];
+
+                        snprintf(m, sizeof(m), "mglCur.%s", sc->out[which].name);
+
+                        if (!bufAddN(out, src + copied, i - copied) || !bufAdd(out, m))
+                            return false;
+
+                        i = after;
+                        copied = i;
+                        continue;
+                    }
+                }
+            }
         }
 
         // an input varying is an array indexed by vertex; an output is not
@@ -944,6 +1406,29 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     gi->in_stride = structStride(sc.in, sc.in_count, false);
     gi->out_stride = structStride(sc.out, sc.out_count, true);
 
+    // the input blocks, so the capture can be re-spelled for the vertex stage
+    gi->in_block_count = 0;
+
+    for (int i = 0; i < sc.in_count; i++)
+    {
+        if (sc.in[i].block[0] == 0)
+            continue;
+
+        bool seen = false;
+
+        for (int k = 0; k < gi->in_block_count; k++)
+            if (!strcmp(gi->in_block_insts[k], sc.in[i].instance)) { seen = true; break; }
+
+        if (seen || gi->in_block_count >= 8)
+            continue;
+
+        snprintf(gi->in_block_names[gi->in_block_count],
+                 sizeof(gi->in_block_names[0]), "%s", sc.in[i].block);
+        snprintf(gi->in_block_insts[gi->in_block_count],
+                 sizeof(gi->in_block_insts[0]), "%s", sc.in[i].instance);
+        gi->in_block_count++;
+    }
+
     // the same walk as structStride, keeping each output's offset
     {
         int offset = 16 + 4 + 4 + 4 + 4;
@@ -957,6 +1442,13 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
             offset = roundUp(offset, align);
             snprintf(gi->out_names[i], sizeof(gi->out_names[i]), "%s", sc.out[i].name);
+
+            if (sc.out[i].block[0])
+                snprintf(gi->out_gl_names[i], sizeof(gi->out_gl_names[i]), "%s.%s",
+                         sc.out[i].block, sc.out[i].member);
+            else
+                snprintf(gi->out_gl_names[i], sizeof(gi->out_gl_names[i]), "%s",
+                         sc.out[i].builtin[0] ? sc.out[i].builtin : sc.out[i].name);
             snprintf(gi->out_types[i], sizeof(gi->out_types[i]), "%s", sc.out[i].type);
             gi->out_offsets[i] = offset;
             gi->out_count = i + 1;
@@ -966,7 +1458,8 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
     if (gi->in_stride == 0 || gi->out_stride == 0)
     {
-        MGL_ERR("MGL Error: a geometry varying has a type MGL cannot size\n");
+        MGL_ERR("MGL Error: a geometry varying has a type MGL cannot size: '%s'\n",
+                g_unsized_type[0] ? g_unsized_type : "?");
         goto done;
     }
 
@@ -1087,32 +1580,114 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     if (!bufAdd(&pass, line))
         goto done;
 
-    for (int i = 0, loc = 0; i < sc.out_count; i++)
+    // The fragment stage declares the same block and links against it by name,
+    // so the pass-through has to declare it too rather than a pile of flat
+    // varyings. One pass per block, in the order the members were found.
+    for (int i = 0; i < sc.out_count; i++)
     {
-        if (sc.out[i].builtin[0])
-        {
-            snprintf(line, sizeof(line), "out %s %s[%d];\n",
-                     sc.out[i].type, sc.out[i].builtin, sc.out[i].array);
-
-            if (!bufAdd(&pass, line))
-                goto done;
-
+        if (sc.out[i].block[0] == 0)
             continue;
-        }
 
-        if (sc.out[i].array)
-            snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s[%d];\n", loc,
-                     sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
-                     sc.out[i].type, sc.out[i].name, sc.out[i].array);
+        bool already = false;
+
+        for (int k = 0; k < i; k++)
+            if (!strcmp(sc.out[k].instance, sc.out[i].instance)) { already = true; break; }
+
+        if (already)
+            continue;
+
+        if (sc.out[i].loc >= 0)
+            snprintf(line, sizeof(line), "layout(location = %d) out %s {\n",
+                     sc.out[i].loc, sc.out[i].block);
         else
-            snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s;\n", loc,
-                     sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
-                     sc.out[i].type, sc.out[i].name);
+            snprintf(line, sizeof(line), "out %s {\n", sc.out[i].block);
 
         if (!bufAdd(&pass, line))
             goto done;
 
-        loc += locationsFor(sc.out[i].type) * (sc.out[i].array ? sc.out[i].array : 1);
+        for (int k = i; k < sc.out_count; k++)
+        {
+            if (strcmp(sc.out[k].instance, sc.out[i].instance))
+                continue;
+
+            if (sc.out[k].array)
+                snprintf(line, sizeof(line), "  %s%s%s %s[%d];\n", sc.out[k].qualifier,
+                         sc.out[k].qualifier[0] ? " " : "", sc.out[k].type,
+                         sc.out[k].member, sc.out[k].array);
+            else
+                snprintf(line, sizeof(line), "  %s%s%s %s;\n", sc.out[k].qualifier,
+                         sc.out[k].qualifier[0] ? " " : "", sc.out[k].type, sc.out[k].member);
+
+            if (!bufAdd(&pass, line))
+                goto done;
+        }
+
+        snprintf(line, sizeof(line), "} %s;\n", sc.out[i].instance);
+
+        if (!bufAdd(&pass, line))
+            goto done;
+    }
+
+    // A varying that asked for a location keeps it -- the fragment stage may
+    // have asked for the same one, and matching is by location wherever both
+    // sides state it. Everything else is packed into what is left over.
+    {
+        bool used[MGL_GS_MAX_LOCATIONS] = { false };
+
+        for (int i = 0; i < sc.out_count; i++)
+        {
+            if (sc.out[i].loc < 0 || sc.out[i].builtin[0])
+                continue;
+
+            int n = gsLocationSpan(&sc, i);
+
+            for (int k = 0; k < n; k++)
+                if (sc.out[i].loc + k < MGL_GS_MAX_LOCATIONS)
+                    used[sc.out[i].loc + k] = true;
+        }
+
+        for (int i = 0; i < sc.out_count; i++)
+        {
+            if (sc.out[i].block[0])
+                continue;
+
+            if (sc.out[i].builtin[0])
+            {
+                snprintf(line, sizeof(line), "out %s %s[%d];\n",
+                         sc.out[i].type, sc.out[i].builtin, sc.out[i].array);
+
+                if (!bufAdd(&pass, line))
+                    goto done;
+
+                continue;
+            }
+
+            int span = gsLocationSpan(&sc, i);
+            int at = sc.out[i].loc;
+
+            if (at < 0)
+            {
+                at = gsFirstFree(used, span);
+
+                if (at < 0)
+                    goto done;
+
+                for (int k = 0; k < span; k++)
+                    used[at + k] = true;
+            }
+
+            if (sc.out[i].array)
+                snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s[%d];\n", at,
+                         sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
+                         sc.out[i].type, sc.out[i].name, sc.out[i].array);
+            else
+                snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s;\n", at,
+                         sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
+                         sc.out[i].type, sc.out[i].name);
+
+            if (!bufAdd(&pass, line))
+                goto done;
+        }
     }
 
     if (!bufAdd(&pass, "\nvoid main()\n{\n  MglGsOutV v = mglGsOut[gl_VertexID];\n"))
@@ -1120,7 +1695,18 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
     for (int i = 0; i < sc.out_count; i++)
     {
-        const char *dst = sc.out[i].builtin[0] ? sc.out[i].builtin : sc.out[i].name;
+        char qual[160];
+        const char *dst;
+
+        if (sc.out[i].block[0])
+        {
+            snprintf(qual, sizeof(qual), "%s.%s", sc.out[i].instance, sc.out[i].member);
+            dst = qual;
+        }
+        else
+        {
+            dst = sc.out[i].builtin[0] ? sc.out[i].builtin : sc.out[i].name;
+        }
 
         // SPIRV-Cross has no lowering for a whole-array copy between a
         // built-in and a struct member, so arrays move one element at a time
@@ -1159,7 +1745,20 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
     for (int i = 0; i < sc.in_count; i++)
     {
-        const char *src_name = sc.in[i].builtin[0] ? sc.in[i].builtin : sc.in[i].name;
+        char qual[160];
+        const char *src_name;
+
+        // the vertex stage declares the matching block, so its members are
+        // read through the instance name rather than bare
+        if (sc.in[i].block[0])
+        {
+            snprintf(qual, sizeof(qual), "%s.%s", sc.in[i].instance, sc.in[i].member);
+            src_name = qual;
+        }
+        else
+        {
+            src_name = sc.in[i].builtin[0] ? sc.in[i].builtin : sc.in[i].name;
+        }
 
         if (sc.in[i].array)
             snprintf(line, sizeof(line),
@@ -1269,11 +1868,86 @@ static char *pointSizeIntoCapture(char *result, const char *src)
     return out;
 }
 
+// How the writing stage spells one of its output blocks: "inst." when it gave
+// the block an instance name, or "" when it did not and the members are bare.
+// Blocks link by block name, so the two stages need not agree on the instance.
+static bool writerBlockPrefix(const char *src, const char *block, char *out, size_t cap)
+{
+    for (size_t i = 0; src[i]; i++)
+    {
+        if (!wordAt(src, i, "out"))
+            continue;
+
+        size_t j = skipSpace(src, i + 3);
+
+        if (!wordAt(src, j, block))
+            continue;
+
+        j = skipSpace(src, j + strlen(block));
+
+        if (src[j] != '{')
+            continue;
+
+        size_t close = matchBrace(src, j);
+
+        if (close == 0)
+            return false;
+
+        size_t k = skipSpace(src, close);
+        char inst[64] = "";
+
+        if (identChar(src[k]))
+            readIdent(src, k, inst, sizeof(inst));
+
+        snprintf(out, cap, "%s%s", inst, inst[0] ? "." : "");
+
+        return true;
+    }
+
+    return false;
+}
+
+// replaces every "from" with "to"; both are short and the input is a shader
+static char *replaceAll(const char *src, const char *from, const char *to)
+{
+    Buf b = {0};
+    size_t n = strlen(from);
+    const char *at = src;
+
+    if (n == 0)
+        return strdup(src);
+
+    while (*at)
+    {
+        const char *hit = strstr(at, from);
+
+        if (hit == NULL)
+            break;
+
+        if (!bufAddN(&b, at, (size_t)(hit - at)) || !bufAdd(&b, to))
+        {
+            free(b.s);
+            return NULL;
+        }
+
+        at = hit + n;
+    }
+
+    if (!bufAdd(&b, at))
+    {
+        free(b.s);
+        return NULL;
+    }
+
+    return b.s;
+}
+
 char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi)
 {
     Buf out = {0};
     const char *p = vs_src;
     const char *main_at = NULL;
+    char *capture = NULL;
 
     // find the entry point's definition and rename it
     for (size_t i = 0; vs_src[i]; i++)
@@ -1307,12 +1981,39 @@ char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi)
         return NULL;
     }
 
-    if (!bufAdd(&out, "\n") || !bufAdd(&out, gi->capture_decl) ||
+    // the capture was written against the geometry stage's own spelling of
+    // each input block; the vertex stage may name the instance differently, or
+    // not at all
+    capture = strdup(gi->capture_decl ? gi->capture_decl : "");
+
+    for (int i = 0; capture && i < gi->in_block_count; i++)
+    {
+        char prefix[80] = "", from[80];
+        char *next;
+
+        if (!writerBlockPrefix(vs_src, gi->in_block_names[i], prefix, sizeof(prefix)))
+            continue;
+
+        snprintf(from, sizeof(from), "%s.", gi->in_block_insts[i]);
+
+        if (!strcmp(from, prefix))
+            continue;
+
+        next = replaceAll(capture, from, prefix);
+        free(capture);
+        capture = next;
+    }
+
+    if (capture == NULL ||
+        !bufAdd(&out, "\n") || !bufAdd(&out, capture) ||
         !bufAdd(&out, "\nvoid main()\n{\n  mglVsBody();\n  mglGsCapture();\n}\n"))
     {
+        free(capture);
         free(out.s);
         return NULL;
     }
+
+    free(capture);
 
     return pointSizeIntoCapture(out.s, vs_src);
 }
@@ -1673,7 +2374,7 @@ int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
         }
 
         for (int o = 0; o < gi->out_count && offset < 0; o++)
-            if (!strcmp(gi->out_names[o], base))
+            if (!strcmp(gi->out_names[o], base) || !strcmp(gi->out_gl_names[o], base))
             {
                 offset = gi->out_offsets[o];
                 snprintf(type, sizeof(type), "%s", gi->out_types[o]);
@@ -1984,6 +2685,21 @@ char *mglPassThroughGeometry(const char *tes_src, int input)
         GsVarying v;
         bool is_varying = false;
 
+        // commented-out declarations are not declarations
+        if (tes_src[i] == '/' && tes_src[i + 1] == '/')
+        {
+            while (tes_src[i] && tes_src[i] != '\n') i++;
+            continue;
+        }
+
+        if (tes_src[i] == '/' && tes_src[i + 1] == '*')
+        {
+            i += 2;
+            while (tes_src[i] && !(tes_src[i] == '*' && tes_src[i + 1] == '/')) i++;
+            if (tes_src[i]) i++;
+            continue;
+        }
+
         if ((i && identChar(tes_src[i - 1])) || !identChar(tes_src[i]))
             continue;
 
@@ -1998,6 +2714,29 @@ char *mglPassThroughGeometry(const char *tes_src, int input)
 
             if (!seen)
                 outs[count++] = v;
+
+            continue;
+        }
+
+        // A layout list is full of identifiers that are qualifier names rather
+        // than types, so walking into one reads "xfb_stride = 32" as a
+        // declaration of something called 32 with the type xfb_stride.
+        if (wordAt(tes_src, i, "layout"))
+        {
+            size_t j = skipSpace(tes_src, i + 6);
+
+            if (tes_src[j] == '(')
+            {
+                int depth = 0;
+
+                for (; tes_src[j]; j++)
+                {
+                    if (tes_src[j] == '(') depth++;
+                    else if (tes_src[j] == ')' && --depth == 0) { j++; break; }
+                }
+
+                i = j - 1;
+            }
         }
     }
 

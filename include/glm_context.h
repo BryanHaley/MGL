@@ -587,8 +587,17 @@ typedef struct GeometryInfo_t {
     // the three numbers the compute pass is told about this draw
     GLint  prims_loc, indexed_loc, first_loc, stride_loc;
     // where each output sits in one emitted vertex, for transform feedback
+    // the input interface blocks the geometry stage declared, so the capture
+    // injected into the vertex shader can spell them the way IT declares them
+    GLint  in_block_count;
+    char   in_block_names[8][64];
+    char   in_block_insts[8][64];
+
     GLint  out_count;
     char   out_names[32][64];
+    // what an application calls it: a block member is "Block.member", which is
+    // the name transform feedback asks for
+    char   out_gl_names[32][96];
     char   out_types[32][32];
     GLint  out_offsets[32];
 } GeometryInfo;
