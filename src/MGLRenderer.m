@@ -1120,9 +1120,11 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
             return i;
     }
 
-    // CRITICAL FIX: Handle assertion gracefully instead of crashing
-            MGL_NSERR(@"MGL ERROR: Assertion hit in MGLRenderer.m at line %d", __LINE__);
-            return 0;
+    // Slot zero belongs to a uniform buffer and carries no stride, so handing
+    // it back here makes Metal reject the whole descriptor. Say "not found".
+    MGL_NSERR(@"MGL ERROR: enabled vertex attribute %d was never mapped to a buffer", attribute);
+
+    return -1;
 }
 
 #pragma mark textures
@@ -3478,6 +3480,12 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
 
 - (bool)bindMTLTexture:(Texture *)tex
 {
+    // A texture with no storage is an ordinary thing to find bound to a unit
+    // the shader never reads. Metal cannot make one, but saying so on every
+    // draw buried the real messages -- one sweep logged this 425,472 times.
+    if (tex->width == 0 || tex->height == 0)
+        return false;
+
     // Sampler state and pixel storage are different things. Dropping the Metal
     // texture throws away whatever the GPU drew into it, so only a change to
     // the storage may do that -- a filter or wrap change must not.
@@ -7172,6 +7180,9 @@ static MTLWinding mtlWindingFor(const Program *p)
             int mapped_buffer_index;
 
             mapped_buffer_index = [self getVertexBufferIndexWithAttributeSet: i];
+
+            if (mapped_buffer_index < 0)
+                return NULL;
 
             BufferMap *slot = &ctx->state.vertex_buffer_map_list.buffers[mapped_buffer_index];
 

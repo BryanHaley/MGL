@@ -1587,6 +1587,60 @@ static bool allocCompressedLevel(GLMContext ctx, Texture *tex, GLuint face, GLin
     return true;
 }
 
+// How far the unpack walks from the first byte it reads: the skip, then every
+// full row and slice before the last one, then the last row itself.
+static size_t unpackExtent(const PixelStore *ps, GLsizei width, GLsizei height,
+                           GLsizei depth, GLuint pixel_size, size_t row_pitch, bool is_3d)
+{
+    size_t rows   = height > 0 ? (size_t)height : 1;
+    size_t slices = depth  > 0 ? (size_t)depth  : 1;
+    size_t rows_per_image = (ps && ps->image_height > 0) ? (size_t)ps->image_height : rows;
+
+    size_t skip = is_3d ? mglPixelStoreSkipBytes(ps, height, pixel_size, row_pitch)
+                        : mglPixelStoreSkipBytes2D(ps, pixel_size, row_pitch);
+
+    return skip
+         + (slices - 1) * rows_per_image * row_pitch
+         + (rows - 1) * row_pitch
+         + (size_t)width * pixel_size;
+}
+
+// With a pixel unpack buffer bound, the "pixels" argument is a byte offset
+// into that buffer rather than a pointer. Turns it into an address, or says
+// no. Every caller used to take the offset on trust, which is how a texture
+// upload could read off the end of the buffer.
+static bool resolveUnpackSource(GLMContext ctx, const void **pixels, size_t bytes)
+{
+    Buffer *ptr = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
+    GLubyte *base;
+    size_t offset;
+
+    if (ptr == NULL)
+        return true;
+
+    // A persistent mapping is meant to stay mapped while the GPU reads through
+    // it, so only an ordinary mapping is an error here.
+    if (ptr->mapped && !(ptr->access & GL_MAP_PERSISTENT_BIT))
+    {
+        MGL_ERR("MGL Error: %s: pixel unpack buffer %u is mapped\n", __FUNCTION__, ptr->name);
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+    }
+
+    base = getBufferData(ctx, ptr);
+    offset = (size_t)*pixels;
+
+    if (base == NULL || offset > (size_t)ptr->size || bytes > (size_t)ptr->size - offset)
+    {
+        MGL_ERR("MGL Error: %s: unpack wants %zu bytes at offset %zu of a %zu byte buffer\n",
+                __FUNCTION__, bytes, offset, (size_t)ptr->size);
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+    }
+
+    *pixels = base + offset;
+
+    return true;
+}
+
 bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLboolean is_array, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, void *pixels, GLboolean proxy)
 {
     // all the levels are created on a tex storage call.. if we get here we should just assert
@@ -1676,23 +1730,21 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
         }
     }
 
-    if (STATE(buffers[_PIXEL_UNPACK_BUFFER]))
+    // This is the one place the unpack buffer is resolved. It used to happen
+    // again further down, which took the address the first one produced and
+    // used it as a second offset -- reliably off the end of memory.
     {
-        Buffer *ptr;
+        GLuint    up_size  = sizeForFormatType(format, type);
+        size_t    up_pitch = mglPixelStoreRowPitch(&ctx->state.unpack, width, up_size);
+        bool      up_3d    = (depth > 1 || tex->target == GL_TEXTURE_3D ||
+                              tex->target == GL_TEXTURE_2D_ARRAY ||
+                              tex->target == GL_TEXTURE_1D_ARRAY ||
+                              tex->target == GL_TEXTURE_CUBE_MAP_ARRAY);
 
-        ptr = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
-
-        ERROR_CHECK_RETURN_VALUE(ptr->mapped == false, GL_INVALID_OPERATION, false);
-
-        GLubyte *buffer_data;
-        buffer_data = getBufferData(ctx, ptr);
-
-        // if a pixel buffer is the src, pixels is the offset
-        // need to check offset against size
-        size_t offset;
-        offset = (size_t)pixels;
-
-        pixels = &buffer_data[offset];
+        if (resolveUnpackSource(ctx, (const void **)&pixels,
+                                unpackExtent(&ctx->state.unpack, width, height, depth,
+                                             up_size, up_pitch, up_3d)) == false)
+            return false;
     }
 
     tex->num_levels = MAX(tex->num_levels, level + 1);
@@ -1821,25 +1873,7 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
                 ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
             }
 
-            // unpack from pixel buffer
-            if (STATE(buffers[_PIXEL_UNPACK_BUFFER]))
-            {
-                Buffer *ptr;
-
-                ptr = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
-
-                ERROR_CHECK_RETURN_VALUE(ptr->mapped == false, GL_INVALID_OPERATION, false);
-
-                GLubyte *buffer_data;
-                buffer_data = getBufferData(ctx, ptr);
-
-                // if a pixel buffer is the src, pixels is the offset
-                // need to check offset against size
-                size_t offset;
-                offset = (size_t)pixels;
-
-                pixels = &buffer_data[offset];
-            }
+            // the unpack buffer was already resolved above
 
             pixels = (const GLubyte *)pixels +
                      ((depth > 1 || tex->target == GL_TEXTURE_3D || tex->target == GL_TEXTURE_2D_ARRAY ||
@@ -2065,27 +2099,18 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
     }
 
     // unpack from pixel buffer
-    if (STATE(buffers[_PIXEL_UNPACK_BUFFER]))
     {
-        Buffer *ptr;
+        GLuint    up_size  = sizeForFormatType(format, type);
+        size_t    up_pitch = mglPixelStoreRowPitch(&ctx->state.unpack, width, up_size);
+        bool      up_3d    = (depth > 1 || tex->target == GL_TEXTURE_3D ||
+                              tex->target == GL_TEXTURE_2D_ARRAY ||
+                              tex->target == GL_TEXTURE_1D_ARRAY ||
+                              tex->target == GL_TEXTURE_CUBE_MAP_ARRAY);
 
-        ptr = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
-
-        // ERROR_CHECK_RETURN_VALUE(ptr->mapped == false, GL_INVALID_OPERATION, false);
-        if (ptr->mapped) {
-            MGL_ERR("MGL Error: texSubImage: pixel unpack buffer is mapped\n");
-            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
-        }
-
-        GLubyte *buffer_data;
-        buffer_data = getBufferData(ctx, ptr);
-
-        // if a pixel buffer is the src, pixels is the offset
-        // need to check offset against size
-        size_t offset;
-        offset = (size_t)pixels;
-
-        pixels = &buffer_data[offset];
+        if (resolveUnpackSource(ctx, (const void **)&pixels,
+                                unpackExtent(&ctx->state.unpack, width, height, depth,
+                                             up_size, up_pitch, up_3d)) == false)
+            return false;
     }
 
     // no src data.. return

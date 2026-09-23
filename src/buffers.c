@@ -241,9 +241,14 @@ void *getBufferData(GLMContext ctx, Buffer *ptr)
 {
     void *buffer_data;
 
-    ptr = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
+    // this used to throw the caller's buffer away and read whatever was bound
+    // to GL_PIXEL_UNPACK_BUFFER instead
+    ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, NULL);
 
-    ERROR_CHECK_RETURN_VALUE(ptr->mapped == false, GL_INVALID_OPERATION, NULL);
+    // a persistent mapping stays mapped while the GPU reads through it
+    ERROR_CHECK_RETURN_VALUE(ptr->mapped == false ||
+                             (ptr->access & GL_MAP_PERSISTENT_BIT),
+                             GL_INVALID_OPERATION, NULL);
 
     buffer_data = (void *)ptr->data.buffer_data;
 
@@ -1446,19 +1451,27 @@ GLboolean mglUnmapBuffer(GLMContext ctx, GLenum target)
 
     ERROR_CHECK_RETURN_VALUE((ptr != NULL), GL_INVALID_OPERATION, GL_FALSE);
 
+    // GL says unmapping a buffer that is NOT mapped is the error. Unmapping
+    // one that is mapped is what the call is for, and this test had it
+    // backwards, so every persistent unmap failed.
+    if (ptr->mapped == GL_FALSE)
+    {
+        MGL_ERR("MGL Error: %s: buffer %u is not mapped\n", __FUNCTION__, ptr->name);
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, GL_FALSE);
+    }
+
     if ((ptr->storage_flags & GL_MAP_PERSISTENT_BIT) &&
         (ptr->access & GL_MAP_PERSISTENT_BIT))
     {
-        // this will cause the buffer to be flushed on next draw command
+        // the app wrote through a live pointer, so the buffer has to go back
+        // to the GPU before the next draw reads it
         ptr->data.dirty_bits |= DIRTY_BUFFER_DATA;
 
-        // GL says unmapping a buffer that is not mapped is an error
-        if (ptr->mapped != GL_FALSE)
-        {
-            MGL_ERR("MGL Error: %s: buffer %u is still mapped\n", __FUNCTION__, ptr->name);
-            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, GL_FALSE);
-        }
+        ptr->mapped = GL_FALSE;
         ptr->access = 0;
+        ptr->access_flags = 0;
+        ptr->mapped_offset = 0;
+        ptr->mapped_length = 0;
 
         return GL_TRUE;
     }

@@ -643,8 +643,9 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
 
         ptr = STATE(buffers[_PIXEL_PACK_BUFFER]);
 
-        // ERROR_CHECK_RETURN(ptr->mapped == false, GL_INVALID_OPERATION);
-        if (ptr->mapped) {
+        // a persistent mapping is meant to stay mapped while the GPU writes
+        // through it, so only an ordinary mapping is an error here
+        if (ptr->mapped && !(ptr->access & GL_MAP_PERSISTENT_BIT)) {
             MGL_ERR("MGL Error: mglReadPixels: pixel pack buffer is mapped\n");
             ERROR_RETURN(GL_INVALID_OPERATION);
         }

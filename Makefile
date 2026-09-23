@@ -405,17 +405,25 @@ test: $(test_exe)
 # glcts drops TestResults.qpa in whatever directory it is run from, so the
 # log path is passed explicitly to keep it out of the repo root.
 # Override the case filter: make cts CTS_CASE='KHR-GL46.clear_tex_image.*'
+#
+# The surface size is not optional. Leave it off and deqp sizes the FBO to
+# GL_MAX_RENDERBUFFER_SIZE squared -- a 16384x16384, one gigabyte target that
+# no conformance run uses. Tests that allocate a few surfaces that big then
+# die of bad_alloc and take the rest of their group with them. 64x64 is what
+# the Khronos runner uses for GL 4.6, so it is what we measure against.
 cts_dir := tests/results
 cts_bin := submodules/VK-GL-CTS/build/external/openglcts/modules/glcts
 CTS_CASE ?= KHR-GL46.*
+CTS_W ?= 64
+CTS_H ?= 64
 
 cts: $(mgl_lib)
 	@mkdir -p $(cts_dir)
-	MGL_LIBRARY_PATH=$(abspath $(mgl_lib)) $(cts_bin) \
+	MGL_LIBRARY_PATH=$(abspath $(mgl_lib)) caffeinate -dimsu $(cts_bin) \
 	  --deqp-case='$(CTS_CASE)' \
 	  --deqp-log-filename=$(abspath $(cts_dir))/TestResults.qpa \
 	  --deqp-surface-type=fbo \
-	  --deqp-surface-width=256 --deqp-surface-height=256 \
+	  --deqp-surface-width=$(CTS_W) --deqp-surface-height=$(CTS_H) \
 	  --deqp-watchdog=disable
 
 dbg: $(test_exe)

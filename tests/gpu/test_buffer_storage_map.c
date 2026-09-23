@@ -469,3 +469,41 @@ GPU_TEST(buffer_storage_map, bind_buffers_range_rejects_bad_buffer_name)
     glBindBuffersRange(GL_UNIFORM_BUFFER, 0, 1, &bad_name, &off, &sz);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 }
+
+/* ---------- unmapping a persistent mapping ---------- */
+
+GPU_TEST(buffer_storage_map, persistent_mapping_unmaps_cleanly)
+{
+    GLuint b = 0;
+    unsigned char *p;
+    GLint still_mapped = -1;
+
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_ARRAY_BUFFER, b);
+
+    glBufferStorage(GL_ARRAY_BUFFER, 256, NULL,
+                    GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+    if (mgl_drain_errors() != GL_NO_ERROR) {
+        glDeleteBuffers(1, &b);
+        SKIP("persistent storage unavailable");
+    }
+
+    p = (unsigned char *)glMapBufferRange(GL_ARRAY_BUFFER, 0, 256,
+                                          GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK(p != NULL);
+
+    // the call under test: a mapped buffer is exactly what unmap is for
+    CHECK_EQ_INT(glUnmapBuffer(GL_ARRAY_BUFFER), GL_TRUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_MAPPED, &still_mapped);
+    CHECK_EQ_INT(still_mapped, GL_FALSE);
+
+    // and a second unmap is the error case
+    CHECK_EQ_INT(glUnmapBuffer(GL_ARRAY_BUFFER), GL_FALSE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDeleteBuffers(1, &b);
+}
