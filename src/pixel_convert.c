@@ -1025,8 +1025,11 @@ static GLboolean encode_plain(GLubyte *d, GLenum format, GLenum type, const MGLT
     if (tsz == 0)
         return GL_FALSE;
 
-    // integer formats only pair with integer types
-    if (want_int && (type == GL_FLOAT || type == GL_HALF_FLOAT))
+    // integer formats only pair with integer types, except that a stencil
+    // index may be read as a float of the same value
+    bool float_stencil = format == GL_STENCIL_INDEX && (type == GL_FLOAT || type == GL_HALF_FLOAT);
+
+    if (want_int && (type == GL_FLOAT || type == GL_HALF_FLOAT) && !float_stencil)
         return GL_FALSE;
 
     select_components(t, format, fo, io, uo, &count);
@@ -1035,7 +1038,9 @@ static GLboolean encode_plain(GLubyte *d, GLenum format, GLenum type, const MGLT
 
     for (k = 0; k < count; k++)
     {
-        if (want_int)
+        if (float_stencil)
+            store_norm(d + k*tsz, type, (GLfloat)uo[k]);
+        else if (want_int)
             store_int(d + k*tsz, type, io[k], uo[k], t->is_sint);
         else if (t->is_uint)
             store_norm(d + k*tsz, type, (GLfloat)uo[k]);

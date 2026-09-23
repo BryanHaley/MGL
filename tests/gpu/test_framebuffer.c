@@ -720,3 +720,41 @@ GPU_TEST(framebuffer_status, depth_and_stencil_from_different_images_are_unsuppo
     glDeleteFramebuffers(1, &fbo);
     glDeleteRenderbuffers(3, rb);
 }
+
+// A renderbuffer deleted while attached to a framebuffer that is not bound
+// was freed and left behind in that framebuffer, and the next status check
+// read through the dangling pointer.
+GPU_TEST(framebuffer_status, deleting_an_attached_renderbuffer_leaves_no_dangling_image)
+{
+    GLuint fbo = 0, rb = 0;
+
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 16, 16);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteRenderbuffers(1, &rb);
+
+    // allocations that would reuse the freed memory
+    for (int i = 0; i < 64; i++)
+    {
+        GLuint t = 0;
+
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+        glDeleteTextures(1, &t);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE);
+    mgl_drain_errors();
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+}

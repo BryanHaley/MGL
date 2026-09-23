@@ -350,3 +350,238 @@ GPU_TEST(image_store, atomics_on_cube_and_cube_array_images)
     glDeleteTextures(1, &arr);
     glDeleteBuffers(1, &ssbo);
 }
+
+// A texture bound to an image unit as another format of its size reads its
+// texels as that format. Metal needs the texture made for such views, so
+// the first cast remakes it and carries its contents across.
+GPU_TEST(image_store, a_cast_reads_the_same_bytes_as_another_format)
+{
+    static const char *cs =
+        "#version 450\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(r32ui, binding = 0) uniform readonly uimage2D img;\n"
+        "layout(std430, binding = 0) buffer Out { uint got; };\n"
+        "void main() { got = imageLoad(img, ivec2(1, 0)).x; }\n";
+    static const GLubyte texels[2 * 4] = { 0, 0, 0, 0,  0x11, 0x22, 0x33, 0x44 };
+    GLuint prog, tex = 0, ssbo = 0, got = 0;
+    char log[1024];
+
+    prog = mgl_build_compute_program(cs, log, sizeof log);
+    CHECK_MSG(prog != 0, "cast kernel did not build: %s", log);
+
+    if (!prog) return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof got, &got, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+
+    glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32UI);
+    glUseProgram(prog);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof got, &got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(got == 0x44332211u, "read 0x%08x, want 0x44332211", got);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteTextures(1, &tex);
+    glDeleteBuffers(1, &ssbo);
+}
+
+static GLuint filledImage(GLuint unit, GLuint rgba)
+{
+    GLuint tex = 0, texels[16];
+
+    for (int k = 0; k < 16; k++)
+        texels[k] = rgba;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+    glBindImageTexture(unit, tex, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA8);
+    return tex;
+}
+
+/* An image with no binding sits on unit 0 beside ones whose layout names
+   their units, and each reads the texture on its own unit. */
+GPU_TEST(image_store, declared_bindings_pick_units)
+{
+    char log[2048] = "";
+    GLuint prog = mgl_build_compute_program(
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "writeonly uniform image2D result;\n"
+        "layout(binding = 1, rgba8) uniform image2D a;\n"
+        "layout(binding = 2, rgba8) uniform image2D b;\n"
+        "layout(binding = 4, rgba8) uniform image2D c;\n"
+        "void main() {\n"
+        "    vec4 x = imageLoad(a, ivec2(0)), y = imageLoad(b, ivec2(0)), z = imageLoad(c, ivec2(0));\n"
+        "    imageStore(result, ivec2(0, 0), x);\n"
+        "    imageStore(result, ivec2(1, 0), y);\n"
+        "    imageStore(result, ivec2(2, 0), z);\n"
+        "}\n", log, sizeof log);
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    if (!prog)
+        return;
+
+    GLuint out = filledImage(0, 0);
+    GLuint ta = filledImage(1, 0x000000ffu), tb = filledImage(2, 0x0000ff00u), tc = filledImage(4, 0x00ff0000u);
+    GLuint got[16] = {0};
+
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "result"), 0);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glBindTexture(GL_TEXTURE_2D, out);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+
+    CHECK_MSG(got[0] == 0x000000ffu && got[1] == 0x0000ff00u && got[2] == 0x00ff0000u,
+              "read %08x %08x %08x", got[0], got[1], got[2]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    GLuint all[4] = {out, ta, tb, tc};
+    glDeleteTextures(4, all);
+}
+
+/* layout(binding = 1) on an image array gives element i unit 1 + i. */
+GPU_TEST(image_store, image_array_elements_take_consecutive_units)
+{
+    char log[2048] = "";
+    GLuint prog = mgl_build_compute_program(
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "writeonly uniform image2D result;\n"
+        "layout(binding = 1, rgba8) uniform image2D a[3];\n"
+        "void main() {\n"
+        "    for (int i = 0; i < 3; i++)\n"
+        "        imageStore(result, ivec2(i, 0), imageLoad(a[i], ivec2(0)));\n"
+        "}\n", log, sizeof log);
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    if (!prog)
+        return;
+
+    GLuint colors[3] = {0x000000ffu, 0x0000ff00u, 0x00ff0000u};
+    GLuint tex[4] = {filledImage(0, 0), filledImage(1, colors[0]), filledImage(2, colors[1]), filledImage(3, colors[2])};
+    GLuint got[16] = {0};
+    GLint unit = -1;
+
+    for (int i = 0; i < 3; i++)
+    {
+        char name[16];
+
+        snprintf(name, sizeof name, "a[%d]", i);
+        glGetUniformiv(prog, glGetUniformLocation(prog, name), &unit);
+        CHECK_MSG(unit == 1 + i, "%s reports unit %d", name, unit);
+    }
+
+    glUseProgram(prog);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+
+    for (int i = 0; i < 3; i++)
+        CHECK_MSG(got[i] == colors[i], "element %d read %08x", i, got[i]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteTextures(4, tex);
+}
+
+/* Atomics on RGBA8 textures bound as R32I and R32UI images, from a fragment
+   shader, land in the texture's own bytes. */
+GPU_TEST(image_store, fragment_atomics_through_a_cast)
+{
+    static const char *vs =
+        "#version 420 core\n"
+        "layout(location = 0) in vec2 pos;\n"
+        "void main() { gl_Position = vec4(pos, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 420 core\n"
+        "layout(location = 0) out vec4 o_color;\n"
+        "layout(r32i) coherent uniform iimage2D g_image0;\n"
+        "layout(r32ui) coherent uniform uimage2D g_image1;\n"
+        "void main() {\n"
+        "  o_color = vec4(0.0, 1.0, 0.0, 1.0);\n"
+        "  ivec2 coord = ivec2(gl_FragCoord);\n"
+        "  if (imageAtomicAdd(g_image0, coord, 2) != 0) o_color = vec4(1.0, 0.0, 0.0, 1.0);\n"
+        "  if (imageAtomicAdd(g_image0, coord, -1) != 2) o_color = vec4(1.0, 0.0, 0.0, 1.0);\n"
+        "  if (imageAtomicAdd(g_image1, coord, 1) != 0) o_color = vec4(1.0, 0.0, 0.0, 1.0);\n"
+        "  if (imageAtomicAdd(g_image1, coord, 2) != 1) o_color = vec4(1.0, 0.0, 0.0, 1.0);\n"
+        "}\n";
+    char log[2048] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    if (!prog)
+        return;
+
+    enum { W = 16, H = 16 };
+    GLubyte zeros[W * H * 4] = {0}, got[W * H * 4];
+    GLuint tex[2], vbo = 0, vao = mgl_fullscreen_quad(&vbo);
+    MGLTestTarget t;
+
+    CHECK(mgl_target_create(&t, W, H, GL_RGBA8, 0));
+    mgl_target_bind(&t);
+    glViewport(0, 0, W, H);
+
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "g_image0"), 0);
+    glUniform1i(glGetUniformLocation(prog, "g_image1"), 1);
+
+    glGenTextures(2, tex);
+    for (int i = 0; i < 2; i++)
+    {
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, zeros);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glBindImageTexture(0, tex[0], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32I);
+    glBindImageTexture(1, tex[1], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32UI);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    const GLubyte want[2] = { 1, 3 };
+
+    for (int i = 0; i < 2; i++)
+    {
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+        memset(got, 0xee, sizeof got);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+
+        for (int k = 0; k < W * H; k++)
+            if (got[k * 4] != want[i] || got[k * 4 + 1] || got[k * 4 + 2] || got[k * 4 + 3])
+            {
+                CHECK_MSG(0, "image %d texel %d is %u %u %u %u, want %u 0 0 0", i, k,
+                          got[k * 4], got[k * 4 + 1], got[k * 4 + 2], got[k * 4 + 3], want[i]);
+                break;
+            }
+    }
+
+    unsigned char *px = mgl_read_rgba8(&t), c[4];
+
+    mgl_pixel_at(px, &t, 3, 3, c);
+    CHECK_MSG(c[0] == 0 && c[1] == 255, "fragment wrote %u %u %u", c[0], c[1], c[2]);
+    free(px);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteTextures(2, tex);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&t);
+}

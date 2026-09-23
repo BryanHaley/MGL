@@ -7,6 +7,7 @@
  * name, so glGetUniformIndices could not find any of them.
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "mgl_test.h"
@@ -563,4 +564,64 @@ GPU_TEST(uniform_block_names, a_member_index_names_that_member)
 
     CHECK_EQ_INT(count, 2);
     glDeleteProgram(prog);
+}
+
+/* A block both stages declare is one GL block, so rebinding it moves both. */
+GPU_TEST(uniform_block_names, rebinding_a_block_moves_every_stage)
+{
+    static const char *vs =
+        "#version 430 core\n"
+        "layout(location = 0) in vec2 pos;\n"
+        "layout(std140, binding = 2) uniform Colors { vec4 a; vec4 b; } colors;\n"
+        "out vec4 v;\n"
+        "void main() { v = colors.a; gl_Position = vec4(pos, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 430 core\n"
+        "layout(std140, binding = 2) uniform Colors { vec4 a; vec4 b; } colors;\n"
+        "in vec4 v;\n"
+        "out vec4 color;\n"
+        "void main() { color = v + colors.b; }\n";
+    static const GLfloat data[8] = { 1, 0, 0, 0,  0, 1, 0, 1 };
+    char log[2048] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    if (!prog)
+        return;
+
+    MGLTestTarget t;
+    GLuint vbo = 0, ubo = 0, vao = mgl_fullscreen_quad(&vbo);
+    GLint binding = -1;
+    GLuint index = glGetUniformBlockIndex(prog, "Colors");
+
+    glUniformBlockBinding(prog, index, 11);
+    glGetActiveUniformBlockiv(prog, index, GL_UNIFORM_BLOCK_BINDING, &binding);
+    CHECK_EQ_INT(11, binding);
+
+    glGenBuffers(1, &ubo);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof data, data, GL_STATIC_DRAW);
+    glBindBufferRange(GL_UNIFORM_BUFFER, 11, ubo, 0, sizeof data);
+
+    CHECK(mgl_target_create(&t, 8, 8, GL_RGBA8, 0));
+    mgl_target_bind(&t);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    unsigned char *px = mgl_read_rgba8(&t), c[4];
+
+    mgl_pixel_at(px, &t, 4, 4, c);
+    CHECK_MSG(c[0] == 255 && c[1] == 255 && c[2] == 0 && c[3] == 255,
+              "drew %u %u %u %u", c[0], c[1], c[2], c[3]);
+    free(px);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &ubo);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&t);
 }

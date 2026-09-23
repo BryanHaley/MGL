@@ -626,3 +626,95 @@ GPU_TEST(texture_compressed, each_layer_of_a_compressed_array_is_its_own)
     glDeleteProgram(prog);
     glDeleteTextures(1, &tex);
 }
+
+/* Plain pixels compressed on upload still start where the unpack skips say. */
+GPU_TEST(texture_compressed, rgtc_upload_honours_unpack_skips)
+{
+    GLubyte src[9 * 9], got[8 * 8];
+    GLuint tex = 0;
+
+    /* the first row and column are skipped; the 8x8 image is all 200 */
+    for (int y = 0; y < 9; y++)
+        for (int x = 0; x < 9; x++)
+            src[y * 9 + x] = (x == 0 || y == 0) ? 0 : 200;
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 9);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 1);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RED_RGTC1, 8, 8, 0, GL_RED, GL_UNSIGNED_BYTE, src);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+
+    memset(got, 0, sizeof got);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, got);
+
+    for (int k = 0; k < 64; k++)
+        if (got[k] < 198 || got[k] > 202)
+        {
+            CHECK_MSG(0, "texel %d read %u, want 200", k, got[k]);
+            break;
+        }
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glDeleteTextures(1, &tex);
+}
+
+/* GL 4.6 8.5 and table 8.17: no depth, stencil or RGTC in a 3D texture. */
+GPU_TEST(texture_compressed, three_d_refuses_depth_and_rgtc)
+{
+    GLuint tex = 0;
+    GLubyte zeros[64] = {0};
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_3D, tex);
+    mgl_drain_errors();
+
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_COMPRESSED_RED_RGTC1, 4, 4, 1, 0, GL_RED, GL_UNSIGNED_BYTE, zeros);
+    CHECK_EQ_UINT(GL_INVALID_OPERATION, glGetError());
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_DEPTH_COMPONENT24, 4, 4, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    CHECK_EQ_UINT(GL_INVALID_OPERATION, glGetError());
+    glTexStorage3D(GL_TEXTURE_3D, 1, GL_DEPTH24_STENCIL8, 4, 4, 1);
+    CHECK_EQ_UINT(GL_INVALID_OPERATION, glGetError());
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 4, 4, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, zeros);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    glDeleteTextures(1, &tex);
+}
+
+/* UNPACK_SWAP_BYTES applies to pixels compressed on upload too. */
+GPU_TEST(texture_compressed, rgtc_upload_honours_swap_bytes)
+{
+    GLushort src[8 * 8];
+    GLubyte got[8 * 8];
+    GLuint tex = 0;
+
+    /* 0x8080 is the same either way round, so use one that is not */
+    for (int k = 0; k < 64; k++)
+        src[k] = 0x00c8;    /* stored swapped: reads as 0xc800 */
+
+    glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RED_RGTC1, 8, 8, 0, GL_RED, GL_UNSIGNED_SHORT, src);
+    glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    memset(got, 0, sizeof got);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, got);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+
+    /* 0xc800 / 0xffff is about 200 / 255 */
+    CHECK_MSG(got[0] >= 198 && got[0] <= 202, "texel 0 read %u, want about 200", got[0]);
+
+    glDeleteTextures(1, &tex);
+}

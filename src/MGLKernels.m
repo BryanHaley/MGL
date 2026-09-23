@@ -206,6 +206,34 @@ static inline NSUInteger clampThreads(NSUInteger count, NSUInteger max)
     return true;
 }
 
+- (bool) encodeGatherVertices: (id<MTLComputeCommandEncoder>) enc
+                       source: (id<MTLBuffer>) src
+                  destination: (id<MTLBuffer>) dst
+            destinationOffset: (NSUInteger) doff
+                        slots: (id<MTLBuffer>) slots
+                        count: (NSUInteger) count
+                       stride: (NSUInteger) stride
+{
+    id<MTLComputePipelineState> pso = [self pipelineNamed: "gatherVertices"];
+
+    if (pso == nil || count == 0 || stride % 4 || doff % 4)
+        return false;
+
+    struct { uint32_t stride; uint32_t dstOffset; uint32_t count; } info = {
+        (uint32_t)stride, (uint32_t)doff, (uint32_t)count
+    };
+
+    [enc setComputePipelineState: pso];
+    [enc setBuffer: src offset: 0 atIndex: 0];
+    [enc setBuffer: dst offset: 0 atIndex: 1];
+    [enc setBuffer: slots offset: 0 atIndex: 2];
+    [enc setBytes: &info length: sizeof(info) atIndex: 3];
+    [enc dispatchThreads: MTLSizeMake(count, 1, 1)
+   threadsPerThreadgroup: MTLSizeMake(clampThreads(count, pso.maxTotalThreadsPerThreadgroup), 1, 1)];
+
+    return true;
+}
+
 - (bool) encodeTriFanIndexes: (id<MTLComputeCommandEncoder>) enc
                   fanIndices: (id<MTLBuffer>) fan
                       offset: (NSUInteger) fanOffset

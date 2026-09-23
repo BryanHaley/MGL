@@ -589,3 +589,64 @@ GPU_TEST(uniform, update_between_draws_takes_effect)
     mgl_target_destroy(&t);
 }
 
+// GL draws with no fragment shader at all: nothing is coloured, but depth
+// and stencil are still written. The vertex function such a program is
+// built with returns nothing, for GL_RASTERIZER_DISCARD, so a second one
+// that keeps its position draws when the raster is on.
+GPU_TEST(draw, a_program_with_no_fragment_shader_still_writes_depth)
+{
+    static const char *vs =
+        "#version 430 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.5, 1.0); }\n";
+    GLuint vsh, prog, fbo = 0, color = 0, depth = 0, vao, vbo;
+    GLint ok = 0;
+    GLfloat z = 0.0f;
+
+    vsh = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vsh, 1, &vs, NULL);
+    glCompileShader(vsh);
+    prog = glCreateProgram();
+    glAttachShader(prog, vsh);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+
+    glGenTextures(1, &color);
+    glBindTexture(GL_TEXTURE_2D, color);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 8);
+    glGenTextures(1, &depth);
+    glBindTexture(GL_TEXTURE_2D, depth);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT32F, 8, 8);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
+
+    glViewport(0, 0, 8, 8);
+    glClearDepth(1.0);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_ALWAYS);
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glReadPixels(4, 4, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &z);
+    CHECK_MSG(z > 0.74f && z < 0.76f, "depth is %f, want 0.75", z);
+
+    glDisable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteShader(vsh);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &color);
+    glDeleteTextures(1, &depth);
+}

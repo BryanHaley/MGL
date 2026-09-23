@@ -276,6 +276,76 @@ GPU_TEST(transform_feedback, block_members_and_array_elements_by_name)
     mgl_target_destroy(&t);
 }
 
+// GL records an instanced draw one instance after another. The capture
+// placed each vertex by its vertex id alone, so every instance wrote over
+// the first, and the instanced and base-vertex draws set up no capture at all.
+GPU_TEST(transform_feedback, instances_record_one_after_another)
+{
+    static const char *vs =
+        "#version 430\n"
+        "layout(location = 0) in float v;\n"
+        "out float captured;\n"
+        "void main() { captured = v + 100.0 * float(gl_InstanceID); gl_Position = vec4(0.0); }\n";
+    static const char *fs =
+        "#version 430\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const char *varyings[] = { "captured" };
+    static const GLfloat vals[3] = { 1, 2, 3 };
+    static const GLushort idx[3] = { 0, 1, 2 };
+    GLuint prog, vao, vbo, ibo, tf;
+    GLfloat got[12];
+    char log[2048];
+
+    prog = linkRecording(vs, fs, varyings, 1, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    CHECK_MSG(prog != 0, "recording program did not link: %s", log);
+
+    if (!prog) return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof vals, vals, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 1, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glGenBuffers(1, &ibo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx, idx, GL_STATIC_DRAW);
+
+    tf = recordingBuffer(0, 256);
+    glUseProgram(prog);
+    glEnable(GL_RASTERIZER_DISCARD);
+
+    // two instances of three, arrays then elements
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArraysInstanced(GL_POINTS, 0, 3, 2);
+    glDrawElementsInstanced(GL_POINTS, 3, GL_UNSIGNED_SHORT, NULL, 2);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    memset(got, 0, sizeof got);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, tf);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+
+    for (int d = 0; d < 2; d++)
+        for (int i = 0; i < 6; i++)
+        {
+            GLfloat want = vals[i % 3] + 100.0f * (GLfloat)(i / 3);
+
+            CHECK_MSG(got[d * 6 + i] == want, "%s record %d holds %g, want %g",
+                      d ? "elements" : "arrays", i, got[d * 6 + i], want);
+        }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &tf);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ibo);
+}
+
 /* ---------- nothing is recorded while it is off ---------- */
 
 GPU_TEST(transform_feedback, paused_records_nothing)
@@ -550,4 +620,82 @@ GPU_TEST(transform_feedback, draw_replays_the_recorded_vertices)
     glBindVertexArray(0);
     glDeleteVertexArrays(1, &vao);
     glDeleteProgram(prog);
+}
+
+/* An indexed draw records its vertices in the order the elements list them,
+   not in index order, for every instance in turn. */
+GPU_TEST(transform_feedback, indexed_draws_record_in_element_order)
+{
+    static const char *vs =
+        "#version 430 core\n"
+        "layout(location = 0) in float v;\n"
+        "out float got;\n"
+        "void main() { got = v + float(gl_InstanceID) * 100.0; gl_Position = vec4(0.0); }\n";
+    static const char *fs =
+        "#version 430 core\nout vec4 o;\nvoid main() { o = vec4(1.0); }\n";
+    const char *names[] = { "got" };
+    GLuint prog = glCreateProgram(), sh[2];
+    GLint ok = 0;
+
+    sh[0] = glCreateShader(GL_VERTEX_SHADER);
+    sh[1] = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(sh[0], 1, &vs, NULL);
+    glShaderSource(sh[1], 1, &fs, NULL);
+    for (int i = 0; i < 2; i++)
+    {
+        glCompileShader(sh[i]);
+        glAttachShader(prog, sh[i]);
+        glDeleteShader(sh[i]);
+    }
+    glTransformFeedbackVaryings(prog, 1, names, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+    if (!ok)
+        return;
+
+    static const GLfloat values[8] = { 10, 11, 12, 13, 14, 15, 16, 17 };
+    static const GLushort idx[5] = { 6, 2, 2, 7, 4 };
+    GLuint vao, vbo, ebo, xfb;
+    GLfloat got[10];
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof values, values, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 1, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+    glGenBuffers(1, &ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx, idx, GL_STATIC_DRAW);
+    glGenBuffers(1, &xfb);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, xfb);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof got, NULL, GL_STATIC_READ);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, xfb);
+
+    glUseProgram(prog);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawElementsInstanced(GL_POINTS, 5, GL_UNSIGNED_SHORT, NULL, 2);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    memset(got, 0, sizeof got);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+
+    for (int k = 0; k < 10; k++)
+    {
+        GLfloat want = values[idx[k % 5]] + (GLfloat)(k / 5) * 100.0f;
+
+        CHECK_MSG(got[k] == want, "recorded vertex %d is %g, want %g", k, got[k], want);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ebo);
+    glDeleteBuffers(1, &xfb);
+    glDeleteVertexArrays(1, &vao);
 }

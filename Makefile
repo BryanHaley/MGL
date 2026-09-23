@@ -281,19 +281,22 @@ deps += $(glfw_objs:.o=.d)
 mgl_lib := $(build_dir)/libmoogl.dylib
 mgl_es_lib := $(build_dir)/libmoogles.dylib
 
+# a rebuilt SPIRV-Cross has to relink the driver, or it keeps the old one
+spirv_cross_archives := $(wildcard submodules/SPIRV-Cross/build/libspirv-cross-*.a)
+
 mgl_toolchain_obj := $(build_dir)/src/mgl_toolchain.o
 mgl_toolchain_lib := $(build_dir)/libmoogl_toolchain.a
 
-$(mgl_lib): $(mgl_core_objs) $(mgl_core_arc_objs) $(mgl_core_obj)
+$(mgl_lib): $(mgl_core_objs) $(mgl_core_arc_objs) $(mgl_core_obj) $(spirv_cross_archives)
 	@mkdir -p $(dir $@)
-	$(CC) -D$(CFLAGS_GL_CORE) -dynamiclib -o $@ $^ $(LIBS) \
+	$(CC) -D$(CFLAGS_GL_CORE) -dynamiclib -o $@ $(filter %.o,$^) $(LIBS) \
 		-install_name @rpath/libmoogl.dylib
 	# loading dynamic library requires this
 	ln -fs $(mgl_lib) .
 
-$(mgl_es_lib): $(mgl_es_objs) $(mgl_es_arc_objs) $(mgl_es_obj)
+$(mgl_es_lib): $(mgl_es_objs) $(mgl_es_arc_objs) $(mgl_es_obj) $(spirv_cross_archives)
 	@mkdir -p $(dir $@)
-	$(CC) -D$(CFLAGS_GL_ES) -dynamiclib -o $@ $^ $(LIBS) \
+	$(CC) -D$(CFLAGS_GL_ES) -dynamiclib -o $@ $(filter %.o,$^) $(LIBS) \
 		-install_name @rpath/libmoogles.dylib
 	# loading dynamic library requires this
 	ln -fs $(mgl_es_lib) .

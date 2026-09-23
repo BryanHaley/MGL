@@ -336,6 +336,16 @@ typedef struct Texture_t {
     GLuint mipmapped;
     GLboolean genmipmaps;
     GLboolean mtl_requires_private_storage; // depth, multi sample
+    // bound to an image unit as another format of its size, so Metal has to
+    // be told it may be viewed that way
+    GLboolean format_view;
+    // an image unit asked for another format; the remake waits for a draw
+    // that reads it without atomics, which Metal allows only on the texture
+    GLboolean format_view_wanted;
+    // an image unit does atomics on it through a 32-bit integer cast, so its
+    // storage is R32 under a view in its own format, however often remade.
+    // The Metal format of that storage, signed or not, or 0.
+    GLuint atomic_storage;
     TextureParameter params;
 
     // base level params
@@ -391,6 +401,8 @@ typedef struct VertexAttrib_t {
     GLintptr  pointer;
     GLintptr  relativeoffset;
     GLuint  buffer_bindingindex;
+    // set through glVertexAttribLPointer or LFormat: the shader reads doubles
+    GLboolean is_long;
 } VertexAttrib;
 
 typedef struct VertexElementArray_t {
@@ -561,7 +573,7 @@ typedef struct CaptureInfo_t {
     GLuint *gather;
     GLint   gather_words;
     // where the rewrite's own uniforms and buffers ended up
-    GLint   on_loc, base_loc;
+    GLint   on_loc, base_loc, count_loc;
     GLint   buffer_slot[MGL_XFB_MAX_BUFFERS];
 } CaptureInfo;
 
@@ -593,6 +605,7 @@ typedef struct GeometryInfo_t {
     GLint  tes_gen_slot;            // the CPU tessellator's coordinates
     // the three numbers the compute pass is told about this draw
     GLint  prims_loc, indexed_loc, first_loc, stride_loc;
+    GLint  per_instance_loc;    // how far apart two instances' vertices sit
     // where each output sits in one emitted vertex, for transform feedback
     // the input interface blocks the geometry stage declared, so the capture
     // injected into the vertex shader can spell them the way IT declares them
@@ -772,6 +785,8 @@ typedef struct SpirvResource_t {
     // GL picks the texture unit from the sampler uniform's value, not from the
     // binding baked into the SPIR-V. glUniform1i writes here.
     GLint   tex_unit;
+    // an array of samplers or images has a unit per element; NULL otherwise
+    GLint   *element_unit;
     // for uniform and storage blocks: what glGetActiveUniformBlockiv reports
     GLint   block_size;
     GLint   member_count;
@@ -784,7 +799,18 @@ typedef struct SpirvResource_t {
     // a storage cube image the shader holds as a 2D array of its faces,
     // because Metal before MSL 4.0 has no atomics on cube textures
     GLboolean cube_as_array;
+    // the shader does atomics on this image, which Metal allows only on the
+    // texture itself, never through a view of another format
+    GLboolean atomic;
 } SpirvResource;
+
+static inline GLint mglResourceUnit(const SpirvResource *res, GLint element)
+{
+    if (element > 0 && res->element_unit && element < res->array_size)
+        return res->element_unit[element];
+
+    return res->tex_unit;
+}
 
 typedef struct SpirvResourceList_t {
     GLuint  count;
@@ -875,6 +901,11 @@ typedef struct Program_t {
     CullInfo cull;
     Spirv cull_capture;
     Spirv cull_kernel;
+    // With no fragment shader the vertex function is built to return nothing,
+    // for GL_RASTERIZER_DISCARD; this second one still returns a position,
+    // so depth and stencil are drawn when the raster is on
+    Spirv vs_raster;
+    GLboolean building_vs_raster;
     // GL's view of the program's resources, for the interface queries
     MglResourceTable resources;
     // glBindAttribLocation and glBindFragDataLocation(Indexed), applied at link
@@ -1339,6 +1370,8 @@ struct GLMMetalFuncs {
 
     void (*mtlReadPixels)(GLMContext glm_ctx, void *pixelBytes, GLuint bytesPerRow, GLenum format, GLenum type, GLint x, GLint y, GLsizei width, GLsizei height);
     void (*mtlGetTexImage)(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint bytesPerRow, GLenum format, GLenum type, GLint x, GLint y, GLsizei width, GLsizei height, GLuint level, GLuint slice);
+    // the texture may be viewed as another format of its size from now on
+    void (*mtlAllowFormatViews)(GLMContext glm_ctx, Texture *tex);
 
     void (*mtlGenerateMipmaps)(GLMContext glm_ctx, Texture *tex);
     void (*mtlTexSubImage)(GLMContext glm_ctx, Texture *tex, Buffer *buf, size_t src_offset, size_t src_pitch, size_t src_image_size, size_t src_size, GLuint slice, GLuint level, size_t width, size_t height, size_t depth, size_t xoffset, size_t yoffset, size_t zoffset);

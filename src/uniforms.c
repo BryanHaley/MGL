@@ -509,7 +509,7 @@ void mglGetUniformfv(GLMContext ctx, GLuint program, GLint location, GLfloat *pa
 
         if (res)
         {
-            params[0] = res->tex_unit;
+            params[0] = mglResourceUnit(res, location - (GLint)res->location);
             return;
         }
     }
@@ -531,7 +531,7 @@ void mglGetUniformiv(GLMContext ctx, GLuint program, GLint location, GLint *para
 
         if (res)
         {
-            params[0] = res->tex_unit;
+            params[0] = mglResourceUnit(res, location - (GLint)res->location);
             return;
         }
     }
@@ -854,11 +854,25 @@ void mglUniformBlockBinding(GLMContext ctx, GLuint program, GLuint uniformBlockI
         SpirvResource *blk = uniformBlockAtElement(ptr, uniformBlockIndex, &element);
 
         // every element of an instance array is its own GL block, so writing
-        // the resource's single binding made them all share one buffer
-        if (blk && element >= 0 && blk->element_binding)
-            blk->element_binding[element] = uniformBlockBinding;
-        else if (blk)
-            blk->binding = uniformBlockBinding;
+        // the resource's single binding made them all share one buffer. The
+        // same block in another stage is the same GL block.
+        for (int stage = _VERTEX_SHADER; blk && stage < _MAX_SHADER_TYPES; stage++)
+        {
+            SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_BUFFER];
+
+            for (GLuint b = 0; b < list->count; b++)
+            {
+                SpirvResource *r = &list->list[b];
+
+                if (r != blk && (!r->name || !blk->name || strcmp(r->name, blk->name)))
+                    continue;
+
+                if (element >= 0 && r->element_binding && element < r->array_size)
+                    r->element_binding[element] = uniformBlockBinding;
+                else if (element < 0)
+                    r->binding = uniformBlockBinding;
+            }
+        }
     }
 
     ptr->dirty_bits |= DIRTY_PROGRAM;
@@ -1138,6 +1152,7 @@ static bool writeStructLeaf(GLMContext ctx, Program *pptr, SpirvResource *res,
 }
 
 void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size);
+static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size);
 
 // Where a uniform of this name ended up, across every stage. Unlike
 // glGetUniformLocation this asks nothing about the program's link state, so
@@ -1244,6 +1259,9 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
     ERROR_CHECK_RETURN(location >= 0, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(size > 0, GL_INVALID_VALUE);
+
+    if (writeOpaqueUniform(ctx, pptr, location, ptr, size))
+        return;
 
     {
         GLint element = 0;
@@ -1382,7 +1400,7 @@ void mglUniform(GLMContext ctx, GLint location, void *ptr, GLsizei size)
 // which MGL cannot size yet, so they go through mglUniform unchecked.
 // Setting a sampler uniform picks a texture unit; it does not write into the
 // uniform buffer the way a float or a vec4 does.
-static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, void *ptr, GLsizei size)
+static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size)
 {
     SpirvResource *res = mglOpaqueUniformByLocation(pptr, location);
 
@@ -1395,12 +1413,22 @@ static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, vo
         return true;
     }
 
-    GLint unit = *(GLint *)ptr;
+    const GLint *units = (const GLint *)ptr;
+    GLint first = location - (GLint)res->location;
+    GLint count = size / (GLsizei)sizeof(GLint);
+    GLint size_of_array = res->array_size > 1 ? res->array_size : 1;
 
-    if (unit < 0 || unit >= TEXTURE_UNITS)
+    // values past the end of the array are dropped
+    if (count > size_of_array - first)
+        count = size_of_array - first;
+
+    for (GLint k = 0; k < count; k++)
     {
-        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_VALUE);
-        return true;
+        if (units[k] < 0 || units[k] >= TEXTURE_UNITS)
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_VALUE);
+            return true;
+        }
     }
 
     // the same sampler in another stage is the same uniform
@@ -1411,8 +1439,19 @@ static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, vo
         {
             SpirvResource *other = opaqueAt(pptr, (GLuint)i);
 
-            if (other && other->location == res->location)
-                other->tex_unit = unit;
+            if (!other || other->location != res->location)
+                continue;
+
+            for (GLint k = 0; k < count; k++)
+            {
+                GLint e = first + k;
+
+                if (e == 0)
+                    other->tex_unit = units[k];
+
+                if (other->element_unit && e < other->array_size)
+                    other->element_unit[e] = units[k];
+            }
         }
     }
 
@@ -2402,7 +2441,7 @@ void mglReadUniform(GLMContext ctx, Program *pp, GLint location, void *params, G
 
     if (res)
     {
-        ((GLint *)params)[0] = res->tex_unit;
+        ((GLint *)params)[0] = mglResourceUnit(res, location - (GLint)res->location);
         return;
     }
 

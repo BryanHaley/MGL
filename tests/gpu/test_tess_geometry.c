@@ -434,3 +434,134 @@ GPU_TEST(tess_geometry, geometry_shader_records_its_own_layout)
     glDeleteBuffers(3, bufs);
     glDeleteVertexArrays(1, &vao);
 }
+
+// Every stage reads an image by its declared unit and records what it saw at
+// its own texel of a second image. None may see an empty slot.
+#define IMG_DECL "#version 430 core\n" \
+                 "layout(binding = 1, rgba8) uniform image2D seen;\n" \
+                 "layout(binding = 2, rgba8) uniform image2D goku;\n"
+#define IMG_READ(k) "    imageStore(seen, ivec2(" #k ", 0), imageLoad(goku, ivec2(0)));\n"
+
+GPU_TEST(tess_geometry, every_stage_reads_its_images)
+{
+    const char *srcs[5] = {
+        IMG_DECL "out vec4 vs_tcs;\n"
+        "void main() {\n" IMG_READ(0) "    vs_tcs = vec4(0, 1, 0, 1);\n}\n",
+
+        IMG_DECL "layout(vertices = 1) out;\n"
+        "in vec4 vs_tcs[];\nout vec4 tcs_tes[];\n"
+        "void main() {\n" IMG_READ(1)
+        "    tcs_tes[gl_InvocationID] = vs_tcs[0];\n"
+        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0;\n"
+        "    gl_TessLevelOuter[2] = 1.0; gl_TessLevelOuter[3] = 1.0;\n"
+        "    gl_TessLevelInner[0] = 1.0; gl_TessLevelInner[1] = 1.0;\n}\n",
+
+        IMG_DECL "layout(isolines, point_mode) in;\n"
+        "in vec4 tcs_tes[];\nout vec4 tes_gs;\n"
+        "void main() {\n" IMG_READ(2) "    tes_gs = tcs_tes[0];\n}\n",
+
+        IMG_DECL "layout(points) in;\nlayout(triangle_strip, max_vertices = 4) out;\n"
+        "in vec4 tes_gs[];\nout vec4 gs_fs;\n"
+        "void main() {\n" IMG_READ(3)
+        "    gs_fs = tes_gs[0]; gl_Position = vec4(-1, -1, 0, 1); EmitVertex();\n"
+        "    gs_fs = tes_gs[0]; gl_Position = vec4(-1,  1, 0, 1); EmitVertex();\n"
+        "    gs_fs = tes_gs[0]; gl_Position = vec4( 1, -1, 0, 1); EmitVertex();\n"
+        "    gs_fs = tes_gs[0]; gl_Position = vec4( 1,  1, 0, 1); EmitVertex();\n}\n",
+
+        IMG_DECL "in vec4 gs_fs;\nout vec4 color;\n"
+        "void main() {\n" IMG_READ(4) "    color = gs_fs;\n}\n",
+    };
+    const GLenum kinds[5] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER,
+                              GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER };
+    const char *names[5] = { "vertex", "control", "evaluation", "geometry", "fragment" };
+    GLuint prog = glCreateProgram();
+    GLint ok = 0;
+    char log[4096] = "";
+
+    for (int i = 0; i < 5; i++)
+    {
+        GLuint sh = glCreateShader(kinds[i]);
+
+        glShaderSource(sh, 1, &srcs[i], NULL);
+        glCompileShader(sh);
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        if (!ok)
+            glGetShaderInfoLog(sh, sizeof log, NULL, log);
+        CHECK_MSG(ok, "%s did not compile: %s", names[i], log);
+        glAttachShader(prog, sh);
+        glDeleteShader(sh);
+    }
+
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok)
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "did not link: %s", log);
+    if (!ok)
+    {
+        glDeleteProgram(prog);
+        return;
+    }
+
+    GLuint tex[2], zero[8] = {0}, red[1] = {0x000000ffu}, got[8] = {0};
+    MGLTestTarget t;
+
+    glGenTextures(2, tex);
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 8, 1, GL_RGBA, GL_UNSIGNED_BYTE, zero);
+    glBindTexture(GL_TEXTURE_2D, tex[1]);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 1, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, red);
+    glBindImageTexture(1, tex[0], 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA8);
+    glBindImageTexture(2, tex[1], 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA8);
+
+    CHECK(mgl_target_create(&t, 16, 16, GL_RGBA8, 0));
+    drawPatch(prog, &t);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+
+    for (int i = 0; i < 5; i++)
+        CHECK_MSG(got[i] == red[0], "%s stage read %08x", names[i], got[i]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteTextures(2, tex);
+    mgl_target_destroy(&t);
+}
+
+// A rectangle sampler keeps the evaluation stage's body in a helper
+// function, which then has to take the stage's input the way it was declared.
+static const char *TES_RECT =
+    "#version 430 core\n"
+    "layout(isolines, point_mode) in;\n"
+    "in vec4 tcs_tes[];\n"
+    "out vec4 tes_gs;\n"
+    "uniform sampler2DRect rect;\n"
+    "void main() {\n"
+    "    tes_gs = tcs_tes[0] + texture(rect, vec2(0.0)) * 0.0;\n"
+    "    gl_Position = vec4(gl_TessCoord.x * 1.6 - 0.8, 0.0, 0.0, 1.0);\n"
+    "}\n";
+
+GPU_TEST(tess_geometry, evaluation_stage_samples_a_rectangle)
+{
+    char log[4096];
+    MGLTestTarget t;
+    GLuint prog = linkAll(TCS, TES_RECT, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "program did not link: %s", log);
+    if (!prog)
+        return;
+
+    CHECK(mgl_target_create(&t, 64, 16, GL_RGBA8, 0));
+    glUseProgram(prog);
+    glUniform1f(glGetUniformLocation(prog, "segments"), 1.0f);
+    drawPatch(prog, &t);
+    checkSquares(&t, (const float[]){ -0.8f, 0.8f }, 2);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

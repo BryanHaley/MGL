@@ -1005,9 +1005,12 @@ static int locationsFor(const char *type)
     "  mglGsIndexed = mglGsIndexedU;\n" \
     "  mglGsFirst = mglGsFirstU;\n" \
     "  mglGsStride = mglGsStrideU;\n" \
+    "  mglGsPerInstance = mglGsPerInstanceU;\n" \
     "  int mglId = int(gl_GlobalInvocationID.x);\n" \
-    "  mglPrimitiveID = mglId / mglGsInvocations;\n" \
-    "  mglInvocationID = mglId - mglPrimitiveID * mglGsInvocations;\n" \
+    "  int mglSlot = mglId / mglGsInvocations;\n" \
+    "  mglInstance = mglGsPrims > 0 ? mglSlot / mglGsPrims : 0;\n" \
+    "  mglPrimitiveID = mglSlot - mglInstance * mglGsPrims;\n" \
+    "  mglInvocationID = mglId - mglSlot * mglGsInvocations;\n" \
     "  if (mglPrimitiveID >= mglGsPrims) return;\n" \
     "  if (mglGsIn[mglFetch(0)].mglPointSize == 0.0) return;\n" \
     "  mglBase = mglId * mglGsCap;\n" \
@@ -1555,7 +1558,8 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
         // -- so the draw's own numbers are copied into ordinary variables and
         // only those are read below.
         "uniform int mglGsPrimsU;\nuniform int mglGsIndexedU;\nuniform int mglGsFirstU;\nuniform int mglGsStrideU;\n"
-        "int mglGsPrims;\nint mglGsIndexed;\nint mglGsFirst;\nint mglGsStride;\n\n"
+        "uniform int mglGsPerInstanceU;\n"
+        "int mglGsPrims;\nint mglGsIndexed;\nint mglGsFirst;\nint mglGsStride;\nint mglGsPerInstance;\n\n"
         "const int mglGsInPerPrim = %d;\nconst int mglGsOutVerts = %d;\n"
         "const int mglGsCap = %d;\nconst int mglGsInvocations = %d;\n\n",
         in_verts, out_verts, cap, gi->invocations);
@@ -1587,11 +1591,32 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     }
 
     if (!bufAdd(&out,
-        "int mglPrimitiveID;\nint mglInvocationID;\nint mglBase;\nint mglWritten;\n"
+        "int mglPrimitiveID;\nint mglInvocationID;\nint mglInstance;\nint mglBase;\nint mglWritten;\n"
         "MglGsOutV mglCur;\nMglGsOutV mglStrip[3];\nint mglStripLen;\nbool mglStripFlip;\n\n"
+        // a triangle strip with adjacency takes its six vertices in the
+        // order GL 4.6 table 10.1 gives, which depends on where in the strip
+        // the triangle is and whether it is odd or even
+        "int mglStripAdjacent(int p, int i)\n{\n"
+        "  const int only[6] = int[6](0, 1, 2, 5, 4, 3);\n"
+        "  const int head[6] = int[6](0, 1, 2, 6, 4, 3);\n"
+        "  int b = 2 * p;\n"
+        "  bool last = p == mglGsPrims - 1;\n"
+        "  if (p == 0) return mglGsPrims == 1 ? only[i] : head[i];\n"
+        "  if ((p & 1) == 1)\n"
+        "  {\n"
+        "    int odd[6] = int[6](b + 2, b - 2, b, b + 3, b + 4, last ? b + 5 : b + 6);\n"
+        "    return odd[i];\n"
+        "  }\n"
+        "  int even[6] = int[6](b, b - 2, b + 2, last ? b + 5 : b + 6, b + 4, b + 3);\n"
+        "  return even[i];\n}\n\n"
         "int mglFetch(int i)\n{\n"
-        "  int v = mglPrimitiveID * mglGsStride + i;\n"
-        "  return mglGsIndexed != 0 ? int(mglGsIdx[v]) : mglGsFirst + v;\n}\n\n"
+        "  int p = mglPrimitiveID;\n"
+        "  int v = p * mglGsStride + i;\n"
+        "  if (mglGsStride == -1) v = mglStripAdjacent(p, i);\n"
+        "  if (mglGsStride == -2) v = (p + i) % mglGsPrims;\n"
+        "  if (mglGsStride == -3) v = i == 0 ? 0 : p + i;\n"
+        "  if (mglGsStride == -4) v = (p & 1) == 1 && i < 2 ? p + 1 - i : p + i;\n"
+        "  return (mglGsIndexed != 0 ? int(mglGsIdx[v]) : v) + mglGsFirst + mglInstance * mglGsPerInstance;\n}\n\n"
         "void mglPut(MglGsOutV v)\n{\n"
         "  if (mglWritten >= mglGsCap) return;\n"
         "  v.mglValid = 1.0;\n"
@@ -2047,6 +2072,8 @@ static char *captureForWriter(const GeometryInfo *gi, const char *writer_src)
     return capture;
 }
 
+static bool replaceWord(Buf *out, const char *src, const char *from, const char *to);
+
 char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi)
 {
     Buf out = {0};
@@ -2088,9 +2115,26 @@ char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi)
 
     capture = captureForWriter(gi, vs_src);
 
+    // each instance's vertices land after the one before
+    if (capture)
+    {
+        Buf renamed = {0};
+
+        if (replaceWord(&renamed, capture, "gl_VertexID", "mglCapIdx"))
+        {
+            free(capture);
+            capture = renamed.s;
+        }
+        else
+            free(renamed.s);
+    }
+
     if (capture == NULL ||
-        !bufAdd(&out, "\n") || !bufAdd(&out, capture) ||
-        !bufAdd(&out, "\nvoid main()\n{\n  mglVsBody();\n  mglGsCapture();\n}\n"))
+        !bufAdd(&out, "\nuniform int mglGsPerInstanceU;\nint mglCapIdx;\n") ||
+        !bufAdd(&out, capture) ||
+        !bufAdd(&out, "\nvoid main()\n{\n  mglVsBody();\n"
+                      "  mglCapIdx = gl_VertexID + gl_InstanceID * mglGsPerInstanceU;\n"
+                      "  mglGsCapture();\n}\n"))
     {
         free(capture);
         free(out.s);

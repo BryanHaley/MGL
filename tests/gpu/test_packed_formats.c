@@ -561,3 +561,45 @@ GPU_TEST(packed_formats, depth_stencil_uploads_reach_the_texture)
     glDeleteProgram(prog);
     glDeleteTextures(1, &tex);
 }
+
+/* Stencil reads back as any non-packed type, floats included. */
+GPU_TEST(packed_formats, stencil_reads_back_as_float_and_half)
+{
+    GLuint fbo = 0, tex = 0, color = 0;
+    GLuint packed[4];
+    GLfloat f[4] = {0};
+    GLushort h[4] = {0};
+
+    for (int k = 0; k < 4; k++)
+        packed[k] = (0x800000u << 8) | (GLuint)(10 + k);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, 2, 2, 0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+
+    glGenTextures(1, &color);
+    glBindTexture(GL_TEXTURE_2D, color);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, tex, 0);
+    mgl_drain_errors();
+
+    glReadPixels(0, 0, 2, 2, GL_STENCIL_INDEX, GL_FLOAT, f);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+    glReadPixels(0, 0, 2, 2, GL_STENCIL_INDEX, GL_HALF_FLOAT, h);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    for (int k = 0; k < 4; k++)
+        CHECK_MSG(f[k] == (GLfloat)(10 + k), "float texel %d read %f", k, f[k]);
+
+    /* 10.0 as a half is 0x4900 */
+    CHECK_MSG(h[0] == 0x4900, "half texels read %04x %04x %04x %04x", h[0], h[1], h[2], h[3]);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    GLuint t[2] = {tex, color};
+    glDeleteTextures(2, t);
+}

@@ -309,3 +309,251 @@ GPU_TEST(geometry_shader, limits_meet_the_floor)
                   req[i].name, v, req[i].floor_value);
     }
 }
+
+// Records what each gl_in[] slot holds, one point per slot, so a test can
+// read back exactly which vertices the geometry stage was handed.
+static GLuint linkRecorder(const char *layout_in, int n_in)
+{
+    static const char *vs =
+        "#version 430 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 430 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    char gs[512], log[2048] = "";
+    const char *names[] = { "got" };
+    GLint ok = 0;
+
+    snprintf(gs, sizeof gs,
+             "#version 430 core\n"
+             "layout(%s) in;\n"
+             "layout(points, max_vertices = %d) out;\n"
+             "out float got;\n"
+             "void main() {\n"
+             "    for (int i = 0; i < %d; i++) { got = gl_in[i].gl_Position.x; EmitVertex(); }\n"
+             "}\n", layout_in, n_in, n_in);
+
+    GLuint prog = glCreateProgram();
+    GLuint v = compileOne(GL_VERTEX_SHADER, vs, log, sizeof log);
+    GLuint g = compileOne(GL_GEOMETRY_SHADER, gs, log, sizeof log);
+    GLuint f = compileOne(GL_FRAGMENT_SHADER, fs, log, sizeof log);
+
+    CHECK_MSG(v && g && f, "did not compile: %s", log);
+    if (!v || !g || !f)
+        return 0;
+
+    glAttachShader(prog, v);
+    glAttachShader(prog, g);
+    glAttachShader(prog, f);
+    glTransformFeedbackVaryings(prog, 1, names, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok)
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "did not link: %s", log);
+
+    return ok ? prog : 0;
+}
+
+// Vertex n sits at x = n, so what was recorded names the vertices directly.
+static void recordDrawN(GLuint prog, GLenum mode, int n_verts, const void *indices, GLenum itype,
+                        int n_draw, GLint base, GLsizei instances, GLfloat *out, int n_out)
+{
+    GLfloat pts[32][2];
+    GLuint vao, vbo, ebo = 0, xfb;
+
+    for (int k = 0; k < n_verts; k++)
+    {
+        pts[k][0] = (GLfloat)k;
+        pts[k][1] = 0.0f;
+    }
+
+    vao = pointsVAO(&pts[0][0], sizeof(GLfloat) * 2 * (size_t)n_verts, &vbo);
+
+    if (indices)
+    {
+        glGenBuffers(1, &ebo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, n_draw * (itype == GL_UNSIGNED_SHORT ? 2 : 4), indices, GL_STATIC_DRAW);
+    }
+
+    glGenBuffers(1, &xfb);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, xfb);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof(GLfloat) * (size_t)n_out, NULL, GL_STATIC_READ);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, xfb);
+
+    glUseProgram(prog);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+
+    if (indices)
+        glDrawElementsInstancedBaseVertex(mode, n_draw, itype, NULL, instances, base);
+    else
+        glDrawArraysInstanced(mode, 0, n_draw, instances);
+
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof(GLfloat) * (size_t)n_out, out);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &xfb);
+    if (ebo)
+        glDeleteBuffers(1, &ebo);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+}
+
+static void recordDraw(GLuint prog, GLenum mode, int n_verts, const void *indices, GLenum itype,
+                       int n_draw, GLint base, GLfloat *out, int n_out)
+{
+    recordDrawN(prog, mode, n_verts, indices, itype, n_draw, base, 1, out, n_out);
+}
+
+// Indices may name any vertex, not just the first `count`, and the base vertex
+// moves all of them.
+GPU_TEST(geometry_shader, indexed_adjacency_reads_the_named_vertices)
+{
+    GLuint prog = linkRecorder("lines_adjacency", 4);
+
+    if (!prog)
+        return;
+
+    static const GLuint idx32[8] = { 9, 3, 7, 1, 11, 0, 2, 5 };
+    static const GLushort idx16[8] = { 9, 3, 7, 1, 11, 0, 2, 5 };
+    GLfloat got[8];
+
+    for (int wide = 0; wide < 2; wide++)
+    {
+        memset(got, 0, sizeof got);
+        recordDraw(prog, GL_LINES_ADJACENCY, 13, wide ? (const void *)idx32 : (const void *)idx16,
+                   wide ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT, 8, 1, got, 8);
+
+        for (int k = 0; k < 8; k++)
+            CHECK_MSG(got[k] == (GLfloat)(idx32[k] + 1), "%s index %d recorded vertex %g, want %u",
+                      wide ? "32 bit" : "16 bit", k, got[k], idx32[k] + 1);
+    }
+
+    glDeleteProgram(prog);
+}
+
+// GL 4.6 table 10.1: a strip with adjacency hands each triangle its six
+// vertices in an order that depends on its place in the strip.
+GPU_TEST(geometry_shader, triangle_strip_adjacency_follows_the_table)
+{
+    GLuint prog = linkRecorder("triangles_adjacency", 6);
+
+    if (!prog)
+        return;
+
+    // first, odd middle, even middle, odd last
+    static const int want[24] = { 0, 1, 2, 6, 4, 3,    4, 0, 2, 5, 6, 8,
+                                  4, 2, 6, 10, 8, 7,   8, 4, 6, 9, 10, 11 };
+    GLfloat got[24];
+
+    memset(got, 0, sizeof got);
+    recordDraw(prog, GL_TRIANGLE_STRIP_ADJACENCY, 12, NULL, 0, 12, 0, got, 24);
+
+    for (int k = 0; k < 24; k++)
+        CHECK_MSG(got[k] == (GLfloat)want[k], "triangle %d slot %d recorded vertex %g, want %d",
+                  k / 6, k % 6, got[k], want[k]);
+
+    glDeleteProgram(prog);
+}
+
+// Every instance runs the vertex stage again, and the geometry stage sees
+// that instance's vertices, not the first instance's.
+GPU_TEST(geometry_shader, instances_each_reach_the_geometry_stage)
+{
+    static const char *vs =
+        "#version 430 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p.x + float(gl_InstanceID) * 100.0, 0.0, 0.0, 1.0); }\n";
+    static const char *gs =
+        "#version 430 core\n"
+        "layout(lines) in;\n"
+        "layout(points, max_vertices = 2) out;\n"
+        "out float got;\n"
+        "void main() {\n"
+        "    got = gl_in[0].gl_Position.x; EmitVertex();\n"
+        "    got = gl_in[1].gl_Position.x; EmitVertex();\n"
+        "}\n";
+    static const char *fs =
+        "#version 430 core\nout vec4 o;\nvoid main() { o = vec4(1.0); }\n";
+    const char *names[] = { "got" };
+    char log[2048] = "";
+    GLint ok = 0;
+    GLuint prog = glCreateProgram();
+    GLuint v = compileOne(GL_VERTEX_SHADER, vs, log, sizeof log);
+    GLuint g = compileOne(GL_GEOMETRY_SHADER, gs, log, sizeof log);
+    GLuint f = compileOne(GL_FRAGMENT_SHADER, fs, log, sizeof log);
+
+    CHECK_MSG(v && g && f, "did not compile: %s", log);
+    if (!v || !g || !f)
+        return;
+
+    glAttachShader(prog, v);
+    glAttachShader(prog, g);
+    glAttachShader(prog, f);
+    glTransformFeedbackVaryings(prog, 1, names, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+    if (!ok)
+        return;
+
+    static const GLuint idx[4] = { 3, 1, 2, 0 };
+    GLfloat got[12];
+
+    // arrays: 3 instances of two lines over vertices 0..3
+    memset(got, 0, sizeof got);
+    recordDrawN(prog, GL_LINES, 4, NULL, 0, 4, 0, 3, got, 12);
+
+    for (int k = 0; k < 12; k++)
+        CHECK_MSG(got[k] == (GLfloat)((k / 4) * 100 + k % 4), "arrays: output %d is %g", k, got[k]);
+
+    // elements: the same, through an index list
+    memset(got, 0, 8 * sizeof(GLfloat));
+    recordDrawN(prog, GL_LINES, 4, idx, GL_UNSIGNED_INT, 4, 0, 2, got, 8);
+
+    for (int k = 0; k < 8; k++)
+        CHECK_MSG(got[k] == (GLfloat)((k / 4) * 100 + (int)idx[k % 4]), "elements: output %d is %g", k, got[k]);
+
+    glDeleteProgram(prog);
+}
+
+// A loop closes back to its first vertex, a fan turns about its first, and a
+// strip swaps the first two vertices of every other triangle.
+GPU_TEST(geometry_shader, loops_fans_and_strips_hand_over_their_vertices_in_order)
+{
+    GLuint lines = linkRecorder("lines", 2);
+    GLuint tris = linkRecorder("triangles", 3);
+    GLfloat got[12];
+
+    if (!lines || !tris)
+        return;
+
+    static const int loop[8] = { 0, 1,  1, 2,  2, 3,  3, 0 };
+    memset(got, 0, sizeof got);
+    recordDraw(lines, GL_LINE_LOOP, 4, NULL, 0, 4, 0, got, 8);
+    for (int k = 0; k < 8; k++)
+        CHECK_MSG(got[k] == (GLfloat)loop[k], "loop output %d is %g, want %d", k, got[k], loop[k]);
+
+    static const int fan[9] = { 0, 1, 2,  0, 2, 3,  0, 3, 4 };
+    memset(got, 0, sizeof got);
+    recordDraw(tris, GL_TRIANGLE_FAN, 5, NULL, 0, 5, 0, got, 9);
+    for (int k = 0; k < 9; k++)
+        CHECK_MSG(got[k] == (GLfloat)fan[k], "fan output %d is %g, want %d", k, got[k], fan[k]);
+
+    static const int strip[9] = { 0, 1, 2,  2, 1, 3,  2, 3, 4 };
+    memset(got, 0, sizeof got);
+    recordDraw(tris, GL_TRIANGLE_STRIP, 5, NULL, 0, 5, 0, got, 9);
+    for (int k = 0; k < 9; k++)
+        CHECK_MSG(got[k] == (GLfloat)strip[k], "strip output %d is %g, want %d", k, got[k], strip[k]);
+
+    glDeleteProgram(lines);
+    glDeleteProgram(tris);
+}

@@ -546,7 +546,8 @@ static bool buildCapture(const char *src, const MglXfbItem *items, int count,
         // SPIRV-Cross hoists a uniform a function reads into a thread
         // reference parameter, which Metal will not bind a constant to, so
         // these are copied into ordinary variables first.
-        if (!bufAdd(&out, "uniform int mglXfbOnU;\nuniform int mglXfbBaseU;\n"))
+        // GL records one instance after another, count vertices apart
+        if (!bufAdd(&out, "uniform int mglXfbOnU;\nuniform int mglXfbBaseU;\nuniform int mglXfbCountU;\n"))
             goto fail;
 
         if (!bufAddN(&out, rest, (size_t)(main_at - rest)) ||
@@ -558,6 +559,7 @@ static bool buildCapture(const char *src, const MglXfbItem *items, int count,
                  "\nvoid main()\n{\n"
                  "  int mglOn = mglXfbOnU;\n"
                  "  int mglBase = mglXfbBaseU;\n"
+                 "  int mglCount = mglXfbCountU;\n"
                  "  mglXfbBody();\n"
                  "  mglXfbCapture(%s, mglOn);\n}\n", slot_expr);
 

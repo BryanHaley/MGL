@@ -78,6 +78,15 @@ enum {
               destinationOffset: (NSUInteger) doff
                            size: (NSUInteger) size;
 
+// dst gets one stride-sized record per slot, in slot-list order
+- (bool) encodeGatherVertices: (id<MTLComputeCommandEncoder>) enc
+                       source: (id<MTLBuffer>) src
+                  destination: (id<MTLBuffer>) dst
+            destinationOffset: (NSUInteger) doff
+                        slots: (id<MTLBuffer>) slots
+                        count: (NSUInteger) count
+                       stride: (NSUInteger) stride;
+
 - (bool) encodeTriFanIndexes: (id<MTLComputeCommandEncoder>) enc
                   fanIndices: (id<MTLBuffer>) fan
                       offset: (NSUInteger) fanOffset

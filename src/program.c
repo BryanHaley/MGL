@@ -291,9 +291,9 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
     mglFreeCullInfo(&ptr->cull);
 
     {
-        Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel };
+        Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster };
 
-        for (int c = 0; c < 2; c++)
+        for (int c = 0; c < 3; c++)
         {
             free(cull[c]->ir);
             free(cull[c]->msl_str);
@@ -348,6 +348,9 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
         {
             // CRITICAL FIX: Add NULL checks and clear pointers to prevent double-frees
             if (ptr->spirv_resources_list[i][j].list) {
+                for (GLuint k = 0; k < ptr->spirv_resources_list[i][j].count; k++)
+                    free(ptr->spirv_resources_list[i][j].list[k].element_unit);
+
                 free(ptr->spirv_resources_list[i][j].list);
                 ptr->spirv_resources_list[i][j].list = NULL;
             }
@@ -1625,8 +1628,10 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     }
     // Metal has no cull distance and SPIRV-Cross's MSL backend writes broken
     // code for it, so the builtin never reaches the output. MGL culls in a
-    // compute pass of its own instead.
-    spvc_compiler_mask_stage_output_by_builtin(compiler_msl, SpvBuiltInCullDistance);
+    // compute pass of its own instead. The stages ahead of the tessellator
+    // only write a buffer the next stage reads, so they keep it.
+    if (!(ptr->tess.active && (stage == _VERTEX_SHADER || stage == _TESS_CONTROL_SHADER)))
+        spvc_compiler_mask_stage_output_by_builtin(compiler_msl, SpvBuiltInCullDistance);
 
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) != SPVC_SUCCESS) {
@@ -1644,7 +1649,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     // A program with no fragment stage can only be drawn with the raster off,
     // and Metal wants a vertex function that returns nothing for that.
     if (stage != _FRAGMENT_SHADER && stage != _COMPUTE_SHADER && ptr &&
-        ptr->shader_slots[_FRAGMENT_SHADER] == NULL)
+        ptr->shader_slots[_FRAGMENT_SHADER] == NULL && !ptr->building_vs_raster)
     {
         if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION, SPVC_TRUE) != SPVC_SUCCESS) {
             MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION) failed\n");
@@ -1668,6 +1673,20 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     // aliases the MTLBuffer rather than copying it into a 2D texture
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE, SPVC_TRUE);
     spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_BUFFER_SIZE_BUFFER_INDEX, MGL_BUFFER_SIZES_MSL_SLOT);
+
+    // A fragment shader that reads gl_CullDistance gets it from the stage that
+    // rasterises, one plain varying per element, since the builtin itself is
+    // kept in a local there.
+    if (ptr && !ptr->cull.building && ptr->shader_slots[_FRAGMENT_SHADER] &&
+        ((stage == _VERTEX_SHADER && !ptr->shader_slots[_TESS_EVALUATION_SHADER] && !ptr->geom_shader) ||
+         (stage == _TESS_EVALUATION_SHADER && !ptr->geom_shader)))
+    {
+        Shader *fs = ptr->shader_slots[_FRAGMENT_SHADER];
+        const char *fsrc = fs->pp_src ? fs->pp_src : fs->src;
+
+        if (fsrc && strstr(fsrc, "gl_CullDistance"))
+            spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_CULL_DISTANCE_VARYINGS, SPVC_TRUE);
+    }
 
     // GL clips z to [-1,1]; Metal clips to [0,1]. Without this the whole near
     // half of every GL projection is thrown away before rasterisation.
@@ -2173,8 +2192,17 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
             // starts at the binding the shader declared, or at 0 -- not at
             // whatever binding glslang handed out -- and glUniform1i replaces it.
             {
-                Shader *sh = ptr->shader_slots[stage];
-                GLint declared = (sh && sh->src) ? explicitUniformLayout(sh->src, list[i].name, "binding") : -1;
+                // The binding belongs to the one program uniform, so a stage
+                // that left it off still starts at the unit another stage set.
+                GLint declared = -1;
+
+                for (int s = 0; s < _MAX_SHADER_TYPES && declared < 0; s++)
+                {
+                    Shader *sh = ptr->shader_slots[s];
+
+                    if (sh && sh->src)
+                        declared = explicitUniformLayout(sh->src, list[i].name, "binding");
+                }
 
                 ptr->spirv_resources_list[stage][res_type].list[i].tex_unit = declared >= 0 ? declared : 0;
             }
@@ -2341,6 +2369,18 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
             rlist->list[i].gl_type = glTypeFromSpirv(compiler_msl, rlist->list[i].type_id,
                                                      &rlist->list[i].array_size);
 
+            // layout(binding = N) on an array gives its elements N, N+1, ...
+            if ((res_type == SPVC_RESOURCE_TYPE_SAMPLED_IMAGE ||
+                 res_type == SPVC_RESOURCE_TYPE_STORAGE_IMAGE) && rlist->list[i].array_size > 1)
+            {
+                free(rlist->list[i].element_unit);
+                rlist->list[i].element_unit = (GLint *)calloc((size_t)rlist->list[i].array_size, sizeof(GLint));
+
+                if (rlist->list[i].element_unit)
+                    for (GLint e = 0; e < rlist->list[i].array_size; e++)
+                        rlist->list[i].element_unit[e] = rlist->list[i].tex_unit + e;
+            }
+
             if (res_type == SPVC_RESOURCE_TYPE_STORAGE_IMAGE)
             {
                 spvc_bool was_arrayed = SPVC_FALSE;
@@ -2351,6 +2391,9 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
                 if (rlist->list[i].cube_as_array)
                     rlist->list[i].gl_type = cubeTypeFor2DArray(rlist->list[i].gl_type, was_arrayed);
+
+                rlist->list[i].atomic =
+                    spvc_compiler_msl_is_image_used_atomically(compiler_msl, rlist->list[i]._id) ? GL_TRUE : GL_FALSE;
             }
             rlist->list[i].block_index = -1;
             rlist->list[i].offset = -1;
@@ -3080,7 +3123,8 @@ static void linkTransformCapture(GLMContext ctx, Program *pptr)
 
     if (!mglBuildTransformCapture(vs->pp_src ? vs->pp_src : vs->src, vs->compiled_glsl_shader,
                                   pptr->xfb_varyings, pptr->xfb_varying_count,
-                                  pptr->xfb_buffer_mode, "gl_VertexID - mglBase", &pptr->xfb))
+                                  pptr->xfb_buffer_mode, "gl_VertexID - mglBase + gl_InstanceID * mglCount",
+                                  &pptr->xfb))
         return;
 
     snprintf(entry, sizeof(entry), "vertex_%d_main", vs->name);
@@ -3111,6 +3155,7 @@ static void resolveTransformCaptureUniforms(Program *pptr)
 
     pptr->xfb.on_loc = mglFindUniformByName(pptr, "mglXfbOnU");
     pptr->xfb.base_loc = mglFindUniformByName(pptr, "mglXfbBaseU");
+    pptr->xfb.count_loc = mglFindUniformByName(pptr, "mglXfbCountU");
 }
 
 // Where SPIRV-Cross put a generated storage block in a stage's Metal buffer
@@ -3564,6 +3609,39 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     MGL_INFO("MGL DEBUG: About to parse SPIRV to Metal\n");
     pptr->spirv[stage].msl_str = parseSPIRVShaderToMetal(ctx, pptr, stage, NULL, NULL);
     MGL_INFO("MGL DEBUG: SPIRV parsed to Metal\n");
+
+    // the same vertex stage again, still returning its position, for drawing
+    // depth and stencil with no fragment shader and the raster on
+    // A program that records feedback, or writes buffers or images, keeps the
+    // one that returns nothing: its work is those side effects, not pixels.
+    if (stage == _VERTEX_SHADER && pptr->spirv[stage].msl_str &&
+        pptr->shader_slots[_FRAGMENT_SHADER] == NULL &&
+        pptr->shader_slots[_TESS_EVALUATION_SHADER] == NULL &&
+        pptr->shader_slots[_GEOMETRY_SHADER] == NULL &&
+        pptr->xfb_varying_count == 0 &&
+        pptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_BUFFER].count == 0 &&
+        pptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_IMAGE].count == 0 &&
+        pptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_ATOMIC_COUNTER].count == 0)
+    {
+        Spirv *v = &pptr->vs_raster;
+
+        free(v->ir);
+        free(v->msl_str);
+        free(v->entry_point);
+        memset(v, 0, sizeof(*v));
+
+        v->stage = (GLuint)stage;
+        v->size = pptr->spirv[stage].size;
+        v->ir = (unsigned int *)malloc(v->size * sizeof(unsigned));
+
+        if (v->ir)
+        {
+            memcpy(v->ir, pptr->spirv[stage].ir, v->size * sizeof(unsigned));
+            pptr->building_vs_raster = GL_TRUE;
+            v->msl_str = parseSPIRVShaderToMetal(ctx, pptr, stage, v, NULL);
+            pptr->building_vs_raster = GL_FALSE;
+        }
+    }
     // ERROR_CHECK_RETURN_VALUE(pptr->spirv[stage].msl_str, GL_INVALID_OPERATION, false);
     if (pptr->spirv[stage].msl_str == NULL) {
         MGL_ERR("MGL Error: parseSPIRVShaderToMetal failed for stage %d\n", stage);
@@ -3823,6 +3901,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         pptr->geom.indexed_loc = mglFindUniformByName(pptr, "mglGsIndexedU");
         pptr->geom.first_loc   = mglFindUniformByName(pptr, "mglGsFirstU");
         pptr->geom.stride_loc  = mglFindUniformByName(pptr, "mglGsStrideU");
+        pptr->geom.per_instance_loc = mglFindUniformByName(pptr, "mglGsPerInstanceU");
 
         if (pptr->link_status == GL_TRUE)
         {
@@ -4128,6 +4207,25 @@ void mglGetAttachedShaders(GLMContext ctx, GLuint program, GLsizei maxCount, GLs
         *count = n;
 }
 
+// How many locations one element of a vertex input takes: one per column.
+static GLint matrixColumns(GLenum type)
+{
+    switch (type)
+    {
+        case GL_FLOAT_MAT2: case GL_FLOAT_MAT2x3: case GL_FLOAT_MAT2x4:
+        case GL_DOUBLE_MAT2: case GL_DOUBLE_MAT2x3: case GL_DOUBLE_MAT2x4:
+            return 2;
+        case GL_FLOAT_MAT3: case GL_FLOAT_MAT3x2: case GL_FLOAT_MAT3x4:
+        case GL_DOUBLE_MAT3: case GL_DOUBLE_MAT3x2: case GL_DOUBLE_MAT3x4:
+            return 3;
+        case GL_FLOAT_MAT4: case GL_FLOAT_MAT4x2: case GL_FLOAT_MAT4x3:
+        case GL_DOUBLE_MAT4: case GL_DOUBLE_MAT4x2: case GL_DOUBLE_MAT4x3:
+            return 4;
+        default:
+            return 1;
+    }
+}
+
 GLint  mglGetAttribLocation(GLMContext ctx, GLuint program, const GLchar *name)
 {
 	if (isProgram(ctx, program) == GL_FALSE)
@@ -4190,7 +4288,8 @@ GLint  mglGetAttribLocation(GLMContext ctx, GLuint program, const GLchar *name)
 			if (element > 0 && (GLuint)element >= l->list[i].array_size)
 				return -1;
 
-			return (GLint)l->list[i].location + element;
+			// an element of an array of matrices is a column per location on
+			return (GLint)l->list[i].location + element * matrixColumns(l->list[i].gl_type);
 		}
 	}
 

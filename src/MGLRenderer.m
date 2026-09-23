@@ -62,7 +62,68 @@ extern GLsizei genStrideFromTypeSize(GLenum type, GLint size);
 // small block bound here; a disabled attribute reads its own 16-byte slice and
 // never steps.
 #define MGL_CONSTANT_ATTRIB_BUFFER_INDEX 30
-#define MGL_CONSTANT_ATTRIB_STRIDE       (MAX_ATTRIBS * 16)
+// the float, int or uint value of each attribute, then its double value
+#define MGL_CONSTANT_ATTRIB_FLOATS       (MAX_ATTRIBS * 16)
+#define MGL_CONSTANT_ATTRIB_STRIDE       (MGL_CONSTANT_ATTRIB_FLOATS + MAX_ATTRIBS * 32)
+
+// What a disabled vertex array feeds the shader, in the layout the vertex
+// descriptor points into. A double input reads raw bits from the second half.
+static void fillAttribConstants(GLMContext ctx, uint8_t *out)
+{
+    for (int i = 0; i < MAX_ATTRIBS; i++)
+    {
+        const AttribConstant *ac = &ctx->state.attrib_constant[i];
+        GLdouble d[4];
+
+        memcpy(out + i * 16, ac->v.f, 16);
+
+        for (int c = 0; c < 4; c++)
+            d[c] = ac->d_valid ? ac->d[c] : (GLdouble)ac->v.f[c];
+
+        memcpy(out + MGL_CONSTANT_ATTRIB_FLOATS + i * 32, d, 32);
+    }
+}
+
+// How many doubles a column of the vertex input at this location holds, or 0
+// when the shader reads no double there.
+static GLuint doubleInputRowsAt(Program *program, GLuint location)
+{
+    if (program == NULL)
+        return 0;
+
+    SpirvResourceList *inputs = &program->spirv_resources_list[_VERTEX_SHADER][SPVC_RESOURCE_TYPE_STAGE_INPUT];
+
+    for (GLuint k = 0; k < inputs->count; k++)
+    {
+        SpirvResource *r = &inputs->list[k];
+        GLuint rows = 0, cols = 1;
+
+        switch (r->gl_type)
+        {
+            case GL_DOUBLE:        rows = 1; break;
+            case GL_DOUBLE_VEC2:   rows = 2; break;
+            case GL_DOUBLE_VEC3:   rows = 3; break;
+            case GL_DOUBLE_VEC4:   rows = 4; break;
+            case GL_DOUBLE_MAT2:   rows = 2; cols = 2; break;
+            case GL_DOUBLE_MAT3:   rows = 3; cols = 3; break;
+            case GL_DOUBLE_MAT4:   rows = 4; cols = 4; break;
+            case GL_DOUBLE_MAT2x3: rows = 3; cols = 2; break;
+            case GL_DOUBLE_MAT2x4: rows = 4; cols = 2; break;
+            case GL_DOUBLE_MAT3x2: rows = 2; cols = 3; break;
+            case GL_DOUBLE_MAT3x4: rows = 4; cols = 3; break;
+            case GL_DOUBLE_MAT4x2: rows = 2; cols = 4; break;
+            case GL_DOUBLE_MAT4x3: rows = 3; cols = 4; break;
+            default: break;
+        }
+
+        GLuint span = cols * (GLuint)(r->array_size > 1 ? r->array_size : 1);
+
+        if (rows && location >= r->location && location < r->location + span)
+            return rows;
+    }
+
+    return 0;
+}
 
 
 typedef struct SyncList_t {
@@ -213,6 +274,19 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     size_t        _tessIndexOffset;
     MTLIndexType  _tessIndexType;
     bool          _tessIndexed;
+    // the element type and offset of the last element draw, as GL gave them
+    GLenum        _gsElementType;
+    size_t        _gsElementOffset;
+    // An indexed draw that records feedback writes each vertex at the slot
+    // its index names; it goes to scratch and is copied out in draw order.
+    bool           _xfbGather;
+    NSMutableData *_xfbGatherSlotList;
+    NSUInteger     _xfbGatherSpan;
+    id<MTLBuffer>  _xfbGatherSlots;
+    id<MTLBuffer>  _xfbGatherScratch[MAX_TRANSFORM_FEEDBACK_BUFFERS];
+    id<MTLBuffer>  _xfbGatherDst[MAX_TRANSFORM_FEEDBACK_BUFFERS];
+    NSUInteger     _xfbGatherDstOffset[MAX_TRANSFORM_FEEDBACK_BUFFERS];
+    NSUInteger     _xfbGatherStride[MAX_TRANSFORM_FEEDBACK_BUFFERS];
     // isolines run as quads get their levels moved into quad order
     id<MTLComputePipelineState> _isolineLevelsPipeline;
     // Triangles and quads cut up on the CPU. The draw waits for the control
@@ -1036,10 +1110,9 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
     MTL_CHECK_RETURN_FALSE(_currentRenderEncoder, GL_INVALID_OPERATION);
 
     {
-        GLfloat constants[MAX_ATTRIBS * 4];
+        uint8_t constants[MGL_CONSTANT_ATTRIB_STRIDE];
 
-        for(int i=0; i<MAX_ATTRIBS; i++)
-            memcpy(&constants[i * 4], ctx->state.attrib_constant[i].v.f, 16);
+        fillAttribConstants(ctx, constants);
 
         [_currentRenderEncoder setVertexBytes:constants
                                        length:MGL_CONSTANT_ATTRIB_STRIDE
@@ -2832,7 +2905,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         iu.level = (GLuint)h->level;
         iu.layered = h->layered;
         iu.layer = h->layer;
-        use = [self imageTexture: &iu cubeAsArray: false];
+        use = [self imageTexture: &iu cubeAsArray: false atomic: false];
     }
     else
         use = [self samplingTexture: tex from: base];
@@ -3080,12 +3153,151 @@ static bool usesBindless(Program *program, int first, int last)
 
 // What an image unit hands a shader: the bound level, and just the one layer
 // when the binding is not layered.
-- (id<MTLTexture>) imageTexture: (ImageUnit *) iu cubeAsArray: (bool) cube_as_array
+// The 32-bit integer storage under a cast texture, however many views MGL
+// has since made of it, or nil. Metal leaves the atomic flag out of the usage
+// it reports back, so the storage is known by its format: MGL puts an R32
+// texture under a view of another format for this and nothing else.
+static bool isR32Integer(MTLPixelFormat f)
+{
+    return f == MTLPixelFormatR32Uint || f == MTLPixelFormatR32Sint;
+}
+
+static id<MTLTexture> atomicStorage(id<MTLTexture> t)
+{
+    for (id<MTLTexture> p = t.parentTexture; p; p = p.parentTexture)
+        if (isR32Integer(p.pixelFormat) && !isR32Integer(t.pixelFormat))
+            return p;
+
+    return nil;
+}
+
+// Whether a texture already allows what an image unit needs: views of
+// another format, and for atomics a 32-bit integer texture underneath in the
+// signedness the unit asks for. Atomics through a view of the other
+// signedness lose updates now and then, so they are not allowed to happen.
+static bool textureReadyForCast(id<MTLTexture> t, MTLPixelFormat atomic)
+{
+    if (t == nil)
+        return true;
+
+    if (atomic == MTLPixelFormatInvalid)
+        return (t.usage & MTLTextureUsagePixelFormatView) != 0;
+
+    if (isR32Integer(t.pixelFormat))
+        return true;
+
+    id<MTLTexture> storage = atomicStorage(t);
+
+    return storage != nil && storage.pixelFormat == atomic;
+}
+
+// The same texture again, made so Metal can view it as another format, with
+// every level and slice carried over, standing in for the old one from here
+// on. Metal allows atomics only on a 32-bit integer texture, never through a
+// view, so for those the new storage is R32 and what the rest of MGL holds is
+// a view of it in the original format; atomics reach through to the parent.
+- (id<MTLTexture>) remakeForFormatViews: (Texture *) tex atomic: (MTLPixelFormat) atomic
+{
+    id<MTLTexture> old = (__bridge id<MTLTexture>)(tex->mtl_data);
+    MTLPixelFormat own = old.pixelFormat;
+    MTLTextureDescriptor *d = [[MTLTextureDescriptor alloc] init];
+    bool integer_storage = atomic != MTLPixelFormatInvalid &&
+                           mglFormatDesc(tex->internalformat)->bytes_per_block == 4 && old.sampleCount == 1;
+
+    // a texture remade before already views its old storage, and the copy
+    // has to come from what the texels really are
+    if (integer_storage && atomicStorage(old))
+        old = atomicStorage(old);
+
+    d.textureType = old.textureType;
+    d.pixelFormat = integer_storage ? atomic : old.pixelFormat;
+    d.width = old.width;
+    d.height = old.height;
+    d.depth = old.depth;
+    d.mipmapLevelCount = old.mipmapLevelCount;
+    d.arrayLength = old.arrayLength;
+    d.sampleCount = old.sampleCount;
+    d.storageMode = old.storageMode;
+    d.usage = old.usage | MTLTextureUsagePixelFormatView;
+
+    if (integer_storage)
+    {
+        if (@available(macOS 14.0, *))
+            d.usage |= MTLTextureUsageShaderAtomic;
+    }
+
+    id<MTLTexture> remade = [_device newTextureWithDescriptor: d];
+
+    if (remade == nil)
+        return nil;
+
+    // Everything already queued has to reach the old texture first, and the
+    // copy has to be done before anything uploads into the new one -- uploads
+    // run at once in a command buffer of their own.
+    [self flushCommandBuffer: true];
+
+    id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+
+    if (!integer_storage)
+        [blit copyFromTexture: old toTexture: remade];
+    else
+    {
+        // different formats of one size only copy through a buffer
+        NSUInteger slices = old.textureType == MTLTextureTypeCube ? 6 :
+                            old.textureType == MTLTextureTypeCubeArray ? old.arrayLength * 6 : old.arrayLength;
+
+        for (NSUInteger level = 0; level < old.mipmapLevelCount; level++)
+        {
+            NSUInteger w = MAX(old.width >> level, 1), h = MAX(old.height >> level, 1);
+            NSUInteger dz = old.textureType == MTLTextureType3D ? MAX(old.depth >> level, 1) : 1;
+            NSUInteger row = w * 4, image = row * h;
+            id<MTLBuffer> staging = [_device newBufferWithLength: image * dz options: MTLResourceStorageModePrivate];
+
+            for (NSUInteger slice = 0; slice < slices && staging; slice++)
+            {
+                [blit copyFromTexture: old sourceSlice: slice sourceLevel: level sourceOrigin: MTLOriginMake(0, 0, 0)
+                           sourceSize: MTLSizeMake(w, h, dz) toBuffer: staging destinationOffset: 0
+               destinationBytesPerRow: row destinationBytesPerImage: image];
+                [blit copyFromBuffer: staging sourceOffset: 0 sourceBytesPerRow: row sourceBytesPerImage: image
+                          sourceSize: MTLSizeMake(w, h, dz) toTexture: remade destinationSlice: slice
+                    destinationLevel: level destinationOrigin: MTLOriginMake(0, 0, 0)];
+            }
+        }
+    }
+
+    [blit endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    id<MTLTexture> use = integer_storage ? [remade newTextureViewWithPixelFormat: own] : remade;
+
+    if (integer_storage)
+        tex->atomic_storage = (GLuint)atomic;
+
+    if (use == nil)
+        return nil;
+
+    CFBridgingRelease(tex->mtl_data);
+    tex->mtl_data = (void *)CFBridgingRetain(use);
+    tex->format_view = GL_TRUE;
+
+    return use;
+}
+
+- (id<MTLTexture>) imageTexture: (ImageUnit *) iu cubeAsArray: (bool) cube_as_array atomic: (bool) atomic
 {
     id<MTLTexture> base = (__bridge id<MTLTexture>)(iu->tex->mtl_data);
 
     if (base == nil)
         return nil;
+
+    // atomics go to the 32-bit integer storage under a cast texture
+    id<MTLTexture> storage = atomic ? atomicStorage(base) : nil;
+    bool atomic_storage = storage != nil;
+
+    if (atomic_storage)
+        base = storage;
 
     MTLTextureType type = base.textureType;
     NSUInteger levels = base.mipmapLevelCount;
@@ -3117,14 +3329,22 @@ static bool usesBindless(Program *program, int first, int last)
     }
 
     // Reading the texels as another format of the same size needs a texture
-    // Metal was told could be viewed that way.
+    // Metal was told could be viewed that way. Saying so up front costs Apple
+    // GPUs their lossless compression, so only a texture actually bound this
+    // way is remade with it, its contents carried across.
     MTLPixelFormat format = base.pixelFormat;
     MTLPixelFormat asked = (MTLPixelFormat)mglFormatMetalFormat(iu->internalformat);
 
-    if (asked != MTLPixelFormatInvalid && asked != format &&
-        mglFormatDesc(iu->internalformat)->bytes_per_block == mglFormatDesc(iu->tex->internalformat)->bytes_per_block &&
-        (base.usage & MTLTextureUsagePixelFormatView))
-        format = asked;
+    // Metal allows atomics only on the texture itself, never through a view,
+    // so an image the shader does atomics on is bound as it is and its bits
+    // read raw
+    if (asked != MTLPixelFormatInvalid && asked != format && (!atomic || atomic_storage) &&
+        mglFormatDesc(iu->internalformat)->bytes_per_block == mglFormatDesc(iu->tex->internalformat)->bytes_per_block)
+    {
+        // glBindImageTexture already made sure it can be, outside any encoder
+        if (base.usage & MTLTextureUsagePixelFormatView)
+            format = asked;
+    }
 
     if (levels == 1 && !one_layer && !as_array && format == base.pixelFormat)
         return base;
@@ -3199,28 +3419,35 @@ static GLenum targetForSampler(GLenum type)
         if (res->msl_index == (GLuint)-1)
             continue;
 
-        GLuint unit = [self getProgramTexUnit: stage type: SPVC_RESOURCE_TYPE_SAMPLED_IMAGE index: i];
-        GLenum target = targetForSampler(res->gl_type);
-        Texture *ptr = target ? STATE(texture_units[unit].textures[textureIndexFromTarget(ctx, target)])
-                              : STATE(active_textures[unit]);
-        id<MTLTexture> texture = nil;
-
-
-        if (ptr && [self bindMTLTexture: ptr] && ptr->mtl_data)
-            texture = [self samplingTexture: ptr from: (__bridge id<MTLTexture>)(ptr->mtl_data)];
-
-        // GL reads an unbound or unusable sampler as black; Metal wants
-        // something of the declared kind in the slot
-        if (texture == nil)
+        // an array takes one slot per element, running on from the first
+        for (GLint e = 0; e < (res->array_size > 1 ? res->array_size : 1); e++)
         {
-            texture = [self dummyTextureForGLType: res->gl_type];
-            setTexture(texture ? texture : [self incompleteTexture], res->msl_index);
-            setSampler([self incompleteSampler], res->msl_sampler_index);
-            continue;
-        }
+            GLint unit = mglResourceUnit(res, e);
 
-        setTexture(texture, res->msl_index);
-        setSampler([self samplerForUnit: unit texture: ptr], res->msl_sampler_index);
+            if (unit < 0 || unit >= TEXTURE_UNITS)
+                unit = 0;
+
+            GLenum target = targetForSampler(res->gl_type);
+            Texture *ptr = target ? STATE(texture_units[unit].textures[textureIndexFromTarget(ctx, target)])
+                                  : STATE(active_textures[unit]);
+            id<MTLTexture> texture = nil;
+
+            if (ptr && [self bindMTLTexture: ptr] && ptr->mtl_data)
+                texture = [self samplingTexture: ptr from: (__bridge id<MTLTexture>)(ptr->mtl_data)];
+
+            // GL reads an unbound or unusable sampler as black; Metal wants
+            // something of the declared kind in the slot
+            if (texture == nil)
+            {
+                texture = [self dummyTextureForGLType: res->gl_type];
+                setTexture(texture ? texture : [self incompleteTexture], res->msl_index + e);
+                setSampler([self incompleteSampler], res->msl_sampler_index + e);
+                continue;
+            }
+
+            setTexture(texture, res->msl_index + e);
+            setSampler([self samplerForUnit: unit texture: ptr], res->msl_sampler_index + e);
+        }
     }
 
     SpirvResourceList *images = &program->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_IMAGE];
@@ -3232,18 +3459,25 @@ static GLenum targetForSampler(GLenum type)
         if (res->msl_index == (GLuint)-1)
             continue;
 
-        GLuint binding = [self getProgramTexUnit: stage type: SPVC_RESOURCE_TYPE_STORAGE_IMAGE index: i];
-        ImageUnit *iu = &STATE(image_units[binding]);
-        id<MTLTexture> texture = nil;
+        for (GLint e = 0; e < (res->array_size > 1 ? res->array_size : 1); e++)
+        {
+            GLint binding = mglResourceUnit(res, e);
 
-        if (iu->tex && (iu->tex->mtl_data || [self bindMTLTexture: iu->tex]))
-            texture = [self imageTexture: iu cubeAsArray: res->cube_as_array];
+            if (binding < 0 || binding >= TEXTURE_UNITS)
+                binding = 0;
 
-        if (texture == nil)
-            texture = [self dummyTextureForGLType: res->cube_as_array ? GL_IMAGE_2D_ARRAY : res->gl_type];
+            ImageUnit *iu = &STATE(image_units[binding]);
+            id<MTLTexture> texture = nil;
 
-        if (texture)
-            setTexture(texture, res->msl_index);
+            if (iu->tex && (iu->tex->mtl_data || [self bindMTLTexture: iu->tex]))
+                texture = [self imageTexture: iu cubeAsArray: res->cube_as_array atomic: res->atomic];
+
+            if (texture == nil)
+                texture = [self dummyTextureForGLType: res->cube_as_array ? GL_IMAGE_2D_ARRAY : res->gl_type];
+
+            if (texture)
+                setTexture(texture, res->msl_index + e);
+        }
     }
 
     return true;
@@ -3261,6 +3495,24 @@ static GLenum targetForSampler(GLenum type)
     return [self bindTexturesForStage: stage
                            setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setFragmentTexture: t atIndex: i]; }
                            setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setFragmentSamplerState: s atIndex: i]; }];
+}
+
+// The stages MGL runs as compute passes, or through another stage's slot,
+// read their own textures: the geometry kernel, the tessellation vertex and
+// control kernels, and the evaluation stage that is the vertex function when
+// tessellating. Only the vertex, fragment and compute stages used to get any.
+- (void) bindTexturesForStage: (int) stage toCompute: (id<MTLComputeCommandEncoder>) enc
+{
+    [self bindTexturesForStage: stage
+                    setTexture: ^(id<MTLTexture> t, NSUInteger i) { [enc setTexture: t atIndex: i]; }
+                    setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [enc setSamplerState: s atIndex: i]; }];
+}
+
+- (void) bindTexturesForStageAsVertex: (int) stage
+{
+    [self bindTexturesForStage: stage
+                    setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setVertexTexture: t atIndex: i]; }
+                    setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setVertexSamplerState: s atIndex: i]; }];
 }
 
 - (bool) bindTexturesToCurrentRenderEncoder
@@ -3487,7 +3739,9 @@ static bool mtlFormatIsStencil(MTLPixelFormat f)
 
 void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlBlitFramebuffer:glm_ctx srcX0:srcX0 srcY0:srcY0 srcX1:srcX1 srcY1:srcY1 dstX0:dstX0 dstY0:dstY0 dstX1:dstX1 dstY1:dstY1 mask:mask filter:filter];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlBlitFramebuffer:glm_ctx srcX0:srcX0 srcY0:srcY0 srcX1:srcX1 srcY1:srcY1 dstX0:dstX0 dstY0:dstY0 dstX1:dstX1 dstY1:dstY1 mask:mask filter:filter];
+    }
 }
 
 - (Texture *)framebufferAttachmentTexture: (FBOAttachment *)fbo_attachment
@@ -3733,6 +3987,10 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
 {
     MTLTextureUsage usage = MTLTextureUsageShaderRead;
 
+    // once an image unit has cast it, every remake keeps allowing that
+    if (tex->format_view)
+        usage |= MTLTextureUsagePixelFormatView;
+
     // Metal will not make a swizzled texture that can be drawn into or written
     if (tex->params.swizzled ||
         tex->params.swizzle_r != GL_RED || tex->params.swizzle_g != GL_GREEN ||
@@ -3847,6 +4105,10 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
                       tex->mipmap_levels);
             return false;
         }
+
+        // made again from scratch, so the integer storage has to be put back
+        if (tex->atomic_storage && !atomicStorage((__bridge id<MTLTexture>)tex->mtl_data))
+            [self remakeForFormatViews: tex atomic: (MTLPixelFormat)tex->atomic_storage];
     }
 
     if (tex->params.mtl_data == NULL)
@@ -4227,6 +4489,9 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
 
     if ([self buildStageFunction: &ptr->cull_capture] == false)
         return false;
+
+    // a missing variant only means depth-only draws stay dark
+    [self buildStageFunction: &ptr->vs_raster];
 
     return [self buildStageFunction: &ptr->cull_kernel];
 }
@@ -5652,7 +5917,7 @@ static GLuint xfbVerticesRecorded(GLenum mode, GLsizei count)
 // Whether the shader records on this draw is a uniform, and uniform values are
 // handed to the encoder when the buffers are bound -- so this has to run before
 // the state is processed, not with the buffer binding below.
-- (void) updateTransformFeedbackUniforms: (GLint) first
+- (void) updateTransformFeedbackUniforms: (GLint) first count: (GLsizei) count
 {
     Program *program = ctx->state.program;
     TransformFeedback *xfb = ctx->state.transform_feedback;
@@ -5665,6 +5930,7 @@ static GLuint xfbVerticesRecorded(GLenum mode, GLsizei count)
 
     mglWriteProgramUniform(ctx, program, program->xfb.on_loc, on ? 1 : 0);
     mglWriteProgramUniform(ctx, program, program->xfb.base_loc, first > 0 ? first : 0);
+    mglWriteProgramUniform(ctx, program, program->xfb.count_loc, count > 0 ? count : 0);
 }
 
 // Primitives this draw makes, for the queries that count them.
@@ -5715,9 +5981,126 @@ static GLuint drawPrimitiveCount(GLenum mode, GLsizei count)
         }
 }
 
+// The index that restarts a primitive for this element size, if restart is on.
+static bool restartIndexFor(GLMContext ctx, size_t elem, uint32_t *out)
+{
+    uint32_t mask = elem == 1 ? 0xFFu : elem == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+
+    if (ctx->state.caps.primitive_restart_fixed_index)
+        *out = mask;
+    else if (ctx->state.caps.primitive_restart)
+        *out = ctx->state.var.primitive_restart_index & mask;
+    else
+        return false;
+
+    return true;
+}
+
+// Past this many vertices a draw is not worth running the vertex stage over
+// every one an index names.
+#define MGL_MAX_GATHER_VERTICES (1u << 24)
+
+// GL records an indexed draw's vertices in the order the elements list them,
+// but the rewritten shader can only place a vertex by its index. So it
+// records into scratch, one slot per index from the lowest used, and a copy
+// puts each element's vertex where GL wants it. Only the list modes, where
+// every element is one recorded vertex.
+- (void) prepareFeedbackGather: (GLenum) mode count: (GLsizei) count instances: (GLsizei) instances
+                    basevertex: (GLint) basevertex
+{
+    Program *program = ctx->state.program;
+    TransformFeedback *xfb = ctx->state.transform_feedback;
+
+    _xfbGather = false;
+
+    if (program == NULL || program->xfb.rewritten_src == NULL || xfb == NULL || !xfb->active || xfb->paused ||
+        mglProgramHasGeometry(program) || mglProgramCulls(program) || program->tess.active || count <= 0)
+        return;
+
+    if (mode != GL_POINTS && mode != GL_LINES && mode != GL_TRIANGLES)
+        return;
+
+    Buffer *eb = getElementBuffer(ctx);
+    size_t elem = _gsElementType == GL_UNSIGNED_BYTE ? 1 : _gsElementType == GL_UNSIGNED_SHORT ? 2 : 4;
+
+    if (eb == NULL || !eb->data.buffer_data || _gsElementOffset + (size_t)count * elem > (size_t)eb->size)
+        return;
+
+    const uint8_t *from = (const uint8_t *)eb->data.buffer_data + _gsElementOffset;
+    uint32_t lo = UINT32_MAX, hi = 0, restart = 0;
+
+    // a restart is never recorded, so it takes no part here; left in, its
+    // index made the scratch gigabytes long
+    if (restartIndexFor(ctx, elem, &restart))
+        return;
+
+    for (GLsizei k = 0; k < count; k++)
+    {
+        uint32_t v = elem == 1 ? from[k] : elem == 2 ? ((const uint16_t *)from)[k] : ((const uint32_t *)from)[k];
+
+        lo = MIN(lo, v);
+        hi = MAX(hi, v);
+    }
+
+    if (instances < 1)
+        instances = 1;
+
+    if ((NSUInteger)(hi - lo) * (NSUInteger)instances >= MGL_MAX_GATHER_VERTICES)
+        return;
+
+    NSUInteger span = (NSUInteger)(hi - lo) + 1;
+
+    _xfbGatherSlotList = [NSMutableData dataWithLength: (NSUInteger)count * (NSUInteger)instances * 4];
+
+    uint32_t *slots = (uint32_t *)_xfbGatherSlotList.mutableBytes;
+
+    for (GLsizei i = 0; i < instances; i++)
+        for (GLsizei k = 0; k < count; k++)
+        {
+            uint32_t v = elem == 1 ? from[k] : elem == 2 ? ((const uint16_t *)from)[k] : ((const uint32_t *)from)[k];
+
+            slots[i * count + k] = (v - lo) + (uint32_t)(i * span);
+        }
+
+    mglWriteProgramUniform(ctx, program, program->xfb.base_loc, (GLint)lo + basevertex);
+    mglWriteProgramUniform(ctx, program, program->xfb.count_loc, (GLint)span);
+
+    _xfbGatherSpan = span * (NSUInteger)instances;
+    _xfbGather = true;
+}
+
+// Copies what the draw recorded into the feedback buffers, in element order.
+- (void) finishFeedbackGather
+{
+    if (!_xfbGather)
+        return;
+
+    _xfbGather = false;
+
+    id<MTLComputeCommandEncoder> enc = [self liveComputeEncoder];
+    NSUInteger n = _xfbGatherSlotList.length / 4;
+
+    for (int b = 0; b < MAX_TRANSFORM_FEEDBACK_BUFFERS; b++)
+    {
+        if (enc && _xfbGatherScratch[b] && _xfbGatherSlots)
+            [_kernels encodeGatherVertices: enc source: _xfbGatherScratch[b] destination: _xfbGatherDst[b]
+                         destinationOffset: _xfbGatherDstOffset[b] slots: _xfbGatherSlots
+                                     count: n stride: _xfbGatherStride[b]];
+
+        _xfbGatherScratch[b] = nil;
+        _xfbGatherDst[b] = nil;
+    }
+
+    _xfbGatherSlots = nil;
+    _xfbGatherSlotList = nil;
+
+    [self endComputeEncoding];
+}
+
 // Binds the feedback buffers where the rewritten shader reads them, and tells
 // it whether it is recording at all. Returns the vertices this draw will add.
 - (GLuint) setUpTransformFeedback: (GLenum) mode count: (GLsizei) count first: (GLint) first
+                         instances: (GLsizei) instances
 {
     Program *program = ctx->state.program;
     TransformFeedback *xfb = ctx->state.transform_feedback;
@@ -5746,13 +6129,43 @@ static GLuint drawPrimitiveCount(GLenum mode, GLsizei count)
         if (buf->data.mtl_data == NULL)
             continue;
 
+        NSUInteger stride = [self xfbStrideFor: program buffer: b];
+        NSUInteger at = (NSUInteger)offset + xfb->vertices_recorded * stride;
+
+        if (_xfbGather && b < MAX_TRANSFORM_FEEDBACK_BUFFERS)
+        {
+            id<MTLBuffer> scratch = [_scratchPool bufferOfLength: MAX(_xfbGatherSpan * stride, 4)
+                                               forCommandBuffer: _currentCommandBuffer];
+
+            if (_xfbGatherSlots == nil)
+            {
+                _xfbGatherSlots = [_scratchPool bufferOfLength: MAX(_xfbGatherSlotList.length, 4)
+                                              forCommandBuffer: _currentCommandBuffer];
+
+                if (_xfbGatherSlots)
+                    memcpy(_xfbGatherSlots.contents, _xfbGatherSlotList.bytes, _xfbGatherSlotList.length);
+            }
+
+            if (scratch && _xfbGatherSlots)
+            {
+                _xfbGatherScratch[b] = scratch;
+                _xfbGatherDst[b] = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
+                _xfbGatherDstOffset[b] = at;
+                _xfbGatherStride[b] = stride;
+
+                [_currentRenderEncoder setVertexBuffer: scratch offset: 0 atIndex: program->xfb.buffer_slot[b]];
+                continue;
+            }
+        }
+
         // the shader appends where the last draw left off
         [_currentRenderEncoder setVertexBuffer: (__bridge id<MTLBuffer>)(buf->data.mtl_data)
-                                        offset: offset + xfb->vertices_recorded * [self xfbStrideFor: program buffer: b]
+                                        offset: at
                                        atIndex: program->xfb.buffer_slot[b]];
     }
 
-    return xfbVerticesRecorded(mode, count);
+    // each instance records all its vertices after the one before
+    return xfbVerticesRecorded(mode, count) * (GLuint)(instances > 1 ? instances : 1);
 }
 
 // Bytes one recorded vertex takes in this buffer.
@@ -5781,9 +6194,15 @@ static GLuint gsPrimitiveCount(GLenum mode, GLsizei count, GLint *stride)
         case GL_TRIANGLES_ADJACENCY:     *stride = 6; return count / 6;
         case GL_LINE_STRIP:              *stride = 1; return count > 1 ? count - 1 : 0;
         case GL_LINE_STRIP_ADJACENCY:    *stride = 1; return count > 3 ? count - 3 : 0;
-        case GL_TRIANGLE_STRIP:
-        case GL_TRIANGLE_FAN:            *stride = 1; return count > 2 ? count - 2 : 0;
-        case GL_TRIANGLE_STRIP_ADJACENCY: *stride = 2; return count > 5 ? (count - 4) / 2 : 0;
+        // The rest do not take their vertices at a fixed step, and the kernel
+        // knows which order to use by these strides: a strip with adjacency
+        // follows GL 4.6 table 10.1, a loop closes back to its first vertex, a
+        // fan turns about its first, and a strip swaps the first two
+        // vertices of every other triangle to keep them facing the same way.
+        case GL_TRIANGLE_STRIP_ADJACENCY: *stride = -1; return count > 5 ? (count - 4) / 2 : 0;
+        case GL_LINE_LOOP:               *stride = -2; return count > 1 ? count : 0;
+        case GL_TRIANGLE_FAN:            *stride = -3; return count > 2 ? count - 2 : 0;
+        case GL_TRIANGLE_STRIP:          *stride = -4; return count > 2 ? count - 2 : 0;
         default:                         *stride = 1; return count;   // GL_POINTS
     }
 }
@@ -6309,16 +6728,58 @@ static const char *mgl_gs_capture_msl =
     if (prims == 0 || gi->compute_src == NULL)
         return true;
 
-    // Metal's indexed stage-in and this kernel both want 32 bit indices, so a
-    // narrower element buffer is drawn in order instead.
-    bool indexed = src != NULL && src->buffer != nil && src->type == MTLIndexTypeUInt32;
+    bool indexed = src != NULL && src->buffer != nil;
 
     // as above: take the command buffer before the scratch, or the scratch
     // this draw is about to use goes back into the pool
     if ([self liveCommandBuffer] == nil)
         return true;
 
-    NSUInteger in_verts = (NSUInteger)(first > 0 ? first : 0) + (NSUInteger)count;
+    // The kernel reads 32 bit indices, and the vertex stage has to have run
+    // for every vertex one of them names, not just the first `count`.
+    id<MTLBuffer> gs_indices = nil;
+    GLuint top_index = 0;
+
+    if (indexed && !tess)
+    {
+        Buffer *eb = getElementBuffer(ctx);
+        size_t elem = _gsElementType == GL_UNSIGNED_BYTE ? 1 : _gsElementType == GL_UNSIGNED_SHORT ? 2 : 4;
+
+        if (eb == NULL || !eb->data.buffer_data ||
+            _gsElementOffset + (size_t)count * elem > (size_t)eb->size)
+            return true;
+
+        gs_indices = [_scratchPool bufferOfLength: (NSUInteger)count * 4 forCommandBuffer: _currentCommandBuffer];
+
+        if (gs_indices == nil)
+            return true;
+
+        const uint8_t *from = (const uint8_t *)eb->data.buffer_data + _gsElementOffset;
+        uint32_t *to = (uint32_t *)[gs_indices contents];
+        uint32_t restart = 0;
+        bool restarts = restartIndexFor(ctx, elem, &restart);
+
+        for (GLsizei i = 0; i < count; i++)
+        {
+            uint32_t v = elem == 1 ? from[i] : elem == 2 ? ((const uint16_t *)from)[i] : ((const uint32_t *)from)[i];
+
+            // a restart names no vertex, and sizing the capture by it asked
+            // for gigabytes; it reads vertex 0 instead
+            if (restarts && v == restart)
+                v = 0;
+
+            to[i] = v;
+            top_index = MAX(top_index, v);
+        }
+
+        if (top_index >= MGL_MAX_GATHER_VERTICES)
+            return true;
+    }
+
+    // one instance's vertices, and every instance after it sits that far on
+    NSUInteger per_instance = (NSUInteger)(first > 0 ? first : 0) +
+                              (gs_indices ? (NSUInteger)top_index + 1 : (NSUInteger)count);
+    NSUInteger in_verts = per_instance * (NSUInteger)instances;
     NSUInteger slots = (NSUInteger)prims * (NSUInteger)gi->invocations * (NSUInteger)instances;
 
     if (general)
@@ -6366,9 +6827,10 @@ static const char *mgl_gs_capture_msl =
         GLint v;
 
         v = (GLint)prims;   mglWriteProgramUniform(ctx, program, gi->prims_loc, v);
-        v = (indexed && !tess) || general ? 1 : 0; mglWriteProgramUniform(ctx, program, gi->indexed_loc, v);
+        v = gs_indices != nil || general ? 1 : 0; mglWriteProgramUniform(ctx, program, gi->indexed_loc, v);
         v = tess ? 0 : first; mglWriteProgramUniform(ctx, program, gi->first_loc, v);
         v = stride;         mglWriteProgramUniform(ctx, program, gi->stride_loc, v);
+        v = tess ? 0 : (GLint)per_instance; mglWriteProgramUniform(ctx, program, gi->per_instance_loc, v);
     }
 
     // ---- pass one: the vertex stage, or the tessellation stages, capturing ----
@@ -6386,6 +6848,7 @@ static const char *mgl_gs_capture_msl =
 
         [_currentRenderEncoder setRenderPipelineState: _gsCapturePipeline];
         [self bindTessBuffersToRenderEncoder];
+        [self bindTexturesForStageAsVertex: _TESS_EVALUATION_SHADER];
         [_currentRenderEncoder setVertexBuffer: _tessGenCtl offset: 0 atIndex: MGL_TESS_CONTROL_OUT_INDEX];
         [_currentRenderEncoder setVertexBuffer: _tessGenPatch offset: 0 atIndex: MGL_TESS_PATCH_OUT_INDEX];
         [_currentRenderEncoder setVertexBuffer: _tessGenLevels offset: 0 atIndex: MGL_TESS_LEVEL_INDEX];
@@ -6457,7 +6920,8 @@ static const char *mgl_gs_capture_msl =
         [_currentRenderEncoder setVertexBuffer: in_buf offset: 0 atIndex: gi->vs_in_slot];
         [_currentRenderEncoder drawPrimitives: MTLPrimitiveTypePoint
                                   vertexStart: first > 0 ? first : 0
-                                  vertexCount: count];
+                                  vertexCount: gs_indices ? top_index + 1 : (NSUInteger)count
+                                instanceCount: (NSUInteger)instances];
     }
 
     // ---- pass two: the geometry stage ----
@@ -6468,15 +6932,14 @@ static const char *mgl_gs_capture_msl =
 
     [enc setComputePipelineState: _gsComputePipeline];
     [self bindTessBuffers: &ctx->state.geometry_buffer_map_list toComputeEncoder: enc];
+    [self bindTexturesForStage: _GEOMETRY_SHADER toCompute: enc];
     [enc setBuffer: in_buf offset: 0 atIndex: gi->gs_in_slot];
     [enc setBuffer: out_buf offset: 0 atIndex: gi->gs_out_slot];
 
     if (gi->gs_index_slot >= 0 && general)
         [enc setBuffer: _tessGenIndex offset: 0 atIndex: gi->gs_index_slot];
     else if (gi->gs_index_slot >= 0)
-        [enc setBuffer: indexed ? src->buffer : in_buf
-                offset: indexed ? src->offset : 0
-               atIndex: gi->gs_index_slot];
+        [enc setBuffer: gs_indices ? gs_indices : in_buf offset: 0 atIndex: gi->gs_index_slot];
 
     [enc dispatchThreads: MTLSizeMake(slots, 1, 1)
    threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
@@ -6811,10 +7274,9 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
 
 - (void) bindTessVertexBuffersToComputeEncoder: (id<MTLComputeCommandEncoder>) enc
 {
-    GLfloat constants[MAX_ATTRIBS * 4];
+    uint8_t constants[MGL_CONSTANT_ATTRIB_STRIDE];
 
-    for (int i = 0; i < MAX_ATTRIBS; i++)
-        memcpy(&constants[i * 4], ctx->state.attrib_constant[i].v.f, 16);
+    fillAttribConstants(ctx, constants);
 
     [enc setBytes: constants
            length: MGL_CONSTANT_ATTRIB_STRIDE
@@ -7159,6 +7621,7 @@ static const char *mgl_isoline_levels_msl =
 
     [enc setComputePipelineState: indexed ? _tessVertexIndexedPipeline : _tessVertexPipeline];
     [self bindTessVertexBuffersToComputeEncoder: enc];
+    [self bindTexturesForStage: _VERTEX_SHADER toCompute: enc];
     [enc setBuffer: vtx_out offset: 0 atIndex: MGL_TESS_VERTEX_OUT_INDEX];
 
     if (indexed)
@@ -7189,6 +7652,7 @@ static const char *mgl_isoline_levels_msl =
 
         [enc setComputePipelineState: _tessControlPipeline];
             [self bindTessBuffers: &ctx->state.tess_control_buffer_map_list toComputeEncoder: enc];
+            [self bindTexturesForStage: _TESS_CONTROL_SHADER toCompute: enc];
         [enc setBuffer: vtx_out offset: 0 atIndex: MGL_TESS_VERTEX_OUT_INDEX];
         [enc setBuffer: ctl_out offset: 0 atIndex: MGL_TESS_CONTROL_OUT_INDEX];
         [enc setBuffer: patch_out offset: 0 atIndex: MGL_TESS_PATCH_OUT_INDEX];
@@ -7238,6 +7702,7 @@ static const char *mgl_isoline_levels_msl =
 
     [_currentRenderEncoder setRenderPipelineState: pipeline];
     [self bindTessBuffersToRenderEncoder];
+    [self bindTexturesForStageAsVertex: _TESS_EVALUATION_SHADER];
 
     [_currentRenderEncoder setVertexBuffer: ctl_out offset: 0 atIndex: MGL_TESS_CONTROL_OUT_INDEX];
     [_currentRenderEncoder setVertexBuffer: patch_out offset: 0 atIndex: MGL_TESS_PATCH_OUT_INDEX];
@@ -7305,6 +7770,10 @@ static MTLWinding mtlWindingFor(const Program *p)
     // since its vertex function is built to return nothing.
     bool raster_off = ctx->state.caps.rasterizer_discard;
     bool no_fs = program->shader_slots[_FRAGMENT_SHADER] == NULL;
+    bool use_vs_raster = no_fs && !raster_off && program->vs_raster.mtl_function;
+
+    if (use_vs_raster)
+        vertexFunction = (__bridge id<MTLFunction>)(program->vs_raster.mtl_function);
 
     if (!vertexFunction || (!fragmentFunction && !raster_off && !no_fs))
     {
@@ -7360,7 +7829,7 @@ static MTLWinding mtlWindingFor(const Program *p)
     // the raster off. Nothing reaches the fragment stage either way. A
     // geometry program turns its own vertex stage off on purpose -- it only
     // captures -- and draws through the generated pass-through instead.
-    if (!program->geom_shader &&
+    if (!program->geom_shader && !use_vs_raster &&
         program->spirv[program->tess.active ? _TESS_EVALUATION_SHADER : _VERTEX_SHADER].raster_off)
     {
         pipelineStateDescriptor.rasterizationEnabled = NO;
@@ -7483,9 +7952,16 @@ static MTLWinding mtlWindingFor(const Program *p)
                 return NULL;
             }
 
-            format = glTypeSizeToMtlType(VAO_ATTRIB_STATE(i).type,
-                                         VAO_ATTRIB_STATE(i).size,
-                                         VAO_ATTRIB_STATE(i).normalized);
+            // Metal has no double vertex format, so the shader reads each GL
+            // location as raw bits: two doubles make a uint4, one a uint2
+            bool is_double = VAO_ATTRIB_STATE(i).type == GL_DOUBLE && VAO_ATTRIB_STATE(i).is_long;
+
+            if (is_double)
+                format = VAO_ATTRIB_STATE(i).size >= 2 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
+            else
+                format = glTypeSizeToMtlType(VAO_ATTRIB_STATE(i).type,
+                                             VAO_ATTRIB_STATE(i).size,
+                                             VAO_ATTRIB_STATE(i).normalized);
 
             if (format == MTLVertexFormatInvalid)
             {
@@ -7508,6 +7984,16 @@ static MTLWinding mtlWindingFor(const Program *p)
             // the slot is bound at its own offset, so this is the rest of the way in
             vertexDescriptor.attributes[i].offset = attrib_base - slot->offset;
             vertexDescriptor.attributes[i].format = format;
+
+            // a dvec3 or dvec4 is still one GL location; its last doubles
+            // come in at 16 + the location, where the shader looks for them
+            if (is_double && VAO_ATTRIB_STATE(i).size > 2)
+            {
+                vertexDescriptor.attributes[16 + i].bufferIndex = slot->buffer_base_index;
+                vertexDescriptor.attributes[16 + i].offset = attrib_base - slot->offset + 16;
+                vertexDescriptor.attributes[16 + i].format = VAO_ATTRIB_STATE(i).size == 4 ? MTLVertexFormatUInt4
+                                                                                           : MTLVertexFormatUInt2;
+            }
 
             vertexDescriptor.layouts[slot->buffer_base_index].stride = slot->layout_stride;
 
@@ -7543,6 +8029,22 @@ static MTLWinding mtlWindingFor(const Program *p)
             vertexDescriptor.attributes[i].bufferIndex = MGL_CONSTANT_ATTRIB_BUFFER_INDEX;
             vertexDescriptor.attributes[i].offset = i * 16;
             vertexDescriptor.attributes[i].format = format;
+
+            // a double input reads the exact value, as raw bits
+            GLuint rows = doubleInputRowsAt(ctx->state.program, (GLuint)i);
+
+            if (rows)
+            {
+                vertexDescriptor.attributes[i].offset = MGL_CONSTANT_ATTRIB_FLOATS + i * 32;
+                vertexDescriptor.attributes[i].format = rows >= 2 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
+
+                if (rows > 2)
+                {
+                    vertexDescriptor.attributes[16 + i].bufferIndex = MGL_CONSTANT_ATTRIB_BUFFER_INDEX;
+                    vertexDescriptor.attributes[16 + i].offset = MGL_CONSTANT_ATTRIB_FLOATS + i * 32 + 16;
+                    vertexDescriptor.attributes[16 + i].format = rows == 4 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
+                }
+            }
 
             vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stride = MGL_CONSTANT_ATTRIB_STRIDE;
             vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stepRate = 0;
@@ -7973,6 +8475,10 @@ static MTLWinding mtlWindingFor(const Program *p)
     }
 
     //logDirtyBits(ctx);
+
+    // any image cast has to be settled before this draw opens an encoder
+    if (draw_command)
+        [self prepareImageFormatViews: _VERTEX_SHADER last: _FRAGMENT_SHADER];
 
     // gl_NumSamples belongs to the framebuffer, not the application, so its
     // uniform is written here rather than by a glUniform call.
@@ -8484,12 +8990,71 @@ static MTLWinding mtlWindingFor(const Program *p)
 // Uploading a texture needs a blit, which retires whatever encoder is open, so
 // every texture a compute pass reads has to be made resident before its encoder
 // exists.
+static void allowFormatViews(GLMContext glm_ctx, Texture *tex, MTLPixelFormat atomic);
+
+// A texture bound to an image unit as another format of its size has to be
+// remade before Metal will view it that way, which retires any open encoder,
+// so it happens before a draw or dispatch starts one. Atomics go to the
+// texture itself rather than a view, but the remake still matters there: it
+// is what turns off the GPU's lossless compression, and only then are the
+// raw bits the texels' real bytes.
+- (void) prepareImageFormatViews: (int) first_stage last: (int) last_stage
+{
+    Program *program = ctx->state.program;
+
+    if (program == NULL)
+        return;
+
+    for (int stage = first_stage; stage <= last_stage; stage++)
+    {
+        SpirvResourceList *list = &program->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_IMAGE];
+
+        for (GLuint i = 0; i < list->count; i++)
+        {
+            SpirvResource *res = &list->list[i];
+
+            if (res->msl_index == (GLuint)-1)
+                continue;
+
+            for (GLint e = 0; e < (res->array_size > 1 ? res->array_size : 1); e++)
+            {
+                GLint unit = mglResourceUnit(res, e);
+
+                if (unit < 0 || unit >= TEXTURE_UNITS)
+                    continue;
+
+                ImageUnit *iu = &STATE(image_units[unit]);
+                Texture *tex = iu->tex;
+                MTLPixelFormat atomic = !res->atomic ? MTLPixelFormatInvalid :
+                                        iu->internalformat == GL_R32UI ? MTLPixelFormatR32Uint :
+                                        iu->internalformat == GL_R32I ? MTLPixelFormatR32Sint : MTLPixelFormatInvalid;
+
+                if (tex == NULL)
+                    continue;
+
+                // pending uploads go in before the shader can write, or they
+                // land on top of what it wrote. They also remake the texture
+                // from scratch, so a cast remake has to come after them.
+                [self bindMTLTexture: tex];
+
+                if (!tex->format_view_wanted || iu->internalformat == tex->internalformat)
+                    continue;
+
+                if (!textureReadyForCast((__bridge id<MTLTexture>)tex->mtl_data, atomic))
+                    allowFormatViews(ctx, tex, atomic);
+            }
+        }
+    }
+}
+
 - (bool) prepareComputeTextures
 {
     Program *program = ctx->state.program;
 
     if (program == NULL)
         return true;
+
+    [self prepareImageFormatViews: _COMPUTE_SHADER last: _COMPUTE_SHADER];
 
     if (usesBindless(program, _COMPUTE_SHADER, _COMPUTE_SHADER))
         [self refreshBindless];
@@ -8500,12 +9065,25 @@ static MTLWinding mtlWindingFor(const Program *p)
         SpirvResourceList *list = &program->spirv_resources_list[_COMPUTE_SHADER][type];
 
         for (GLuint i = 0; i < list->count; i++)
+        for (GLint e = 0; e < (list->list[i].array_size > 1 ? list->list[i].array_size : 1); e++)
         {
             Texture *tex;
 
-            GLuint unit = [self getProgramTexUnit: _COMPUTE_SHADER type: type index: i];
+            GLint unit = mglResourceUnit(&list->list[i], e);
 
-            tex = kind ? STATE(image_units[unit].tex) : STATE(active_textures[unit]);
+            if (unit < 0 || unit >= TEXTURE_UNITS)
+                continue;
+
+            if (kind)
+                tex = STATE(image_units[unit].tex);
+            else
+            {
+                // the texture of the sampler's own target, not the unit's last
+                GLenum target = targetForSampler(list->list[i].gl_type);
+
+                tex = target ? STATE(texture_units[unit].textures[textureIndexFromTarget(ctx, target)])
+                             : STATE(active_textures[unit]);
+            }
 
             if (tex == NULL)
                 continue;
@@ -8634,8 +9212,10 @@ static MTLWinding mtlWindingFor(const Program *p)
 
 void mtlDispatchCompute(GLMContext glm_ctx, GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDispatchCompute: glm_ctx groupsX:num_groups_x groupsY:num_groups_y groupsZ:num_groups_z];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDispatchCompute: glm_ctx groupsX:num_groups_x groupsY:num_groups_y groupsZ:num_groups_z];
+    }
 }
 
 
@@ -8675,7 +9255,9 @@ void mtlDispatchCompute(GLMContext glm_ctx, GLuint num_groups_x, GLuint num_grou
 
 void mtlMemoryBarrier(GLMContext glm_ctx, GLbitfield barriers)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMemoryBarrier: glm_ctx barriers: barriers];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMemoryBarrier: glm_ctx barriers: barriers];
+    }
 }
 
 -(void)mtlDispatchComputeIndirect:(GLMContext)glm_ctx indirect:(GLintptr)indirect
@@ -8685,7 +9267,9 @@ void mtlMemoryBarrier(GLMContext glm_ctx, GLbitfield barriers)
 
 void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDispatchComputeIndirect: glm_ctx indirect:indirect];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDispatchComputeIndirect: glm_ctx indirect:indirect];
+    }
 }
 
 
@@ -8876,44 +9460,56 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
 #pragma mark C interface to mtlBindBuffer
 void mtlBindBuffer(GLMContext glm_ctx, Buffer *ptr)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindMTLBuffer:ptr];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindMTLBuffer:ptr];
+    }
 }
 
 #pragma mark C interface to mtlSetSwapInterval
 void mtlSetSwapInterval(GLMContext glm_ctx, int interval)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlSetSwapInterval: interval];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlSetSwapInterval: interval];
+    }
 }
 
 #pragma mark C interface to bindless
 GLuint mtlBindlessSampler(GLMContext glm_ctx, TextureParameter *params, GLenum target)
 {
-    return [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindlessSamplerSlot: params target: target];
+    @autoreleasepool {
+        return [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindlessSamplerSlot: params target: target];
+    }
 }
 
 void mtlBindlessRelease(GLMContext glm_ctx, MglHandle *h)
 {
-    if (h->mtl_texture)
-        CFBridgingRelease(h->mtl_texture);
+    @autoreleasepool {
+        if (h->mtl_texture)
+            CFBridgingRelease(h->mtl_texture);
 
-    h->mtl_texture = NULL;
-    h->mtl_base = NULL;
+        h->mtl_texture = NULL;
+        h->mtl_base = NULL;
+    }
 }
 
 #pragma mark C interface to mtlBindTexture
 void mtlBindTexture(GLMContext glm_ctx, Texture *ptr)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindMTLTexture:ptr];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindMTLTexture:ptr];
+    }
 }
 
 #pragma mark C interface to mtlBindProgram
 bool mtlBindProgram(GLMContext glm_ctx, Program *ptr)
 {
-    // the result says whether Metal accepted the MSL -- dropping it is how a
-    // broken program used to report a successful link and then draw nothing
-    return [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindMTLProgram:ptr];
+    @autoreleasepool {
+        // the result says whether Metal accepted the MSL -- dropping it is how a
+        // broken program used to report a successful link and then draw nothing
+        return [(__bridge id) glm_ctx->mtl_funcs.mtlObj bindMTLProgram:ptr];
+    }
 }
 
 #pragma mark C interface to mtlDeleteMTLObj
@@ -8929,8 +9525,10 @@ bool mtlBindProgram(GLMContext glm_ctx, Program *ptr)
 
 void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDeleteMTLObj: glm_ctx buffer: obj];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDeleteMTLObj: glm_ctx buffer: obj];
+    }
 }
 
 #pragma mark C interface to mtlGetSync
@@ -9025,8 +9623,10 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
 
 void mtlGetSync (GLMContext glm_ctx, Sync *sync)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlGetSync: glm_ctx sync: sync];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlGetSync: glm_ctx sync: sync];
+    }
 }
 
 #pragma mark C interface to mtlWaitForSync
@@ -9063,8 +9663,10 @@ void mtlGetSync (GLMContext glm_ctx, Sync *sync)
 
 void mtlWaitForSync (GLMContext glm_ctx, Sync *sync)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlWaitForSync: glm_ctx sync: sync];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlWaitForSync: glm_ctx sync: sync];
+    }
 }
 
 #pragma mark C interface to mtlForgetSync
@@ -9096,7 +9698,9 @@ void mtlWaitForSync (GLMContext glm_ctx, Sync *sync)
 
 void mtlForgetSync (GLMContext glm_ctx, Sync *sync)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlForgetSync: glm_ctx sync: sync];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlForgetSync: glm_ctx sync: sync];
+    }
 }
 
 extern Texture *findTexture(GLMContext ctx, GLuint texture);
@@ -9158,17 +9762,23 @@ extern Buffer *findBuffer(GLMContext ctx, GLuint buffer);
 
 void mtlPushDebugGroup (GLMContext glm_ctx, const char *name)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlPushDebugGroup: glm_ctx name: name];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlPushDebugGroup: glm_ctx name: name];
+    }
 }
 
 void mtlPopDebugGroup (GLMContext glm_ctx)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlPopDebugGroup: glm_ctx];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlPopDebugGroup: glm_ctx];
+    }
 }
 
 void mtlLabelObject (GLMContext glm_ctx, GLenum identifier, GLuint name, const char *label)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlLabelObject: glm_ctx identifier: identifier name: name label: label];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlLabelObject: glm_ctx identifier: identifier name: name label: label];
+    }
 }
 
 #pragma mark C interface to mtlFlush
@@ -9179,23 +9789,31 @@ void mtlLabelObject (GLMContext glm_ctx, GLenum identifier, GLuint name, const c
 
 void mtlQueryBegin (GLMContext glm_ctx, Query *q)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj beginOcclusionCountingOnEncoder];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj beginOcclusionCountingOnEncoder];
+    }
 }
 
 void mtlQueryEnd (GLMContext glm_ctx, Query *q)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj endOcclusionCountingOnEncoder];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj endOcclusionCountingOnEncoder];
+    }
 }
 
 void mtlQueryResult (GLMContext glm_ctx, Query *q)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj collectOcclusionQuery: q];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj collectOcclusionQuery: q];
+    }
 }
 
 void mtlFlush (GLMContext glm_ctx, bool finish)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlFlush:glm_ctx finish:finish];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlFlush:glm_ctx finish:finish];
+    }
 }
 
 #pragma mark C interface to mtlSwapBuffers
@@ -9320,27 +9938,29 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
 
 void mtlSwapBuffers (GLMContext glm_ctx)
 {
-    // CRITICAL FIX: Validate context and Metal object pointer before dereferencing
-    // This prevents pointer authentication failures from corrupted pointers
-    if (!glm_ctx) {
-        MGL_NSERR(@"MGL CRITICAL: mtlSwapBuffers - GLM context is NULL");
-        return;
-    }
-
-    // Validate the Metal object pointer (realistic bounds for 64-bit systems)
-    if (!glm_ctx->mtl_funcs.mtlObj || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj < 0x1000) || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj > 0x100000000000ULL)) {
-        MGL_NSERR(@"MGL CRITICAL: mtlSwapBuffers - Invalid Metal object pointer: %p", glm_ctx->mtl_funcs.mtlObj);
-        MGL_NSERR(@"MGL CRITICAL: This indicates memory corruption or context destruction");
-        return;
-    }
-
-    // Call the Objective-C method using Objective-C syntax
     @autoreleasepool {
-        @try {
-            [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlSwapBuffers: glm_ctx];
-        } @catch (NSException *exception) {
-            MGL_NSERR(@"MGL CRITICAL: mtlSwapBuffers - Exception caught: %@", exception);
-            MGL_NSERR(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
+        // CRITICAL FIX: Validate context and Metal object pointer before dereferencing
+        // This prevents pointer authentication failures from corrupted pointers
+        if (!glm_ctx) {
+            MGL_NSERR(@"MGL CRITICAL: mtlSwapBuffers - GLM context is NULL");
+            return;
+        }
+
+        // Validate the Metal object pointer (realistic bounds for 64-bit systems)
+        if (!glm_ctx->mtl_funcs.mtlObj || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj < 0x1000) || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj > 0x100000000000ULL)) {
+            MGL_NSERR(@"MGL CRITICAL: mtlSwapBuffers - Invalid Metal object pointer: %p", glm_ctx->mtl_funcs.mtlObj);
+            MGL_NSERR(@"MGL CRITICAL: This indicates memory corruption or context destruction");
+            return;
+        }
+
+        // Call the Objective-C method using Objective-C syntax
+        @autoreleasepool {
+            @try {
+                [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlSwapBuffers: glm_ctx];
+            } @catch (NSException *exception) {
+                MGL_NSERR(@"MGL CRITICAL: mtlSwapBuffers - Exception caught: %@", exception);
+                MGL_NSERR(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
+            }
         }
     }
 }
@@ -9353,8 +9973,10 @@ void mtlSwapBuffers (GLMContext glm_ctx)
 
 void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlClearBuffer: glm_ctx type: type mask: mask];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlClearBuffer: glm_ctx type: type mask: mask];
+    }
 }
 
 #pragma mark C interface to mtlBufferSubData
@@ -9392,8 +10014,10 @@ void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
 
 void mtlBufferSubData(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, const void *ptr)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlBufferSubData: glm_ctx buf: buf offset:offset size:size ptr:ptr];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlBufferSubData: glm_ctx buf: buf offset:offset size:size ptr:ptr];
+    }
 }
 
 #pragma mark C interface to mtlMapUnmapBuffer
@@ -9420,8 +10044,10 @@ void mtlBufferSubData(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t siz
 
 void *mtlMapUnmapBuffer(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, GLenum access, bool map)
 {
-    // Call the Objective-C method using Objective-C syntax
-    return [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMapUnmapBuffer: glm_ctx buf: buf offset: offset size: size access: access map: map];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        return [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMapUnmapBuffer: glm_ctx buf: buf offset: offset size: size access: access map: map];
+    }
 }
 
 #pragma mark C interface to mtlFlushMappedBufferRange
@@ -9436,8 +10062,10 @@ void *mtlMapUnmapBuffer(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t s
 
 void mtlFlushBufferRange(GLMContext glm_ctx, Buffer *buf, GLintptr offset, GLsizeiptr length)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlFlushMappedBufferRange: glm_ctx buf: buf offset: offset length: length];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlFlushMappedBufferRange: glm_ctx buf: buf offset: offset length: length];
+    }
 }
 
 
@@ -9566,6 +10194,77 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
     return nil;
 }
 
+static bool isCombinedDepthStencil(MTLPixelFormat f)
+{
+    return f == MTLPixelFormatDepth32Float_Stencil8 || f == MTLPixelFormatDepth24Unorm_Stencil8;
+}
+
+// Metal copies a combined depth-stencil texture out one plane at a time, so
+// both planes come out and are put back together in the layout the pixel
+// conversion expects: a float and a stencil byte in 8 bytes, or 24 bits of
+// depth under the stencil in 4.
+- (bool) readDepthStencil: (id<MTLTexture>) texture slice: (NSUInteger) slice level: (NSUInteger) level
+                   origin: (MTLOrigin) origin width: (NSUInteger) w height: (NSUInteger) h
+                     into: (id<MTLBuffer>) staging pitch: (NSUInteger) staging_pitch bpp: (GLuint) bpp
+{
+    NSUInteger d_pitch = ((w * 4) + 255) & ~(NSUInteger)255;
+    NSUInteger s_pitch = (w + 255) & ~(NSUInteger)255;
+    id<MTLBuffer> dplane = [_device newBufferWithLength: d_pitch * h options: MTLResourceStorageModeShared];
+    id<MTLBuffer> splane = [_device newBufferWithLength: s_pitch * h options: MTLResourceStorageModeShared];
+
+    if (!dplane || !splane)
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_OUT_OF_MEMORY);
+        return false;
+    }
+
+    if (_currentCommandBuffer == nil)
+        [self newCommandBuffer];
+
+    id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
+
+    [blit copyFromTexture: texture sourceSlice: slice sourceLevel: level sourceOrigin: origin
+               sourceSize: MTLSizeMake(w, h, 1) toBuffer: dplane destinationOffset: 0
+   destinationBytesPerRow: d_pitch destinationBytesPerImage: d_pitch * h
+                  options: MTLBlitOptionDepthFromDepthStencil];
+    [blit copyFromTexture: texture sourceSlice: slice sourceLevel: level sourceOrigin: origin
+               sourceSize: MTLSizeMake(w, h, 1) toBuffer: splane destinationOffset: 0
+   destinationBytesPerRow: s_pitch destinationBytesPerImage: s_pitch * h
+                  options: MTLBlitOptionStencilFromDepthStencil];
+    [blit endEncoding];
+
+    [_currentCommandBuffer commit];
+    [_currentCommandBuffer waitUntilCompleted];
+    _currentCommandBuffer = nil;
+
+    uint8_t *out = (uint8_t *)[staging contents];
+
+    for (NSUInteger y = 0; y < h; y++)
+        for (NSUInteger x = 0; x < w; x++)
+        {
+            const uint8_t *d = (const uint8_t *)[dplane contents] + y * d_pitch + x * 4;
+            uint8_t st = ((const uint8_t *)[splane contents])[y * s_pitch + x];
+            uint8_t *px = out + y * staging_pitch + x * bpp;
+
+            if (bpp == 8)
+            {
+                memcpy(px, d, 4);
+                px[4] = st;
+                px[5] = px[6] = px[7] = 0;
+            }
+            else
+            {
+                uint32_t v;
+
+                memcpy(&v, d, 4);
+                v = (v & 0xFFFFFFu) | ((uint32_t)st << 24);
+                memcpy(px, &v, 4);
+            }
+        }
+
+    return true;
+}
+
 -(void) mtlReadPixels:(GLMContext) glm_ctx
            pixelBytes:(void *)pixelBytes
           bytesPerRow:(NSUInteger)bytesPerRow
@@ -9626,31 +10325,40 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
         return;
     }
 
-    if (_currentCommandBuffer == nil)
-        [self newCommandBuffer];
+    if (isCombinedDepthStencil(src.pixelFormat))
+    {
+        if (![self readDepthStencil: src slice: 0 level: 0 origin: MTLOriginMake(x, flipped_y, 0)
+                              width: w height: h into: staging pitch: staging_pitch bpp: bpp])
+            return;
+    }
+    else
+    {
+        if (_currentCommandBuffer == nil)
+            [self newCommandBuffer];
 
-    id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
+        id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
 
-    [blit copyFromTexture: src
-              sourceSlice: 0
-              sourceLevel: 0
-             sourceOrigin: MTLOriginMake(x, flipped_y, 0)
-               sourceSize: MTLSizeMake(w, h, 1)
-                 toBuffer: staging
-        destinationOffset: 0
-   destinationBytesPerRow: staging_pitch
- destinationBytesPerImage: staging_size];
+        [blit copyFromTexture: src
+                  sourceSlice: 0
+                  sourceLevel: 0
+                 sourceOrigin: MTLOriginMake(x, flipped_y, 0)
+                   sourceSize: MTLSizeMake(w, h, 1)
+                     toBuffer: staging
+            destinationOffset: 0
+       destinationBytesPerRow: staging_pitch
+     destinationBytesPerImage: staging_size];
 
-    // the staging buffer is Shared, and synchronizeResource is only legal on
-    // Managed -- Metal's validation layer asserts on it
-    if ([staging storageMode] == MTLStorageModeManaged)
-        [blit synchronizeResource: staging];
+        // the staging buffer is Shared, and synchronizeResource is only legal on
+        // Managed -- Metal's validation layer asserts on it
+        if ([staging storageMode] == MTLStorageModeManaged)
+            [blit synchronizeResource: staging];
 
-    [blit endEncoding];
+        [blit endEncoding];
 
-    [_currentCommandBuffer commit];
-    [_currentCommandBuffer waitUntilCompleted];
-    _currentCommandBuffer = nil;
+        [_currentCommandBuffer commit];
+        [_currentCommandBuffer waitUntilCompleted];
+        _currentCommandBuffer = nil;
+    }
 
     if (!mglConvertPixels([staging contents], staging_pitch, nf,
                           pixelBytes, bytesPerRow, format, type,
@@ -9692,6 +10400,12 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
         return;
     }
 
+    // A cast texture is a view, and shaders write the storage under it.
+    // Metal orders work by the object it names, so a copy out of the view
+    // does not wait for them; everything queued has to finish first.
+    if (texture.parentTexture)
+        [self flushCommandBuffer: true];
+
     NSUInteger w = region.size.width;
     NSUInteger h = region.size.height;
     GLuint bpp = mglNativeFormatBytesPerPixel(nf);
@@ -9706,11 +10420,6 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
         return;
     }
 
-    if (_currentCommandBuffer == nil)
-        [self newCommandBuffer];
-
-    id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
-
     // An array texture keeps its layers in slices; a 3D texture has one slice
     // and counts depth in the origin instead. Asking a 3D texture for slice N
     // read image zero back every time.
@@ -9723,37 +10432,19 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
         source_slice = 0;
     }
 
-    // A combined depth-stencil texture comes out as two planes, which are
-    // put back together in the layout the conversion expects.
-    bool split = texture.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
-                 texture.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8;
-    NSUInteger d_pitch = ((w * 4) + 255) & ~(NSUInteger)255;
-    NSUInteger s_pitch = (w + 255) & ~(NSUInteger)255;
-    id<MTLBuffer> dplane = nil, splane = nil;
-
-    if (split)
+    if (isCombinedDepthStencil(texture.pixelFormat))
     {
-        dplane = [_device newBufferWithLength: d_pitch * h options: MTLResourceStorageModeShared];
-        splane = [_device newBufferWithLength: s_pitch * h options: MTLResourceStorageModeShared];
-
-        if (!dplane || !splane)
-        {
-            [blit endEncoding];
-            ctx->error_func(ctx, __FUNCTION__, GL_OUT_OF_MEMORY);
+        if (![self readDepthStencil: texture slice: source_slice level: level origin: origin
+                              width: w height: h into: staging pitch: staging_pitch bpp: bpp])
             return;
-        }
-
-        [blit copyFromTexture: texture sourceSlice: source_slice sourceLevel: level sourceOrigin: origin
-                   sourceSize: MTLSizeMake(w, h, 1) toBuffer: dplane destinationOffset: 0
-       destinationBytesPerRow: d_pitch destinationBytesPerImage: d_pitch * h
-                      options: MTLBlitOptionDepthFromDepthStencil];
-        [blit copyFromTexture: texture sourceSlice: source_slice sourceLevel: level sourceOrigin: origin
-                   sourceSize: MTLSizeMake(w, h, 1) toBuffer: splane destinationOffset: 0
-       destinationBytesPerRow: s_pitch destinationBytesPerImage: s_pitch * h
-                      options: MTLBlitOptionStencilFromDepthStencil];
     }
     else
     {
+        if (_currentCommandBuffer == nil)
+            [self newCommandBuffer];
+
+        id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
+
         [blit copyFromTexture: texture
                   sourceSlice: source_slice
                   sourceLevel: level
@@ -9763,40 +10454,12 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
             destinationOffset: 0
        destinationBytesPerRow: staging_pitch
      destinationBytesPerImage: staging_size];
-    }
 
-    [blit endEncoding];
+        [blit endEncoding];
 
-    [_currentCommandBuffer commit];
-    [_currentCommandBuffer waitUntilCompleted];
-    _currentCommandBuffer = nil;
-
-    if (split)
-    {
-        uint8_t *out = (uint8_t *)[staging contents];
-
-        for (NSUInteger y = 0; y < h; y++)
-            for (NSUInteger x = 0; x < w; x++)
-            {
-                const uint8_t *d = (const uint8_t *)[dplane contents] + y * d_pitch + x * 4;
-                uint8_t st = ((const uint8_t *)[splane contents])[y * s_pitch + x];
-                uint8_t *px = out + y * staging_pitch + x * bpp;
-
-                if (bpp == 8)
-                {
-                    memcpy(px, d, 4);
-                    px[4] = st;
-                    px[5] = px[6] = px[7] = 0;
-                }
-                else
-                {
-                    uint32_t v;
-
-                    memcpy(&v, d, 4);
-                    v = (v & 0xFFFFFFu) | ((uint32_t)st << 24);
-                    memcpy(px, &v, 4);
-                }
-            }
+        [_currentCommandBuffer commit];
+        [_currentCommandBuffer waitUntilCompleted];
+        _currentCommandBuffer = nil;
     }
 
     // GetTexImage keeps the texture's own top-down row order
@@ -9812,12 +10475,34 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
 
 void mtlReadPixels(GLMContext glm_ctx, void *pixelBytes, GLuint bytesPerRow, GLenum format, GLenum type, GLint x, GLint y, GLsizei width, GLsizei height)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlReadPixels:glm_ctx pixelBytes:pixelBytes bytesPerRow:bytesPerRow format:format type:type fromRegion:MTLRegionMake2D(x,y,width,height)];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlReadPixels:glm_ctx pixelBytes:pixelBytes bytesPerRow:bytesPerRow format:format type:type fromRegion:MTLRegionMake2D(x,y,width,height)];
+    }
+}
+
+static void allowFormatViews(GLMContext glm_ctx, Texture *tex, MTLPixelFormat atomic)
+{
+    MGLRenderer *r = (__bridge MGLRenderer *)glm_ctx->mtl_funcs.mtlObj;
+
+    tex->format_view = GL_TRUE;
+
+    // one already made without what the unit needs is remade, contents and all
+    if (tex->mtl_data && !textureReadyForCast((__bridge id<MTLTexture>)tex->mtl_data, atomic))
+        [r remakeForFormatViews: tex atomic: atomic];
+}
+
+void mtlAllowFormatViews(GLMContext glm_ctx, Texture *tex)
+{
+    @autoreleasepool {
+        allowFormatViews(glm_ctx, tex, MTLPixelFormatInvalid);
+    }
 }
 
 void mtlGetTexImage(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint bytesPerRow, GLenum format, GLenum type, GLint x, GLint y, GLsizei width, GLsizei height, GLuint level, GLuint slice)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlGetTexImage:glm_ctx tex:tex pixelBytes:pixelBytes bytesPerRow:bytesPerRow format:format type:type fromRegion:MTLRegionMake2D(x,y,width,height) mipmapLevel:level slice:slice];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlGetTexImage:glm_ctx tex:tex pixelBytes:pixelBytes bytesPerRow:bytesPerRow format:format type:type fromRegion:MTLRegionMake2D(x,y,width,height) mipmapLevel:level slice:slice];
+    }
 }
 
 
@@ -9849,7 +10534,9 @@ void mtlGetTexImage(GLMContext glm_ctx, Texture *tex, void *pixelBytes, GLuint b
 
 void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlGenerateMipmaps:glm_ctx forTexture:tex];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlGenerateMipmaps:glm_ctx forTexture:tex];
+    }
 }
 
 
@@ -9893,7 +10580,9 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
 
 void mtlTexSubImage(GLMContext glm_ctx, Texture *tex, Buffer *buf, size_t src_offset, size_t src_pitch, size_t src_image_size, size_t src_size, GLuint slice, GLuint level, size_t width, size_t height, size_t depth, size_t xoffset, size_t yoffset, size_t zoffset)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlTexSubImage:glm_ctx tex:tex buf:buf src_offset:src_offset src_pitch:src_pitch src_image_size:src_image_size src_size:src_size slice:slice level:level width:width height:height depth:depth xoffset:xoffset yoffset:yoffset zoffset:zoffset];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlTexSubImage:glm_ctx tex:tex buf:buf src_offset:src_offset src_pitch:src_pitch src_image_size:src_image_size src_size:src_size slice:slice level:level width:width height:height depth:depth xoffset:xoffset yoffset:yoffset zoffset:zoffset];
+    }
 }
 
 #pragma mark utility functions for draw commands
@@ -10070,6 +10759,10 @@ Buffer *getIndirectBuffer(GLMContext ctx)
     if ([self processBuffer: gl_element_buffer] == false)
         return false;
 
+    // the geometry path reads the application's own indices on the CPU
+    _gsElementType = type;
+    _gsElementOffset = offset;
+
     id<MTLBuffer> indexBuffer = (__bridge id<MTLBuffer>)(gl_element_buffer->data.mtl_data);
     MTL_CHECK_RETURN_FALSE(indexBuffer, GL_OUT_OF_MEMORY);
 
@@ -10169,7 +10862,7 @@ Buffer *getIndirectBuffer(GLMContext ctx)
         return; // Early return to prevent crash
     }
 
-    [self updateTransformFeedbackUniforms: first];
+    [self updateTransformFeedbackUniforms: first count: count];
     [self countDrawnPrimitives: mode count: count instances: 1];
     [self setDrawTopologyForMode: mode];
     if ([self processGLState: true] == false) {
@@ -10184,7 +10877,7 @@ Buffer *getIndirectBuffer(GLMContext ctx)
     }
 
     {
-        GLuint recorded = [self setUpTransformFeedback: mode count: count first: first];
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: first instances: 1];
 
         if (ctx->state.transform_feedback)
             ctx->state.transform_feedback->vertices_recorded += recorded;
@@ -10216,30 +10909,41 @@ Buffer *getIndirectBuffer(GLMContext ctx)
 
 void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
 {
-    // FINAL FAILSAFE: Catch any unhandled exceptions to prevent QEMU crashes
-    @try {
-        // Validate context before bridging (realistic bounds for 64-bit systems)
-        if (!glm_ctx || ((uintptr_t)glm_ctx < 0x1000) || ((uintptr_t)glm_ctx > 0x100000000000ULL)) {
-            MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Invalid GLM context, aborting operation");
-            return;
-        }
+    @autoreleasepool {
+        // FINAL FAILSAFE: Catch any unhandled exceptions to prevent QEMU crashes
+        @try {
+            // Validate context before bridging (realistic bounds for 64-bit systems)
+            if (!glm_ctx || ((uintptr_t)glm_ctx < 0x1000) || ((uintptr_t)glm_ctx > 0x100000000000ULL)) {
+                MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Invalid GLM context, aborting operation");
+                return;
+            }
 
-        // Validate the Metal object pointer (realistic bounds for 64-bit systems)
-        if (!glm_ctx->mtl_funcs.mtlObj || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj < 0x1000) || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj > 0x100000000000ULL)) {
-            MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Invalid Metal object, aborting operation");
-            return;
-        }
+            // Validate the Metal object pointer (realistic bounds for 64-bit systems)
+            if (!glm_ctx->mtl_funcs.mtlObj || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj < 0x1000) || ((uintptr_t)glm_ctx->mtl_funcs.mtlObj > 0x100000000000ULL)) {
+                MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Invalid Metal object, aborting operation");
+                return;
+            }
 
-        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawArrays: glm_ctx mode: mode first: first count: count];
-    } @catch (NSException *exception) {
-        MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Unhandled exception caught: %@", exception);
-        MGL_NSERR(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
-        MGL_NSERR(@"MGL CRITICAL: This is a failsafe to prevent QEMU crashes");
-        // Don't crash, just return gracefully
-    } @catch (id exception) {
-        MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Unknown exception caught: %@", exception);
-        // Final safety net
+            [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawArrays: glm_ctx mode: mode first: first count: count];
+        } @catch (NSException *exception) {
+            MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Unhandled exception caught: %@", exception);
+            MGL_NSERR(@"MGL CRITICAL: Exception reason: %@", [exception reason]);
+            MGL_NSERR(@"MGL CRITICAL: This is a failsafe to prevent QEMU crashes");
+            // Don't crash, just return gracefully
+        } @catch (id exception) {
+            MGL_NSERR(@"MGL CRITICAL: mtlDrawArrays - Unknown exception caught: %@", exception);
+            // Final safety net
+        }
     }
+}
+
+// A geometry shader reads its vertices through the element list itself, so
+// an element draw hands it one even in the modes Metal cannot draw.
+static bool geometryReadsIndices(GLMContext ctx)
+{
+    Program *p = ctx->state.program;
+
+    return p && mglProgramHasGeometry(p) && !p->tess.active;
 }
 
 #pragma mark C interface to mtlDrawElements
@@ -10248,17 +10952,18 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
-    [self updateTransformFeedbackUniforms: 0];
+    [self updateTransformFeedbackUniforms: 0 count: count];
+    [self prepareFeedbackGather: mode count: (GLsizei)count instances: 1 basevertex: 0];
     [self countDrawnPrimitives: mode count: count instances: 1];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     {
-        GLuint recorded = [self setUpTransformFeedback: mode count: count first: 0];
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: 0 instances: 1];
 
         if (ctx->state.transform_feedback)
             ctx->state.transform_feedback->vertices_recorded += recorded;
@@ -10285,12 +10990,16 @@ void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
 
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType
                                      indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1];
+
+    [self finishFeedbackGather];
 }
 
 void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElements: glm_ctx mode: mode count: count type: type indices: indices];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElements: glm_ctx mode: mode count: count type: type indices: indices];
+    }
 }
 
 
@@ -10300,12 +11009,21 @@ void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self updateTransformFeedbackUniforms: 0 count: count];
+    [self prepareFeedbackGather: mode count: (GLsizei)count instances: 1 basevertex: 0];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: 0 instances: 1];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self drawGeometry: mode count: count first: 0 instances: 1 indices: &src])
         return;
@@ -10333,11 +11051,15 @@ void mtlDrawElements(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type
 
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType
                                      indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1];
+
+    [self finishFeedbackGather];
 }
 
 void mtlDrawRangeElements(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawRangeElements: glm_ctx mode: mode start: start end: end count: count type: type indices: indices];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawRangeElements: glm_ctx mode: mode start: start end: end count: count type: type indices: indices];
+    }
 }
 
 
@@ -10346,13 +11068,13 @@ void mtlDrawRangeElements(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint 
 {
     MTLPrimitiveType primitiveType;
 
-    [self updateTransformFeedbackUniforms: first];
+    [self updateTransformFeedbackUniforms: first count: count];
     [self countDrawnPrimitives: mode count: count instances: 1];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
     {
-        GLuint recorded = [self setUpTransformFeedback: mode count: count first: first];
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: first instances: instancecount];
 
         if (ctx->state.transform_feedback)
             ctx->state.transform_feedback->vertices_recorded += recorded;
@@ -10374,7 +11096,9 @@ void mtlDrawRangeElements(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint 
 
 void mtlDrawArraysInstanced(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count, GLsizei instancecount)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawArraysInstanced: glm_ctx mode: mode first: first count: count instancecount: instancecount];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawArraysInstanced: glm_ctx mode: mode first: first count: count instancecount: instancecount];
+    }
 }
 
 
@@ -10384,12 +11108,21 @@ void mtlDrawArraysInstanced(GLMContext glm_ctx, GLenum mode, GLint first, GLsize
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self updateTransformFeedbackUniforms: 0 count: count];
+    [self prepareFeedbackGather: mode count: (GLsizei)count instances: instancecount basevertex: 0];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: 0 instances: instancecount];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self drawGeometry: mode count: count first: 0 instances: instancecount indices: &src])
         return;
@@ -10414,11 +11147,15 @@ void mtlDrawArraysInstanced(GLMContext glm_ctx, GLenum mode, GLint first, GLsize
     //
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType
                                      indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:instancecount];
+
+    [self finishFeedbackGather];
 }
 
 void mtlDrawElementsInstanced(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsInstanced: glm_ctx mode: mode count: count type: type indices: indices instancecount: instancecount];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsInstanced: glm_ctx mode: mode count: count type: type indices: indices instancecount: instancecount];
+    }
 }
 
 
@@ -10428,12 +11165,21 @@ void mtlDrawElementsInstanced(GLMContext glm_ctx, GLenum mode, GLsizei count, GL
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self updateTransformFeedbackUniforms: basevertex count: count];
+    [self prepareFeedbackGather: mode count: (GLsizei)count instances: 1 basevertex: basevertex];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: basevertex instances: 1];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self drawGeometry: mode count: count first: basevertex instances: 1 indices: &src])
         return;
@@ -10455,11 +11201,15 @@ void mtlDrawElementsInstanced(GLMContext glm_ctx, GLenum mode, GLsizei count, GL
     size_t offset = src.offset;
 
     [_currentRenderEncoder drawIndexedPrimitives: primitiveType indexCount:count indexType: indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1 baseVertex:basevertex baseInstance:0];
+
+    [self finishFeedbackGather];
 }
 
 void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsBaseVertex: glm_ctx mode: mode count: count type: type indices: indices basevertex: basevertex];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsBaseVertex: glm_ctx mode: mode count: count type: type indices: indices basevertex: basevertex];
+    }
 }
 
 
@@ -10469,12 +11219,21 @@ void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, G
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self updateTransformFeedbackUniforms: basevertex count: count];
+    [self prepareFeedbackGather: mode count: (GLsizei)count instances: 1 basevertex: basevertex];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: basevertex instances: 1];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self drawGeometry: mode count: count first: basevertex instances: 1 indices: &src])
         return;
@@ -10501,11 +11260,15 @@ void mtlDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, G
     (void)end;
 
     [_currentRenderEncoder drawIndexedPrimitives: primitiveType indexCount:count indexType: indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:1 baseVertex:basevertex baseInstance:0];
+
+    [self finishFeedbackGather];
 }
 
 void mtlDrawRangeElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices, GLint basevertex)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawRangeElementsBaseVertex:glm_ctx mode:mode start: start end: end count: count type: type indices: indices basevertex:basevertex];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawRangeElementsBaseVertex:glm_ctx mode:mode start: start end: end count: count type: type indices: indices basevertex:basevertex];
+    }
 }
 
 
@@ -10515,12 +11278,21 @@ void mtlDrawRangeElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLuint star
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self updateTransformFeedbackUniforms: basevertex count: count];
+    [self prepareFeedbackGather: mode count: (GLsizei)count instances: instancecount basevertex: basevertex];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: basevertex instances: instancecount];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self drawGeometry: mode count: count first: basevertex instances: instancecount indices: &src])
         return;
@@ -10539,11 +11311,15 @@ void mtlDrawRangeElementsBaseVertex(GLMContext glm_ctx, GLenum mode, GLuint star
     size_t offset = src.offset;
 
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:instancecount baseVertex:basevertex baseInstance:0];
+
+    [self finishFeedbackGather];
 }
 
 void mtlDrawElementsInstancedBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsInstancedBaseVertex:glm_ctx mode:mode count:count type:type indices:indices instancecount:instancecount basevertex:basevertex];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsInstancedBaseVertex:glm_ctx mode:mode count:count type:type indices:indices instancecount:instancecount basevertex:basevertex];
+    }
 }
 
 #pragma mark C interface to mtlDrawArraysIndirect
@@ -10603,7 +11379,9 @@ void mtlDrawElementsInstancedBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei
 
 void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawArraysIndirect:glm_ctx mode:mode indirect:indirect];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawArraysIndirect:glm_ctx mode:mode indirect:indirect];
+    }
 }
 
 
@@ -10656,7 +11434,9 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
 
 void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const void *indirect)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsIndirect:glm_ctx mode:mode type:type indirect:indirect];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsIndirect:glm_ctx mode:mode type:type indirect:indirect];
+    }
 }
 
 
@@ -10665,8 +11445,16 @@ void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const
 {
     MTLPrimitiveType primitiveType;
 
+    [self updateTransformFeedbackUniforms: first count: count];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: first instances: instancecount];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self expandDraw:mode count:count type:0 indices:NULL instanceCount:instancecount baseVertex:first baseInstance:baseinstance])
         return;
@@ -10678,7 +11466,9 @@ void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const
 
 void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawArraysInstancedBaseInstance:glm_ctx mode:mode first:first count:count instancecount:instancecount baseinstance:baseinstance];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawArraysInstancedBaseInstance:glm_ctx mode:mode first:first count:count instancecount:instancecount baseinstance:baseinstance];
+    }
 }
 
 
@@ -10688,12 +11478,21 @@ void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint f
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self updateTransformFeedbackUniforms: 0 count: count];
+    [self prepareFeedbackGather: mode count: (GLsizei)count instances: instancecount basevertex: 0];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: 0 instances: instancecount];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:instancecount baseVertex:0 baseInstance:baseinstance])
         return;
@@ -10711,11 +11510,15 @@ void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint f
     // to much memory down.. like a million point galaxy drawing
     //
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:instancecount baseVertex:0 baseInstance:baseinstance];
+
+    [self finishFeedbackGather];
 }
 
 void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLuint baseinstance)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsInstancedBaseInstance:glm_ctx mode:mode count:count type:type indices:indices instancecount:instancecount baseinstance:baseinstance];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsInstancedBaseInstance:glm_ctx mode:mode count:count type:type indices:indices instancecount:instancecount baseinstance:baseinstance];
+    }
 }
 
 
@@ -10726,12 +11529,21 @@ void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsiz
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: (size_t)(uintptr_t)indices count: count into: &src] == false)
         return;
 
+    [self updateTransformFeedbackUniforms: basevertex count: count];
+    [self prepareFeedbackGather: mode count: count instances: instancecount basevertex: basevertex];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
+
+    {
+        GLuint recorded = [self setUpTransformFeedback: mode count: count first: basevertex instances: instancecount];
+
+        if (ctx->state.transform_feedback)
+            ctx->state.transform_feedback->vertices_recorded += recorded;
+    }
 
     if ([self expandDraw:mode count:count type:type indices:indices instanceCount:instancecount
               baseVertex:basevertex baseInstance:baseinstance])
@@ -10750,11 +11562,15 @@ void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsiz
     // to much memory down.. like a million point galaxy drawing
     //
     [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexCount:count indexType:indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:instancecount baseVertex:basevertex baseInstance:baseinstance];
+
+    [self finishFeedbackGather];
 }
 
 void mtlDrawElementsInstancedBaseVertexBaseInstance(GLMContext glm_ctx, GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsInstancedBaseVertexBaseInstance:glm_ctx mode:mode count:count type:type indices:indices instancecount:instancecount basevertex:basevertex baseinstance:baseinstance];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawElementsInstancedBaseVertexBaseInstance:glm_ctx mode:mode count:count type:type indices:indices instancecount:instancecount basevertex:basevertex baseinstance:baseinstance];
+    }
 }
 
 
@@ -10781,7 +11597,9 @@ void mtlDrawElementsInstancedBaseVertexBaseInstance(GLMContext glm_ctx, GLenum m
 
 void mtlMultiDrawArrays(GLMContext glm_ctx, GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawArrays:glm_ctx mode:mode first:first count:count drawcount:drawcount];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawArrays:glm_ctx mode:mode first:first count:count drawcount:drawcount];
+    }
 }
 
 
@@ -10791,7 +11609,7 @@ void mtlMultiDrawArrays(GLMContext glm_ctx, GLenum mode, const GLint *first, con
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
         return;
 
@@ -10819,8 +11637,10 @@ void mtlMultiDrawArrays(GLMContext glm_ctx, GLenum mode, const GLint *first, con
 
 void mtlMultiDrawElements(GLMContext glm_ctx, GLenum mode, const GLsizei *count, GLenum type, const void *const*indices, GLsizei drawcount)
 {
-    // Call the Objective-C method using Objective-C syntax
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawElements: glm_ctx mode: mode count: count type: type indices: indices drawcount: drawcount];
+    @autoreleasepool {
+        // Call the Objective-C method using Objective-C syntax
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawElements: glm_ctx mode: mode count: count type: type indices: indices drawcount: drawcount];
+    }
 }
 
 
@@ -10832,7 +11652,7 @@ void mtlMultiDrawElements(GLMContext glm_ctx, GLenum mode, const GLsizei *count,
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
         return;
 
@@ -10863,7 +11683,9 @@ void mtlMultiDrawElements(GLMContext glm_ctx, GLenum mode, const GLsizei *count,
 
 void mtlMultiDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, const GLsizei *count, GLenum type, const void *const*indices, GLsizei drawcount, const GLint *basevertex)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawElementsBaseVertex: glm_ctx mode: mode count: count type: type indices: indices drawcount: drawcount basevertex:basevertex];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawElementsBaseVertex: glm_ctx mode: mode count: count type: type indices: indices drawcount: drawcount basevertex:basevertex];
+    }
 }
 
 
@@ -10910,7 +11732,9 @@ void mtlMultiDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, const GLsiz
 
 void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect, GLsizei drawcount, GLsizei stride)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawArraysIndirect:glm_ctx mode:mode indirect:indirect drawcount:drawcount stride:stride];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawArraysIndirect:glm_ctx mode:mode indirect:indirect drawcount:drawcount stride:stride];
+    }
 }
 
 
@@ -10919,7 +11743,7 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
+    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
         [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
         return;
 
@@ -10968,13 +11792,18 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
 
 void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const void *indirect, GLsizei drawcount, GLsizei stride)
 {
-    [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawElementsIndirect:glm_ctx mode:mode type:type indirect:indirect drawcount:drawcount stride:stride];
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlMultiDrawElementsIndirect:glm_ctx mode:mode type:type indirect:indirect drawcount:drawcount stride:stride];
+    }
 }
 
 #pragma mark C interface to context functions
 
 - (void) bindObjFuncsToGLMContext: (GLMContext) glm_ctx
 {
+    // Each of these runs inside its own autorelease pool. A plain C program
+    // never drains one, so the command buffers and textures a call made
+    // stayed alive until the process ran out of memory.
     glm_ctx->mtl_funcs.mtlObj = (void *)CFBridgingRetain(self);
 
     glm_ctx->mtl_funcs.mtlBindBuffer = mtlBindBuffer;
@@ -11013,6 +11842,7 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
 
     glm_ctx->mtl_funcs.mtlReadPixels = mtlReadPixels;
     glm_ctx->mtl_funcs.mtlGetTexImage = mtlGetTexImage;
+    glm_ctx->mtl_funcs.mtlAllowFormatViews = mtlAllowFormatViews;
     
     glm_ctx->mtl_funcs.mtlGenerateMipmaps = mtlGenerateMipmaps;
     glm_ctx->mtl_funcs.mtlTexSubImage = mtlTexSubImage;

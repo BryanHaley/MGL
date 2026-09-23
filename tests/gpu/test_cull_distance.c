@@ -410,3 +410,144 @@ GPU_TEST(cull_distance, a_tessellation_stage_can_cull_a_whole_patch)
     glDeleteBuffers(1, &vbo);
     mgl_target_destroy(&t);
 }
+
+// A fragment shader may read gl_CullDistance back. Metal has no such output,
+// so MGL keeps the builtin in a local in the vertex stage; each element now
+// also goes out as a plain varying for the fragment side to read.
+GPU_TEST(cull_distance, a_fragment_shader_reads_the_distances_back)
+{
+    static const char *vs =
+        "#version 450\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out float gl_CullDistance[2];\n"
+        "void main() { gl_CullDistance[0] = 0.25; gl_CullDistance[1] = 0.75; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 450\n"
+        "in float gl_CullDistance[2];\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(gl_CullDistance[0], gl_CullDistance[1], 0.0, 1.0); }\n";
+    static const float tri[] = { -1, -1,  3, -1,  -1, 3 };
+    GLuint prog, vao, vbo;
+    MGLTestTarget t;
+    unsigned char c[4] = { 0 };
+    unsigned char *px;
+    char log[2048];
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 8, 8);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 4, 4, c);
+        CHECK_MSG(abs(c[0] - 64) <= 2 && abs(c[1] - 191) <= 2, "read back %d,%d, want 64,191", c[0], c[1]);
+        free(px);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+}
+
+// Clip and cull distances written by the vertex stage travel through the
+// control and evaluation stages, which pass them on the way any output goes.
+GPU_TEST(cull_distance, distances_pass_through_tessellation)
+{
+    static const char *vs =
+        "#version 450\n"
+        "layout(location = 0) in vec2 p;\n"
+        "uniform float clip;\n"
+        "uniform float cull;\n"
+        "out float gl_ClipDistance[1];\n"
+        "out float gl_CullDistance[1];\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); gl_ClipDistance[0] = clip; gl_CullDistance[0] = cull; }\n";
+    static const char *tcs =
+        "#version 450\n"
+        "layout(vertices = 3) out;\n"
+        "void main() {\n"
+        "  gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "  gl_out[gl_InvocationID].gl_ClipDistance[0] = gl_in[gl_InvocationID].gl_ClipDistance[0];\n"
+        "  gl_out[gl_InvocationID].gl_CullDistance[0] = gl_in[gl_InvocationID].gl_CullDistance[0];\n"
+        "  gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0; gl_TessLevelOuter[2] = 1.0;\n"
+        "  gl_TessLevelInner[0] = 1.0;\n"
+        "}\n";
+    static const char *tes =
+        "#version 450\n"
+        "layout(triangles) in;\n"
+        "out float gl_ClipDistance[1];\n"
+        "out float gl_CullDistance[1];\n"
+        "void main() {\n"
+        "  gl_Position = vec4(mat3(gl_in[0].gl_Position.xyz, gl_in[1].gl_Position.xyz, gl_in[2].gl_Position.xyz) * gl_TessCoord, 1.0);\n"
+        "  gl_ClipDistance[0] = dot(vec3(gl_in[0].gl_ClipDistance[0], gl_in[1].gl_ClipDistance[0], gl_in[2].gl_ClipDistance[0]), gl_TessCoord);\n"
+        "  gl_CullDistance[0] = dot(vec3(gl_in[0].gl_CullDistance[0], gl_in[1].gl_CullDistance[0], gl_in[2].gl_CullDistance[0]), gl_TessCoord);\n"
+        "}\n";
+    static const GLfloat tri[6] = { -1,-1, 3,-1, -1,3 };
+    const float cases[4][2] = { { 1, 1 }, { -1, 1 }, { 1, -1 }, { -1, -1 } };
+    MGLTestTarget t;
+    GLuint prog, vao = 0, vbo = 0;
+    char log[2048];
+
+    prog = linkTess(vs, tcs, tes, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not link: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 32, 32, GL_RGBA8, 0))
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 32, 32);
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glEnable(GL_CLIP_DISTANCE0);
+    glClearColor(0, 0, 0, 1);
+
+    for (int c = 0; c < 4; c++)
+    {
+        glUniform1f(glGetUniformLocation(prog, "clip"), cases[c][0]);
+        glUniform1f(glGetUniformLocation(prog, "cull"), cases[c][1]);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_PATCHES, 0, 3);
+
+        int want = cases[c][0] > 0 && cases[c][1] > 0 ? 32 * 32 : 0;
+        int got = greenPixels(&t);
+
+        CHECK_MSG(got == want, "clip %g cull %g drew %d pixels, want %d", cases[c][0], cases[c][1], got, want);
+    }
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glDisable(GL_CLIP_DISTANCE0);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+}

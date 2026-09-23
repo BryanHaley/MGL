@@ -50,7 +50,7 @@ GLsizei typeSize(GLenum type)
             return sizeof(float);
 
         case GL_DOUBLE:
-            return sizeof(float);
+            return sizeof(double);
 
         case GL_HALF_FLOAT:
             return sizeof(float) >> 1;
@@ -303,10 +303,12 @@ void mglGetVertexAttribdv(GLMContext ctx, GLuint index, GLenum pname, GLdouble *
             *params = vao->attrib[index].relativeoffset;
             break;
 
-        // MGL does not track these flags separately yet
         case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
-        case GL_VERTEX_ATTRIB_ARRAY_LONG:
             *params = GL_FALSE;
+            break;
+
+        case GL_VERTEX_ATTRIB_ARRAY_LONG:
+            *params = vao->attrib[index].is_long;
             break;
 
         default:
@@ -369,6 +371,7 @@ void setVertexAttrib(GLMContext ctx, GLuint index, GLint size, GLenum type, GLbo
     VAO_ATTRIB_STATE(index).size = size;
     VAO_ATTRIB_STATE(index).type = type;
     VAO_ATTRIB_STATE(index).normalized = normalized;
+    VAO_ATTRIB_STATE(index).is_long = GL_FALSE;
     // GL hands these two straight back as they came in
     VAO_ATTRIB_STATE(index).stride = stride;
     VAO_ATTRIB_STATE(index).pointer = (GLubyte *)pointer - (GLubyte *)NULL;
@@ -379,8 +382,9 @@ void setVertexAttrib(GLMContext ctx, GLuint index, GLint size, GLenum type, GLbo
     // offset and the array buffer is what the binding holds
     BufferBinding *binding = &VAO_STATE(bindings[index]);
 
+    // with no array buffer and a null pointer the binding simply holds
+    // buffer zero; the callers refuse a pointer with no buffer to go in
     binding->buffer = STATE(buffers[_ARRAY_BUFFER]);
-    ERROR_CHECK_RETURN(binding->buffer, GL_INVALID_OPERATION);
 
     binding->offset = (GLubyte *)pointer - (GLubyte *)NULL;
     binding->stride = walk_stride;
@@ -497,7 +501,10 @@ void mglVertexAttribLPointer(GLMContext ctx, GLuint index, GLint size, GLenum ty
             ERROR_RETURN(GL_INVALID_ENUM);
     }
 
+    ERROR_CHECK_RETURN(size >= 1 && size <= 4, GL_INVALID_VALUE);
+
     setVertexAttrib(ctx, index, size, type, 0, stride, pointer);
+    VAO_ATTRIB_STATE(index).is_long = GL_TRUE;
 }
 
 void mglGetVertexAttribPointerv(GLMContext ctx, GLuint index, GLenum pname, void **pointer)
@@ -699,6 +706,7 @@ void setAttribFormat(GLMContext ctx, VertexArray *vao, GLuint attribindex, GLint
 
     vao->attrib[attribindex].size = size;
     vao->attrib[attribindex].type = type;
+    vao->attrib[attribindex].is_long = GL_FALSE;
     vao->attrib[attribindex].normalized = normalized;
     vao->attrib[attribindex].relativeoffset = relativeoffset;
 
@@ -748,6 +756,7 @@ void setAttribIFormat(GLMContext ctx, VertexArray *vao, GLuint attribindex, GLin
 
     vao->attrib[attribindex].size = size;
     vao->attrib[attribindex].type = type;
+    vao->attrib[attribindex].is_long = GL_FALSE;
     vao->attrib[attribindex].normalized = 0;
     vao->attrib[attribindex].relativeoffset = relativeoffset;
 
@@ -792,6 +801,7 @@ void setAttribLFormat(GLMContext ctx, VertexArray *vao, GLuint attribindex, GLin
 
     vao->attrib[attribindex].size = size;
     vao->attrib[attribindex].type = type;
+    vao->attrib[attribindex].is_long = GL_TRUE;
     vao->attrib[attribindex].normalized = 0;
     vao->attrib[attribindex].relativeoffset = relativeoffset;
 
@@ -931,8 +941,11 @@ static bool vertexArrayIndexedParam(GLMContext ctx, VertexArray *vao, GLuint ind
             return true;
 
         case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
-        case GL_VERTEX_ATTRIB_ARRAY_LONG:
             *out = GL_FALSE;
+            return true;
+
+        case GL_VERTEX_ATTRIB_ARRAY_LONG:
+            *out = att->is_long;
             return true;
 
         case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:

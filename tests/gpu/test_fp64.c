@@ -315,3 +315,101 @@ GPU_TEST(fp64, arrays_of_matrices_compare_element_by_element)
                                 "y[1][1][1][0] = 9.0lf;\n"
                                 "r = (x == y) ? 1.0 : 0.0;"), 1e-5f);
 }
+
+// Metal has no double vertex format, so doubles arrive as raw bits. GLSL
+// gives a vertex input one location even for a dvec3 or dvec4, and a Metal
+// attribute holds 16 bytes, so the first two doubles come in at the location
+// and the rest at 16 + the location. Doubles used to take an attribute index
+// each, which collided with the next attribute's.
+GPU_TEST(fp64, double_vertex_attributes_arrive_whole)
+{
+    static const char *vs =
+        "#version 450\n"
+        "layout(location = 0) in dvec2 a;\n"
+        "layout(location = 1) in dvec3 b;\n"
+        "layout(location = 2) in dvec4 c;\n"
+        "layout(location = 3) in vec2 p;\n"
+        "flat out int ok;\n"
+        "void main() {\n"
+        "  // one bit per value, so a miss says which\n"
+        "  ok = (a.x == 1.0lf / 3.0lf ? 1 : 0) | (a.y == 2.5lf ? 2 : 0) | (b.x == 0.1lf ? 4 : 0) |\n"
+        "       (b.y == 1e-10lf + 1.0lf ? 8 : 0) | (b.z == -7.0lf ? 16 : 0) |\n"
+        "       (c == dvec4(0.2lf, 0.3lf, 1e-12lf, 4.0lf) ? 32 : 0);\n"
+        "  gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const char *fs =
+        "#version 450\n"
+        "flat in int ok;\n"
+        "out vec4 o;\n"
+        "void main() { o = ok == 63 ? vec4(0, 1, 0, 1) : vec4(1, 0, float(ok) / 255.0, 1); }\n";
+    static const float tri[] = { -1, -1,  3, -1,  -1, 3 };
+    GLdouble a[3][2], b[3][3];
+    GLuint prog, vao, bufs[3];
+    GLint is_long = 0;
+    MGLTestTarget t;
+    unsigned char c[4] = { 0 };
+    unsigned char *px;
+    char log[2048];
+
+    for (int v = 0; v < 3; v++)
+    {
+        a[v][0] = 1.0 / 3.0; a[v][1] = 2.5;
+        b[v][0] = 0.1; b[v][1] = 1e-10 + 1.0; b[v][2] = -7.0;
+    }
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "double attribute program did not build: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(3, bufs);
+
+    glBindBuffer(GL_ARRAY_BUFFER, bufs[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof a, a, GL_STATIC_DRAW);
+    glVertexAttribLPointer(0, 2, GL_DOUBLE, 0, NULL);
+    glEnableVertexAttribArray(0);
+
+    glBindBuffer(GL_ARRAY_BUFFER, bufs[1]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof b, b, GL_STATIC_DRAW);
+    glVertexAttribLPointer(1, 3, GL_DOUBLE, 0, NULL);
+    glEnableVertexAttribArray(1);
+
+    glBindBuffer(GL_ARRAY_BUFFER, bufs[2]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(3);
+
+    // location 2 stays disabled and reads the constant, which only a double
+    // holds exactly
+    glDisableVertexAttribArray(2);
+    glVertexAttribL4d(2, 0.2, 0.3, 1e-12, 4.0);
+
+    glGetVertexAttribiv(1, GL_VERTEX_ATTRIB_ARRAY_LONG, &is_long);
+    CHECK_EQ_INT(is_long, GL_TRUE);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 8, 8);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 4, 4, c);
+        CHECK_MSG(c[1] > 200 && c[0] < 50, "values that arrived right, one bit each: %d of 63", c[2]);
+        free(px);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(3, bufs);
+    mgl_target_destroy(&t);
+}

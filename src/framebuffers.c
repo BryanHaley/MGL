@@ -602,12 +602,13 @@ void mglDeleteRenderbuffers(GLMContext ctx, GLsizei n, const GLuint *renderbuffe
         if (ctx->state.renderbuffer == rbo)
             ctx->state.renderbuffer = NULL;
 
-        // a deleted renderbuffer detaches itself from the bound framebuffers
-        if (ctx->state.framebuffer)
-            detachRenderbuffer(ctx->state.framebuffer, rbo);
-
-        if (ctx->state.readbuffer && ctx->state.readbuffer != ctx->state.framebuffer)
-            detachRenderbuffer(ctx->state.readbuffer, rbo);
+        // GL detaches a deleted renderbuffer from the bound framebuffers and
+        // keeps it alive in any other. MGL frees it, so it comes off every
+        // framebuffer; left behind, it was a pointer into freed memory that
+        // the next status check read.
+        for (size_t k = 0; k < STATE(framebuffer_table).size; k++)
+            if (STATE(framebuffer_table).keys[k].data)
+                detachRenderbuffer((Framebuffer *)STATE(framebuffer_table).keys[k].data, rbo);
 
         if (rbo->tex)
         {

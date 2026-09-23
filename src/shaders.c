@@ -342,7 +342,7 @@ GLboolean mglIsShader(GLMContext ctx, GLuint shader)
 
 void mglShaderSource(GLMContext ctx, GLuint shader, GLsizei count, const GLchar *const*string, const GLint *length)
 {
-    size_t len;
+    size_t len = 0, at = 0;
     GLchar *src;
     Shader *ptr;
 
@@ -352,79 +352,32 @@ void mglShaderSource(GLMContext ctx, GLuint shader, GLsizei count, const GLchar 
     ptr = findShader(ctx, shader);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(count == 0 || string, GL_INVALID_VALUE);
 
-    if (count>1)
+    // GL 4.6 7.1: a part with no length, or a negative one, ends at its null;
+    // any other part is exactly that many bytes and need not end in one at all
+    for (GLsizei i = 0; i < count; i++)
     {
-        // compute storage requirement
-        len = 0;
-        if (!length) {
-            for(int i=0; i<count; i++)
-            {
-                len += strlen(string[i]);
-            }
-        }
-        else {
-            for(int i=0; i<count; i++)
-            {
-                len += length[i];
-            }
-        }   
-        ERROR_CHECK_RETURN(len, GL_INVALID_VALUE);
-
-        // allocate storage
-        src = (GLchar *)malloc(len+1); // +1 for NULL
-        ERROR_CHECK_RETURN(src, GL_OUT_OF_MEMORY);
-
-        if (!length) {        
-            // string[i] are null-terminated
-            *src = 0;
-            for(int i=0; i<count; ++i)
-            {
-                strlcat(src, string[i], len+1);
-            }
-            assert(strlen(src) == len);
-        } else {
-            // CRITICAL SECURITY FIX: Prevent buffer overflow in shader source concatenation
-            // string[i] may not be null-terminated - we must validate bounds carefully
-            size_t cum_len = 0;
-            for(int i=0; i<count; ++i)
-            {
-                // CRITICAL: Check if adding this string would exceed buffer bounds
-                if (cum_len + length[i] > (size_t)len) {
-                    // SECURITY: Truncate safely instead of overflowing buffer
-                    MGL_ERR("MGL SECURITY ERROR: Shader source concatenation would overflow buffer, truncating safely\n");
-                    // Copy only what fits
-                    size_t safe_copy_len = ((size_t)len > cum_len) ? ((size_t)len - cum_len) : 0;
-                    if (safe_copy_len > 0) {
-                        strncpy(&src[cum_len], string[i], safe_copy_len);
-                    }
-                    cum_len = len; // Force termination at end
-                    break;
-                }
-
-                // CRITICAL: Validate source pointer and length before copy
-                if (!string[i]) {
-                    MGL_ERR("MGL SECURITY ERROR: NULL string pointer in shader source concatenation\n");
-                    continue; // Skip this string
-                }
-
-                strncpy(&src[cum_len], string[i], length[i]);
-                cum_len += length[i];
-            }
-            // CRITICAL: Ensure null termination regardless of truncation
-            src[cum_len < (size_t)len ? cum_len : (size_t)len] = '\0';
-        }
-    }
-    else
-    {
-        ERROR_CHECK_RETURN(string, GL_INVALID_VALUE);
-
-        src = strdup(*string);
-        len = strlen(src);
-
-        ERROR_CHECK_RETURN(len, GL_INVALID_VALUE);
+        ERROR_CHECK_RETURN(string[i] || (length && length[i] == 0), GL_INVALID_VALUE);
+        len += (length && length[i] >= 0) ? (size_t)length[i] : strlen(string[i]);
     }
 
+    src = (GLchar *)malloc(len + 1);
+    ERROR_CHECK_RETURN(src, GL_OUT_OF_MEMORY);
+
+    for (GLsizei i = 0; i < count; i++)
+    {
+        size_t n = (length && length[i] >= 0) ? (size_t)length[i] : strlen(string[i]);
+
+        if (n)
+            memcpy(src + at, string[i], n);
+
+        at += n;
+    }
+
+    src[len] = 0;
+
+    free(ptr->src);
     ptr->src_len = len;
     ptr->src = src;
     ptr->dirty_bits |= DIRTY_SHADER;
@@ -1478,8 +1431,23 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
     ctx->error_suppress++;
 
-    char *normal = normalizeFrontEnd(ptr->src, ptr->type);
-    char *raised = rewriteCullExtension(normal ? normal : ptr->src);
+    // A source may end in a // comment with no newline, or in a line
+    // continuation; either would swallow the first line of anything added
+    // after it. Two newlines end both, and change nothing for glslang.
+    size_t src_len = strlen(ptr->src);
+    char *ended = (char *)malloc(src_len + 3);
+
+    if (ended == NULL)
+    {
+        ctx->error_suppress--;
+        return;
+    }
+
+    memcpy(ended, ptr->src, src_len);
+    memcpy(ended + src_len, "\n\n", 3);
+
+    char *normal = normalizeFrontEnd(ended, ptr->type);
+    char *raised = rewriteCullExtension(normal ? normal : ended);
 
     if (normal && raised == NULL)
     {
@@ -1488,7 +1456,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     }
 
     free(normal);
-    const char *front = raised ? raised : ptr->src;
+    const char *front = raised ? raised : ended;
 
     // glslang will not take the subroutine keyword when it targets SPIR-V, so
     // the source is rewritten into plain GLSL before it ever sees it.
@@ -1500,6 +1468,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         ptr->log = strdup(ptr->subroutines.error);
         free(desub);
         free(raised);
+        free(ended);
         ctx->error_suppress--;
         return;
     }
@@ -1525,6 +1494,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         }
         free(desub);
         free(raised);
+        free(ended);
         ctx->error_suppress--;
         return;
     }
@@ -1631,6 +1601,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
         free(desub);
         free(raised);
+        free(ended);
         ctx->error_suppress--;
         return;
     }
@@ -1672,6 +1643,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
         free(desub);
         free(raised);
+        free(ended);
         ctx->error_suppress--;
         return;
     }
@@ -1710,6 +1682,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         glslang_shader_delete(glsl_shader);
         free(desub);
         free(raised);
+        free(ended);
         ctx->error_suppress--;
         return;
     }
@@ -1721,6 +1694,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     ptr->compiled_glsl_shader = glsl_shader;
     free(desub);
     free(raised);
+    free(ended);
     ctx->error_suppress--;
 }
 
