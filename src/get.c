@@ -741,7 +741,47 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x92D8: RET_TYPE_VAR(type, max_atomic_counter_buffer_size); break; // GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE
         case 0x92D9: RET_TYPE_CONST(type, MAX_ATOMIC_COUNTER_BUFFER_BINDINGS); break; // GL_ACTIVE_ATOMIC_COUNTER_BUFFERS
 
+        // GL_DRAW_BUFFER0..15: what each output of the bound draw framebuffer
+        // goes to. The default framebuffer has only the one.
+        case 0x8825: case 0x8826: case 0x8827: case 0x8828:
+        case 0x8829: case 0x882A: case 0x882B: case 0x882C:
+        case 0x882D: case 0x882E: case 0x882F: case 0x8830:
+        case 0x8831: case 0x8832: case 0x8833: case 0x8834:
+        {
+            GLuint i = pname - 0x8825;
+            Framebuffer *fbo = ctx->state.framebuffer;
+            GLenum b = GL_NONE;
+
+            if (fbo)
+                b = (i < MAX_COLOR_ATTACHMENTS && i < fbo->n_draw_buffers) ? fbo->draw_buffers[i] : GL_NONE;
+            else if (i == 0)
+                b = ctx->state.default_draw_buffer;
+
+            RET_TYPE_CONST(type, b);
+            break;
+        }
+
+        case 0x92C1: // GL_ATOMIC_COUNTER_BUFFER_BINDING
+        {
+            Buffer *b = ctx->state.buffers[_ATOMIC_COUNTER_BUFFER];
+
+            RET_TYPE_CONST(type, (b ? b->name : 0));
+            break;
+        }
+
+        case 0x8C37: RET_TYPE_VAR(type, min_sample_shading); break; // GL_MIN_SAMPLE_SHADING_VALUE
+
         default:
+        {
+            GLint v;
+
+            // pixel store state lives on the context, not in the var table
+            if (mglPixelStoreGet(ctx, pname, &v))
+            {
+                RET_TYPE_CONST(type, v);
+                break;
+            }
+        }
             // Falling out of the switch used to leave the caller's variable
             // untouched and report no error, so it read back whatever was
             // already there and believed it.

@@ -179,6 +179,7 @@ typedef struct {
     char params[256];
     int  types[MAX_TYPES_PER_FN];
     int  type_count;
+    int  index;         // layout(index), then filled in for the rest
 } SubFn;
 
 typedef struct {
@@ -229,8 +230,27 @@ static void paramNames(const char *params, char *dst, size_t dstlen)
         }
 
         // the last identifier before the comma is the parameter's name, unless
-        // an array size follows it
+        // an array size follows it -- "a[2][2]" ends in a 2, not in the name
         const char *q = end;
+
+        for (;;)
+        {
+            while (q > p && isspace((unsigned char)q[-1]))
+                q--;
+
+            if (q == p || q[-1] != ']')
+                break;
+
+            int depth = 0;
+
+            while (q > p)
+            {
+                q--;
+
+                if (*q == ']') depth++;
+                else if (*q == '[' && --depth == 0) break;
+            }
+        }
 
         while (q > p && !identChar(q[-1]))
             q--;
@@ -400,6 +420,47 @@ static const char *checkSubroutines(Scan *sc)
         }
     }
 
+    for (int f = 0; f < sc->fn_count; f++)
+    {
+        if (sc->fns[f].index < 0 || sc->fns[f].index >= MAX_SUB_FNS)
+            return "a subroutine index is past GL_MAX_SUBROUTINES";
+
+        for (int g = 0; g < f; g++)
+            if (sc->fns[g].index == sc->fns[f].index)
+                return "two subroutine functions have the same index";
+    }
+
+    // GL 4.6 7.10: locations run below GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS,
+    // are never shared, and together have to fit under it
+    {
+        int total = 0;
+
+        for (int u = 0; u < sc->uniform_count; u++)
+        {
+            const SubUniform *a = &sc->uniforms[u];
+
+            total += a->array_size;
+
+            if (a->location < 0)
+                continue;
+
+            if (a->location + a->array_size > MAX_SUB_UNIFORM_LIMIT)
+                return "a subroutine uniform location is past GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS";
+
+            for (int v = 0; v < u; v++)
+            {
+                const SubUniform *b = &sc->uniforms[v];
+
+                if (b->location >= 0 && a->location < b->location + b->array_size &&
+                    b->location < a->location + a->array_size)
+                    return "two subroutine uniforms share a location";
+            }
+        }
+
+        if (total > MAX_SUB_UNIFORM_LIMIT)
+            return "more subroutine uniform locations than GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS";
+    }
+
     for (int u = 0; u < sc->uniform_count; u++)
     {
         bool found = false;
@@ -419,6 +480,83 @@ static const char *checkSubroutines(Scan *sc)
 // ---------------------------------------------------------------------------
 // pass 1: find the declarations and strip the subroutine keyword
 // ---------------------------------------------------------------------------
+
+// A "layout(...)" just in front of the subroutine keyword belongs to the
+// subroutine, not to what it becomes, so it comes off the output. Hands back
+// the value given for key, or -1. Only a layout naming key is taken unless
+// any is set.
+static int takeLayout(Buf *out, const char *key, bool any)
+{
+    size_t end = out->len;
+    int value = -1;
+
+    while (end > 0 && isspace((unsigned char)out->s[end - 1]))
+        end--;
+
+    if (end == 0 || out->s[end - 1] != ')')
+        return -1;
+
+    size_t open = end - 1;
+    int depth = 0;
+
+    while (open > 0)
+    {
+        if (out->s[open] == ')') depth++;
+        else if (out->s[open] == '(' && --depth == 0) break;
+        open--;
+    }
+
+    size_t w = open;
+
+    while (w > 0 && isspace((unsigned char)out->s[w - 1]))
+        w--;
+
+    if (w < 6 || strncmp(out->s + w - 6, "layout", 6))
+        return -1;
+
+    for (size_t k = open; k < end; k++)
+        if (wordAt(out->s, k, key))
+        {
+            const char *eq = strchr(out->s + k, '=');
+
+            if (eq && eq < out->s + end)
+                value = (int)strtol(eq + 1, NULL, 0);
+        }
+
+    if (value < 0 && !any)
+        return -1;
+
+    out->len = w - 6;
+    out->s[out->len] = 0;
+
+    return value;
+}
+
+static bool indexTaken(const Scan *sc, int index)
+{
+    for (int f = 0; f < sc->fn_count; f++)
+        if (sc->fns[f].index == index)
+            return true;
+
+    return false;
+}
+
+// Functions with no layout(index) take the lowest indices nobody asked for.
+static void fillIndices(Scan *sc)
+{
+    int next = 0;
+
+    for (int f = 0; f < sc->fn_count; f++)
+    {
+        if (sc->fns[f].index >= 0)
+            continue;
+
+        while (indexTaken(sc, next))
+            next++;
+
+        sc->fns[f].index = next++;
+    }
+}
 
 static bool scanAndStrip(const char *src, Scan *sc, Buf *out)
 {
@@ -482,11 +620,17 @@ static bool scanAndStrip(const char *src, Scan *sc, Buf *out)
             while (namestart > k && identChar(src[namestart - 1]))
                 namestart--;
 
+            int index = takeLayout(out, "index", false);
+
+            if (sc->fn_count == MAX_SUB_FNS && nameend > namestart)
+                sc->error = "more subroutine functions than GL_MAX_SUBROUTINES";
+
             if (sc->fn_count < MAX_SUB_FNS && nameend > namestart)
             {
                 SubFn *f = &sc->fns[sc->fn_count];
 
                 memset(f, 0, sizeof(*f));
+                f->index = index;
                 snprintf(f->name, sizeof(f->name), "%.*s",
                          (int)(nameend - namestart), src + namestart);
                 snprintf(f->ret, sizeof(f->ret), "%.*s", (int)(namestart - k), src + k);
@@ -558,47 +702,7 @@ static bool scanAndStrip(const char *src, Scan *sc, Buf *out)
 
             // "layout(location = N)" in front belongs to the subroutine
             // uniform, not to the plain int it becomes
-            int location = -1;
-            {
-                size_t end = out->len;
-
-                while (end > 0 && isspace((unsigned char)out->s[end - 1]))
-                    end--;
-
-                if (end > 0 && out->s[end - 1] == ')')
-                {
-                    size_t open = end - 1;
-                    int depth = 0;
-
-                    while (open > 0)
-                    {
-                        if (out->s[open] == ')') depth++;
-                        else if (out->s[open] == '(' && --depth == 0) break;
-                        open--;
-                    }
-
-                    size_t w = open;
-
-                    while (w > 0 && isspace((unsigned char)out->s[w - 1]))
-                        w--;
-
-                    if (w >= 6 && !strncmp(out->s + w - 6, "layout", 6))
-                    {
-                        const char *loc = strstr(out->s + open, "location");
-
-                        if (loc && loc < out->s + end)
-                        {
-                            const char *eq = strchr(loc, '=');
-
-                            if (eq && eq < out->s + end)
-                                location = (int)strtol(eq + 1, NULL, 0);
-                        }
-
-                        out->len = w - 6;
-                        out->s[out->len] = 0;
-                    }
-                }
-            }
+            int location = takeLayout(out, "location", true);
 
             if (ti >= 0 && sc->uniform_count < MAX_SUB_UNIFORMS)
             {
@@ -896,10 +1000,10 @@ static bool appendDispatchers(Scan *sc, Buf *out)
 
             if (returnsVoid(t->ret))
                 snprintf(line, sizeof(line), "  case %d: %s(%s); return;\n",
-                         f, fn->name, args);
+                         fn->index, fn->name, args);
             else
                 snprintf(line, sizeof(line), "  case %d: return %s(%s);\n",
-                         f, fn->name, args);
+                         fn->index, fn->name, args);
 
             if (!bufAdd(out, line))
                 return false;
@@ -941,8 +1045,19 @@ void mglFreeSubroutineInfo(SubroutineInfo *info)
     free(info->uniform_type);
     free(info->uniform_location);
     free(info->fn_types);
+    free(info->fn_index);
 
     memset(info, 0, sizeof(*info));
+}
+
+// Where the function with this GL index sits in the tables, or -1.
+GLint mglSubroutineSlot(const SubroutineInfo *info, GLuint index)
+{
+    for (GLuint i = 0; info && i < info->fn_count; i++)
+        if ((info->fn_index ? info->fn_index[i] : i) == index)
+            return (GLint)i;
+
+    return -1;
 }
 
 bool mglSubroutineCompatible(const SubroutineInfo *info, GLuint uniform, GLuint fn)
@@ -970,10 +1085,12 @@ bool mglCopySubroutineInfo(SubroutineInfo *dst, const SubroutineInfo *src)
     dst->uniform_type = (GLuint *)calloc(src->uniform_count ? src->uniform_count : 1, sizeof(GLuint));
     dst->uniform_location = (GLint *)calloc(src->uniform_count ? src->uniform_count : 1, sizeof(GLint));
     dst->fn_types = (GLuint64 *)calloc(src->fn_count ? src->fn_count : 1, sizeof(GLuint64));
+    dst->fn_index = (GLuint *)calloc(src->fn_count ? src->fn_count : 1, sizeof(GLuint));
 
     if (dst->fn_names == NULL || dst->uniform_names == NULL ||
         dst->uniform_array_size == NULL || dst->uniform_compatible == NULL ||
-        dst->uniform_type == NULL || dst->uniform_location == NULL || dst->fn_types == NULL)
+        dst->uniform_type == NULL || dst->uniform_location == NULL || dst->fn_types == NULL ||
+        dst->fn_index == NULL)
     {
         mglFreeSubroutineInfo(dst);
         return false;
@@ -983,6 +1100,7 @@ bool mglCopySubroutineInfo(SubroutineInfo *dst, const SubroutineInfo *src)
     {
         dst->fn_names[i] = strdup(src->fn_names[i] ? src->fn_names[i] : "");
         dst->fn_types[i] = src->fn_types ? src->fn_types[i] : 0;
+        dst->fn_index[i] = src->fn_index ? src->fn_index[i] : i;
     }
 
     for (GLuint i = 0; i < src->uniform_count; i++)
@@ -1023,6 +1141,8 @@ char *mglRewriteSubroutines(const char *src, SubroutineInfo *info)
     if (sc.type_count == 0 && sc.uniform_count == 0)
         goto done;
 
+    fillIndices(&sc);
+
     if (!rewriteCalls(stripped.s ? stripped.s : "", &sc, &arrays))
         goto done;
 
@@ -1046,10 +1166,12 @@ char *mglRewriteSubroutines(const char *src, SubroutineInfo *info)
         info->uniform_type = (GLuint *)calloc(sc.uniform_count ? sc.uniform_count : 1, sizeof(GLuint));
         info->uniform_location = (GLint *)calloc(sc.uniform_count ? sc.uniform_count : 1, sizeof(GLint));
         info->fn_types = (GLuint64 *)calloc(sc.fn_count ? sc.fn_count : 1, sizeof(GLuint64));
+        info->fn_index = (GLuint *)calloc(sc.fn_count ? sc.fn_count : 1, sizeof(GLuint));
 
         if (info->fn_names == NULL || info->uniform_names == NULL ||
             info->uniform_array_size == NULL || info->uniform_compatible == NULL ||
-            info->uniform_type == NULL || info->uniform_location == NULL || info->fn_types == NULL)
+            info->uniform_type == NULL || info->uniform_location == NULL || info->fn_types == NULL ||
+            info->fn_index == NULL)
         {
             mglFreeSubroutineInfo(info);
             goto done;
@@ -1058,6 +1180,7 @@ char *mglRewriteSubroutines(const char *src, SubroutineInfo *info)
         for (int i = 0; i < sc.fn_count; i++)
         {
             info->fn_names[i] = strdup(sc.fns[i].name);
+            info->fn_index[i] = (GLuint)sc.fns[i].index;
 
             for (int k = 0; k < sc.fns[i].type_count; k++)
                 info->fn_types[i] |= (GLuint64)1 << sc.fns[i].types[k];

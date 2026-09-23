@@ -588,3 +588,4 @@ GPU_TEST(uniform, update_between_draws_takes_effect)
     glDeleteBuffers(1, &vbo);
     mgl_target_destroy(&t);
 }
+

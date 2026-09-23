@@ -294,3 +294,119 @@ GPU_TEST(cull_distance, a_geometry_stage_can_cull_on_its_own)
 
     glDeleteProgram(prog);
 }
+
+/* ---------- cull distance written by a tessellation stage ---------- */
+
+// A tessellation evaluation stage that writes a cull distance is drawn through
+// a geometry stage MGL generates. That stage passed gl_CullDistance on under
+// the rewrite's internal name, as an ordinary varying nothing wrote, so the
+// program never linked.
+static GLuint linkTess(const char *vs, const char *tcs, const char *tes, const char *fs,
+                       char *log, int log_size)
+{
+    GLuint p = glCreateProgram();
+    GLuint s[4];
+    GLint ok = 0;
+
+    s[0] = compileStage(GL_VERTEX_SHADER, vs, log, log_size);
+    s[1] = compileStage(GL_TESS_CONTROL_SHADER, tcs, log, log_size);
+    s[2] = compileStage(GL_TESS_EVALUATION_SHADER, tes, log, log_size);
+    s[3] = compileStage(GL_FRAGMENT_SHADER, fs, log, log_size);
+
+    for (int i = 0; i < 4; i++)
+    {
+        if (!s[i])
+            return 0;
+
+        glAttachShader(p, s[i]);
+    }
+
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+
+    if (!ok && log && log_size)
+        glGetProgramInfoLog(p, log_size, NULL, log);
+
+    return ok ? p : 0;
+}
+
+GPU_TEST(cull_distance, a_tessellation_stage_can_cull_a_whole_patch)
+{
+    static const char *vs =
+        "#version 450\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *tcs =
+        "#version 450\n"
+        "layout(vertices = 3) out;\n"
+        "void main() {\n"
+        "  gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "  gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0; gl_TessLevelOuter[2] = 1.0;\n"
+        "  gl_TessLevelInner[0] = 1.0;\n"
+        "}\n";
+    static const char *tes =
+        "#version 450\n"
+        "layout(triangles) in;\n"
+        "uniform float dist;\n"
+        "uniform float slope;\n"
+        "out float gl_CullDistance[1];\n"
+        "void main() {\n"
+        "  gl_Position = gl_TessCoord.x * gl_in[0].gl_Position + gl_TessCoord.y * gl_in[1].gl_Position\n"
+        "              + gl_TessCoord.z * gl_in[2].gl_Position;\n"
+        "  gl_CullDistance[0] = dist + slope * gl_TessCoord.x;\n"
+        "}\n";
+    static const GLfloat tri[6] = { -1,-1, 3,-1, -1,3 };
+    MGLTestTarget t;
+    GLuint prog, vao = 0, vbo = 0;
+    int kept, culled, mixed;
+    char log[2048];
+
+    prog = linkTess(vs, tcs, tes, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "tessellation cull program did not link: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 32, 32, GL_RGBA8, 0))
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 32, 32);
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+
+    glUniform1f(glGetUniformLocation(prog, "dist"), 1.0f);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_PATCHES, 0, 3);
+    kept = greenPixels(&t);
+
+    glUniform1f(glGetUniformLocation(prog, "dist"), -1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_PATCHES, 0, 3);
+    culled = greenPixels(&t);
+
+    // one corner in front and two behind: culling keeps the whole triangle,
+    // where clipping would have cut it
+    glUniform1f(glGetUniformLocation(prog, "dist"), -0.5f);
+    glUniform1f(glGetUniformLocation(prog, "slope"), 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_PATCHES, 0, 3);
+    mixed = greenPixels(&t);
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(kept == 32 * 32, "a positive distance drew %d of 1024 pixels", kept);
+    CHECK_MSG(culled == 0, "a negative distance still drew %d pixels", culled);
+    CHECK_MSG(mixed == 32 * 32, "a triangle with one corner in front drew %d of 1024 pixels", mixed);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+}

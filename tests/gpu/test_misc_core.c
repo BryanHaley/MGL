@@ -505,3 +505,22 @@ GPU_TEST(misc_core, swap_interval_is_remembered)
     CHECK_EQ_UINT(on, 1u);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 }
+
+// Three alignments were never filled in and answered 0. GL wants a power of
+// two no larger than 256, and an application rounding up to 0 divides by it.
+GPU_TEST(misc_core, buffer_offset_alignments_are_real)
+{
+    static const GLenum pnames[] = {
+        GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT,
+        GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT,
+        GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT,
+    };
+
+    for (int i = 0; i < 3; i++)
+    {
+        GLint a = 0;
+
+        glGetIntegerv(pnames[i], &a);
+        CHECK_MSG(a > 0 && a <= 256 && (a & (a - 1)) == 0, "pname 0x%x answers %d", pnames[i], a);
+    }
+}

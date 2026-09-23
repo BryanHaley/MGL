@@ -69,6 +69,11 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_shader_storage_buffer_bindings, MAX_SHADER_STORAGE_BUFFER_BINDINGS);
     at_least(&v->min_map_buffer_alignment, 64);
 
+    // Left at 0 these read as "no rule", which GL does not allow, and any
+    // application that rounds an offset up to them divides by zero.
+    at_least(&v->uniform_buffer_offset_alignment, 256);
+    at_least(&v->shader_storage_buffer_offset_alignment, 16);
+
     at_least(&v->max_vertex_attribs, 16);
     at_least(&v->max_vertex_attrib_bindings, 16);
     at_least(&v->max_vertex_attrib_relative_offset, 2047);

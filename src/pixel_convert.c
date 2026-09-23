@@ -1711,6 +1711,11 @@ MGLNativeFormat mglNativeFormatForMTLFormat(GLuint mtl_format)
 
 MGLNativeFormat mglNativeFormatForGLInternalFormat(GLenum internalformat)
 {
+    // The level's own copy stays in GL's four byte packing even when Metal
+    // holds it as a float and a stencil byte; the upload converts.
+    if (internalformat == GL_DEPTH24_STENCIL8)
+        return MGL_NF_DEPTH24_UNORM_STENCIL8;
+
     return mglNativeFormatForMTLFormat((GLuint)mglFormatMetalFormat(internalformat));
 }
 

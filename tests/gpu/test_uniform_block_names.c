@@ -520,3 +520,47 @@ GPU_TEST(uniform_block_names, one_element_arrays_keep_their_index)
 
     glDeleteProgram(prog);
 }
+
+/* ---------- a block's member indices name its members ---------- */
+
+// Every program carries two hidden driver uniforms for the alpha test. The
+// block query counted them when it numbered its members, so each index it
+// handed back was two past the member it meant -- and past the end of the
+// program's own uniform list.
+GPU_TEST(uniform_block_names, a_member_index_names_that_member)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(std140) uniform Block { vec4 tint; float gain; };\n"
+        "uniform vec4 plain;\n"
+        "void main() { gl_Position = tint * gain + plain; }\n";
+    GLuint prog = build(vs);
+    GLint count = 0, members = 0, active = 0;
+    GLint idx[2] = { -1, -1 };
+    char name[64];
+
+    if (!prog) SKIP("program did not build");
+
+    GLuint block = glGetUniformBlockIndex(prog, "Block");
+    glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &active);
+    glGetActiveUniformBlockiv(prog, block, GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS, &members);
+    CHECK_EQ_INT(members, 2);
+
+    glGetActiveUniformBlockiv(prog, block, GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES, idx);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    for (int i = 0; i < 2; i++)
+    {
+        CHECK_MSG(idx[i] >= 0 && idx[i] < active,
+                  "member %d has index %d, and the program has %d uniforms", i, idx[i], active);
+
+        name[0] = 0;
+        glGetActiveUniformName(prog, (GLuint)idx[i], sizeof name, NULL, name);
+        CHECK_MSG(!strcmp(name, "tint") || !strcmp(name, "gain"),
+                  "index %d names '%s', not a member of Block", idx[i], name);
+        count++;
+    }
+
+    CHECK_EQ_INT(count, 2);
+    glDeleteProgram(prog);
+}

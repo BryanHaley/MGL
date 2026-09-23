@@ -243,6 +243,27 @@ static void tex_buffer_impl(GLMContext ctx, Texture *tex, GLenum internalformat,
     ctx->state.dirty_bits |= DIRTY_TEX;
 }
 
+// What the renderer needs to build the Metal texture: which buffer, and the
+// byte range of it the texture sees. A size of -1 means the whole buffer.
+bool mglBufferTextureSource(GLMContext ctx, const Texture *tex, Buffer **buf,
+                            GLintptr *offset, GLsizeiptr *size)
+{
+    BufferTextureBinding *bt = find_buf_tex_binding(tex->name);
+
+    if (bt == NULL || bt->buffer == 0)
+        return false;
+
+    *buf = findBuffer(ctx, bt->buffer);
+
+    if (*buf == NULL)
+        return false;
+
+    *offset = bt->offset;
+    *size = bt->size < 0 ? (GLsizeiptr)(*buf)->size - bt->offset : bt->size;
+
+    return true;
+}
+
 /* ---- entry points ---- */
 
 void mglTexBuffer(GLMContext ctx, GLenum target, GLenum internalformat, GLuint buffer)

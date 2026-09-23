@@ -98,6 +98,58 @@ static size_t matchBracket(const char *s, size_t i)
     return i;
 }
 
+// the value of "name = N" inside a layout list, or -1 when it is not there
+static int layoutValue(const char *inner, const char *name)
+{
+    const char *at = strstr(inner, name);
+
+    if (at == NULL)
+        return -1;
+
+    const char *eq = strchr(at, '=');
+
+    return eq ? atoi(eq + 1) : -1;
+}
+
+// Eats one "layout(...)" at i, keeping the location and component it names --
+// GLSL 4.20 lets a declaration carry several, anywhere among its qualifiers,
+// and a later value overrides an earlier one. Returns the index past it, or 0.
+static size_t readLayoutGroup(const char *s, size_t i, int *loc, int *comp)
+{
+    size_t open = skipSpace(s, i + 6);
+
+    if (!wordAt(s, i, "layout") || s[open] != '(')
+        return 0;
+
+    size_t j = open;
+    int depth = 0;
+
+    for (; s[j]; j++)
+    {
+        if (s[j] == '(') depth++;
+        else if (s[j] == ')' && --depth == 0) { j++; break; }
+    }
+
+    char inner[256];
+    size_t n = (j - open >= 2) ? j - open - 2 : 0;
+
+    if (n > sizeof(inner) - 1)
+        n = sizeof(inner) - 1;
+
+    memcpy(inner, s + open + 1, n);
+    inner[n] = 0;
+
+    int v;
+
+    if (loc && (v = layoutValue(inner, "location")) >= 0)
+        *loc = v;
+
+    if (comp && (v = layoutValue(inner, "component")) >= 0)
+        *comp = v;
+
+    return skipSpace(s, j);
+}
+
 // index just past the '}' that closes the '{' at i, or 0 if it never closes
 static size_t matchBrace(const char *s, size_t i)
 {
@@ -165,6 +217,7 @@ typedef struct {
     char instance[64];    // what the shader calls the block
     char member[64];      // its own name inside the block
     int  loc;             // layout(location=) it asked for, or -1
+    int  comp;            // layout(component=), 0 when not given
 } GsVarying;
 
 typedef struct {
@@ -235,54 +288,38 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
     // a layout(...) prefix carries one thing this needs: an explicit location,
     // which the generated pass-through has to reproduce or the fragment stage
     // matches the wrong varying
-    int want_loc = -1;
+    int want_loc = -1, want_comp = -1;
 
-    if (wordAt(s, i, "layout"))
+    while (wordAt(s, i, "layout"))
     {
-        size_t open = skipSpace(s, i + 6);
+        size_t j = readLayoutGroup(s, i, &want_loc, &want_comp);
 
-        if (s[open] != '(')
+        if (j == 0)
             return 0;
 
-        size_t j = open;
-        int depth = 0;
-
-        for (; s[j]; j++)
-        {
-            if (s[j] == '(') depth++;
-            else if (s[j] == ')' && --depth == 0) { j++; break; }
-        }
-
-        {
-            char inner[256];
-            size_t n = (j - open >= 2) ? j - open - 2 : 0;
-
-            if (n > sizeof(inner) - 1)
-                n = sizeof(inner) - 1;
-
-            memcpy(inner, s + open + 1, n);
-            inner[n] = 0;
-
-            const char *at = strstr(inner, "location");
-
-            if (at)
-            {
-                const char *eq = strchr(at, '=');
-
-                if (eq)
-                    want_loc = atoi(eq + 1);
-            }
-        }
-
-        i = skipSpace(s, j);
+        i = j;
     }
 
     memset(v, 0, sizeof(*v));
-    v->loc = want_loc;
 
     // walk the words up to the semicolon, remembering the last two
     while (s[i] && s[i] != ';' && s[i] != '{' && s[i] != '(')
     {
+        // "in layout(location = 3) vec4 x[]" is legal: a layout group can
+        // follow the storage qualifier as easily as lead it. Only while nothing
+        // but qualifiers has been read, though -- after a type or a name, a
+        // layout starts the next declaration.
+        if (prev[0] == 0 && wordAt(s, i, "layout"))
+        {
+            size_t j = readLayoutGroup(s, i, &want_loc, &want_comp);
+
+            if (j == 0)
+                return 0;
+
+            i = j;
+            continue;
+        }
+
         if (!identChar(s[i]))
         {
             if (s[i] == '[')
@@ -334,6 +371,8 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
 
     snprintf(v->type, sizeof(v->type), "%s", prev2);
     snprintf(v->name, sizeof(v->name), "%s", prev);
+    v->loc = want_loc;
+    v->comp = want_comp > 0 ? want_comp : 0;
 
     // gl_ClipDistance and gl_CullDistance are redeclared like varyings but are
     // built-ins, so they travel under a name the generated struct can hold and
@@ -485,6 +524,17 @@ static size_t readBlockDecl(const char *s, size_t i, bool want_out,
 
     while (s[i] && identChar(s[i]))
     {
+        if (wordAt(s, i, "layout"))
+        {
+            size_t j = readLayoutGroup(s, i, &loc, NULL);
+
+            if (j == 0)
+                return 0;
+
+            i = j;
+            continue;
+        }
+
         size_t after = readIdent(s, i, word, sizeof(word));
 
         after = skipSpace(s, after);
@@ -717,22 +767,49 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
         }
 
         // ---- layout(...) in|out; -- the primitive declarations ----
+        // GLSL 4.20 allows several groups on one declaration, the later value
+        // of a qualifier overriding the earlier one, so every group is kept in
+        // order and the last number found is the one that counts.
         if (wordAt(src, i, "layout"))
         {
             size_t j = skipSpace(src, i + 6);
 
             if (src[j] == '(')
             {
-                size_t close = j;
-                int depth = 0;
+                char inner[512] = "";
+                size_t close = i;
 
-                for (; src[close]; close++)
+                while (wordAt(src, close, "layout"))
                 {
-                    if (src[close] == '(') depth++;
-                    else if (src[close] == ')' && --depth == 0) { close++; break; }
+                    size_t open = skipSpace(src, close + 6);
+                    size_t k = open;
+                    int depth = 0;
+
+                    if (src[open] != '(')
+                        break;
+
+                    for (; src[k]; k++)
+                    {
+                        if (src[k] == '(') depth++;
+                        else if (src[k] == ')' && --depth == 0) { k++; break; }
+                    }
+
+                    size_t len = strlen(inner);
+                    size_t n = k - open - 2;
+
+                    if (len + n + 2 < sizeof(inner))
+                    {
+                        if (len)
+                            inner[len++] = ',';
+
+                        memcpy(inner + len, src + open + 1, n);
+                        inner[len + n] = 0;
+                    }
+
+                    close = skipSpace(src, k);
                 }
 
-                size_t after = skipSpace(src, close);
+                size_t after = close;
                 bool is_in = wordAt(src, after, "in");
                 bool is_out = wordAt(src, after, "out");
                 size_t semi = after + (is_in ? 2 : is_out ? 3 : 0);
@@ -741,11 +818,6 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
 
                 if ((is_in || is_out) && src[semi] == ';')
                 {
-                    char inner[256];
-                    size_t n = close - j - 2 < sizeof(inner) - 1 ? close - j - 2 : sizeof(inner) - 1;
-
-                    memcpy(inner, src + j + 1, n);
-                    inner[n] = 0;
 
                     if (is_in)
                     {
@@ -755,9 +827,8 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
                         else if (strstr(inner, "lines")) gi->in_primitive = GL_LINES;
                         else if (strstr(inner, "points")) gi->in_primitive = GL_POINTS;
 
-                        const char *inv = strstr(inner, "invocations");
-
-                        if (inv)
+                        for (const char *inv = strstr(inner, "invocations"); inv;
+                             inv = strstr(inv + 1, "invocations"))
                         {
                             const char *eq = strchr(inv, '=');
 
@@ -771,9 +842,8 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
                         else if (strstr(inner, "line_strip")) gi->out_primitive = GL_LINE_STRIP;
                         else if (strstr(inner, "points")) gi->out_primitive = GL_POINTS;
 
-                        const char *mv = strstr(inner, "max_vertices");
-
-                        if (mv)
+                        for (const char *mv = strstr(inner, "max_vertices"); mv;
+                             mv = strstr(mv + 1, "max_vertices"))
                         {
                             const char *eq = strchr(mv, '=');
 
@@ -1676,12 +1746,19 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
                     used[at + k] = true;
             }
 
+            char where[48];
+
+            if (sc.out[i].comp > 0)
+                snprintf(where, sizeof(where), "location = %d, component = %d", at, sc.out[i].comp);
+            else
+                snprintf(where, sizeof(where), "location = %d", at);
+
             if (sc.out[i].array)
-                snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s[%d];\n", at,
+                snprintf(line, sizeof(line), "layout(%s) %s%sout %s %s[%d];\n", where,
                          sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
                          sc.out[i].type, sc.out[i].name, sc.out[i].array);
             else
-                snprintf(line, sizeof(line), "layout(location = %d) %s%sout %s %s;\n", at,
+                snprintf(line, sizeof(line), "layout(%s) %s%sout %s %s;\n", where,
                          sc.out[i].qualifier, sc.out[i].qualifier[0] ? " " : "",
                          sc.out[i].type, sc.out[i].name);
 
@@ -1942,6 +2019,34 @@ static char *replaceAll(const char *src, const char *from, const char *to)
     return b.s;
 }
 
+// The capture was written against the geometry stage's own spelling of each
+// input block; the stage writing it may name the instance differently, or
+// not at all.
+static char *captureForWriter(const GeometryInfo *gi, const char *writer_src)
+{
+    char *capture = strdup(gi->capture_decl ? gi->capture_decl : "");
+
+    for (int i = 0; capture && i < gi->in_block_count; i++)
+    {
+        char prefix[80] = "", from[80];
+        char *next;
+
+        if (!writerBlockPrefix(writer_src, gi->in_block_names[i], prefix, sizeof(prefix)))
+            continue;
+
+        snprintf(from, sizeof(from), "%s.", gi->in_block_insts[i]);
+
+        if (!strcmp(from, prefix))
+            continue;
+
+        next = replaceAll(capture, from, prefix);
+        free(capture);
+        capture = next;
+    }
+
+    return capture;
+}
+
 char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi)
 {
     Buf out = {0};
@@ -1981,28 +2086,7 @@ char *mglAddGeometryCapture(const char *vs_src, const GeometryInfo *gi)
         return NULL;
     }
 
-    // the capture was written against the geometry stage's own spelling of
-    // each input block; the vertex stage may name the instance differently, or
-    // not at all
-    capture = strdup(gi->capture_decl ? gi->capture_decl : "");
-
-    for (int i = 0; capture && i < gi->in_block_count; i++)
-    {
-        char prefix[80] = "", from[80];
-        char *next;
-
-        if (!writerBlockPrefix(vs_src, gi->in_block_names[i], prefix, sizeof(prefix)))
-            continue;
-
-        snprintf(from, sizeof(from), "%s.", gi->in_block_insts[i]);
-
-        if (!strcmp(from, prefix))
-            continue;
-
-        next = replaceAll(capture, from, prefix);
-        free(capture);
-        capture = next;
-    }
+    capture = captureForWriter(gi, vs_src);
 
     if (capture == NULL ||
         !bufAdd(&out, "\n") || !bufAdd(&out, capture) ||
@@ -2261,8 +2345,15 @@ char *mglAddTessPointCapture(const char *tes_src, const GeometryInfo *gi)
         !bufAdd(&out, main_at + 4))
         goto done_src;
 
-    if (!replaceWord(&decl, gi->capture_decl, "gl_VertexID", "mglCapIdx"))
-        goto done_src;
+    {
+        char *capture = captureForWriter(gi, tes_src);
+        bool made = capture && replaceWord(&decl, capture, "gl_VertexID", "mglCapIdx");
+
+        free(capture);
+
+        if (!made)
+            goto done_src;
+    }
 
     char line[1024];
 
@@ -2619,8 +2710,15 @@ char *mglAddTessGeneralCapture(const char *tes_src, const GeometryInfo *gi)
         !bufAdd(&out, main_at + 4))
         goto done;
 
-    if (!replaceWord(&decl, gi->capture_decl, "gl_VertexID", "mglCapIdx"))
-        goto done;
+    {
+        char *capture = captureForWriter(gi, tes_src);
+        bool made = capture && replaceWord(&decl, capture, "gl_VertexID", "mglCapIdx");
+
+        free(capture);
+
+        if (!made)
+            goto done;
+    }
 
     char line[1600];
 
@@ -2751,9 +2849,17 @@ char *mglPassThroughGeometry(const char *tes_src, int input)
 
     for (int i = 0; i < count; i++)
     {
-        snprintf(line, sizeof(line), "%s%sin %s %s[];\n%s%sout %s %s;\n",
-                 outs[i].qualifier, outs[i].qualifier[0] ? " " : "", outs[i].type, outs[i].name,
-                 outs[i].qualifier, outs[i].qualifier[0] ? " " : "", outs[i].type, outs[i].name);
+        // A clip or cull distance stays the built-in it is: read through gl_in,
+        // written under its own name at the size the evaluation stage gave it.
+        // Passing it on under the rewrite's internal name made it a varying
+        // that nothing wrote and that the next stage could not find.
+        if (outs[i].builtin[0])
+            snprintf(line, sizeof(line), "out float %s[%d];\n", outs[i].builtin,
+                     outs[i].array ? outs[i].array : MAX_CLIP_DISTANCES);
+        else
+            snprintf(line, sizeof(line), "%s%sin %s %s[];\n%s%sout %s %s;\n",
+                     outs[i].qualifier, outs[i].qualifier[0] ? " " : "", outs[i].type, outs[i].name,
+                     outs[i].qualifier, outs[i].qualifier[0] ? " " : "", outs[i].type, outs[i].name);
 
         if (!bufAdd(&out, line))
             goto fail;
@@ -2771,6 +2877,22 @@ char *mglPassThroughGeometry(const char *tes_src, int input)
 
         for (int i = 0; i < count; i++)
         {
+            if (outs[i].builtin[0])
+            {
+                int n = outs[i].array ? outs[i].array : MAX_CLIP_DISTANCES;
+
+                for (int k = 0; k < n; k++)
+                {
+                    snprintf(line, sizeof(line), "  %s[%d] = gl_in[%d].%s[%d];\n",
+                             outs[i].builtin, k, v, outs[i].builtin, k);
+
+                    if (!bufAdd(&out, line))
+                        goto fail;
+                }
+
+                continue;
+            }
+
             snprintf(line, sizeof(line), "  %s = %s[%d];\n", outs[i].name, outs[i].name, v);
 
             if (!bufAdd(&out, line))

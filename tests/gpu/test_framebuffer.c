@@ -568,3 +568,155 @@ GPU_TEST(framebuffer, swapped_attachments_keep_what_was_drawn)
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(1, &vbo);
 }
+
+/* ---------- completeness is actually worked out ---------- */
+
+// glCheckFramebufferStatus answered COMPLETE for everything, and read colour
+// attachment 0's texture whether or not one was there.
+
+static GLuint tex2D(GLenum internalformat, GLsizei w, GLsizei h)
+{
+    GLuint t = 0;
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexStorage2D(GL_TEXTURE_2D, 1, internalformat, w, h);
+
+    return t;
+}
+
+GPU_TEST(framebuffer_status, nothing_attached_is_missing_an_attachment)
+{
+    GLuint fbo = 0;
+
+    glCreateFramebuffers(1, &fbo);
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fbo, GL_FRAMEBUFFER),
+                  GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT);
+
+    // unless the defaults say how big it is
+    glNamedFramebufferParameteri(fbo, GL_FRAMEBUFFER_DEFAULT_WIDTH, 16);
+    glNamedFramebufferParameteri(fbo, GL_FRAMEBUFFER_DEFAULT_HEIGHT, 16);
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fbo, GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glDeleteFramebuffers(1, &fbo);
+}
+
+GPU_TEST(framebuffer_status, a_depth_image_in_a_colour_slot_is_incomplete)
+{
+    GLuint fbo = 0, depth = tex2D(GL_DEPTH_COMPONENT24, 16, 16);
+
+    glCreateFramebuffers(1, &fbo);
+    glNamedFramebufferTexture(fbo, GL_COLOR_ATTACHMENT0, depth, 0);
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fbo, GL_FRAMEBUFFER),
+                  GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
+
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &depth);
+}
+
+GPU_TEST(framebuffer_status, a_layer_past_the_end_is_incomplete)
+{
+    GLuint fbo = 0, arr = 0;
+
+    glGenTextures(1, &arr);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, arr);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, 16, 16, 2);
+
+    glCreateFramebuffers(1, &fbo);
+    glNamedFramebufferTextureLayer(fbo, GL_COLOR_ATTACHMENT0, arr, 0, 1);
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fbo, GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glNamedFramebufferTextureLayer(fbo, GL_COLOR_ATTACHMENT0, arr, 0, 2);
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fbo, GL_FRAMEBUFFER),
+                  GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
+
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &arr);
+}
+
+GPU_TEST(framebuffer_status, a_layered_and_a_flat_attachment_do_not_mix)
+{
+    GLuint fbo = 0, arr = 0, flat = tex2D(GL_RGBA8, 16, 16);
+
+    glGenTextures(1, &arr);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, arr);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, 16, 16, 2);
+
+    glCreateFramebuffers(1, &fbo);
+    glNamedFramebufferTexture(fbo, GL_COLOR_ATTACHMENT0, arr, 0);   // every layer
+    glNamedFramebufferTexture(fbo, GL_COLOR_ATTACHMENT1, flat, 0);
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fbo, GL_FRAMEBUFFER),
+                  GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS);
+
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &arr);
+    glDeleteTextures(1, &flat);
+}
+
+GPU_TEST(framebuffer_status, clearing_an_incomplete_framebuffer_is_an_error_not_a_crash)
+{
+    GLuint fbo = 0;
+    static const GLfloat red[4] = { 1, 0, 0, 1 };
+
+    glCreateFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    glClear(GL_COLOR_BUFFER_BIT);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_FRAMEBUFFER_OPERATION);
+
+    glClearBufferfv(GL_COLOR, 0, red);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_FRAMEBUFFER_OPERATION);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+}
+
+// Metal pairs a packed depth-stencil image only with itself, so depth from
+// one image and stencil from another went on to a pipeline Metal's own
+// validation aborts the process over. GL lets the driver answer UNSUPPORTED,
+// and a draw into it has to be refused.
+GPU_TEST(framebuffer_status, depth_and_stencil_from_different_images_are_unsupported)
+{
+    GLuint fbo = 0, rb[3] = { 0 }, vao, vbo, prog;
+    char log[512];
+
+    prog = mgl_build_program("#version 430 core\nlayout(location = 0) in vec2 p;\n"
+                             "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n",
+                             "#version 430 core\nout vec4 o;\nvoid main() { o = vec4(1.0); }\n",
+                             log, sizeof log);
+
+    glGenRenderbuffers(3, rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 16, 16);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 16, 16);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[2]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, 16, 16);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb[2]);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_UNSUPPORTED);
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glViewport(0, 0, 16, 16);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_FRAMEBUFFER_OPERATION);
+
+    // the same packed image in both slots is fine
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteRenderbuffers(3, rb);
+}

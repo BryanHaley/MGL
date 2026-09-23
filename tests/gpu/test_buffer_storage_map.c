@@ -507,3 +507,43 @@ GPU_TEST(buffer_storage_map, persistent_mapping_unmaps_cleanly)
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glDeleteBuffers(1, &b);
 }
+
+/* ---------- a persistent pointer survives the buffer reaching the GPU ---------- */
+
+// The Metal side of a buffer used to be made by copying its memory into a new
+// MTLBuffer and freeing the original, so a persistent mapping taken before the
+// first GPU use pointed at freed pages afterwards.
+GPU_TEST(buffer_storage_map, a_persistent_pointer_still_reads_after_a_gpu_copy)
+{
+    static const GLuint reference[2] = { 3, 1415927 };
+    GLuint src = 0, dst = 0;
+    GLuint *mapped;
+    GLsync sync;
+
+    glCreateBuffers(1, &src);
+    glNamedBufferData(src, sizeof reference, reference, GL_STATIC_COPY);
+
+    glCreateBuffers(1, &dst);
+    glNamedBufferStorage(dst, sizeof reference, NULL,
+                         GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+
+    mapped = (GLuint *)glMapNamedBufferRange(dst, 0, sizeof reference,
+                                             GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+    CHECK(mapped != NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glCopyNamedBufferSubData(src, dst, 0, 0, sizeof reference);
+    sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+    glDeleteSync(sync);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    if (mapped)
+        CHECK_MSG(mapped[0] == reference[0] && mapped[1] == reference[1],
+                  "read %u %u through the mapping, want %u %u",
+                  mapped[0], mapped[1], reference[0], reference[1]);
+
+    glUnmapNamedBuffer(dst);
+    glDeleteBuffers(1, &src);
+    glDeleteBuffers(1, &dst);
+}

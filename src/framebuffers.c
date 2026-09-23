@@ -342,52 +342,164 @@ void mglDeleteFramebuffers(GLMContext ctx, GLsizei n, const GLuint *framebuffers
     STATE(dirty_bits) |= DIRTY_FBO;
 }
 
+// The image an attachment points at, whichever way it was attached.
+static Texture *attachmentImage(const FBOAttachment *a)
+{
+    if (a->textarget == GL_RENDERBUFFER)
+        return a->buf.rbo ? a->buf.rbo->tex : NULL;
+
+    return a->buf.tex;
+}
+
+static bool attachmentUsed(const FBOAttachment *a)
+{
+    return a->textarget != 0 && attachmentImage(a) != NULL;
+}
+
+// How many layers a single-layer attachment may pick from at this level.
+static GLuint attachmentLayers(const Texture *tex, GLuint level)
+{
+    switch (tex->target)
+    {
+        case GL_TEXTURE_3D:
+            return tex->faces[0].levels[level].depth ? tex->faces[0].levels[level].depth : 1;
+        case GL_TEXTURE_1D_ARRAY:
+            return tex->height ? tex->height : 1;
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            return tex->depth ? tex->depth : 1;
+        case GL_TEXTURE_CUBE_MAP:
+            return 6;
+    }
+
+    return 1;
+}
+
+// GL 4.6 9.4.1: the image exists, has size, the layer is inside it, and its
+// format can be rendered to at this attachment point.
+static bool attachmentComplete(const FBOAttachment *a, GLenum point)
+{
+    Texture *tex = attachmentImage(a);
+    GLuint face = 0;
+
+    if (tex == NULL)
+        return false;
+
+    if (a->textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && a->textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)
+        face = a->textarget - GL_TEXTURE_CUBE_MAP_POSITIVE_X;
+
+    if (tex->faces[face].levels == NULL || a->level >= tex->mipmap_levels)
+        return false;
+
+    if (tex->faces[face].levels[a->level].width == 0 || tex->faces[face].levels[a->level].height == 0)
+        return false;
+
+    if (!a->layered && a->layer >= attachmentLayers(tex, a->level))
+        return false;
+
+    const MGLFormatDesc *fd = mglFormatDesc(tex->internalformat);
+
+    if (fd == NULL)
+        return false;
+
+    if (point == GL_DEPTH_ATTACHMENT)
+        return fd->kind == MGL_FMT_DEPTH || fd->kind == MGL_FMT_DEPTH_STENCIL;
+
+    if (point == GL_STENCIL_ATTACHMENT)
+        return fd->kind == MGL_FMT_STENCIL || fd->kind == MGL_FMT_DEPTH_STENCIL;
+
+    // Anything uncompressed and colour that Metal can hold renders here. The
+    // spec's required list is a floor, and refusing a format MGL does draw to
+    // would break programs that work today.
+    return (fd->kind == MGL_FMT_COLOR_FLOAT || fd->kind == MGL_FMT_COLOR_INT ||
+            fd->kind == MGL_FMT_COLOR_UINT) && !mglFormatIsCompressed(tex->internalformat);
+}
+
+GLenum  mglCheckFramebufferStatus(GLMContext ctx, GLenum target);
+
+// GL 4.6 9.4.4: clearing or drawing into an incomplete framebuffer is an
+// error, and there is nothing for Metal to encode into besides.
+bool mglDrawFramebufferComplete(GLMContext ctx)
+{
+    if (ctx->state.framebuffer == NULL ||
+        mglCheckFramebufferStatus(ctx, GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
+        return true;
+
+    ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
+
+    return false;
+}
+
+// GL 4.6 9.4.2. This used to answer COMPLETE for everything, and it read
+// colour attachment 0's texture whether or not there was one.
 GLenum  mglCheckFramebufferStatus(GLMContext ctx, GLenum target)
 {
-    Framebuffer *fbo;
-    Texture *tex;
-    GLuint level;
-    GLuint width, height;
-
-    fbo = currentFBOForType(ctx, target);
+    Framebuffer *fbo = currentFBOForType(ctx, target);
+    const FBOAttachment *all[MAX_COLOR_ATTACHMENTS + 2];
+    GLenum points[MAX_COLOR_ATTACHMENTS + 2];
+    int n = 0;
 
     // the default framebuffer is always complete; a bad target returns 0
     if (!fbo)
         return (ctx->state.error == GL_INVALID_ENUM) ? 0 : GL_FRAMEBUFFER_COMPLETE;
 
-    if (fbo->color_attachments[0].textarget == GL_RENDERBUFFER)
-    {
-        tex = fbo->color_attachments[0].buf.rbo->tex;
-    }
-    else
-    {
-        tex = fbo->color_attachments[0].buf.tex;
-    }
-
-    level = fbo->color_attachments[0].level;
-    width = tex->faces[0].levels[level].width;
-    height = tex->faces[0].levels[level].height;
-
-    for(int i=1; i<STATE(max_color_attachments);i++)
-    {
-        if (fbo->color_attachments[i].textarget == GL_RENDERBUFFER)
+    for (int i = 0; i < MAX_COLOR_ATTACHMENTS && i < STATE(max_color_attachments); i++)
+        if (attachmentUsed(&fbo->color_attachments[i]))
         {
-            tex = fbo->color_attachments[i].buf.rbo->tex;
-        }
-        else
-        {
-            tex = fbo->color_attachments[i].buf.tex;
+            all[n] = &fbo->color_attachments[i];
+            points[n++] = GL_COLOR_ATTACHMENT0 + i;
         }
 
-        if (tex)
-        {
-            level = fbo->color_attachments[i].level;
-            width = tex->faces[0].levels[level].width;
-            height = tex->faces[0].levels[level].height;
-        }
+    if (attachmentUsed(&fbo->depth))
+    {
+        all[n] = &fbo->depth;
+        points[n++] = GL_DEPTH_ATTACHMENT;
     }
 
-    DEBUG_PRINT("%s need to fix this function %d, %d, %d\n", __FUNCTION__, width, height, level);
+    if (attachmentUsed(&fbo->stencil))
+    {
+        all[n] = &fbo->stencil;
+        points[n++] = GL_STENCIL_ATTACHMENT;
+    }
+
+    // nothing attached is fine only when the defaults say how big it is
+    if (n == 0)
+        return (fbo->default_width > 0 && fbo->default_height > 0)
+               ? GL_FRAMEBUFFER_COMPLETE : GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+
+    for (int i = 0; i < n; i++)
+        if (!attachmentComplete(all[i], points[i]))
+            return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+
+    // every image has to report the same sample count
+    for (int i = 1; i < n; i++)
+        if (attachmentImage(all[i])->samples != attachmentImage(all[0])->samples)
+            return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
+
+    // layered or not, all of them; and layered ones all of one texture target
+    for (int i = 1; i < n; i++)
+    {
+        if (all[i]->layered != all[0]->layered)
+            return GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
+
+        if (all[0]->layered && attachmentImage(all[i])->target != attachmentImage(all[0])->target)
+            return GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
+    }
+
+    // Metal takes a separate depth image and stencil image, but a packed
+    // depth-stencil one only as both halves of itself. GL allows saying so.
+    if (attachmentUsed(&fbo->depth) && attachmentUsed(&fbo->stencil))
+    {
+        Texture *d = attachmentImage(&fbo->depth), *st = attachmentImage(&fbo->stencil);
+        bool packed = mglFormatKind(d->internalformat) == MGL_FMT_DEPTH_STENCIL ||
+                      mglFormatKind(st->internalformat) == MGL_FMT_DEPTH_STENCIL;
+        bool same = d == st && fbo->depth.level == fbo->stencil.level &&
+                    fbo->depth.layer == fbo->stencil.layer;
+
+        if (packed && !same)
+            return GL_FRAMEBUFFER_UNSUPPORTED;
+    }
 
     return GL_FRAMEBUFFER_COMPLETE;
 }
@@ -847,6 +959,11 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
     fbo_attachment_ptr->textarget = textarget;
     fbo_attachment_ptr->level = level;
     fbo_attachment_ptr->layer = layer;
+    fbo_attachment_ptr->layered = attachment_type == GL_NONE && tex &&
+                                  (tex->target == GL_TEXTURE_3D || tex->target == GL_TEXTURE_1D_ARRAY ||
+                                   tex->target == GL_TEXTURE_2D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP ||
+                                   tex->target == GL_TEXTURE_CUBE_MAP_ARRAY ||
+                                   tex->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
     fbo_attachment_ptr->clear_bitmask = 0;
     fbo_attachment_ptr->clear_color[0] = 0.f;
     fbo_attachment_ptr->clear_color[1] = 0.f;
@@ -1012,6 +1129,7 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
     fbo_attachment_ptr = getFBOAttachment(ctx, fbo, attachment);
 
     fbo_attachment_ptr->textarget = GL_RENDERBUFFER;
+    fbo_attachment_ptr->layered = GL_FALSE;
     fbo_attachment_ptr->texture = renderbuffer;
     fbo_attachment_ptr->level = 0;
     fbo_attachment_ptr->buf.rbo = rbo;

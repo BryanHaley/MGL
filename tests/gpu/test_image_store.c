@@ -250,3 +250,103 @@ GPU_TEST(image_store, fragment_shader_writes_an_image)
     glDeleteBuffers(1, &vbo);
     mgl_target_destroy(&target);
 }
+
+// GL lets an image unit name a format other than the texture's own; one of
+// the same size reads the texels as that format. It was refused outright.
+GPU_TEST(image_store, binding_as_another_format_is_not_an_error)
+{
+    GLuint tex = 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+
+    glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32UI);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindImageTexture(0, 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32UI);
+    glDeleteTextures(1, &tex);
+}
+
+// Metal has atomics on cube textures only from MSL 4.0. Before that the
+// shader holds a storage cube as a 2D array of its faces -- which is how GL
+// numbers the texels anyway -- and the unit is bound as that view. imageSize
+// still answers as a cube.
+GPU_TEST(image_store, atomics_on_cube_and_cube_array_images)
+{
+    static const char *cs =
+        "#version 450\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(r32ui, binding = 0) uniform uimageCube c;\n"
+        "layout(r32ui, binding = 1) uniform uimageCubeArray ca;\n"
+        "layout(std430, binding = 0) buffer Out { ivec2 cs; ivec3 cas; };\n"
+        "void main() {\n"
+        "  imageAtomicAdd(c, ivec3(1, 2, 4), 5u);\n"
+        "  imageAtomicMax(ca, ivec3(3, 0, 6 * 1 + 2), 9u);\n"
+        "  imageStore(c, ivec3(0, 0, 1), uvec4(7u));\n"
+        "  cs = imageSize(c);\n"
+        "  cas = imageSize(ca);\n"
+        "}\n";
+    static const GLuint zero = 0;
+    GLuint prog, cube = 0, arr = 0, ssbo = 0;
+    GLuint face[16], all[4 * 4 * 12];
+    GLint sizes[8] = { 0 };
+    char log[2048];
+
+    prog = mgl_build_compute_program(cs, log, sizeof log);
+    CHECK_MSG(prog != 0, "cube atomics kernel did not build: %s", log);
+
+    if (!prog) return;
+
+    glGenTextures(1, &cube);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+    glTexStorage2D(GL_TEXTURE_CUBE_MAP, 1, GL_R32UI, 4, 4);
+    glClearTexImage(cube, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
+
+    glGenTextures(1, &arr);
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, arr);
+    glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 1, GL_R32UI, 4, 4, 12);
+    glClearTexImage(arr, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
+
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof sizes, sizes, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+
+    glBindImageTexture(0, cube, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R32UI);
+    glBindImageTexture(1, arr, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R32UI);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(prog);
+    glDispatchCompute(1, 1, 1);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    // face 4 is +Z; two dispatches of +5
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+    glGetTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, face);
+    CHECK_MSG(face[2 * 4 + 1] == 10, "+Z texel (1,2) holds %u, want 10", face[2 * 4 + 1]);
+
+    glGetTexImage(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, face);
+    CHECK_MSG(face[0] == 7, "-X texel (0,0) holds %u, want 7", face[0]);
+
+    // layer 1, face 2 is layer-face 8
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, arr);
+    glGetTexImage(GL_TEXTURE_CUBE_MAP_ARRAY, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, all);
+    CHECK_MSG(all[8 * 16 + 3] == 9, "layer-face 8 texel (3,0) holds %u, want 9", all[8 * 16 + 3]);
+    CHECK_MSG(all[2 * 16 + 3] == 0, "layer-face 2 was written too: %u", all[2 * 16 + 3]);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof sizes, sizes);
+    CHECK_MSG(sizes[0] == 4 && sizes[1] == 4, "cube size %d x %d, want 4 x 4", sizes[0], sizes[1]);
+    // cas is an ivec3 at offset 16 in std430
+    CHECK_MSG(sizes[4] == 4 && sizes[5] == 4 && sizes[6] == 2,
+              "cube array size %d x %d x %d, want 4 x 4 x 2", sizes[4], sizes[5], sizes[6]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteTextures(1, &cube);
+    glDeleteTextures(1, &arr);
+    glDeleteBuffers(1, &ssbo);
+}

@@ -506,3 +506,68 @@ GPU_TEST(compute, map_read_without_finish_sees_gpu_writes)
     glDeleteBuffers(1, &ssbo);
     glDeleteProgram(prog);
 }
+
+// A std140 struct whose Metal size already equals its array stride was still
+// wrapped in a padding helper, which then held a zero-length array -- and
+// Metal will not compile one of those.
+GPU_TEST(compute, a_std140_struct_that_fills_its_stride)
+{
+    static const char *cs =
+        "#version 430 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "struct S4 { float f[1]; int i[2]; uint ui[3]; bool b[4]; ivec3 iv[5]; bvec2 bv[6]; vec4 v[7]; uvec2 uv[8]; };\n"
+        "struct S6 { S4 s4[3]; };\n"
+        "layout(std140, binding = 0) buffer Out4 { S4 data[]; } g4;\n"
+        "layout(std140, binding = 1) buffer Out6 { S6 data[]; } g6;\n"
+        "layout(std430, binding = 2) buffer Len { int len[2]; };\n"
+        "void main() {\n"
+        "  len[0] = g4.data.length();\n"
+        "  len[1] = g6.data.length();\n"
+        "  g4.data[1].uv[7] = uvec2(7u, 8u);\n"
+        "  g6.data[0].s4[2].v[6] = vec4(9.0);\n"
+        "}\n";
+    GLuint prog = compute_program(cs);
+    GLuint bufs[3];
+    GLuint *zero = calloc(1728, 1);
+    GLuint u[2];
+    GLfloat f[4];
+    GLint len[2] = { -1, -1 };
+
+    CHECK_MSG(prog != 0, "std140 struct kernel did not build");
+
+    if (!prog) { free(zero); return; }
+
+    // S4 is 576 bytes in std140, and S6 three of those
+    glGenBuffers(3, bufs);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufs[0]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 2 * 576, zero, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, bufs[0]);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufs[1]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 1728, zero, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, bufs[1]);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufs[2]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof len, len, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, bufs[2]);
+
+    glUseProgram(prog);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof len, len);
+    CHECK_MSG(len[0] == 2 && len[1] == 1, "lengths %d and %d, want 2 and 1", len[0], len[1]);
+
+    // data[1].uv[7] sits 448 + 7 * 16 bytes into the second element
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufs[0]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 576 + 448 + 7 * 16, sizeof u, u);
+    CHECK_MSG(u[0] == 7 && u[1] == 8, "uv[7] holds %u %u, want 7 8", u[0], u[1]);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufs[1]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 2 * 576 + 336 + 6 * 16, sizeof f, f);
+    CHECK_MSG(f[0] == 9.0f && f[3] == 9.0f, "s4[2].v[6] holds %g .. %g, want 9", f[0], f[3]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    free(zero);
+    glUseProgram(0);
+    glDeleteBuffers(3, bufs);
+    glDeleteProgram(prog);
+}

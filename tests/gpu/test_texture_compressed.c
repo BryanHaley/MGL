@@ -9,6 +9,7 @@
 
 #include "mgl_test.h"
 #include "harness.h"
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef GL_COMPRESSED_RED_RGTC1
@@ -475,4 +476,153 @@ GPU_TEST(texture_compressed, immutable_storage_takes_compressed_formats)
 
         glDeleteTextures(1, &tex);
     }
+}
+
+/* ---------- pixel storage on compressed data ---------- */
+
+// glPixelStorei refused the block parameters outright, and nothing in the
+// pixel store could be read back through glGet at all.
+GPU_TEST(texture_compressed, block_pixel_store_is_kept_and_answered)
+{
+    static const GLenum names[] = {
+        GL_UNPACK_COMPRESSED_BLOCK_WIDTH, GL_UNPACK_COMPRESSED_BLOCK_HEIGHT,
+        GL_UNPACK_COMPRESSED_BLOCK_DEPTH, GL_UNPACK_COMPRESSED_BLOCK_SIZE,
+        GL_PACK_COMPRESSED_BLOCK_WIDTH,   GL_PACK_COMPRESSED_BLOCK_HEIGHT,
+        GL_PACK_COMPRESSED_BLOCK_DEPTH,   GL_PACK_COMPRESSED_BLOCK_SIZE,
+        GL_UNPACK_ROW_LENGTH,             GL_PACK_SKIP_ROWS,
+    };
+
+    for (unsigned i = 0; i < sizeof names / sizeof *names; i++)
+    {
+        GLint got = -1;
+
+        glPixelStorei(names[i], 4 + (GLint)i);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        glGetIntegerv(names[i], &got);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+        CHECK_MSG(got == 4 + (GLint)i, "pname 0x%x read back %d, want %d", names[i], got, 4 + (GLint)i);
+
+        glPixelStorei(names[i], 0);
+    }
+}
+
+// With a block size set, row length and the skips count whole blocks, so a
+// 4x4 upload can be taken from the middle of a wider compressed image.
+GPU_TEST(texture_compressed, a_block_rectangle_comes_out_of_a_wider_image)
+{
+    GLuint t = 0;
+    unsigned char src[4 * 8], got[8];
+
+    if (!format_is_advertised(GL_COMPRESSED_RED_RGTC1))
+        SKIP("BC4/RGTC not supported by this device");
+
+    // a 16x4 image is one row of four 8-byte blocks; each block holds its index
+    for (int b = 0; b < 4; b++)
+        memset(src + b * 8, 0x10 * (b + 1), 8);
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+
+    glPixelStorei(GL_UNPACK_COMPRESSED_BLOCK_SIZE, 8);
+    glPixelStorei(GL_UNPACK_COMPRESSED_BLOCK_WIDTH, 4);
+    glPixelStorei(GL_UNPACK_COMPRESSED_BLOCK_HEIGHT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 16);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 8);   // the third block
+
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RED_RGTC1, 4, 4, 0, 8, src);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glPixelStorei(GL_UNPACK_COMPRESSED_BLOCK_SIZE, 0);
+    glPixelStorei(GL_UNPACK_COMPRESSED_BLOCK_WIDTH, 0);
+    glPixelStorei(GL_UNPACK_COMPRESSED_BLOCK_HEIGHT, 0);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+
+    memset(got, 0xCD, sizeof got);
+    glGetCompressedTexImage(GL_TEXTURE_2D, 0, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(got[0] == 0x30 && got[7] == 0x30,
+              "uploaded block starts 0x%02x - want the third block, 0x30", got[0]);
+
+    glDeleteTextures(1, &t);
+}
+
+// A compressed level keeps one row per row of 4x4 blocks. The array upload
+// stepped from layer to layer by pixel rows, so every layer after the first
+// was read from four times too far in.
+GPU_TEST(texture_compressed, each_layer_of_a_compressed_array_is_its_own)
+{
+    static const char *vs =
+        "#version 430 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 430 core\n"
+        "uniform sampler2DArray t;\n"
+        "uniform int layer;\n"
+        "out vec4 o;\n"
+        "void main() { o = texture(t, vec3(0.5, 0.5, float(layer))); }\n";
+    // one solid colour a layer: red, green, blue, as DXT1 blocks whose every
+    // index picks colour 0
+    static const GLushort colours[3] = { 0xF800, 0x07E0, 0x001F };
+    GLubyte data[3 * 4 * 8];
+    GLuint tex = 0, prog, vao, vbo;
+    MGLTestTarget t;
+    char log[1024];
+
+    for (int l = 0; l < 3; l++)
+        for (int b = 0; b < 4; b++)
+        {
+            GLubyte *blk = data + (l * 4 + b) * 8;
+
+            memset(blk, 0, 8);
+            blk[0] = (GLubyte)(colours[l] & 0xFF);
+            blk[1] = (GLubyte)(colours[l] >> 8);
+        }
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glCompressedTexImage3D(GL_TEXTURE_2D_ARRAY, 0, 0x83F0 /* RGB_S3TC_DXT1 */, 8, 8, 3, 0, sizeof data, data);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+
+    if (prog && mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+    {
+        mgl_target_bind(&t);
+        glViewport(0, 0, 8, 8);
+        vao = mgl_fullscreen_quad(&vbo);
+        glUseProgram(prog);
+        glUniform1i(glGetUniformLocation(prog, "t"), 0);
+
+        for (int l = 0; l < 3; l++)
+        {
+            unsigned char c[4] = { 0 };
+            unsigned char *px;
+
+            glUniform1i(glGetUniformLocation(prog, "layer"), l);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            px = mgl_read_rgba8(&t);
+
+            if (px)
+            {
+                mgl_pixel_at(px, &t, 4, 4, c);
+                CHECK_MSG(c[l] > 200 && c[(l + 1) % 3] < 50 && c[(l + 2) % 3] < 50,
+                          "layer %d drew %d,%d,%d", l, c[0], c[1], c[2]);
+                free(px);
+            }
+        }
+
+        glUseProgram(0);
+        glDeleteVertexArrays(1, &vao);
+        glDeleteBuffers(1, &vbo);
+        mgl_target_destroy(&t);
+    }
+
+    glDeleteProgram(prog);
+    glDeleteTextures(1, &tex);
 }

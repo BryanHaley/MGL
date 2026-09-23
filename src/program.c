@@ -548,11 +548,27 @@ static GLenum glSamplerTypeFromSpirv(spvc_compiler compiler, spvc_type type)
             return arrayed ? GL_SAMPLER_2D_ARRAY : GL_SAMPLER_2D;
         case SpvDim3D:     return GL_SAMPLER_3D;
         case SpvDimCube:
-            if (depth)     return GL_SAMPLER_CUBE_SHADOW;
+            if (depth)     return arrayed ? GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW : GL_SAMPLER_CUBE_SHADOW;
             return arrayed ? GL_SAMPLER_CUBE_MAP_ARRAY : GL_SAMPLER_CUBE;
         case SpvDimRect:   return depth ? GL_SAMPLER_2D_RECT_SHADOW : GL_SAMPLER_2D_RECT;
         case SpvDimBuffer: return GL_SAMPLER_BUFFER;
         default:           return GL_NONE;
+    }
+}
+
+// The cube type GL declared, for an image SPIRV-Cross declared as a 2D array
+// of faces so its atomics would compile.
+static GLenum cubeTypeFor2DArray(GLenum type, bool arrayed)
+{
+    switch (type)
+    {
+        case GL_SAMPLER_2D_ARRAY:              return arrayed ? GL_SAMPLER_CUBE_MAP_ARRAY : GL_SAMPLER_CUBE;
+        case GL_INT_SAMPLER_2D_ARRAY:          return arrayed ? GL_INT_SAMPLER_CUBE_MAP_ARRAY : GL_INT_SAMPLER_CUBE;
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY: return arrayed ? GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY : GL_UNSIGNED_INT_SAMPLER_CUBE;
+        case GL_IMAGE_2D_ARRAY:                return arrayed ? GL_IMAGE_CUBE_MAP_ARRAY : GL_IMAGE_CUBE;
+        case GL_INT_IMAGE_2D_ARRAY:            return arrayed ? GL_INT_IMAGE_CUBE_MAP_ARRAY : GL_INT_IMAGE_CUBE;
+        case GL_UNSIGNED_INT_IMAGE_2D_ARRAY:   return arrayed ? GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY : GL_UNSIGNED_INT_IMAGE_CUBE;
+        default:                               return type;
     }
 }
 
@@ -1290,7 +1306,19 @@ static void addStructUniformLeaves(spvc_compiler compiler, Program *ptr, int sta
         if (!st)
             continue;
 
-        total = countStructLeaves(compiler, st, 0);
+        // "uniform S s[3]" is s[0].a, s[1].a and so on, one struct after another
+        GLint elems = 1;
+        unsigned es = 0, ea = 1;
+
+        if (spvc_type_get_num_array_dimensions(t) > 0)
+        {
+            unsigned dim = spvc_type_get_array_dimension(t, 0);
+
+            elems = dim ? (GLint)dim : 1;
+            mslTypeLayout(compiler, st_id, &es, &ea, 0);
+        }
+
+        total = countStructLeaves(compiler, st, 0) * (GLuint)elems;
 
         if (total == 0 || total > 512)
             continue;
@@ -1300,8 +1328,18 @@ static void addStructUniformLeaves(spvc_compiler compiler, Program *ptr, int sta
         if (!leaves)
             continue;
 
-        flattenStructLeaves(compiler, ptr, stage, st, st_id, list->list[i].name,
-                            0, 0, leaves, &n, total);
+        for (GLint e = 0; e < elems; e++)
+        {
+            char name[256];
+
+            if (spvc_type_get_num_array_dimensions(t) > 0)
+                snprintf(name, sizeof name, "%s[%d]", list->list[i].name, e);
+            else
+                snprintf(name, sizeof name, "%s", list->list[i].name);
+
+            flattenStructLeaves(compiler, ptr, stage, st, st_id, name,
+                                0, e * (GLint)es, leaves, &n, total);
+        }
 
         mslTypeLayout(compiler, list->list[i].type_id, &ssize, &salign, 0);
 
@@ -1344,13 +1382,16 @@ static void addStructUniformLeaves(spvc_compiler compiler, Program *ptr, int sta
 // it, so it is told about every one, and pads its side to match. Built-ins
 // are handled by mglTouchTessInputs instead.
 
-static void addTessInterfaceVar(spvc_compiler c, bool input, unsigned location, unsigned vecsize,
-                                SpvBuiltIn builtin, bool patch)
+static void addTessInterfaceVar(spvc_compiler c, bool input, unsigned location, unsigned component,
+                                unsigned vecsize, SpvBuiltIn builtin, bool patch)
 {
     spvc_msl_shader_interface_var_2 v;
 
     spvc_msl_shader_interface_var_init_2(&v);
     v.location = location;
+    // two variables can share a location through component=, and SPIRV-Cross
+    // keys these by both, so a missing component made the second overwrite the first
+    v.component = component;
     v.vecsize = vecsize;
     v.builtin = builtin;
     v.rate = patch ? SPVC_MSL_SHADER_VARIABLE_RATE_PER_PATCH : SPVC_MSL_SHADER_VARIABLE_RATE_PER_VERTEX;
@@ -1418,8 +1459,11 @@ static void declareTessInterface(spvc_compiler compiler_msl, Program *pptr, int 
                 if (spvc_compiler_has_member_decoration(c, list[i].base_type_id, m, SpvDecorationLocation))
                     next = spvc_compiler_get_member_decoration(c, list[i].base_type_id, m, SpvDecorationLocation);
 
+                unsigned comp = spvc_compiler_has_member_decoration(c, list[i].base_type_id, m, SpvDecorationComponent)
+                              ? spvc_compiler_get_member_decoration(c, list[i].base_type_id, m, SpvDecorationComponent) : 0;
+
                 for (unsigned k = 0; k < cols * n; k++)
-                    addTessInterfaceVar(compiler_msl, true, next++, vec, SpvBuiltInMax, patch);
+                    addTessInterfaceVar(compiler_msl, true, next++, comp, vec, SpvBuiltInMax, patch);
             }
 
             continue;
@@ -1443,8 +1487,11 @@ static void declareTessInterface(spvc_compiler compiler_msl, Program *pptr, int 
             n *= spvc_type_get_array_dimension(type, d) ? spvc_type_get_array_dimension(type, d) : 1;
         }
 
+        unsigned comp = spvc_compiler_has_decoration(c, list[i].id, SpvDecorationComponent)
+                      ? spvc_compiler_get_decoration(c, list[i].id, SpvDecorationComponent) : 0;
+
         for (unsigned k = 0; k < cols * n; k++)
-            addTessInterfaceVar(compiler_msl, true, loc + k, vec, SpvBuiltInMax, patch);
+            addTessInterfaceVar(compiler_msl, true, loc + k, comp, vec, SpvBuiltInMax, patch);
     }
 
     spvc_context_destroy(ctx);
@@ -1617,6 +1664,11 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
+    // a samplerBuffer or imageBuffer is Metal's own texture_buffer, which
+    // aliases the MTLBuffer rather than copying it into a 2D texture
+    spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE, SPVC_TRUE);
+    spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_BUFFER_SIZE_BUFFER_INDEX, MGL_BUFFER_SIZES_MSL_SLOT);
+
     // GL clips z to [-1,1]; Metal clips to [0,1]. Without this the whole near
     // half of every GL projection is thrown away before rasterisation.
     if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_FIXUP_DEPTH_CONVENTION, SPVC_TRUE) != SPVC_SUCCESS) {
@@ -1726,6 +1778,11 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     // evaluation stage, which becomes the vertex function of the draw.
     if (ptr->tess.active)
     {
+        // Every buffer between these stages is read as a plain struct, so a
+        // location shared through component= needs no packing on either side.
+        if (stage == _VERTEX_SHADER || stage == _TESS_CONTROL_SHADER || stage == _TESS_EVALUATION_SHADER)
+            spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_PLAIN_TESSELLATION_IO, SPVC_TRUE);
+
         switch (stage)
         {
             case _VERTEX_SHADER:
@@ -2184,6 +2241,10 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
     DEBUG_PRINT("\n%s\n", result);
 
+    if (sp)
+        sp->raster_off = spvc_compiler_msl_is_rasterization_disabled(compiler_msl) ? GL_TRUE : GL_FALSE;
+        sp->needs_sizes = spvc_compiler_msl_needs_buffer_size_buffer(compiler_msl) ? GL_TRUE : GL_FALSE;
+
     // The counter blocks made before parsing reflect as storage buffers. GL
     // knows them as atomic counter buffers, bound through
     // GL_ATOMIC_COUNTER_BUFFER at the binding the counters declared.
@@ -2279,6 +2340,18 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
             rlist->list[i].gl_type = glTypeFromSpirv(compiler_msl, rlist->list[i].type_id,
                                                      &rlist->list[i].array_size);
+
+            if (res_type == SPVC_RESOURCE_TYPE_STORAGE_IMAGE)
+            {
+                spvc_bool was_arrayed = SPVC_FALSE;
+
+                rlist->list[i].cube_as_array =
+                    spvc_compiler_msl_is_cube_image_emulated_as_array(compiler_msl, rlist->list[i].type_id,
+                                                                      &was_arrayed) ? GL_TRUE : GL_FALSE;
+
+                if (rlist->list[i].cube_as_array)
+                    rlist->list[i].gl_type = cubeTypeFor2DArray(rlist->list[i].gl_type, was_arrayed);
+            }
             rlist->list[i].block_index = -1;
             rlist->list[i].offset = -1;
 
@@ -2544,10 +2617,32 @@ static const char *uniformLocationProblem(Program *ptr)
     return NULL;
 }
 
+// The first run of n locations nobody has taken, so an explicit location at
+// the top of the range does not push every implicit one off the end.
+static GLuint freeLocations(const bool *used, GLuint n)
+{
+    for (GLuint at = 0; at + n <= MAX_UNIFORM_LOCATIONS; at++)
+    {
+        GLuint k = 0;
+
+        while (k < n && !used[at + k])
+            k++;
+
+        if (k == n)
+            return at;
+
+        at += k;
+    }
+
+    return MAX_UNIFORM_LOCATIONS;
+}
+
 static void assignUniformLocations(Program *ptr)
 {
-    GLuint next = 0;
+    bool used[MAX_UNIFORM_LOCATIONS];
     int kinds = (int)(sizeof(location_res_types) / sizeof(location_res_types[0]));
+
+    memset(used, 0, sizeof used);
 
     for (int k = 0; k < kinds; k++)
         for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
@@ -2558,8 +2653,11 @@ static void assignUniformLocations(Program *ptr)
             {
                 GLuint n = list->list[i].array_size > 1 ? (GLuint)list->list[i].array_size : 1;
 
-                if (list->list[i].location != MGL_NO_LOCATION && list->list[i].location + n > next)
-                    next = list->list[i].location + n;
+                if (list->list[i].location == MGL_NO_LOCATION)
+                    continue;
+
+                for (GLuint l = list->list[i].location; l < list->list[i].location + n && l < MAX_UNIFORM_LOCATIONS; l++)
+                    used[l] = true;
             }
         }
 
@@ -2620,10 +2718,13 @@ static void assignUniformLocations(Program *ptr)
 
             if (!shared)
             {
-                GLint n = list->list[i].array_size > 1 ? list->list[i].array_size : 1;
+                GLuint n = list->list[i].array_size > 1 ? (GLuint)list->list[i].array_size : 1;
+                GLuint at = freeLocations(used, n);
 
-                list->list[i].location = next;
-                next += (GLuint)n;
+                list->list[i].location = at;
+
+                for (GLuint l = at; l < at + n && l < MAX_UNIFORM_LOCATIONS; l++)
+                    used[l] = true;
             }
         }
     }
@@ -3627,8 +3728,9 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
         // Metal cannot tessellate isolines at all, and has no point mode.
         // Those, and triangles and quads when something has to see the
-        // primitives one by one for transform feedback, are cut up on the CPU
-        // and drawn through a geometry stage that passes them straight on.
+        // primitives one by one for transform feedback or cull distance, are
+        // cut up on the CPU and drawn through a geometry stage that passes
+        // them straight on.
         if (tsrc)
         {
             int domain, spacing;
@@ -3637,7 +3739,8 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
             mglTesLayout(tsrc, &domain, &spacing, &cw, &points);
 
             if (domain == 2 || points ||
-                ((domain == 0 || domain == 1) && (pptr->xfb_varying_count > 0 || strstr(tsrc, "xfb_"))))
+                ((domain == 0 || domain == 1) && (pptr->xfb_varying_count > 0 || strstr(tsrc, "xfb_") ||
+                                                  strstr(tsrc, "gl_CullDistance"))))
             {
                 kind = 1;
                 input = points ? 0 : domain == 2 ? 1 : 2;
@@ -4597,9 +4700,11 @@ void mglGetActiveSubroutineName(GLMContext ctx, GLuint program, GLenum shadertyp
 
     si = stageSubroutines(pptr, shadertype);
 
-    ERROR_CHECK_RETURN(si && index < si->fn_count, GL_INVALID_VALUE);
+    GLint slot = mglSubroutineSlot(si, index);
 
-    copyResourceName(si->fn_names[index], bufSize, length, name);
+    ERROR_CHECK_RETURN(slot >= 0, GL_INVALID_VALUE);
+
+    copyResourceName(si->fn_names[slot], bufSize, length, name);
 }
 
 void mglGetActiveSubroutineUniformiv(GLMContext ctx, GLuint program, GLenum shadertype, GLuint index, GLenum pname, GLint *values)
@@ -4627,7 +4732,7 @@ void mglGetActiveSubroutineUniformiv(GLMContext ctx, GLuint program, GLenum shad
             // functions that dispatcher switches on
             for (GLuint i = 0, n = 0; i < si->fn_count; i++)
                 if (mglSubroutineCompatible(si, index, i))
-                    values[n++] = (GLint)i;
+                    values[n++] = (GLint)si->fn_index[i];
             break;
 
         case GL_UNIFORM_SIZE:
@@ -4675,7 +4780,7 @@ GLuint mglGetSubroutineIndex(GLMContext ctx, GLuint program, GLenum shadertype, 
 
     for (GLuint i = 0; i < si->fn_count; i++)
         if (si->fn_names[i] && !strcmp(si->fn_names[i], name))
-            return i;
+            return si->fn_index[i];
 
     return GL_INVALID_INDEX;
 }
@@ -4737,7 +4842,7 @@ void mglUniformSubroutinesuiv(GLMContext ctx, GLenum shadertype, GLsizei count, 
     ERROR_CHECK_RETURN(indices, GL_INVALID_VALUE);
 
     for (GLsizei i = 0; i < count; i++)
-        ERROR_CHECK_RETURN(indices[i] < si->fn_count, GL_INVALID_VALUE);
+        ERROR_CHECK_RETURN(mglSubroutineSlot(si, indices[i]) >= 0, GL_INVALID_VALUE);
 
     if (pptr->subroutine_values[stage] == NULL)
     {
@@ -5523,7 +5628,7 @@ void mglGetProgramResourceiv(GLMContext ctx, GLuint program, GLenum programInter
 
                 for (GLuint f = 0; si && f < si->fn_count && written < count; f++)
                     if (mglSubroutineCompatible(si, index, f))
-                        params[written++] = (GLint)f;
+                        params[written++] = (GLint)si->fn_index[f];
                 continue;
             }
 

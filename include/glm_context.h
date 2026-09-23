@@ -352,6 +352,9 @@ typedef struct Texture_t {
     // the swizzle the Metal texture was built with, so a later change is seen
     GLuint  mtl_swizzle;
     GLsizei samples;
+    // a buffer texture is a view of one MTLBuffer; which one, so a buffer given
+    // new storage gets a new view instead of reading the freed one
+    void    *mtl_buffer_src;
 } Texture;
 
 typedef struct TextureUnit_t {
@@ -481,6 +484,9 @@ int mglTessellate(int domain, int spacing, bool point_mode, bool cw,
 #define MGL_XFB_MAX_BUFFERS   MAX_TRANSFORM_FEEDBACK_BUFFERS
 #define MGL_XFB_FIRST_MSL_SLOT 22
 
+// where a stage finds the table of buffer lengths .length() reads
+#define MGL_BUFFER_SIZES_MSL_SLOT 21
+
 // Cull distance needs a pass of its own before the draw, and five buffers.
 #define MGL_CULL_FIRST_BINDING  20
 #define MGL_CULL_FIRST_MSL_SLOT 24
@@ -538,6 +544,7 @@ typedef struct CullInfo_t {
 } CullInfo;
 
 void  mglReadColorFormatAndType(GLMContext ctx, GLenum *format, GLenum *type);
+bool  mglDrawFramebufferComplete(GLMContext ctx);
 GLint mglCullDistanceSize(const char *src);
 bool  mglBuildCullShaders(const char *vs_src, CullInfo *ci);
 void  mglFreeCullInfo(CullInfo *ci);
@@ -653,12 +660,16 @@ typedef struct SubroutineInfo_t {
     GLuint  *uniform_type;       // which subroutine type each uniform has
     GLint   *uniform_location;   // layout(location), -1 when none was given
     GLuint64 *fn_types;          // the types each function implements, one bit each
+    GLuint   *fn_index;          // each function's GL index, from layout(index) or given
     GLuint   uniform_count;
     const char *error;           // set when the shader misuses a subroutine
 } SubroutineInfo;
 
 char *mglRewriteSubroutines(const char *src, SubroutineInfo *info);
+bool  mglBufferTextureSource(GLMContext ctx, const Texture *tex, Buffer **buf,
+                             GLintptr *offset, GLsizeiptr *size);
 bool  mglSubroutineCompatible(const SubroutineInfo *info, GLuint uniform, GLuint fn);
+GLint mglSubroutineSlot(const SubroutineInfo *info, GLuint index);
 void  mglFreeSubroutineInfo(SubroutineInfo *info);
 bool  mglCopySubroutineInfo(SubroutineInfo *dst, const SubroutineInfo *src);
 
@@ -698,6 +709,11 @@ typedef struct Spirv_t {
     char *entry_point;
     void *mtl_function;
     void *mtl_library;
+    // SPIRV-Cross made this a vertex function that returns nothing -- it writes
+    // no outputs at all -- and Metal refuses to rasterise from one of those
+    GLboolean raster_off;
+    // the shader asks how long a buffer is, so the sizes go in a table
+    GLboolean needs_sizes;
 } Spirv;
 
 #define MGL_NO_LOCATION ((GLuint)-1)
@@ -765,6 +781,9 @@ typedef struct SpirvResource_t {
     GLint   array_stride;
     GLint   matrix_stride;
     GLboolean is_row_major;
+    // a storage cube image the shader holds as a 2D array of its faces,
+    // because Metal before MSL 4.0 has no atomics on cube textures
+    GLboolean cube_as_array;
 } SpirvResource;
 
 typedef struct SpirvResourceList_t {
@@ -777,6 +796,7 @@ typedef struct BufferMap_t {
     GLuint      attribute_mask;
     Buffer      *buf;
     GLintptr    offset;
+    GLsizeiptr  size;       // the bound range, 0 for the rest of the buffer
     GLuint      stride;     // vertex stride of the attributes sharing this slot
     GLuint      divisor;    // how many instances share one element, 0 for none
     // what Metal is told the slot's stride is. GL's stride of zero means every
@@ -981,6 +1001,9 @@ typedef struct FBOAttachment_t {
     GLuint texture;
     GLuint level;
     GLuint layer;
+    // glFramebufferTexture on an array, cube or 3D texture attaches every
+    // layer at once; the layer-at-a-time calls do not
+    GLboolean layered;
     GLbitfield clear_bitmask;
     GLfloat clear_color[4];
     union {
@@ -1043,11 +1066,18 @@ typedef struct PixelStore_t {
     GLint skip_pixels;
     GLint skip_images;
     GLint alignment;
+    // GL 4.2's compressed pixel storage: how big a block is, so row length and
+    // the skips can be counted in whole blocks. Zero means not in use.
+    GLint compressed_block_width;
+    GLint compressed_block_height;
+    GLint compressed_block_depth;
+    GLint compressed_block_size;
 } PixelStore;
 
 /* GL 4.6 8.4.4 / 18.2: rows are row_length (or width) pixels wide padded up to
    the alignment, and the skip_* modes move where the data starts. */
 size_t mglPixelStoreRowPitch(const PixelStore *ps, GLsizei width, GLuint pixel_size);
+bool   mglPixelStoreGet(GLMContext ctx, GLenum pname, GLint *out);
 size_t mglPixelStoreSkipBytes(const PixelStore *ps, GLsizei height, GLuint pixel_size, size_t row_pitch);
 size_t mglPixelStoreSkipBytes2D(const PixelStore *ps, GLuint pixel_size, size_t row_pitch);
 

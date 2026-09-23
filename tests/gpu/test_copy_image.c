@@ -218,3 +218,59 @@ GPU_TEST(copy_image, copies_between_two_formats_of_one_size_class)
     glDeleteTextures(1, &src);
     glDeleteTextures(1, &dst);
 }
+
+/* ---------- the target has to be what the object is ---------- */
+
+GPU_TEST(copy_image, rejects_a_target_that_is_not_the_objects_own)
+{
+    GLuint a = make_tex(GL_RGBA8, 4, 4, 0x01);
+    GLuint b = make_tex(GL_RGBA8, 4, 4, 0x02);
+
+    mgl_drain_errors();
+
+    // both are 2D textures; calling one a 3D texture is an enum error
+    glCopyImageSubData(a, GL_TEXTURE_3D, 0, 0, 0, 0,
+                       b, GL_TEXTURE_2D, 0, 0, 0, 0, 1, 1, 1);
+    CHECK_EQ_UINT(GL_INVALID_ENUM, glGetError());
+
+    glCopyImageSubData(a, GL_TEXTURE_2D, 0, 0, 0, 0,
+                       b, GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 1);
+    CHECK_EQ_UINT(GL_INVALID_ENUM, glGetError());
+
+    glDeleteTextures(1, &a);
+    glDeleteTextures(1, &b);
+}
+
+/* ---------- a 1D array's layers are reached through z ---------- */
+
+// MGL keeps a 1D array's layer count where a height would go, so y was
+// allowed to walk the layers. An image in a 1D array is one texel tall.
+GPU_TEST(copy_image, a_1d_array_is_one_texel_tall)
+{
+    GLuint t[2];
+    GLubyte px[8 * 4 * 4];
+
+    memset(px, 0x40, sizeof px);
+    glGenTextures(2, t);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glBindTexture(GL_TEXTURE_1D_ARRAY, t[i]);
+        glTexImage2D(GL_TEXTURE_1D_ARRAY, 0, GL_RGBA8, 8, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        glTexParameteri(GL_TEXTURE_1D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0);
+    }
+
+    mgl_drain_errors();
+
+    // all four layers, the way GL says: through z and depth
+    glCopyImageSubData(t[0], GL_TEXTURE_1D_ARRAY, 0, 0, 0, 0,
+                       t[1], GL_TEXTURE_1D_ARRAY, 0, 0, 0, 0, 8, 1, 4);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    // two rows tall is past the edge of a 1D image
+    glCopyImageSubData(t[0], GL_TEXTURE_1D_ARRAY, 0, 0, 0, 0,
+                       t[1], GL_TEXTURE_1D_ARRAY, 0, 0, 0, 0, 8, 2, 1);
+    CHECK_EQ_UINT(GL_INVALID_VALUE, glGetError());
+
+    glDeleteTextures(2, t);
+}

@@ -163,6 +163,10 @@ bool processVAO(GLMContext ctx)
 
 bool validate_vao(GLMContext ctx, bool uses_elements)
 {
+    // an incomplete framebuffer is its own error, and it is the one GL keeps
+    if (!mglDrawFramebufferComplete(ctx))
+        return false;
+
     if (!VAO()) {
         MGL_ERR("MGL Error: validate_vao: VAO is NULL\n");
         return false;
@@ -552,7 +556,7 @@ void mglDrawElementsIndirect(GLMContext ctx, GLenum mode, GLenum type, const voi
 
     ERROR_CHECK_RETURN(STATE(buffers[_DRAW_INDIRECT_BUFFER]), GL_INVALID_OPERATION);
 
-    ctx->mtl_funcs.mtlDrawArraysIndirect(ctx, mode, indirect);
+    ctx->mtl_funcs.mtlDrawElementsIndirect(ctx, mode, type, indirect);
 }
 
 void mglDrawArraysInstancedBaseInstance(GLMContext ctx, GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance)

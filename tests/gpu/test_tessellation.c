@@ -611,3 +611,95 @@ GPU_TEST(tessellation, ids_read_back_through_feedback)
     glUseProgram(0);
     glDeleteProgram(prog);
 }
+
+/* ---------- two varyings sharing one location through component= ---------- */
+
+// SPIRV-Cross refused component= on any tessellation interface. The buffers
+// between these stages are read as plain structs, so each variable can be its
+// own member -- but only if every stage lays them out the same way. Half of
+// the green comes from each variable, so a slot read from the wrong place
+// shows as black rather than passing.
+GPU_TEST(tessellation, a_location_shared_through_component_survives_every_stage)
+{
+    static const GLfloat tri[6] = { -1,-1, 3,-1, -1,3 };
+    static const char *vs =
+        "#version 450\n"
+        "layout(location = 0) in vec2 p;\n"
+        "layout(location = 0, component = 0) out vec3 a;\n"
+        "layout(location = 0, component = 3) out float b;\n"
+        "void main() { a = vec3(0.0, 0.5, 0.0); b = 2.0; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *tcs =
+        "#version 450\n"
+        "layout(vertices = 3) out;\n"
+        "layout(location = 0, component = 0) in vec3 a[];\n"
+        "layout(location = 0, component = 3) in float b[];\n"
+        "layout(location = 0, component = 0) out vec3 ta[];\n"
+        "layout(location = 0, component = 3) out float tb[];\n"
+        "void main() {\n"
+        "    ta[gl_InvocationID] = a[gl_InvocationID];\n"
+        "    tb[gl_InvocationID] = b[gl_InvocationID];\n"
+        "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "    gl_TessLevelOuter[0] = 2.0; gl_TessLevelOuter[1] = 2.0; gl_TessLevelOuter[2] = 2.0;\n"
+        "    gl_TessLevelInner[0] = 2.0;\n"
+        "}\n";
+    static const char *tes =
+        "#version 450\n"
+        "layout(triangles, equal_spacing, ccw) in;\n"
+        "layout(location = 0, component = 0) in vec3 ta[];\n"
+        "layout(location = 0, component = 3) in float tb[];\n"
+        "layout(location = 0, component = 0) flat out vec3 ea;\n"
+        "layout(location = 0, component = 3) flat out float eb;\n"
+        "void main() {\n"
+        "    ea = ta[0]; eb = tb[1];\n"
+        "    gl_Position = gl_TessCoord.x * gl_in[0].gl_Position\n"
+        "                + gl_TessCoord.y * gl_in[1].gl_Position\n"
+        "                + gl_TessCoord.z * gl_in[2].gl_Position;\n"
+        "}\n";
+    static const char *fs =
+        "#version 450\n"
+        "layout(location = 0, component = 0) flat in vec3 ea;\n"
+        "layout(location = 0, component = 3) flat in float eb;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(ea.x, ea.y * eb, ea.z, 1.0); }\n";
+    MGLTestTarget t;
+    GLuint prog, vao, vbo;
+    int green;
+    char log[2048];
+
+    prog = linkStages(vs, tcs, tes, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "component-packed tessellation program did not link: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 64, 64, GL_RGBA8, 0))
+    {
+        CHECK(0);
+        return;
+    }
+
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+
+    glViewport(0, 0, 64, 64);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_PATCHES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    // the patch covers the whole target, so every pixel should be full green
+    green = greenPixels(&t);
+    CHECK_MSG(green == 64 * 64, "%d of 4096 pixels green - a shared location lost a component", green);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

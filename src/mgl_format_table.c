@@ -431,7 +431,7 @@ static const MGLFormatDesc gl_table[] = {
     { GL_DEPTH_COMPONENT32,  MTLPixelFormatDepth32Float,         _INV,                                1,1, 4, _D,  {0,0,0,0,32,0}, _BD,  GL_DEPTH_COMPONENT, GL_FLOAT,         false, true, true, "GL_DEPTH_COMPONENT32" },
     { GL_DEPTH_COMPONENT32F, MTLPixelFormatDepth32Float,         _INV,                                1,1, 4, _D,  {0,0,0,0,32,0}, _BD,  GL_DEPTH_COMPONENT, GL_FLOAT,         false, true, true, "GL_DEPTH_COMPONENT32F" },
     { GL_DEPTH24_STENCIL8,   MTLPixelFormatDepth24Unorm_Stencil8, MTLPixelFormatDepth32Float_Stencil8, 1,1, 4, _DS, {0,0,0,0,24,8}, _BDS, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, false, true, true, "GL_DEPTH24_STENCIL8" },
-    { GL_DEPTH32F_STENCIL8,  MTLPixelFormatDepth32Float_Stencil8, _INV,                               1,1, 5, _DS, {0,0,0,0,32,8}, _BDS, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, false, true, true, "GL_DEPTH32F_STENCIL8" },
+    { GL_DEPTH32F_STENCIL8,  MTLPixelFormatDepth32Float_Stencil8, _INV,                               1,1, 8, _DS, {0,0,0,0,32,8}, _BDS, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, false, true, true, "GL_DEPTH32F_STENCIL8" },
     { GL_STENCIL_INDEX1,  _INV, _INV, 1,1, 1, _S,  {0,0,0,0,0,1},  _BS, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, false, true, false, "GL_STENCIL_INDEX1" },
     { GL_STENCIL_INDEX4,  _INV, _INV, 1,1, 1, _S,  {0,0,0,0,0,4},  _BS, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, false, true, false, "GL_STENCIL_INDEX4" },
     { GL_STENCIL_INDEX8,  MTLPixelFormatStencil8, _INV, 1,1, 1, _S, {0,0,0,0,0,8},  _BS, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, false, true, false, "GL_STENCIL_INDEX8" },

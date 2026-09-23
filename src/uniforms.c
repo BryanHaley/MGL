@@ -751,8 +751,11 @@ void mglGetActiveUniformBlockiv(GLMContext ctx, GLuint program, GLuint uniformBl
             GLuint plain = 0, seen = 0, out = 0;
             GLuint room = (GLuint)blockMemberCount(ptr, uniformBlockIndex);
 
+            // the same count uniformAt walks: hidden driver uniforms and struct
+            // owners take no index, so counting them put every member two past
+            // where glGetActiveUniform finds it once the alpha test added its pair
             for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
-                plain += ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT].count;
+                plain += plainUniformCount(ptr, stage);
 
             for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
             {

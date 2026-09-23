@@ -47,6 +47,9 @@
 #import "mgl_format_table.h"
 #import "pixel_convert.h"
 
+// pixel_utils.h redefines Metal enums, so only this is taken from it
+GLuint sizeForInternalFormat(GLenum internalformat, GLenum format, GLenum type);
+
 #define TRACE_FUNCTION()    DEBUG_PRINT("%s\n", __FUNCTION__);
 
 extern void mglDrawBuffer(GLMContext ctx, GLenum buf);
@@ -120,6 +123,11 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     GLMContext  ctx;    // context macros need this exact name
 
     id<MTLDevice> _device;
+
+    // bytes a pixel in the level being uploaded, since padded rows hide it,
+    // and how many pixel rows one stored row covers (4 for a compressed block)
+    NSUInteger _uploadPixelSize;
+    NSUInteger _uploadBlockHeight;
 
     // CRITICAL FIX: Thread synchronization to prevent race conditions
     NSLock *_metalStateLock;
@@ -523,7 +531,12 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         options |= MTLResourceCPUCacheModeWriteCombined;
     }
 
-    if (ptr->storage_flags & GL_CLIENT_STORAGE_BIT)
+    // Wrapping the memory we already have, rather than copying it and freeing
+    // the original, keeps any pointer the application was given still good. A
+    // persistent mapping handed out before the first draw pointed at pages the
+    // copy path then freed.
+    if (ptr->data.buffer_data &&
+        ((ptr->storage_flags & (GL_CLIENT_STORAGE_BIT | GL_MAP_PERSISTENT_BIT)) || ptr->mapped))
     {
         // The whole page-aligned allocation, not just the GL size. Metal maps
         // whole pages either way, and the deallocator below is handed back this
@@ -705,6 +718,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                         buffer_map->buffers[buffer_map->count].buffer_base_index = base_slot + (GLuint)e;
                         buffer_map->buffers[buffer_map->count].buf = buf;
                         buffer_map->buffers[buffer_map->count].offset = buffers[slot_binding].offset;
+                        buffer_map->buffers[buffer_map->count].size = buffers[slot_binding].size;
                         buffer_map->buffers[buffer_map->count].gl_buffer_type = (GLubyte)gl_buffer_type;
                         buffer_map->count++;
                     }
@@ -988,6 +1002,31 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     return true;
 }
 
+// .length() on an unsized array reads the buffer's length from a table
+// SPIRV-Cross indexes by the buffer's Metal slot.
+static bool bufferSizesFor(Program *program, int stage, const BufferMapList *list, uint32_t sizes[31])
+{
+    if (program == NULL || !program->spirv[stage].needs_sizes)
+        return false;
+
+    memset(sizes, 0, 31 * sizeof(uint32_t));
+
+    for (int i = 0; i < list->count; i++)
+    {
+        const BufferMap *map = &list->buffers[i];
+
+        if (map->buf == NULL || map->buffer_base_index >= 31 ||
+            (map->gl_buffer_type != _SHADER_STORAGE_BUFFER && map->gl_buffer_type != _UNIFORM_BUFFER))
+            continue;
+
+        GLsizeiptr len = map->size > 0 ? map->size : map->buf->size - map->offset;
+
+        sizes[map->buffer_base_index] = len > 0 ? (uint32_t)len : 0;
+    }
+
+    return true;
+}
+
 - (bool) bindVertexBuffersToCurrentRenderEncoder
 {
     BufferMap *map;
@@ -1007,6 +1046,13 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                                       atIndex:MGL_CONSTANT_ATTRIB_BUFFER_INDEX];
     }
 
+    {
+        uint32_t sizes[31];
+
+        if (bufferSizesFor(ctx->state.program, _VERTEX_SHADER, &ctx->state.vertex_buffer_map_list, sizes))
+            [_currentRenderEncoder setVertexBytes: sizes length: sizeof sizes atIndex: MGL_BUFFER_SIZES_MSL_SLOT];
+    }
+
     for(int i=0; i<ctx->state.vertex_buffer_map_list.count; i++)
     {
         map = &ctx->state.vertex_buffer_map_list.buffers[i];
@@ -1021,7 +1067,11 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         // way round wraps and hands Metal a length of nearly 2^64.
         GLintptr inline_len = offset < ptr->size ? ptr->size - offset : 0;
 
-        if (ptr->size < 4096 && ptr->data.mtl_data == NULL)
+        // a buffer the shader writes can't be a copy, or the writes go nowhere
+        bool writable = (map->gl_buffer_type == _SHADER_STORAGE_BUFFER ||
+                         map->gl_buffer_type == _ATOMIC_COUNTER_BUFFER);
+
+        if (!writable && ptr->size < 4096 && ptr->data.mtl_data == NULL)
         {
             // An offset past the end leaves nothing to bind, and a slot Metal
             // finds empty is undefined -- so bind zeroes rather than nothing.
@@ -1066,6 +1116,13 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     GLintptr offset;
     
     MTL_CHECK_RETURN_FALSE(_currentRenderEncoder, GL_INVALID_OPERATION);
+
+    {
+        uint32_t sizes[31];
+
+        if (bufferSizesFor(ctx->state.program, _FRAGMENT_SHADER, &ctx->state.fragment_buffer_map_list, sizes))
+            [_currentRenderEncoder setFragmentBytes: sizes length: sizeof sizes atIndex: MGL_BUFFER_SIZES_MSL_SLOT];
+    }
 
     for(int i=0; i<ctx->state.fragment_buffer_map_list.count; i++)
     {
@@ -1156,8 +1213,64 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     tex_desc.swizzle = MTLTextureSwizzleChannelsMake(channel_r, channel_g, channel_b, channel_a);
 }
 
+// A buffer texture is not a texture with storage of its own: Metal makes a
+// view straight onto the MTLBuffer, so the shader reads the buffer's own bytes.
+- (id<MTLTexture>) createMTLBufferTexture:(Texture *) tex
+{
+    Buffer *buf = NULL;
+    GLintptr offset = 0;
+    GLsizeiptr size = 0;
+
+    if (!mglBufferTextureSource(ctx, tex, &buf, &offset, &size) || size <= 0)
+        return nil;
+
+    // the buffer's Metal object is made lazily too, and a small one not at all
+    if ([self processBuffer: buf] == false || buf->data.mtl_data == NULL)
+        return nil;
+
+    id<MTLBuffer> mtlbuf = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
+    MTLPixelFormat fmt = mtlPixelFormatForGLTex(tex);
+    const MGLFormatDesc *fd = mglFormatDesc(tex->internalformat);
+
+    if (fmt == MTLPixelFormatInvalid || fd == NULL || fd->bytes_per_block == 0)
+    {
+        MGL_NSERR(@"MGL: a buffer texture of format 0x%x has no Metal equivalent", tex->internalformat);
+        return nil;
+    }
+
+    NSUInteger texels = (NSUInteger)size / fd->bytes_per_block;
+    NSUInteger align = [_device minimumTextureBufferAlignmentForPixelFormat: fmt];
+
+    if (texels == 0 || (align && (NSUInteger)offset % align))
+    {
+        MGL_NSERR(@"MGL: buffer texture offset %ld is not a multiple of the %lu Metal needs",
+                  (long)offset, (unsigned long)align);
+        return nil;
+    }
+
+    MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat: fmt
+                                                                                    width: texels
+                                                                          resourceOptions: mtlbuf.resourceOptions
+                                                                                    usage: MTLTextureUsageShaderRead |
+                                                                                           MTLTextureUsageShaderWrite];
+
+    id<MTLTexture> view = [mtlbuf newTextureWithDescriptor: d
+                                                    offset: (NSUInteger)offset
+                                               bytesPerRow: texels * fd->bytes_per_block];
+
+    tex->mtl_buffer_src = buf->data.mtl_data;
+
+    return view;
+}
+
 - (id<MTLTexture>) createMTLTextureFromGLTexture:(Texture *) tex
 {
+    if (tex->target == GL_TEXTURE_BUFFER)
+        return [self createMTLBufferTexture: tex];
+
+    _uploadPixelSize = sizeForInternalFormat(tex->internalformat, 0, 0);
+    _uploadBlockHeight = mglFormatDesc(tex->internalformat)->block_h ? mglFormatDesc(tex->internalformat)->block_h : 1;
+
     // PROPER FIX: Enhanced pre-creation validation to prevent AGX driver issues
     if (!_device || !_commandQueue) {
         MGL_NSERR(@"MGL ERROR: Metal device or command queue not available for texture creation");
@@ -1498,7 +1611,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 
                         if (addr % 256 != 0 || alignedBytesPerRow != bytesPerRow) {
                             // Data is not aligned OR bytesPerRow needs alignment - allocate aligned buffer and copy row by row
-                            NSUInteger rows = (NSUInteger)(height ? height : 1) * (depth ? depth : 1);
+                            NSUInteger rows = [self storedRows: height ? height : 1] * (depth ? depth : 1);
                             NSUInteger alignedSize = alignedBytesPerRow * rows;
                             void *alignedData = mgl_aligned_alloc(alignment, alignedSize);
 
@@ -1608,7 +1721,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
                         // count put every layer after the first at a wrong offset.
                         bytesPerImage = (tex->target == GL_TEXTURE_1D_ARRAY)
                                       ? bytesPerRow
-                                      : bytesPerRow * (size_t)(height ? height : 1);
+                                      : bytesPerRow * [self storedRows: height ? height : 1];
 
                         // The target says which shape a layer is; guessing it from
                         // the dimensions got a one-layer 2D array wrong. The
@@ -1646,14 +1759,14 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
                                 if (addr % alignment != 0 || alignedBytesPerRow != bytesPerRow) {
                                     // Data is not aligned OR bytesPerRow needs alignment - allocate aligned buffer and copy
                                     // padded rows take more room than the image did
-                                    NSUInteger alignedSize = alignedBytesPerRow * region.size.height;
+                                    NSUInteger alignedSize = alignedBytesPerRow * [self storedRows: region.size.height];
                                     void *alignedData = mgl_aligned_alloc(alignment, alignedSize);
 
                                     if (alignedData) {
                                         // Copy data with row alignment
                                         // one layer is a whole image: every row of it has to
                                         // be copied, not just the first
-                                        NSUInteger sliceHeight = region.size.height;
+                                        NSUInteger sliceHeight = [self storedRows: region.size.height];
                                         NSUInteger srcRowSize = bytesPerRow;
                                         NSUInteger dstRowSize = alignedBytesPerRow;
                                         uint8_t *srcPtr = (uint8_t *)srcData;
@@ -1755,7 +1868,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 
                             if (addr % alignment != 0 || alignedBytesPerRow != bytesPerRow) {
                                 // Data is not aligned OR bytesPerRow needs alignment - allocate aligned buffer and copy
-                                NSUInteger texHeight = height ? height : 1;
+                                NSUInteger texHeight = [self storedRows: height ? height : 1];
                                 NSUInteger alignedSize = alignedBytesPerRow * texHeight;
                                 void *alignedData = mgl_aligned_alloc(alignment, alignedSize);
 
@@ -2719,7 +2832,7 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         iu.level = (GLuint)h->level;
         iu.layered = h->layered;
         iu.layer = h->layer;
-        use = [self imageTexture: &iu];
+        use = [self imageTexture: &iu cubeAsArray: false];
     }
     else
         use = [self samplingTexture: tex from: base];
@@ -2967,7 +3080,7 @@ static bool usesBindless(Program *program, int first, int last)
 
 // What an image unit hands a shader: the bound level, and just the one layer
 // when the binding is not layered.
-- (id<MTLTexture>) imageTexture: (ImageUnit *) iu
+- (id<MTLTexture>) imageTexture: (ImageUnit *) iu cubeAsArray: (bool) cube_as_array
 {
     id<MTLTexture> base = (__bridge id<MTLTexture>)(iu->tex->mtl_data);
 
@@ -2988,6 +3101,13 @@ static bool usesBindless(Program *program, int first, int last)
     bool one_layer = !iu->layered && (type == MTLTextureType2DArray || type == MTLTextureTypeCube ||
                                       type == MTLTextureTypeCubeArray);
 
+    // the shader holds a cube image as a 2D array of its faces, one slice each
+    bool as_array = cube_as_array && iu->layered &&
+                    (type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray);
+
+    if (as_array)
+        type = MTLTextureType2DArray;
+
     if (one_layer)
     {
         NSUInteger layer = iu->layer > 0 ? (NSUInteger)iu->layer : 0;
@@ -2996,15 +3116,66 @@ static bool usesBindless(Program *program, int first, int last)
         slices = NSMakeRange(layer < layers ? layer : layers - 1, 1);
     }
 
-    if (levels == 1 && !one_layer)
+    // Reading the texels as another format of the same size needs a texture
+    // Metal was told could be viewed that way.
+    MTLPixelFormat format = base.pixelFormat;
+    MTLPixelFormat asked = (MTLPixelFormat)mglFormatMetalFormat(iu->internalformat);
+
+    if (asked != MTLPixelFormatInvalid && asked != format &&
+        mglFormatDesc(iu->internalformat)->bytes_per_block == mglFormatDesc(iu->tex->internalformat)->bytes_per_block &&
+        (base.usage & MTLTextureUsagePixelFormatView))
+        format = asked;
+
+    if (levels == 1 && !one_layer && !as_array && format == base.pixelFormat)
         return base;
 
-    id<MTLTexture> view = [base newTextureViewWithPixelFormat: base.pixelFormat
+    id<MTLTexture> view = [base newTextureViewWithPixelFormat: format
                                                   textureType: type
                                                        levels: NSMakeRange(level, 1)
                                                        slices: slices];
 
     return view ? view : base;
+}
+
+extern GLuint textureIndexFromTarget(GLMContext ctx, GLenum target);
+
+// A unit holds one texture per target, and a sampler reads the one its type
+// names -- not whichever was bound to the unit last.
+static GLenum targetForSampler(GLenum type)
+{
+    switch (type)
+    {
+        case GL_SAMPLER_1D: case GL_SAMPLER_1D_SHADOW: case GL_INT_SAMPLER_1D: case GL_UNSIGNED_INT_SAMPLER_1D:
+            return GL_TEXTURE_1D;
+        case GL_SAMPLER_2D: case GL_SAMPLER_2D_SHADOW: case GL_INT_SAMPLER_2D: case GL_UNSIGNED_INT_SAMPLER_2D:
+            return GL_TEXTURE_2D;
+        case GL_SAMPLER_3D: case GL_INT_SAMPLER_3D: case GL_UNSIGNED_INT_SAMPLER_3D:
+            return GL_TEXTURE_3D;
+        case GL_SAMPLER_CUBE: case GL_SAMPLER_CUBE_SHADOW: case GL_INT_SAMPLER_CUBE: case GL_UNSIGNED_INT_SAMPLER_CUBE:
+            return GL_TEXTURE_CUBE_MAP;
+        case GL_SAMPLER_2D_RECT: case GL_SAMPLER_2D_RECT_SHADOW: case GL_INT_SAMPLER_2D_RECT:
+        case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+            return GL_TEXTURE_RECTANGLE;
+        case GL_SAMPLER_1D_ARRAY: case GL_SAMPLER_1D_ARRAY_SHADOW: case GL_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+            return GL_TEXTURE_1D_ARRAY;
+        case GL_SAMPLER_2D_ARRAY: case GL_SAMPLER_2D_ARRAY_SHADOW: case GL_INT_SAMPLER_2D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+            return GL_TEXTURE_2D_ARRAY;
+        case GL_SAMPLER_CUBE_MAP_ARRAY: case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW: case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+            return GL_TEXTURE_CUBE_MAP_ARRAY;
+        case GL_SAMPLER_BUFFER: case GL_INT_SAMPLER_BUFFER: case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+            return GL_TEXTURE_BUFFER;
+        case GL_SAMPLER_2D_MULTISAMPLE: case GL_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+            return GL_TEXTURE_2D_MULTISAMPLE;
+        case GL_SAMPLER_2D_MULTISAMPLE_ARRAY: case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            return GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+        default:
+            return 0;
+    }
 }
 
 // Binds every texture and image a stage reads, each into the Metal slot
@@ -3029,7 +3200,9 @@ static bool usesBindless(Program *program, int first, int last)
             continue;
 
         GLuint unit = [self getProgramTexUnit: stage type: SPVC_RESOURCE_TYPE_SAMPLED_IMAGE index: i];
-        Texture *ptr = STATE(active_textures[unit]);
+        GLenum target = targetForSampler(res->gl_type);
+        Texture *ptr = target ? STATE(texture_units[unit].textures[textureIndexFromTarget(ctx, target)])
+                              : STATE(active_textures[unit]);
         id<MTLTexture> texture = nil;
 
 
@@ -3064,10 +3237,10 @@ static bool usesBindless(Program *program, int first, int last)
         id<MTLTexture> texture = nil;
 
         if (iu->tex && (iu->tex->mtl_data || [self bindMTLTexture: iu->tex]))
-            texture = [self imageTexture: iu];
+            texture = [self imageTexture: iu cubeAsArray: res->cube_as_array];
 
         if (texture == nil)
-            texture = [self dummyTextureForGLType: res->gl_type];
+            texture = [self dummyTextureForGLType: res->cube_as_array ? GL_IMAGE_2D_ARRAY : res->gl_type];
 
         if (texture)
             setTexture(texture, res->msl_index);
@@ -3337,6 +3510,115 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
 // Upload pixel data into a Metal texture without replaceRegion, which the AGX
 // driver has trouble with. Stages the rows into a buffer and blits, on its own
 // command buffer so an active render encoder is never disturbed.
+// Metal fills a combined depth-stencil texture as two blits, one per plane.
+// The level keeps either GL's packed 24/8 word or a float and a stencil byte,
+// and either can be going into a texture Metal holds the other way.
+// A compressed level keeps one row per row of blocks, not per pixel row.
+- (NSUInteger) storedRows: (NSUInteger) height
+{
+    NSUInteger bh = _uploadBlockHeight ? _uploadBlockHeight : 1;
+
+    return (height + bh - 1) / bh;
+}
+
+- (bool) uploadDepthStencil:(const void *)src
+                  toTexture:(id<MTLTexture>)texture
+                bytesPerRow:(NSUInteger)srcBytesPerRow
+                      slice:(NSUInteger)slice
+                      level:(NSUInteger)level
+                      width:(NSUInteger)width
+                     height:(NSUInteger)height
+                      depth:(NSUInteger)depth
+{
+    NSUInteger bpp = _uploadPixelSize;
+    bool to_float = texture.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
+
+    if (bpp != 4 && bpp != 8)
+    {
+        MGL_NSERR(@"MGL Error: depth-stencil upload of %lu bytes a pixel", (unsigned long)bpp);
+        return false;
+    }
+
+    @autoreleasepool {
+
+    NSUInteger d_row = ((width * 4 + 255) / 256) * 256;
+    NSUInteger s_row = ((width + 255) / 256) * 256;
+    id<MTLBuffer> dbuf = [_device newBufferWithLength: d_row * height * depth options: MTLResourceStorageModeShared];
+    id<MTLBuffer> sbuf = [_device newBufferWithLength: s_row * height * depth options: MTLResourceStorageModeShared];
+
+    if (dbuf == nil || sbuf == nil)
+        return false;
+
+    const uint8_t *s8 = (const uint8_t *)src;
+    uint8_t *dp = (uint8_t *)dbuf.contents;
+    uint8_t *sp = (uint8_t *)sbuf.contents;
+
+    for (NSUInteger z = 0; z < depth; z++)
+        for (NSUInteger y = 0; y < height; y++)
+        {
+            const uint8_t *in = s8 + (z * height + y) * srcBytesPerRow;
+            uint8_t *drow = dp + (z * height + y) * d_row;
+            uint8_t *srow = sp + (z * height + y) * s_row;
+
+            for (NSUInteger x = 0; x < width; x++, in += bpp)
+            {
+                uint32_t out;
+                float f;
+
+                if (bpp == 4)
+                {
+                    uint32_t w;
+
+                    memcpy(&w, in, 4);
+                    srow[x] = (uint8_t)(w >> 24);
+                    out = w & 0xFFFFFFu;
+                    f = (float)out / 16777215.0f;
+                }
+                else
+                {
+                    memcpy(&f, in, 4);
+                    srow[x] = in[4];
+                    f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+                    out = (uint32_t)(f * 16777215.0f + 0.5f);
+                }
+
+                if (to_float)
+                    memcpy(&out, &f, 4);
+
+                memcpy(drow + x * 4, &out, 4);
+            }
+        }
+
+    id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+
+    if (cmd == nil || blit == nil)
+        return false;
+
+    [blit copyFromBuffer: dbuf sourceOffset: 0 sourceBytesPerRow: d_row sourceBytesPerImage: d_row * height
+              sourceSize: MTLSizeMake(width, height, depth)
+               toTexture: texture destinationSlice: slice destinationLevel: level
+       destinationOrigin: MTLOriginMake(0, 0, 0) options: MTLBlitOptionDepthFromDepthStencil];
+    [blit copyFromBuffer: sbuf sourceOffset: 0 sourceBytesPerRow: s_row sourceBytesPerImage: s_row * height
+              sourceSize: MTLSizeMake(width, height, depth)
+               toTexture: texture destinationSlice: slice destinationLevel: level
+       destinationOrigin: MTLOriginMake(0, 0, 0) options: MTLBlitOptionStencilFromDepthStencil];
+    [blit endEncoding];
+
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    if (cmd.error)
+    {
+        MGL_NSERR(@"MGL Error: depth-stencil upload failed: %@", cmd.error);
+        return false;
+    }
+
+    }
+
+    return true;
+}
+
 - (bool) uploadBytes:(const void *)src
            toTexture:(id<MTLTexture>)texture
          bytesPerRow:(NSUInteger)srcBytesPerRow
@@ -3357,14 +3639,20 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     if (depth == 0)
         depth = 1;
 
+    if (texture.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+        texture.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8)
+        return [self uploadDepthStencil: src toTexture: texture bytesPerRow: srcBytesPerRow
+                                  slice: slice level: level width: width height: height depth: depth];
+
     // Every upload takes a staging buffer and a command buffer. Without a pool
     // of its own they pile up until the process runs out of room.
     @autoreleasepool {
 
     // Metal wants the staged rows aligned; pad each row if the source is not.
     NSUInteger alignment = 256;
+    NSUInteger rows = [self storedRows: height];
     NSUInteger dstBytesPerRow = ((srcBytesPerRow + alignment - 1) / alignment) * alignment;
-    NSUInteger dstBytesPerImage = dstBytesPerRow * height;
+    NSUInteger dstBytesPerImage = dstBytesPerRow * rows;
     NSUInteger totalBytes = dstBytesPerImage * depth;
 
     id<MTLBuffer> staging = [_device newBufferWithLength:totalBytes
@@ -3380,9 +3668,9 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     const uint8_t *s8 = (const uint8_t *)src;
 
     for (NSUInteger z = 0; z < depth; z++)
-        for (NSUInteger row = 0; row < height; row++)
+        for (NSUInteger row = 0; row < rows; row++)
             memcpy(dst + z * dstBytesPerImage + row * dstBytesPerRow,
-                   s8  + z * srcBytesPerRow * height + row * srcBytesPerRow,
+                   s8  + z * srcBytesPerRow * rows + row * srcBytesPerRow,
                    srcBytesPerRow);
 
     id<MTLCommandBuffer> cmd = [_commandQueue commandBuffer];
@@ -3485,6 +3773,19 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     // draw buried the real messages -- one sweep logged this 425,472 times.
     if (tex->width == 0 || tex->height == 0)
         return false;
+
+    if (tex->target == GL_TEXTURE_BUFFER && tex->mtl_data)
+    {
+        Buffer *buf = NULL;
+        GLintptr off = 0;
+        GLsizeiptr sz = 0;
+
+        if (!mglBufferTextureSource(ctx, tex, &buf, &off, &sz) || buf->data.mtl_data != tex->mtl_buffer_src)
+        {
+            CFBridgingRelease(tex->mtl_data);
+            tex->mtl_data = NULL;
+        }
+    }
 
     // Sampler state and pixel storage are different things. Dropping the Metal
     // texture throws away whatever the GPU drew into it, so only a change to
@@ -6999,10 +7300,13 @@ static MTLWinding mtlWindingFor(const Program *p)
     fragmentFunction = (__bridge id<MTLFunction>)(program->spirv[_FRAGMENT_SHADER].mtl_function);
 
     // With the raster off nothing reaches a fragment stage, and GL lets a
-    // program that only feeds transform feedback leave it out.
+    // program that only feeds transform feedback leave it out. One with no
+    // fragment shader at all is legal to draw too; it rasterises nothing yet,
+    // since its vertex function is built to return nothing.
     bool raster_off = ctx->state.caps.rasterizer_discard;
+    bool no_fs = program->shader_slots[_FRAGMENT_SHADER] == NULL;
 
-    if (!vertexFunction || (!fragmentFunction && !raster_off))
+    if (!vertexFunction || (!fragmentFunction && !raster_off && !no_fs))
     {
         MGL_NSERR(@"MGL ERROR: program %u has no linked %s stage", program->name,
               vertexFunction ? "fragment" : "vertex");
@@ -7017,7 +7321,7 @@ static MTLWinding mtlWindingFor(const Program *p)
     pipelineStateDescriptor.vertexFunction = vertexFunction;
     pipelineStateDescriptor.fragmentFunction = fragmentFunction;
 
-    if (!fragmentFunction)
+    if (!fragmentFunction && (!no_fs || raster_off))
         pipelineStateDescriptor.rasterizationEnabled = NO;
 
     if (program->tess.active)
@@ -7049,6 +7353,18 @@ static MTLWinding mtlWindingFor(const Program *p)
         }
 
         pipelineStateDescriptor.vertexFunction = vertexFunction;
+    }
+
+    // A vertex stage that writes nothing but images or buffers comes out of
+    // SPIRV-Cross returning void, and Metal will only take one of those with
+    // the raster off. Nothing reaches the fragment stage either way. A
+    // geometry program turns its own vertex stage off on purpose -- it only
+    // captures -- and draws through the generated pass-through instead.
+    if (!program->geom_shader &&
+        program->spirv[program->tess.active ? _TESS_EVALUATION_SHADER : _VERTEX_SHADER].raster_off)
+    {
+        pipelineStateDescriptor.rasterizationEnabled = NO;
+        pipelineStateDescriptor.fragmentFunction = nil;
     }
 
     // The pipeline has to agree with the attachments about how many samples
@@ -8080,6 +8396,13 @@ static MTLWinding mtlWindingFor(const Program *p)
         [self updateDirtyBaseBufferList: &ctx->state.compute_buffer_map_list];
 
         ctx->state.dirty_bits &= ~DIRTY_BUFFER;
+    }
+
+    {
+        uint32_t sizes[31];
+
+        if (bufferSizesFor(ctx->state.program, _COMPUTE_SHADER, &ctx->state.compute_buffer_map_list, sizes))
+            [computeCommandEncoder setBytes: sizes length: sizeof sizes atIndex: MGL_BUFFER_SIZES_MSL_SLOT];
     }
 
     for(int i=0; i<ctx->state.compute_buffer_map_list.count; i++)
@@ -9400,21 +9723,81 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
         source_slice = 0;
     }
 
-    [blit copyFromTexture: texture
-              sourceSlice: source_slice
-              sourceLevel: level
-             sourceOrigin: origin
-               sourceSize: MTLSizeMake(w, h, region.size.depth ? region.size.depth : 1)
-                 toBuffer: staging
-        destinationOffset: 0
-   destinationBytesPerRow: staging_pitch
- destinationBytesPerImage: staging_size];
+    // A combined depth-stencil texture comes out as two planes, which are
+    // put back together in the layout the conversion expects.
+    bool split = texture.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+                 texture.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8;
+    NSUInteger d_pitch = ((w * 4) + 255) & ~(NSUInteger)255;
+    NSUInteger s_pitch = (w + 255) & ~(NSUInteger)255;
+    id<MTLBuffer> dplane = nil, splane = nil;
+
+    if (split)
+    {
+        dplane = [_device newBufferWithLength: d_pitch * h options: MTLResourceStorageModeShared];
+        splane = [_device newBufferWithLength: s_pitch * h options: MTLResourceStorageModeShared];
+
+        if (!dplane || !splane)
+        {
+            [blit endEncoding];
+            ctx->error_func(ctx, __FUNCTION__, GL_OUT_OF_MEMORY);
+            return;
+        }
+
+        [blit copyFromTexture: texture sourceSlice: source_slice sourceLevel: level sourceOrigin: origin
+                   sourceSize: MTLSizeMake(w, h, 1) toBuffer: dplane destinationOffset: 0
+       destinationBytesPerRow: d_pitch destinationBytesPerImage: d_pitch * h
+                      options: MTLBlitOptionDepthFromDepthStencil];
+        [blit copyFromTexture: texture sourceSlice: source_slice sourceLevel: level sourceOrigin: origin
+                   sourceSize: MTLSizeMake(w, h, 1) toBuffer: splane destinationOffset: 0
+       destinationBytesPerRow: s_pitch destinationBytesPerImage: s_pitch * h
+                      options: MTLBlitOptionStencilFromDepthStencil];
+    }
+    else
+    {
+        [blit copyFromTexture: texture
+                  sourceSlice: source_slice
+                  sourceLevel: level
+                 sourceOrigin: origin
+                   sourceSize: MTLSizeMake(w, h, region.size.depth ? region.size.depth : 1)
+                     toBuffer: staging
+            destinationOffset: 0
+       destinationBytesPerRow: staging_pitch
+     destinationBytesPerImage: staging_size];
+    }
 
     [blit endEncoding];
 
     [_currentCommandBuffer commit];
     [_currentCommandBuffer waitUntilCompleted];
     _currentCommandBuffer = nil;
+
+    if (split)
+    {
+        uint8_t *out = (uint8_t *)[staging contents];
+
+        for (NSUInteger y = 0; y < h; y++)
+            for (NSUInteger x = 0; x < w; x++)
+            {
+                const uint8_t *d = (const uint8_t *)[dplane contents] + y * d_pitch + x * 4;
+                uint8_t st = ((const uint8_t *)[splane contents])[y * s_pitch + x];
+                uint8_t *px = out + y * staging_pitch + x * bpp;
+
+                if (bpp == 8)
+                {
+                    memcpy(px, d, 4);
+                    px[4] = st;
+                    px[5] = px[6] = px[7] = 0;
+                }
+                else
+                {
+                    uint32_t v;
+
+                    memcpy(&v, d, 4);
+                    v = (v & 0xFFFFFFu) | ((uint32_t)st << 24);
+                    memcpy(px, &v, 4);
+                }
+            }
+    }
 
     // GetTexImage keeps the texture's own top-down row order
     if (!mglConvertPixels([staging contents], staging_pitch, nf,
@@ -10164,21 +10547,45 @@ void mtlDrawElementsInstancedBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei
 }
 
 #pragma mark C interface to mtlDrawArraysIndirect
+// A fan, loop or adjacency draw is expanded on the CPU, which needs the
+// draw's numbers in hand. They sit in the indirect buffer, where the GPU may
+// still be writing them, so wait for it and read them back.
+- (bool) readIndirect: (const void *) indirect size: (size_t) size into: (void *) out
+{
+    Buffer *buf = getIndirectBuffer(ctx);
+    size_t offset = (size_t)(uintptr_t)indirect;
+
+    MTL_CHECK_RETURN_FALSE(buf, GL_INVALID_OPERATION);
+    MTL_CHECK_RETURN_FALSE(offset + size <= (size_t)buf->size, GL_INVALID_OPERATION);
+
+    if (buf->data.mtl_data)
+        [self flushCommandBuffer: true];
+
+    MTL_CHECK_RETURN_FALSE(buf->data.buffer_data, GL_INVALID_OPERATION);
+
+    memcpy(out, (const uint8_t *)buf->data.buffer_data + offset, size);
+
+    return true;
+}
+
 -(void) mtlDrawArraysIndirect: (GLMContext) glm_ctx mode:(GLenum) mode indirect: (const void *) indirect
 {
     MTLPrimitiveType primitiveType;
 
-    [self setDrawTopologyForMode: mode];
-    RETURN_ON_FAILURE([self processGLState: true]);
-
-    // the draw parameters live in a GPU buffer, so there is nothing to expand
-    // from here yet; refusing beats aborting the process
     if (primitive_mode_needs_expand(mode))
     {
-        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        DrawArraysIndirectCommand cmd;
+
+        if ([self readIndirect: indirect size: sizeof cmd into: &cmd] && cmd.count && cmd.instanceCount)
+            [self mtlDrawArraysInstancedBaseInstance: glm_ctx mode: mode first: (GLint)cmd.first
+                                               count: (GLsizei)cmd.count instancecount: (GLsizei)cmd.instanceCount
+                                        baseinstance: cmd.baseInstance];
 
         return;
     }
+
+    [self setDrawTopologyForMode: mode];
+    RETURN_ON_FAILURE([self processGLState: true]);
 
     primitiveType = getMTLPrimitiveType(mode);
 
@@ -10206,21 +10613,26 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) == false &&
-        [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
+    if (primitive_mode_needs_expand(mode))
+    {
+        DrawElementsIndirectCommand cmd;
+        GLuint index_size = type == GL_UNSIGNED_BYTE ? 1 : type == GL_UNSIGNED_SHORT ? 2 : 4;
+
+        if ([self readIndirect: indirect size: sizeof cmd into: &cmd] && cmd.count && cmd.instanceCount)
+            [self mtlDrawElementsInstancedBaseVertexBaseInstance: glm_ctx mode: mode count: (GLsizei)cmd.count
+                                                            type: type
+                                                         indices: (const void *)(uintptr_t)(cmd.first * index_size)
+                                                   instancecount: (GLsizei)cmd.instanceCount
+                                                      basevertex: cmd.baseVertex baseinstance: cmd.baseInstance];
+
+        return;
+    }
+
+    if ([self resolveIndices: type offset: 0 count: 0 into: &src] == false)
         return;
 
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
-
-    // the draw parameters live in a GPU buffer, so there is nothing to expand
-    // from here yet; refusing beats aborting the process
-    if (primitive_mode_needs_expand(mode))
-    {
-        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
-
-        return;
-    }
 
     primitiveType = getMTLPrimitiveType(mode);
 
@@ -10321,7 +10733,8 @@ void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsiz
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
-    if ([self expandDraw:mode count:count type:type indices:indices instanceCount:1 baseVertex:0 baseInstance:0])
+    if ([self expandDraw:mode count:count type:type indices:indices instanceCount:instancecount
+              baseVertex:basevertex baseInstance:baseinstance])
         return;
 
     primitiveType = getMTLPrimitiveType(mode);
@@ -10763,6 +11176,21 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 
     glm_ctx->state.var.max_compute_shared_memory_size =
         (GLuint)[_device maxThreadgroupMemoryLength];
+
+    // one answer for every buffer texture format, so take the strictest
+    {
+        static const MTLPixelFormat fmts[] = {
+            MTLPixelFormatR8Unorm, MTLPixelFormatRG16Float, MTLPixelFormatR32Float,
+            MTLPixelFormatRGBA8Unorm, MTLPixelFormatRGBA16Float, MTLPixelFormatRGBA32Float,
+            MTLPixelFormatRGBA32Uint,
+        };
+        NSUInteger align = 16;
+
+        for (size_t i = 0; i < sizeof fmts / sizeof fmts[0]; i++)
+            align = MAX(align, [_device minimumTextureBufferAlignmentForPixelFormat: fmts[i]]);
+
+        glm_ctx->state.var.texture_buffer_offset_alignment = (GLuint)MIN(align, (NSUInteger)256);
+    }
 
     // MAX_BINDABLE_BUFFERS is our own ceiling, and it is below Metal's 31
     // buffer slots per stage, so it is the honest answer here.

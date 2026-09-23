@@ -263,3 +263,102 @@ GPU_TEST(geometry_blocks, an_explicit_location_survives_the_rewrite)
 
     glDeleteProgram(prog);
 }
+
+/* ---------- a location shared through component= ---------- */
+
+// The pass-through rebuilds every output with its location. Two outputs on one
+// location without their components overlap, and the generated shader will
+// not compile at all.
+GPU_TEST(geometry_blocks, a_location_shared_through_component_survives_the_rewrite)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "layout(location = 0, component = 0) out vec3 a;\n"
+        "layout(location = 0, component = 3) out float b;\n"
+        "void main() { a = vec3(0.0, 0.5, 0.0); b = 2.0; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *gs =
+        "#version 460 core\n"
+        "layout(triangles) in;\n"
+        "layout(triangle_strip, max_vertices = 3) out;\n"
+        "layout(location = 0, component = 0) in vec3 a[];\n"
+        "layout(location = 0, component = 3) in float b[];\n"
+        "layout(location = 0, component = 0) flat out vec3 ga;\n"
+        "layout(location = 0, component = 3) flat out float gb;\n"
+        "void main() {\n"
+        "  for (int i = 0; i < 3; i++) {\n"
+        "    ga = a[i]; gb = b[i];\n"
+        "    gl_Position = gl_in[i].gl_Position;\n"
+        "    EmitVertex();\n"
+        "  }\n"
+        "  EndPrimitive();\n"
+        "}\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "layout(location = 0, component = 0) flat in vec3 ga;\n"
+        "layout(location = 0, component = 3) flat in float gb;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(ga.x, ga.y * gb, ga.z, 1.0); }\n";
+    GLuint prog;
+    char log[4096];
+    unsigned char c[4] = { 0 };
+
+    prog = linkVGF(vs, gs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "component-sharing geometry program did not link: %s", log);
+
+    if (!prog) return;
+
+    if (!drawAndRead(prog, c)) { glDeleteProgram(prog); SKIP("no target"); }
+
+    CHECK_MSG(c[1] > 200 && c[0] < 60, "centre = %d,%d,%d - want green", c[0], c[1], c[2]);
+
+    glDeleteProgram(prog);
+}
+
+/* ---------- GLSL 4.20's relaxed qualifiers ---------- */
+
+// Qualifiers may come in any order and a declaration may carry several layout
+// groups, the later value winning. The rewrite only read a layout group at the
+// front of a declaration, so these stayed behind in the compute shader, where
+// an "in" is not legal at all.
+GPU_TEST(geometry_blocks, qualifiers_in_any_order_and_repeated_layouts)
+{
+    static const char *vs =
+        "#version 420\n"
+        "layout(location = 0) in vec2 p;\n"
+        "layout(location = 2) out vec4 tint;\n"
+        "void main() { tint = vec4(0, 1, 0, 1); gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *gs =
+        "#version 420\n"
+        "layout(triangles) in;\n"
+        "layout(triangle_strip, max_vertices = 1) layout(max_vertices = 3) out;\n"
+        "in layout(location = 5) layout(location = 2) vec4 tint[];\n"
+        "out layout(location = 4) flat layout(location = 1) vec4 outTint;\n"
+        "void main() {\n"
+        "  for (int i = 0; i < 3; i++) {\n"
+        "    outTint = tint[i];\n"
+        "    gl_Position = gl_in[i].gl_Position;\n"
+        "    EmitVertex();\n"
+        "  }\n"
+        "}\n";
+    static const char *fs =
+        "#version 420\n"
+        "layout(location = 1) flat in vec4 outTint;\n"
+        "out vec4 o;\n"
+        "void main() { o = outTint; }\n";
+    GLuint prog;
+    char log[4096];
+    unsigned char c[4] = { 0 };
+
+    prog = linkVGF(vs, gs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "4.20 qualifier program did not link: %s", log);
+
+    if (!prog) return;
+
+    // three vertices only fit if the later max_vertices won
+    if (!drawAndRead(prog, c)) { glDeleteProgram(prog); SKIP("no target"); }
+
+    CHECK_MSG(c[1] > 200 && c[0] < 60, "centre = %d,%d,%d - want green", c[0], c[1], c[2]);
+
+    glDeleteProgram(prog);
+}

@@ -5,6 +5,7 @@
  * Instanced, base-vertex, base-instance, multi-draw and indirect draws.
  */
 
+#include <stdlib.h>
 #include "mgl_test.h"
 #include "harness.h"
 
@@ -526,5 +527,84 @@ GPU_TEST(draw_variants, client_side_indices_reach_the_draw)
     glDeleteBuffers(1, &vbo);
     glDeleteVertexArrays(1, &vao);
     glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// Fans, loops and adjacency have no Metal primitive and are expanded on the
+// CPU, which the indirect path could not do with its numbers in a buffer, so
+// it refused them. They are read back now, fan and indexed fan alike.
+GPU_TEST(draw_variants, indirect_fans_are_drawn)
+{
+    static const float quad[] = { -1, -1,  1, -1,  1, 1,  -1, 1 };
+    static const GLushort idx[] = { 9, 9, 0, 1, 2, 3 };
+    // four vertices, one instance; the indexed one starts two indices in
+    static const GLuint arrays_cmd[] = { 4, 1, 0, 0 };
+    static const GLuint elements_cmd[] = { 4, 1, 2, 0, 0 };
+    GLuint prog, vao, vbo, ibo, cmds;
+    MGLTestTarget t;
+    unsigned char c[4];
+    unsigned char *px;
+    char log[512];
+
+    prog = mgl_build_program(VS_TRI, FS_RED, log, sizeof log);
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+    glGenBuffers(1, &ibo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx, idx, GL_STATIC_DRAW);
+
+    glGenBuffers(1, &cmds);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, cmds);
+    glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof arrays_cmd + sizeof elements_cmd, NULL, GL_STATIC_DRAW);
+    glBufferSubData(GL_DRAW_INDIRECT_BUFFER, 0, sizeof arrays_cmd, arrays_cmd);
+    glBufferSubData(GL_DRAW_INDIRECT_BUFFER, sizeof arrays_cmd, sizeof elements_cmd, elements_cmd);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 16, 16);
+    glUseProgram(prog);
+
+    for (int pass = 0; pass < 3; pass++)
+    {
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        if (pass == 0)
+            glDrawArraysIndirect(GL_TRIANGLE_FAN, (const void *)0);
+        else if (pass == 2)
+            glDrawElements(GL_TRIANGLE_FAN, 4, GL_UNSIGNED_SHORT, (const void *)4);
+        else
+            glDrawElementsIndirect(GL_TRIANGLE_FAN, GL_UNSIGNED_SHORT, (const void *)sizeof arrays_cmd);
+
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        px = mgl_read_rgba8(&t);
+
+        if (px)
+        {
+            // both corners, so the fan's two triangles are both there
+            mgl_pixel_at(px, &t, 2, 13, c);
+            CHECK_MSG(c[0] > 200, "pass %d fan missed the top left: %d", pass, c[0]);
+            mgl_pixel_at(px, &t, 13, 2, c);
+            CHECK_MSG(c[0] > 200, "pass %d fan missed the bottom right: %d", pass, c[0]);
+            free(px);
+        }
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ibo);
+    glDeleteBuffers(1, &cmds);
     mgl_target_destroy(&t);
 }

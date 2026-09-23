@@ -41,6 +41,9 @@ void mglClear(GLMContext ctx, GLbitfield mask)
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
+    if (!mglDrawFramebufferComplete(ctx))
+        return;
+
     ctx->state.clear_bitmask = mask;
     ctx->state.clear_framebuffer = ctx->state.framebuffer;
 
@@ -129,6 +132,9 @@ void mglClearBufferfv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLf
     Framebuffer * fbo = ctx->state.framebuffer;
     FBOAttachment * fboa;
 
+    if (!mglDrawFramebufferComplete(ctx))
+        return;
+
     ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
 
     if (fbo == NULL)
@@ -168,6 +174,9 @@ void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat d
 {
     Framebuffer * fbo = ctx->state.framebuffer;
     FBOAttachment * fboa;
+
+    if (!mglDrawFramebufferComplete(ctx))
+        return;
 
     if (buffer != GL_DEPTH_STENCIL)
     {
@@ -383,7 +392,51 @@ static bool validPixelStorePname(GLenum pname)
         case GL_UNPACK_SKIP_PIXELS:
         case GL_UNPACK_SKIP_IMAGES:
         case GL_UNPACK_ALIGNMENT:
+        case GL_UNPACK_COMPRESSED_BLOCK_WIDTH:
+        case GL_UNPACK_COMPRESSED_BLOCK_HEIGHT:
+        case GL_UNPACK_COMPRESSED_BLOCK_DEPTH:
+        case GL_UNPACK_COMPRESSED_BLOCK_SIZE:
+        case GL_PACK_COMPRESSED_BLOCK_WIDTH:
+        case GL_PACK_COMPRESSED_BLOCK_HEIGHT:
+        case GL_PACK_COMPRESSED_BLOCK_DEPTH:
+        case GL_PACK_COMPRESSED_BLOCK_SIZE:
             return true;
+    }
+
+    return false;
+}
+
+// glGet answers these from here; none of them were answered at all
+bool mglPixelStoreGet(GLMContext ctx, GLenum pname, GLint *out)
+{
+    const PixelStore *pk = &ctx->state.pack, *up = &ctx->state.unpack;
+
+    switch (pname)
+    {
+        case GL_PACK_SWAP_BYTES:                *out = pk->swap_bytes; return true;
+        case GL_PACK_LSB_FIRST:                 *out = pk->lsb_first; return true;
+        case GL_PACK_ROW_LENGTH:                *out = pk->row_length; return true;
+        case GL_PACK_IMAGE_HEIGHT:              *out = pk->image_height; return true;
+        case GL_PACK_SKIP_ROWS:                 *out = pk->skip_rows; return true;
+        case GL_PACK_SKIP_PIXELS:               *out = pk->skip_pixels; return true;
+        case GL_PACK_SKIP_IMAGES:               *out = pk->skip_images; return true;
+        case GL_PACK_ALIGNMENT:                 *out = pk->alignment; return true;
+        case GL_PACK_COMPRESSED_BLOCK_WIDTH:    *out = pk->compressed_block_width; return true;
+        case GL_PACK_COMPRESSED_BLOCK_HEIGHT:   *out = pk->compressed_block_height; return true;
+        case GL_PACK_COMPRESSED_BLOCK_DEPTH:    *out = pk->compressed_block_depth; return true;
+        case GL_PACK_COMPRESSED_BLOCK_SIZE:     *out = pk->compressed_block_size; return true;
+        case GL_UNPACK_SWAP_BYTES:              *out = up->swap_bytes; return true;
+        case GL_UNPACK_LSB_FIRST:               *out = up->lsb_first; return true;
+        case GL_UNPACK_ROW_LENGTH:              *out = up->row_length; return true;
+        case GL_UNPACK_IMAGE_HEIGHT:            *out = up->image_height; return true;
+        case GL_UNPACK_SKIP_ROWS:               *out = up->skip_rows; return true;
+        case GL_UNPACK_SKIP_PIXELS:             *out = up->skip_pixels; return true;
+        case GL_UNPACK_SKIP_IMAGES:             *out = up->skip_images; return true;
+        case GL_UNPACK_ALIGNMENT:               *out = up->alignment; return true;
+        case GL_UNPACK_COMPRESSED_BLOCK_WIDTH:  *out = up->compressed_block_width; return true;
+        case GL_UNPACK_COMPRESSED_BLOCK_HEIGHT: *out = up->compressed_block_height; return true;
+        case GL_UNPACK_COMPRESSED_BLOCK_DEPTH:  *out = up->compressed_block_depth; return true;
+        case GL_UNPACK_COMPRESSED_BLOCK_SIZE:   *out = up->compressed_block_size; return true;
     }
 
     return false;
@@ -475,6 +528,15 @@ void mglPixelStorei(GLMContext ctx, GLenum pname, GLint param)
         case GL_UNPACK_SKIP_IMAGES:
             ctx->state.unpack.skip_images = param;
             break;
+
+        case GL_UNPACK_COMPRESSED_BLOCK_WIDTH:  ctx->state.unpack.compressed_block_width = param; break;
+        case GL_UNPACK_COMPRESSED_BLOCK_HEIGHT: ctx->state.unpack.compressed_block_height = param; break;
+        case GL_UNPACK_COMPRESSED_BLOCK_DEPTH:  ctx->state.unpack.compressed_block_depth = param; break;
+        case GL_UNPACK_COMPRESSED_BLOCK_SIZE:   ctx->state.unpack.compressed_block_size = param; break;
+        case GL_PACK_COMPRESSED_BLOCK_WIDTH:    ctx->state.pack.compressed_block_width = param; break;
+        case GL_PACK_COMPRESSED_BLOCK_HEIGHT:   ctx->state.pack.compressed_block_height = param; break;
+        case GL_PACK_COMPRESSED_BLOCK_DEPTH:    ctx->state.pack.compressed_block_depth = param; break;
+        case GL_PACK_COMPRESSED_BLOCK_SIZE:     ctx->state.pack.compressed_block_size = param; break;
 
         case GL_UNPACK_ALIGNMENT:
             switch(param)
@@ -758,6 +820,9 @@ void mglClearBufferiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLi
 
     ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
 
+    if (!mglDrawFramebufferComplete(ctx))
+        return;
+
     for (int i = 0; i < 4; i++)
         v[i] = (GLfloat)value[i];
 
@@ -769,6 +834,9 @@ void mglClearBufferuiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GL
     GLfloat v[4];
 
     ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
+
+    if (!mglDrawFramebufferComplete(ctx))
+        return;
 
     for (int i = 0; i < 4; i++)
         v[i] = (GLfloat)value[i];

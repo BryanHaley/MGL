@@ -288,3 +288,30 @@ GPU_TEST(fp64, plain_uniform_doubles_arrive_intact)
     /* 1+2+3+4+5+6+7 */
     CHECK_NEAR(28.0f, got, 1e-3f);
 }
+
+/* glslang writes "!=" on floats as an unordered compare. Its helper sat with
+   the vector operations, so a shader using only scalar doubles called a
+   function that was never emitted and failed to compile. */
+GPU_TEST(fp64, not_equal_works_with_no_double_vectors_in_sight)
+{
+    CHECK_NEAR(1.0f, run_scalar("double a = double(gl_GlobalInvocationID.x) + 1.0LF;\n"
+                                "r = (a != 1.0LF) ? 0.0 : 1.0;"), 1e-5f);
+    CHECK_NEAR(2.0f, run_scalar("double a = double(gl_GlobalInvocationID.x) + 1.0LF;\n"
+                                "r = (a != 2.0LF) ? 2.0 : 0.0;"), 1e-5f);
+}
+
+/* Comparing arrays of dmat walks down through the array before it reaches a
+   column. The emulation took the array index for a column and named a member
+   the array does not have, so the shader did not compile. */
+GPU_TEST(fp64, arrays_of_matrices_compare_element_by_element)
+{
+    CHECK_NEAR(1.0f, run_scalar("dmat2 x[2][2]; dmat2 y[2][2];\n"
+                                "for (int a = 0; a < 2; a++) for (int b = 0; b < 2; b++) {\n"
+                                "  x[a][b] = dmat2(double(a + b)); y[a][b] = dmat2(double(a + b)); }\n"
+                                "r = (x == y) ? 1.0 : 0.0;"), 1e-5f);
+    CHECK_NEAR(0.0f, run_scalar("dmat2 x[2][2]; dmat2 y[2][2];\n"
+                                "for (int a = 0; a < 2; a++) for (int b = 0; b < 2; b++) {\n"
+                                "  x[a][b] = dmat2(double(a + b)); y[a][b] = dmat2(double(a + b)); }\n"
+                                "y[1][1][1][0] = 9.0lf;\n"
+                                "r = (x == y) ? 1.0 : 0.0;"), 1e-5f);
+}

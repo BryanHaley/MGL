@@ -220,6 +220,112 @@ static bool varyingType(const char *src, const char *name, char *type, size_t ty
     return false;
 }
 
+// A member of an output block, which feedback names by the block's name
+// rather than its instance: "StageData.attrib" for "out StageData { ... } vs_out".
+static bool blockMemberType(const char *src, const char *block, const char *member,
+                            char *inst, size_t instlen, char *type, size_t typelen)
+{
+    for (size_t i = 0; src[i]; i++)
+    {
+        if (!wordAt(src, i, block))
+            continue;
+
+        size_t open = skipSpace(src, i + strlen(block));
+
+        if (src[open] != '{')
+            continue;
+
+        // only an output block, so look back to where the declaration starts
+        size_t start = i;
+        bool is_out = false;
+
+        while (start > 0 && src[start - 1] != ';' && src[start - 1] != '}' && src[start - 1] != '{')
+            start--;
+
+        for (size_t k = start; k < i; k++)
+            if (wordAt(src, k, "out"))
+                is_out = true;
+
+        if (!is_out)
+            continue;
+
+        size_t close = open;
+
+        while (src[close] && src[close] != '}')
+            close++;
+
+        if (src[close] == 0)
+            return false;
+
+        for (size_t k = open + 1; k < close; k++)
+        {
+            if (!wordAt(src, k, member))
+                continue;
+
+            size_t e = k, b;
+
+            while (e > open && isspace((unsigned char)src[e - 1]))
+                e--;
+
+            b = e;
+
+            while (b > open && identChar(src[b - 1]))
+                b--;
+
+            if (b == e)
+                continue;
+
+            snprintf(type, typelen, "%.*s", (int)(e - b), src + b);
+
+            size_t n = skipSpace(src, close + 1), n0 = n;
+
+            while (identChar(src[n]))
+                n++;
+
+            snprintf(inst, instlen, "%.*s", (int)(n - n0), src + n0);
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Turns a name as glTransformFeedbackVaryings gave it into what the shader
+// calls it, and the type of the one thing it picks out. "a[2]" is an element
+// of an array and "Block.m" a block member, and both can be combined.
+static bool resolveVarying(const char *src, const char *name, char *expr, size_t exprlen,
+                           char *type, size_t typelen)
+{
+    const char *index = strchr(name, '[');
+    char base[160];
+
+    snprintf(base, sizeof base, "%.*s", index ? (int)(index - name) : (int)strlen(name), name);
+
+    char *dot = strchr(base, '.');
+
+    if (dot)
+    {
+        char inst[80];
+
+        *dot = 0;
+
+        if (!blockMemberType(src, base, dot + 1, inst, sizeof inst, type, typelen))
+            return false;
+
+        snprintf(expr, exprlen, "%s%s%s%s", inst, inst[0] ? "." : "", dot + 1, index ? index : "");
+
+        return true;
+    }
+
+    if (!varyingType(src, base, type, typelen))
+        return false;
+
+    snprintf(expr, exprlen, "%s%s", base, index ? index : "");
+
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // the rewrite
 // ---------------------------------------------------------------------------
@@ -285,7 +391,9 @@ static int itemsFromVaryings(const char *src, char *const *varyings, GLsizei cou
         if (buffer >= MGL_XFB_MAX_BUFFERS || n >= max_items)
             return -1;
 
-        if (!varyingType(src, name, type, sizeof type))
+        char expr[160];
+
+        if (!resolveVarying(src, name, expr, sizeof expr, type, sizeof type))
         {
             MGL_ERR("MGL Error: transform feedback varying '%s' is not an output of this stage\n", name);
             return -1;
@@ -302,7 +410,7 @@ static int itemsFromVaryings(const char *src, char *const *varyings, GLsizei cou
         matrixShape(type, &cols, &rows);
 
         memset(&items[n], 0, sizeof(items[n]));
-        snprintf(items[n].expr, sizeof(items[n].expr), "%s", name);
+        snprintf(items[n].expr, sizeof(items[n].expr), "%s", expr);
         items[n].buffer = buffer;
         items[n].offset = offset;
         items[n].kind = kind;

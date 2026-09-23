@@ -296,6 +296,11 @@ static GLuint copyImageLevelHeight(const Texture *t, GLint level)
 	if (level < 0 || (GLuint)level >= t->mipmap_levels || !t->faces[0].levels)
 		return 0;
 
+	// a 1D array keeps its layer count where a height would go, but the copy
+	// reaches its layers through z; an image in it is one texel tall
+	if (t->target == GL_TEXTURE_1D || t->target == GL_TEXTURE_1D_ARRAY)
+		return 1;
+
 	return t->faces[0].levels[level].height ? t->faces[0].levels[level].height : 1;
 }
 
@@ -365,6 +370,10 @@ void mglCopyImageSubData(GLMContext ctx, GLuint srcName, GLenum srcTarget, GLint
 	dstTex = copyImageObject(ctx, dstTarget, dstName);
 
 	ERROR_CHECK_RETURN(srcTex && dstTex, GL_INVALID_VALUE);
+
+	// the target has to name what the object actually is
+	ERROR_CHECK_RETURN(srcTarget == GL_RENDERBUFFER || srcTex->target == srcTarget, GL_INVALID_ENUM);
+	ERROR_CHECK_RETURN(dstTarget == GL_RENDERBUFFER || dstTex->target == dstTarget, GL_INVALID_ENUM);
 
 	ERROR_CHECK_RETURN(srcWidth >= 0 && srcHeight >= 0 && srcDepth >= 0, GL_INVALID_VALUE);
 	ERROR_CHECK_RETURN(srcX >= 0 && srcY >= 0 && srcZ >= 0, GL_INVALID_VALUE);

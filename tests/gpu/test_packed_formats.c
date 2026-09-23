@@ -8,6 +8,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "mgl_test.h"
@@ -484,5 +485,79 @@ GPU_TEST(packed_formats, rgb10_a2ui_keeps_the_bits_it_was_given)
         CHECK_MSG(out[i] == in[i], "texel %d went in as 0x%08X and came back 0x%08X",
                   i, in[i], out[i]);
 
+    glDeleteTextures(1, &tex);
+}
+
+// A combined depth-stencil level kept no copy of its own, so glTexImage2D's
+// pixels were dropped and every glTexSubImage2D failed with no message. The
+// depth half is sampled here, which only works if it reached the Metal
+// texture and not just the level's copy.
+GPU_TEST(packed_formats, depth_stencil_uploads_reach_the_texture)
+{
+    static const char *vs =
+        "#version 430 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 430 core\n"
+        "uniform sampler2D d;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(texelFetch(d, ivec2(1, 1), 0).r); }\n";
+    GLuint packed[4 * 4], got[4 * 4];
+    GLuint tex = 0, prog, vao, vbo;
+    MGLTestTarget t;
+    unsigned char c[4] = { 0 };
+    unsigned char *px;
+    char log[1024];
+
+    for (int i = 0; i < 16; i++)
+        packed[i] = (0x800000u << 8) | (GLuint)(i + 1);   // depth 0.5 on top, stencil i+1 below
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, 4, 4, 0,
+                 GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    memset(got, 0, sizeof got);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, got);
+    CHECK_MSG(got[5] == packed[5], "texel 5 read back 0x%08x, wrote 0x%08x", got[5], packed[5]);
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "depth sampling program did not build: %s", log);
+
+    if (prog && mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+    {
+        mgl_target_bind(&t);
+        glViewport(0, 0, 8, 8);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        vao = mgl_fullscreen_quad(&vbo);
+        glUseProgram(prog);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glUniform1i(glGetUniformLocation(prog, "d"), 0);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        px = mgl_read_rgba8(&t);
+
+        if (px)
+        {
+            mgl_pixel_at(px, &t, 4, 4, c);
+            CHECK_MSG(c[0] >= 125 && c[0] <= 130, "sampled depth %d/255, want about 128", c[0]);
+            free(px);
+        }
+
+        glUseProgram(0);
+        glDeleteVertexArrays(1, &vao);
+        glDeleteBuffers(1, &vbo);
+        mgl_target_destroy(&t);
+    }
+
+    glDeleteProgram(prog);
     glDeleteTextures(1, &tex);
 }

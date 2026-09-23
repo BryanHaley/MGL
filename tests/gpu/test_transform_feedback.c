@@ -206,6 +206,76 @@ GPU_TEST(transform_feedback, two_varyings_pack_tightly)
     mgl_target_destroy(&t);
 }
 
+// Feedback can name one element of an array, and a block member by the
+// block's name rather than its instance's. Only whole plain varyings were
+// looked up, so every one of these failed the link.
+GPU_TEST(transform_feedback, block_members_and_array_elements_by_name)
+{
+    static const GLfloat pts[2] = { 0.0f, 0.0f };
+    static const char *vs =
+        "#version 430\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out StageData { vec4 v[3]; float f; } vs_out;\n"
+        "out float arr[4];\n"
+        "void main() {\n"
+        "  for (int i = 0; i < 3; i++) vs_out.v[i] = vec4(float(i * 10));\n"
+        "  vs_out.f = 5.0;\n"
+        "  for (int i = 0; i < 4; i++) arr[i] = float(100 + i);\n"
+        "  gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const char *fs =
+        "#version 430\n"
+        "in StageData { vec4 v[3]; float f; } fs_in;\n"
+        "in float arr[4];\n"
+        "out vec4 o;\n"
+        "void main() { o = fs_in.v[0] + vec4(fs_in.f + arr[0]); }\n";
+    static const char *varyings[] = { "StageData.v[2]", "arr[3]", "StageData.f", "StageData.v[1]" };
+    // v[2] as four floats, then arr[3], f, and v[1]
+    static const GLfloat want[10] = { 20, 20, 20, 20, 103, 5, 10, 10, 10, 10 };
+    MGLTestTarget t;
+    GLuint prog, vao, vbo, tf;
+    GLfloat got[10];
+    char log[2048];
+
+    prog = linkRecording(vs, fs, varyings, 4, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    CHECK_MSG(prog != 0, "block member feedback did not link: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+        return;
+
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof pts, pts, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+
+    tf = recordingBuffer(0, 256);
+    glViewport(0, 0, 16, 16);
+
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glEndTransformFeedback();
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    memset(got, 0, sizeof got);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+
+    for (int i = 0; i < 10; i++)
+        CHECK_MSG(got[i] == want[i], "word %d captured %g, want %g", i, got[i], want[i]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &tf);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+}
+
 /* ---------- nothing is recorded while it is off ---------- */
 
 GPU_TEST(transform_feedback, paused_records_nothing)
