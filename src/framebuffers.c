@@ -1388,6 +1388,58 @@ void mglFramebufferParameteri(GLMContext ctx, GLenum target, GLenum pname, GLint
     framebufferParameter(ctx, fbo, pname, param);
 }
 
+// What ReadPixels will accept for the colour buffer currently being read.
+// GL always allows RGBA/UNSIGNED_BYTE for a normalised buffer, but an integer
+// buffer has to name an integer pair or the caller reads integers as floats.
+void mglReadColorFormatAndType(GLMContext ctx, GLenum *format, GLenum *type)
+{
+    Framebuffer *fbo = ctx->state.readbuffer;
+    GLenum internalformat = 0;
+
+    *format = GL_RGBA;
+    *type = GL_UNSIGNED_BYTE;
+
+    if (fbo == NULL)
+        return;
+
+    {
+        GLuint att = 0;
+
+        if (ctx->state.read_buffer >= GL_COLOR_ATTACHMENT0 &&
+            ctx->state.read_buffer < GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
+            att = ctx->state.read_buffer - GL_COLOR_ATTACHMENT0;
+
+        if (fbo->color_attachments[att].textarget == GL_RENDERBUFFER)
+        {
+            if (fbo->color_attachments[att].buf.rbo && fbo->color_attachments[att].buf.rbo->tex)
+                internalformat = fbo->color_attachments[att].buf.rbo->tex->internalformat;
+        }
+        else if (fbo->color_attachments[att].buf.tex)
+        {
+            internalformat = fbo->color_attachments[att].buf.tex->internalformat;
+        }
+    }
+
+    if (internalformat == 0)
+        return;
+
+    switch (mglFormatKind(internalformat))
+    {
+        case MGL_FMT_COLOR_INT:
+            *format = GL_RGBA_INTEGER;
+            *type = GL_INT;
+            break;
+
+        case MGL_FMT_COLOR_UINT:
+            *format = GL_RGBA_INTEGER;
+            *type = GL_UNSIGNED_INT;
+            break;
+
+        default:
+            break;
+    }
+}
+
 static void getFramebufferParameter(GLMContext ctx, Framebuffer *fbo, GLenum pname, GLint *params)
 {
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
@@ -1403,8 +1455,15 @@ static void getFramebufferParameter(GLMContext ctx, Framebuffer *fbo, GLenum pna
             case GL_STEREO:                  *params = GL_FALSE; return;
             case GL_SAMPLES:                 *params = 0;        return;
             case GL_SAMPLE_BUFFERS:          *params = 0;        return;
-            case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;          return;
-            case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return;
+            case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
+            case GL_IMPLEMENTATION_COLOR_READ_TYPE:
+            {
+                GLenum f, t;
+
+                mglReadColorFormatAndType(ctx, &f, &t);
+                *params = (GLint)(pname == GL_IMPLEMENTATION_COLOR_READ_FORMAT ? f : t);
+                return;
+            }
 
             default:
                 ERROR_RETURN(GL_INVALID_OPERATION);
@@ -1426,8 +1485,15 @@ static void getFramebufferParameter(GLMContext ctx, Framebuffer *fbo, GLenum pna
         case GL_STEREO:                  *params = GL_FALSE; return;
         case GL_SAMPLES:                 *params = 0;        return;
         case GL_SAMPLE_BUFFERS:          *params = 0;        return;
-        case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;          return;
-        case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return;
+        case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
+        case GL_IMPLEMENTATION_COLOR_READ_TYPE:
+        {
+            GLenum f, t;
+
+            mglReadColorFormatAndType(ctx, &f, &t);
+            *params = (GLint)(pname == GL_IMPLEMENTATION_COLOR_READ_FORMAT ? f : t);
+            return;
+        }
 
         default:
             ERROR_RETURN(GL_INVALID_ENUM);

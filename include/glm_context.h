@@ -537,6 +537,7 @@ typedef struct CullInfo_t {
     GLint  building;         // 1 while the capture compiles, 2 for the kernel
 } CullInfo;
 
+void  mglReadColorFormatAndType(GLMContext ctx, GLenum *format, GLenum *type);
 GLint mglCullDistanceSize(const char *src);
 bool  mglBuildCullShaders(const char *vs_src, CullInfo *ci);
 void  mglFreeCullInfo(CullInfo *ci);

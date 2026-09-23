@@ -519,6 +519,18 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x8CA5: RET_TYPE_VAR(type, stencil_back_writemask); break; // GL_STENCIL_BACK_WRITEMASK
         case 0x88ED: RET_TYPE_VAR(type, pixel_pack_buffer_binding); break; // GL_PIXEL_PACK_BUFFER_BINDING
         case 0x88EF: RET_TYPE_VAR(type, pixel_unpack_buffer_binding); break; // GL_PIXEL_UNPACK_BUFFER_BINDING
+        // Framebuffer-dependent state, so it has to be worked out rather than
+        // stored: what ReadPixels will take for whatever is being read now.
+        case 0x8B9B: // GL_IMPLEMENTATION_COLOR_READ_FORMAT
+        case 0x8B9A: // GL_IMPLEMENTATION_COLOR_READ_TYPE
+        {
+            GLenum rf, rt;
+
+            mglReadColorFormatAndType(ctx, &rf, &rt);
+            RET_TYPE_CONST(type, (pname == 0x8B9B) ? rf : rt);
+            break;
+        }
+
         case 0x821B: RET_TYPE_VAR(type, major_version); break; // GL_MAJOR_VERSION
         case 0x821C: RET_TYPE_VAR(type, minor_version); break; // GL_MINOR_VERSION
         case 0x821D: RET_TYPE_VAR(type, num_extensions); break; // GL_NUM_EXTENSIONS
@@ -858,6 +870,7 @@ static const char * const mgl_extensions[] = {
     "GL_ARB_texture_gather",
     "GL_ARB_texture_query_levels",
     "GL_ARB_texture_query_lod",
+    "GL_ARB_texture_rgb10_a2ui",
     "GL_ARB_texture_stencil8",
     "GL_ARB_texture_view",
     "GL_ARB_transform_feedback_instanced",
@@ -867,6 +880,11 @@ static const char * const mgl_extensions[] = {
     "GL_EXT_texture_filter_anisotropic",
     "GL_EXT_texture_sRGB",
     "GL_EXT_texture_compression_s3tc",
+    // Core since 3.0 and 3.3, and named here because tests and applications
+    // check for the old string rather than the version.
+    "GL_EXT_texture_integer",
+    "GL_EXT_texture_shared_exponent",
+    "GL_EXT_texture_type_2_10_10_10_REV",
 };
 
 static const GLuint mgl_num_extensions = (GLuint)(sizeof(mgl_extensions)/sizeof(mgl_extensions[0]));

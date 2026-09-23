@@ -56,6 +56,36 @@ GPU_TEST(ctx, extension_enumeration_is_consistent)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 }
 
+/* A feature that is core still has to answer to its old extension string:
+   plenty of tests and applications check the name rather than the version, and
+   give up before they reach the path that would have worked. */
+GPU_TEST(ctx, core_features_answer_to_their_old_names)
+{
+    static const char *want[] = {
+        "GL_ARB_texture_rgb10_a2ui",
+        "GL_EXT_texture_shared_exponent",
+        "GL_EXT_texture_type_2_10_10_10_REV",
+        "GL_EXT_texture_integer",
+    };
+    GLint n = 0;
+
+    glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+
+    for (size_t w = 0; w < sizeof want / sizeof *want; w++)
+    {
+        int found = 0;
+
+        for (GLint i = 0; i < n && !found; i++)
+        {
+            const char *e = (const char *)glGetStringi(GL_EXTENSIONS, i);
+
+            found = e && !strcmp(e, want[w]);
+        }
+
+        CHECK_MSG(found, "%s is core and implemented, and is not advertised", want[w]);
+    }
+}
+
 GPU_TEST(ctx, getstring_extensions_is_invalid_in_core)
 {
     const GLubyte *s = glGetString(GL_EXTENSIONS);

@@ -7,6 +7,7 @@
  * as glTexImage2D refusing data GL says is legal.
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "mgl_test.h"
@@ -450,6 +451,33 @@ GPU_TEST(packed_formats, r11f_g11f_b10f_keeps_the_bits_it_was_given)
     CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
 
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, out);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    for (int i = 0; i < 4; i++)
+        CHECK_MSG(out[i] == in[i], "texel %d went in as 0x%08X and came back 0x%08X",
+                  i, in[i], out[i]);
+
+    glDeleteTextures(1, &tex);
+}
+
+/* GL_RGB10_A2UI is what GL_ARB_texture_rgb10_a2ui names, and the packed type
+   is what GL_EXT_texture_type_2_10_10_10_REV names. Both are advertised, so
+   both have to work. */
+GPU_TEST(packed_formats, rgb10_a2ui_keeps_the_bits_it_was_given)
+{
+    static const GLuint in[4] = { 0xC0000001u, 0x3FF00000u, 0x000FFC00u, 0x12345678u };
+    GLuint out[4] = { 0u, 0u, 0u, 0u };
+    GLuint tex = 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    mgl_drain_errors();
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB10_A2UI, 2, 2, 0,
+                 GL_RGBA_INTEGER, GL_UNSIGNED_INT_2_10_10_10_REV, in);
+    CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
+
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT_2_10_10_10_REV, out);
     CHECK_EQ_UINT(GL_NO_ERROR, glGetError());
 
     for (int i = 0; i < 4; i++)
