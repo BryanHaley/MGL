@@ -281,6 +281,11 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     NSUInteger    _readPlane;
     // a pass that only clears, with nothing drawn: skip binding draw state
     bool          _clearOnly;
+    // the depth format the open pass was made with, and whether it is only
+    // there because a shader writes gl_FragDepth into a target without one
+    MTLPixelFormat _encoderDepthFormat;
+    bool          _encoderScratchDepth;
+    id<MTLTexture> _scratchDepth;
     // the element type and offset of the last element draw, as GL gave them
     GLenum        _gsElementType;
     size_t        _gsElementOffset;
@@ -4857,7 +4862,8 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
         MTLDepthStencilDescriptor *dsDesc = [[MTLDepthStencilDescriptor alloc] init];
 
         // mtl maps directly to gl
-        if (ctx->state.caps.depth_test)
+        // with no depth buffer in GL terms, the test always passes
+        if (ctx->state.caps.depth_test && !_encoderScratchDepth)
         {
             MTLCompareFunction depthCompareFunction;
 
@@ -5013,6 +5019,15 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     }
 
     [self bindBindlessToRenderEncoder];
+}
+
+// Metal will not build a pipeline whose fragment shader writes depth unless
+// the pass has a depth attachment; GL just lets the value go nowhere
+static bool fragmentWritesDepth(Program *p)
+{
+    const char *msl = p ? p->spirv[_FRAGMENT_SHADER].msl_str : NULL;
+
+    return msl && strstr(msl, "[[depth(") != NULL;
 }
 
 // GL only encodes into an sRGB image while GL_FRAMEBUFFER_SRGB is on; off, a
@@ -5251,7 +5266,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
 
         // attach depth
         if (ctx->depth_format.mtl_pixel_format &&
-            ctx->state.caps.depth_test)
+            (ctx->state.caps.depth_test || fragmentWritesDepth(ctx->state.program)))
         {
             if(_drawBuffers[mgl_drawbuffer].depthbuffer)
             {
@@ -5461,6 +5476,53 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
         }
         _currentRenderEncoder = nil;
     }
+
+    // A shader writing gl_FragDepth into a target with no depth buffer still
+    // draws its colour; Metal wants somewhere for the depth, so it gets a
+    // scratch buffer nobody reads
+    _encoderScratchDepth = false;
+
+    if (_renderPassDescriptor.depthAttachment.texture == nil && fragmentWritesDepth(ctx->state.program))
+    {
+        NSUInteger w = _renderPassDescriptor.renderTargetWidth;
+        NSUInteger h = _renderPassDescriptor.renderTargetHeight;
+        id<MTLTexture> color = _renderPassDescriptor.colorAttachments[0].texture;
+
+        NSUInteger samples = color ? color.sampleCount : 1;
+
+        if ((w == 0 || h == 0) && color)
+            w = color.width, h = color.height;
+
+        if (w && h && (_scratchDepth == nil || _scratchDepth.width != w || _scratchDepth.height != h ||
+                       _scratchDepth.sampleCount != samples))
+        {
+            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: MTLPixelFormatDepth32Float
+                                                                                         width: w
+                                                                                        height: h
+                                                                                     mipmapped: NO];
+            d.storageMode = MTLStorageModePrivate;
+            d.usage = MTLTextureUsageRenderTarget;
+
+            if (samples > 1)
+            {
+                d.textureType = MTLTextureType2DMultisample;
+                d.sampleCount = samples;
+            }
+
+            _scratchDepth = [_device newTextureWithDescriptor: d];
+        }
+
+        if (_scratchDepth)
+        {
+            _renderPassDescriptor.depthAttachment.texture = _scratchDepth;
+            _renderPassDescriptor.depthAttachment.loadAction = MTLLoadActionDontCare;
+            _renderPassDescriptor.depthAttachment.storeAction = MTLStoreActionDontCare;
+            _encoderScratchDepth = true;
+        }
+    }
+
+    _encoderDepthFormat = _renderPassDescriptor.depthAttachment.texture
+                        ? _renderPassDescriptor.depthAttachment.texture.pixelFormat : MTLPixelFormatInvalid;
 
     // A committed buffer can't take another encoder, so swap in a fresh one
     // rather than refusing to draw for the rest of the context's life.
@@ -8211,6 +8273,18 @@ static MTLWinding mtlWindingFor(const Program *p)
             pipelineStateDescriptor.stencilAttachmentPixelFormat = ctx->stencil_format.mtl_pixel_format;
     }
 
+    // Every pipeline in a pass names the pass's depth format, and a shader
+    // writing gl_FragDepth needs one even where GL has no depth buffer
+    if (pipelineStateDescriptor.depthAttachmentPixelFormat == MTLPixelFormatInvalid)
+    {
+        if (_currentRenderEncoder && _encoderDepthFormat != MTLPixelFormatInvalid)
+            pipelineStateDescriptor.depthAttachmentPixelFormat = _encoderDepthFormat;
+        else if (fragmentWritesDepth(ctx->state.program))
+            pipelineStateDescriptor.depthAttachmentPixelFormat =
+                (!ctx->state.framebuffer && ctx->depth_format.mtl_pixel_format)
+                ? ctx->depth_format.mtl_pixel_format : MTLPixelFormatDepth32Float;
+    }
+
     return pipelineStateDescriptor;
 }
 
@@ -8857,6 +8931,16 @@ static MTLWinding mtlWindingFor(const Program *p)
 
     if (draw_command && usesBindless(ctx->state.program, _VERTEX_SHADER, _MAX_SHADER_TYPES - 1))
         [self refreshBindless];
+
+    // A pass cannot gain a depth attachment once it is open, so a draw that
+    // needs one where the pass has none starts a new pass
+    if (draw_command && _currentRenderEncoder && _encoderDepthFormat == MTLPixelFormatInvalid &&
+        (fragmentWritesDepth(ctx->state.program) ||
+         (!ctx->state.framebuffer && ctx->state.caps.depth_test && ctx->depth_format.mtl_pixel_format)))
+    {
+        [self endRenderEncoding];
+        ctx->state.dirty_bits |= DIRTY_VAO | DIRTY_TEX | DIRTY_RENDER_STATE;
+    }
 
     if (ctx->state.dirty_bits)
     {

@@ -393,3 +393,101 @@ GPU_TEST(framebuffer_layers, a_deleted_renderbuffer_stays_on_an_unbound_framebuf
     glDeleteFramebuffers(1, &keeper);
     glDeleteFramebuffers(1, &other);
 }
+
+static const char *FRAG_DEPTH_GREEN =
+    "#version 460 core\n"
+    "out vec4 o;void main(){o=vec4(0,1,0,1);gl_FragDepth=0.3;}\n";
+
+// a shader writing gl_FragDepth into a target with no depth buffer: the depth
+// goes nowhere and the colour still lands, test on or off
+GPU_TEST(framebuffer_layers, frag_depth_into_a_colour_only_target_still_draws)
+{
+    char err[1024] = { 0 };
+    GLuint tex = rgba_tex(), fb = fbo_for(), prog, vao;
+
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    CHECK_EQ_UINT(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
+    prog = mgl_build_program(VS, FRAG_DEPTH_GREEN, err, sizeof err);
+    CHECK_MSG(prog != 0, "link: %s", err);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glViewport(0, 0, 4, 4);
+
+    for (int test = 0; test < 2; test++)
+    {
+        GLubyte px[4 * 4 * 4];
+
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        if (test)
+        {
+            // no depth buffer means the test always passes
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
+        }
+
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDisable(GL_DEPTH_TEST);
+
+        glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK_MSG(px[1] == 255, "depth test %s: green %d", test ? "on" : "off", px[1]);
+    }
+
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}
+
+// one pass drawing with and without gl_FragDepth: every draw lands
+GPU_TEST(framebuffer_layers, frag_depth_and_plain_draws_share_a_pass)
+{
+    char err[1024] = { 0 };
+    GLuint tex = rgba_tex(), fb = fbo_for(), plain, depth, vao;
+    GLubyte px[4 * 4 * 4];
+
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glViewport(0, 0, 4, 4);
+
+    plain = mgl_build_program(VS, RED, err, sizeof err);
+    CHECK_MSG(plain != 0, "link: %s", err);
+    depth = mgl_build_program(VS, FRAG_DEPTH_GREEN, err, sizeof err);
+    CHECK_MSG(depth != 0, "link: %s", err);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    // left half plain, right half with gl_FragDepth, then plain again over
+    // the left: each needs its pipeline to match the pass it lands in
+    glEnable(GL_SCISSOR_TEST);
+    glUseProgram(plain);
+    glScissor(0, 0, 2, 4);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glUseProgram(depth);
+    glScissor(2, 0, 2, 4);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glUseProgram(plain);
+    glScissor(0, 0, 1, 4);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_SCISSOR_TEST);
+
+    glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_MSG(px[0] == 255 && px[1] == 0, "left %d %d", px[0], px[1]);
+    CHECK_MSG(px[3 * 4 + 1] == 255, "right green %d", px[3 * 4 + 1]);
+    CHECK_EQ_UINT(GL_NO_ERROR, mgl_drain_errors());
+
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteProgram(plain);
+    glDeleteProgram(depth);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}
