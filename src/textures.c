@@ -37,6 +37,7 @@ extern void *getBufferData(GLMContext ctx, Buffer *ptr);
 
 bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, void *pixels);
 void invalidateTexture(GLMContext ctx, Texture *tex);
+static void freeLevelData(TextureLevel *lvl);
 
 // true once TexImage or TexStorage has actually defined this level
 static bool texLevelDefined(Texture *tex, GLuint face, GLint level)
@@ -211,7 +212,13 @@ Texture *getTex(GLMContext ctx, GLuint name, GLenum target)
         if (!ptr) {
             GLuint active_texture = STATE(active_texture);
 
-            ptr = newTexObj(ctx, target);
+            // A new one each time was never freed: binding 0 drops it from
+            // the unit, and the conformance suite's reset between cases
+            // made thousands.
+            if (STATE(default_textures[index]) == NULL)
+                STATE(default_textures[index]) = newTexObj(ctx, target);
+
+            ptr = STATE(default_textures[index]);
 
             ERROR_CHECK_RETURN_VALUE(ptr, GL_OUT_OF_MEMORY, NULL);
 
@@ -489,6 +496,72 @@ void mglBindImageTexture(GLMContext ctx, GLuint unit, GLuint texture, GLint leve
 
 void mglBindlessForgetTexture(GLMContext ctx, Texture *tex);
 
+static bool attachmentHolds(const FBOAttachment *a, const Texture *tex)
+{
+    return a->textarget != GL_RENDERBUFFER && a->buf.tex == tex;
+}
+
+static bool framebufferHolds(GLMContext ctx, const Texture *tex)
+{
+    for (size_t k = 0; k < STATE(framebuffer_table).size; k++)
+    {
+        Framebuffer *fb = (Framebuffer *)STATE(framebuffer_table).keys[k].data;
+
+        if (fb == NULL)
+            continue;
+
+        for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+            if (attachmentHolds(&fb->color_attachments[i], tex))
+                return true;
+
+        if (attachmentHolds(&fb->depth, tex) || attachmentHolds(&fb->stencil, tex))
+            return true;
+    }
+
+    return false;
+}
+
+// everything a texture object owns, and the object
+void mglFreeTextureObject(GLMContext ctx, Texture *tex)
+{
+    invalidateTexture(ctx, tex);
+
+    if (tex->params.mtl_data)
+        ctx->mtl_funcs.mtlDeleteMTLObj(ctx, tex->params.mtl_data);
+
+    free(tex);
+}
+
+static void retireTexture(GLMContext ctx, Texture *tex)
+{
+    Texture **grown = (Texture **)realloc(STATE(retired_textures),
+                                          (STATE(retired_texture_count) + 1) * sizeof(Texture *));
+
+    // with nowhere to note it, keeping it is safer than freeing it
+    if (grown == NULL)
+        return;
+
+    STATE(retired_textures) = grown;
+    STATE(retired_textures)[STATE(retired_texture_count)++] = tex;
+}
+
+void mglSweepRetiredTextures(GLMContext ctx)
+{
+    GLuint kept = 0;
+
+    for (GLuint i = 0; i < STATE(retired_texture_count); i++)
+    {
+        Texture *tex = STATE(retired_textures)[i];
+
+        if (framebufferHolds(ctx, tex))
+            STATE(retired_textures)[kept++] = tex;
+        else
+            mglFreeTextureObject(ctx, tex);
+    }
+
+    STATE(retired_texture_count) = kept;
+}
+
 void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
 {
     // negative n would run past the caller's array
@@ -544,14 +617,23 @@ void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
                 tex->mtl_data = NULL;
             }
 
-            // the name has to stop existing or glIsTexture keeps saying yes.
-            // the object itself is emptied but not freed: a framebuffer may
-            // still be holding a pointer to it
+            // the name has to stop existing or glIsTexture keeps saying yes
             invalidateTexture(ctx, tex);
 
             deleteHashElement(&STATE(texture_table), name);
+            mglForgetObjectLabel(ctx, GL_TEXTURE, name, NULL);
+            mglForgetBufferTexture(name);
+
+            // a framebuffer still holding it keeps the emptied struct until
+            // it lets go
+            if (framebufferHolds(ctx, tex))
+                retireTexture(ctx, tex);
+            else
+                mglFreeTextureObject(ctx, tex);
         }
     }
+
+    mglSweepRetiredTextures(ctx);
 }
 
 GLboolean mglIsTexture(GLMContext ctx, GLuint texture)
@@ -733,8 +815,7 @@ static void defineMipChain(GLMContext ctx, Texture *tex)
             if (size == 0 || vm_allocate(mach_task_self(), &data, page_size_align(size), VM_FLAGS_ANYWHERE) != KERN_SUCCESS)
                 return;
 
-            if (lvl->complete && lvl->data)
-                vm_deallocate(mach_task_self(), lvl->data, lvl->data_size);
+            freeLevelData(lvl);
 
             lvl->width = w;
             lvl->height = h;
@@ -811,6 +892,17 @@ static size_t page_size_align(size_t size)
     return size;
 }
 
+// A level's own copy of its pixels, whether or not the level was finished.
+// Freeing only complete levels kept whatever a failed upload had allocated.
+static void freeLevelData(TextureLevel *lvl)
+{
+    if (lvl->data)
+        vm_deallocate(mach_task_self(), lvl->data, lvl->data_size);
+
+    lvl->data = 0;
+    lvl->data_size = 0;
+}
+
 void invalidateTexture(GLMContext ctx, Texture *tex)
 {
     if (tex->mtl_data)
@@ -824,18 +916,11 @@ void invalidateTexture(GLMContext ctx, Texture *tex)
 
     for(int face=0; face<_CUBE_MAP_MAX_FACE; face++)
     {
-        for(int i=0; i<tex->num_levels; i++)
-        {
-            if (tex->faces[face].levels[i].complete)
-            {
-                if (tex->faces[face].levels[i].data)
-                {
-                    vm_deallocate(mach_task_self(),
-                                  tex->faces[face].levels[i].data,
-                                  tex->faces[face].levels[i].data_size);
-                }
-            }
-        }
+        if (tex->faces[face].levels == NULL)
+            continue;
+
+        for(GLuint i=0; i<tex->mipmap_levels; i++)
+            freeLevelData(&tex->faces[face].levels[i]);
     }
 
     for(int i=0; i<6; i++)
@@ -1550,8 +1635,7 @@ static bool compressUploadedTexLevel(GLMContext ctx, Texture *tex, GLuint face, 
     {
         TextureLevel *lvl = &tex->faces[face].levels[level];
 
-        if (lvl->complete && lvl->data)
-            vm_deallocate(mach_task_self(), lvl->data, lvl->data_size);
+        freeLevelData(lvl);
 
         lvl->width = width;
         lvl->height = height;
@@ -1595,8 +1679,7 @@ static bool allocCompressedLevel(GLMContext ctx, Texture *tex, GLuint face, GLin
 
     lvl = &tex->faces[face].levels[level];
 
-    if (lvl->complete && lvl->data)
-        vm_deallocate(mach_task_self(), lvl->data, lvl->data_size);
+    freeLevelData(lvl);
 
     err = vm_allocate((vm_map_t)mach_task_self(), &texture_data, alloc_size, VM_FLAGS_ANYWHERE);
 
@@ -1817,8 +1900,7 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
     {
         TextureLevel *lvl = &tex->faces[face].levels[level];
 
-        if (lvl->complete && lvl->data)
-            vm_deallocate(mach_task_self(), lvl->data, lvl->data_size);
+        freeLevelData(lvl);
 
         lvl->pitch = 0;
         lvl->data = 0;
@@ -1871,6 +1953,9 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
     // here, or glTexImage's pixels and glTexSubImage have nowhere to go; the
     // upload stages through a buffer and blits, which private storage allows.
     {
+        // specifying a level again replaces what it held
+        freeLevelData(&tex->faces[face].levels[level]);
+
         // Allocate directly from VM
         err = vm_allocate((vm_map_t) mach_task_self(),
                           (vm_address_t*) &texture_data,
@@ -3076,6 +3161,8 @@ static bool compressedTexLevel(GLMContext ctx, Texture *tex, GLuint face, GLint 
     slices = depth > 0 ? (size_t)depth : 1;
 
     alloc_size = page_size_align(pitch * rows * slices);
+
+    freeLevelData(&tex->faces[face].levels[level]);
 
     err = vm_allocate((vm_map_t)mach_task_self(), (vm_address_t *)&texture_data, alloc_size, VM_FLAGS_ANYWHERE);
 

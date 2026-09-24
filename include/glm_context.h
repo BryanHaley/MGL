@@ -679,6 +679,12 @@ typedef struct SubroutineInfo_t {
 } SubroutineInfo;
 
 char *mglRewriteSubroutines(const char *src, SubroutineInfo *info);
+void  mglForgetBufferTexture(GLuint texture);
+void  mglForgetObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr);
+void  mglForgetContextLabels(GLMContext ctx);
+void  mtlReleaseRetained(void *obj);
+void  mglSweepRetiredTextures(GLMContext ctx);
+void  mglFreeTextureObject(GLMContext ctx, Texture *tex);
 bool  mglBufferTextureSource(GLMContext ctx, const Texture *tex, Buffer **buf,
                              GLintptr *offset, GLsizeiptr *size);
 bool  mglSubroutineCompatible(const SubroutineInfo *info, GLuint uniform, GLuint fn);
@@ -1279,6 +1285,13 @@ typedef struct {
     HashTable vao_table;
     HashTable buffer_table;
     HashTable texture_table;
+    // deleted textures a framebuffer still had attached; each is freed once
+    // no framebuffer points at it
+    Texture **retired_textures;
+    GLuint retired_texture_count;
+    // texture 0: one per target for the whole context, made the first time
+    // something asks for it
+    Texture *default_textures[_MAX_TEXTURE_TYPES];
     HashTable shader_table;
     HashTable program_table;
     HashTable program_pipeline_table;

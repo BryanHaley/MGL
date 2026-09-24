@@ -24,12 +24,16 @@
 #define MGL_SCRATCH_MIN_SHIFT   12      // 4 KB
 #define MGL_SCRATCH_MAX_SHIFT   28      // 256 MB
 #define MGL_SCRATCH_BUCKETS     (MGL_SCRATCH_MAX_SHIFT - MGL_SCRATCH_MIN_SHIFT + 1)
+// How much the pool keeps waiting to be reused. It used to keep everything
+// it had ever handed out, so one heavy draw held its peak for good.
+#define MGL_SCRATCH_IDLE_CAP    ((NSUInteger)64 << 20)
 
 @implementation MGLScratchBufferPool
 {
     id<MTLDevice>       _device;
     NSMutableArray     *_free[MGL_SCRATCH_BUCKETS];   // buffers ready to hand out
     NSMutableArray     *_inFlight;                    // taken since the last recycle
+    NSUInteger          _idleBytes;                   // what the free lists hold
     MTLResourceOptions  _options;
 }
 
@@ -107,6 +111,7 @@ static NSUInteger bucketForLength(NSUInteger length)
     {
         buffer = [_free[bucket] lastObject];
         [_free[bucket] removeLastObject];
+        _idleBytes -= [buffer length];
     }
     else
     {
@@ -203,9 +208,11 @@ static NSUInteger bucketForLength(NSUInteger length)
 
         // an oversized one-off is dropped rather than held forever
         if (bucket < MGL_SCRATCH_BUCKETS &&
-            [buffer length] == ((NSUInteger)1 << (bucket + MGL_SCRATCH_MIN_SHIFT)))
+            [buffer length] == ((NSUInteger)1 << (bucket + MGL_SCRATCH_MIN_SHIFT)) &&
+            _idleBytes + [buffer length] <= MGL_SCRATCH_IDLE_CAP)
         {
             [_free[bucket] addObject: buffer];
+            _idleBytes += [buffer length];
         }
     }
     }
@@ -219,6 +226,8 @@ static NSUInteger bucketForLength(NSUInteger length)
 
         for (int i = 0; i < MGL_SCRATCH_BUCKETS; i++)
             [_free[i] removeAllObjects];
+
+        _idleBytes = 0;
     }
 }
 

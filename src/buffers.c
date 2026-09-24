@@ -237,6 +237,21 @@ size_t page_size_align(size_t size)
     return size;
 }
 
+// Lets go of a buffer's data store. A Metal buffer, once made, owns the
+// memory: one wrapping the pages frees them itself, and one that copied them
+// freed the originals already. Before that the pages are the buffer's own.
+void mglReleaseBufferStorage(GLMContext ctx, Buffer *ptr)
+{
+    if (ptr->data.mtl_data)
+        ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->data.mtl_data);
+    else if (ptr->data.buffer_data)
+        vm_deallocate(mach_task_self(), ptr->data.buffer_data, ptr->data.buffer_size);
+
+    ptr->data.mtl_data = NULL;
+    ptr->data.buffer_data = 0;
+    ptr->data.buffer_size = 0;
+}
+
 void *getBufferData(GLMContext ctx, Buffer *ptr)
 {
     void *buffer_data;
@@ -262,6 +277,9 @@ void bufferStorage(GLMContext ctx, Buffer *ptr, GLenum target, GLuint index, GLs
     kern_return_t err;
     vm_address_t buffer_data;
     size_t buffer_size;
+
+    // glBufferData may have given it a store already
+    mglReleaseBufferStorage(ctx, ptr);
 
     buffer_size = page_size_align(size);
 
@@ -528,32 +546,10 @@ void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
 
             ptr = (Buffer *)searchHashTable(&STATE(buffer_table), buffer);
 
-            if (ptr->data.buffer_data)
-            {
-                if (ptr->storage_flags & GL_CLIENT_STORAGE_BIT)
-                {
-                    if (ptr->data.mtl_data)
-                    {
-                        // the mtl buffer has a deallocator for the vm allocate
-                        ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->data.mtl_data);
-                    }
-                    else
-                    {
-                        vm_deallocate(mach_task_self(), ptr->data.buffer_data, ptr->data.buffer_size);
-                    }
-                }
-                else
-                {
-                    if (ptr->data.mtl_data)
-                    {
-                        ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->data.mtl_data);
-                    }
-                }
-
-                ptr->data.buffer_data = 0;
-            }
+            mglReleaseBufferStorage(ctx, ptr);
 
             deleteHashElement(&STATE(buffer_table), buffer);
+            mglForgetObjectLabel(ctx, GL_BUFFER, buffer, NULL);
 
             // Drop every reference to this buffer. ptr->target is a GL enum, so
             // it can never be used directly as an array index.
@@ -856,40 +852,11 @@ kern_return_t initBufferData(GLMContext ctx, Buffer *ptr, GLsizeiptr size, const
                 return 0;
             }
         }
-
-        if (ptr->storage_flags & GL_CLIENT_STORAGE_BIT)
-        {
-            if (ptr->data.mtl_data)
-            {
-                // the mtl buffer has a deallocator for the vm allocate
-                ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->data.mtl_data);
-
-                // Always forget it. Keeping the pointer after releasing it lets
-                // the next delete release it a second time, and the buffer is
-                // freed while a command buffer is still holding it.
-                ptr->data.mtl_data = NULL;
-            }
-            else
-            {
-                vm_deallocate(mach_task_self(), ptr->data.buffer_data, ptr->data.buffer_size);
-            }
-            
-            ptr->data.buffer_data = 0;
-            ptr->data.buffer_size = 0;
-        }
-        else
-        {
-            if (ptr->data.mtl_data)
-            {
-                ctx->mtl_funcs.mtlDeleteMTLObj(ctx, ptr->data.mtl_data);
-                ptr->data.mtl_data = NULL;
-            }
-
-            
-            ptr->data.buffer_data = 0;
-            ptr->data.buffer_size = 0;
-        }
     }
+
+    // a Metal buffer made with no data behind it has no pages but still owns
+    // memory, so this runs whatever the pages say
+    mglReleaseBufferStorage(ctx, ptr);
 
     buffer_size = page_size_align(size);
 

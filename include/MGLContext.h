@@ -36,6 +36,9 @@ GLMContext createGLMContext(GLenum format, GLenum type,
 GLuint sizeForFormatType(GLenum format, GLenum type);
 GLuint bicountForFormatType(GLenum format, GLenum type, GLenum component);
 
+// frees the context, every object in it, and its hold on the renderer
+void destroyGLMContext(GLMContext ctx);
+
 GLMContext MGLgetCurrentContext(void);
 void MGLsetCurrentContext(GLMContext ctx);
 

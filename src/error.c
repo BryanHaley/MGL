@@ -409,6 +409,27 @@ static ObjectLabel *labelFind(GLMContext ctx, GLenum identifier, GLuint name, co
     return NULL;
 }
 
+// A deleted object's label goes with it, or the list only grows and the next
+// object given the same name turns up already labelled.
+void mglForgetObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr)
+{
+    ObjectLabel *l = labelFind(ctx, identifier, name, ptr);
+
+    if (l)
+        *l = label_list[--label_count];
+}
+
+void mglForgetContextLabels(GLMContext ctx)
+{
+    GLuint kept = 0;
+
+    for (GLuint i = 0; i < label_count; i++)
+        if (label_list[i].ctx != ctx)
+            label_list[kept++] = label_list[i];
+
+    label_count = kept;
+}
+
 static void labelStore(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr, const char *text, GLsizei len)
 {
     ObjectLabel *l = labelFind(ctx, identifier, name, ptr);

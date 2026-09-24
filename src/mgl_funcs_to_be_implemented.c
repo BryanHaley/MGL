@@ -554,6 +554,7 @@ void mglDeleteTransformFeedbacks(GLMContext ctx, GLsizei n, const GLuint *ids)
         
         // Remove from hash table and free
         deleteHashElement(&STATE(transform_feedback_table), ids[i]);
+        mglForgetObjectLabel(ctx, GL_TRANSFORM_FEEDBACK, ids[i], NULL);
         free(ptr);
     }
 }

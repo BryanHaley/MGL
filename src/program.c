@@ -221,6 +221,26 @@ static void freeSyntheticGeometry(Program *pptr);
 
 void mglDropPipelineProgram(GLMContext ctx, ProgramPipeline *pp);
 
+// A reflected resource list and what each entry owns. Every parse of a stage
+// builds its lists again, so this runs before each rebuild as well as at the end.
+static void freeResourceList(SpirvResourceList *l)
+{
+    if (l->list)
+    {
+        for (GLuint k = 0; k < l->count; k++)
+        {
+            free((void *)l->list[k].name);
+            free(l->list[k].element_binding);
+            free(l->list[k].element_unit);
+        }
+
+        free(l->list);
+    }
+
+    l->list = NULL;
+    l->count = 0;
+}
+
 void mglFreeProgram(GLMContext ctx, Program *ptr)
 {
     if (ptr->linked_glsl_program)
@@ -236,6 +256,25 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
 
     for (int s = 0; s < _MAX_SHADER_TYPES; s++)
         free(ptr->stage_src[s]);
+
+    free(ptr->log);
+    ptr->log = NULL;
+
+    // the buffers plain uniforms keep their values in
+    for (int l = 0; l < MAX_UNIFORM_LOCATIONS; l++)
+    {
+        Buffer *buf = ptr->uniform_constants.buffers[l].buf;
+
+        if (buf == NULL)
+            continue;
+
+        for (int k = l; k < MAX_UNIFORM_LOCATIONS; k++)
+            if (ptr->uniform_constants.buffers[k].buf == buf)
+                ptr->uniform_constants.buffers[k].buf = NULL;
+
+        mglReleaseBufferStorage(ctx, buf);
+        free(buf);
+    }
 
     // no pipeline may go on pointing at it
     for (size_t k = 0; k < STATE(program_pipeline_table).size; k++)
@@ -346,15 +385,10 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
         
         for(int j=0; j<MAX_SPVC_RESOURCE_TYPES; j++)
         {
-            // CRITICAL FIX: Add NULL checks and clear pointers to prevent double-frees
-            if (ptr->spirv_resources_list[i][j].list) {
-                for (GLuint k = 0; k < ptr->spirv_resources_list[i][j].count; k++)
-                    free(ptr->spirv_resources_list[i][j].list[k].element_unit);
-
-                free(ptr->spirv_resources_list[i][j].list);
-                ptr->spirv_resources_list[i][j].list = NULL;
-            }
+            freeResourceList(&ptr->spirv_resources_list[i][j]);
         }
+
+        freeResourceList(&ptr->block_uniforms[i]);
         
         if (ptr->shader_slots[i])
         {
@@ -363,6 +397,7 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
             if (sptr->refcount == 0 && sptr->delete_status)
             {
                 deleteHashElement(&STATE(shader_table), sptr->name);
+                mglForgetObjectLabel(ctx, GL_SHADER, sptr->name, NULL);
                 mglFreeShader(ctx, sptr);
             }
         }
@@ -387,6 +422,7 @@ void mglDeleteProgram(GLMContext ctx, GLuint program)
     }
 
     deleteHashElement(&STATE(program_table), program);
+    mglForgetObjectLabel(ctx, GL_PROGRAM, program, NULL);
     
     ptr->delete_status = GL_TRUE;
     
@@ -487,6 +523,7 @@ void mglDetachShader(GLMContext ctx, GLuint program, GLuint shader)
     if (sptr->refcount == 0 && sptr->delete_status)
     {
         deleteHashElement(&STATE(shader_table), sptr->name);
+        mglForgetObjectLabel(ctx, GL_SHADER, sptr->name, NULL);
         mglFreeShader(ctx, sptr);
     }
     
@@ -1636,14 +1673,14 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_msl_add_discrete_descriptor_set failed\n");
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
     // Modify options.
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_create_compiler_options(compiler_msl, &options) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_create_compiler_options(compiler_msl, &options) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_create_compiler_options failed\n");
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
     // A program with no fragment stage can only be drawn with the raster off,
@@ -1653,20 +1690,20 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     {
         if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION, SPVC_TRUE) != SPVC_SUCCESS) {
             MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION) failed\n");
-            ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+            { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
         }
     }
 
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS, SPVC_FALSE) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS, SPVC_FALSE) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS) failed\n");
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(3,1,0)) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(3,1,0)) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_options_set_uint(SPVC_COMPILER_OPTION_MSL_VERSION) failed\n");
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
     // a samplerBuffer or imageBuffer is Metal's own texture_buffer, which
@@ -1692,14 +1729,14 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     // half of every GL projection is thrown away before rasterisation.
     if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_FIXUP_DEPTH_CONVENTION, SPVC_TRUE) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_FIXUP_DEPTH_CONVENTION) failed\n");
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
     // Metal has no double. SPIRV-Cross carries every double as three floats
     // that add up to it, which is close enough for GL's fp64 rules.
     if (spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_FP64_MODE, 2) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_options_set_uint(SPVC_COMPILER_OPTION_MSL_FP64_MODE) failed\n");
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
     // GL is happy for a fragment shader to write a vec3 into an RGBA target and
@@ -1707,13 +1744,13 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     // gets padded out to four components here.
     if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_PAD_FRAGMENT_OUTPUT_COMPONENTS, SPVC_TRUE) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_PAD_FRAGMENT_OUTPUT_COMPONENTS) failed\n");
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
     // 1D textures live in Metal as 2D ones (see createMTLTextureFromGLTexture)
     if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_1D_AS_2D, SPVC_TRUE) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_TEXTURE_1D_AS_2D) failed\n");
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
     // The buffers the geometry emulation uses have to sit above whatever the
@@ -1872,7 +1909,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
                     if (bs->count >= MGL_BINDLESS_MAX_SETS)
                     {
                         MGL_ERR("MGL Error: this shader reads more kinds of texture by handle than MGL can bind\n");
-                        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+                        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
                     }
 
                     unsigned set = spvc_compiler_get_decoration(compiler_msl, list[r].id, SpvDecorationDescriptorSet);
@@ -1906,7 +1943,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_install_compiler_options(compiler_msl, options) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_install_compiler_options(compiler_msl, options) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_install_compiler_options failed\n");
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+        { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
     // GL 4.6 section 11.1.1: a declared location wins, then one the
@@ -2039,7 +2076,10 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
     // set the entry point for metal
     if (entry_override == NULL)
+    {
+        free((void *)ptr->shader_slots[stage]->entry_point);
         ptr->shader_slots[stage]->entry_point = strdup(entry_point);
+    }
 
     free(sp->entry_point);
     sp->entry_point = strdup(entry_point);
@@ -2102,13 +2142,14 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         
         spvc_resources_get_resource_list_for_type(resources, res_type, &list, &count);
 
+        freeResourceList(&ptr->spirv_resources_list[stage][res_type]);
         ptr->spirv_resources_list[stage][res_type].count = (GLuint)count;
 
         // CRITICAL SECURITY FIX: Prevent integer overflow in resource allocation
         // Check if count * sizeof(SpirvResource) would overflow size_t
         if (count > SIZE_MAX / sizeof(SpirvResource)) {
             MGL_ERR("MGL SECURITY ERROR: Resource count %zu would cause allocation overflow\n", count);
-            ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+            { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL); }
         }
 
         size_t alloc_size = count * sizeof(SpirvResource);
@@ -2117,7 +2158,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         ptr->spirv_resources_list[stage][res_type].list = (SpirvResource *)calloc(count ? count : 1, sizeof(SpirvResource));
         if (!ptr->spirv_resources_list[stage][res_type].list) {
             MGL_ERR("MGL SECURITY ERROR: Failed to allocate %zu bytes for resource list\n", alloc_size);
-            ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL);
+            { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, NULL); }
         }
 
         for (i = 0; i < count; i++)
@@ -2455,7 +2496,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
                         : (GLuint)(blocks->list[b].member_count > 0 ? blocks->list[b].member_count : 0);
         }
 
-        ptr->block_uniforms[stage].count = 0;
+        freeResourceList(&ptr->block_uniforms[stage]);
         ptr->block_uniforms[stage].list = (SpirvResource *)calloc(total ? total : 1, sizeof(SpirvResource));
 
         if (ptr->block_uniforms[stage].list)
@@ -3474,6 +3515,9 @@ static bool linkGeometryProgram(GLMContext ctx, Program *pptr)
            pptr->geom.gs_out_slot >= 0 && pptr->geom.pass_out_slot >= 0;
 }
 
+// a failed stage lets go of the glslang program it made
+#define LINK_FAIL(_type_) do { glslang_program_delete(glsl_program); ERROR_RETURN_VALUE(_type_, false); } while (0)
+
 bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool modes_only)
 {
     glslang_program_t *glsl_program;
@@ -3520,7 +3564,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     MGL_INFO("MGL DEBUG: Adding shaders to program\n");
     if (!addShadersToProgram(ctx, pptr, glsl_program))
     {
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+        LINK_FAIL(GL_INVALID_OPERATION);
     }
     MGL_INFO("MGL DEBUG: Shaders added\n");
 
@@ -3536,7 +3580,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
         MGL_ERR("MGL Error: glslang_program_get_info_log:\n%s\n", glslang_program_get_info_log(glsl_program));
         MGL_ERR("MGL Error: glslang_program_get_info_debug_log:\n%s\n", glslang_program_get_info_debug_log(glsl_program));
 
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+        LINK_FAIL(GL_INVALID_OPERATION);
     }
 
     // hands out the locations auto-map left pending, matching them across stages
@@ -3545,7 +3589,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
         MGL_ERR("MGL Error: glslang_program_map_io failed\n");
         MGL_ERR("MGL Error: glslang_program_get_info_log:\n%s\n", glslang_program_get_info_log(glsl_program));
 
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+        LINK_FAIL(GL_INVALID_OPERATION);
     }
 
     // generate SPIVR
@@ -3557,7 +3601,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     {
         DEBUG_PRINT("%s\n", glslang_program_SPIRV_get_messages(glsl_program));
 
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+        LINK_FAIL(GL_INVALID_OPERATION);
     }
 
     // save SPIRV code
@@ -3569,14 +3613,14 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     // Check if size * sizeof(unsigned) would overflow size_t
     if (pptr->spirv[stage].size > SIZE_MAX / sizeof(unsigned)) {
         MGL_ERR("MGL SECURITY ERROR: SPIRV size %zu would cause allocation overflow\n", pptr->spirv[stage].size);
-        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, false);
+        LINK_FAIL(GL_OUT_OF_MEMORY);
     }
 
     size_t alloc_size = pptr->spirv[stage].size * sizeof(unsigned);
     pptr->spirv[stage].ir = (unsigned int *)malloc(alloc_size);
     if (!pptr->spirv[stage].ir) {
         MGL_ERR("MGL SECURITY ERROR: Failed to allocate %zu bytes for SPIRV\n", alloc_size);
-        ERROR_RETURN_VALUE(GL_OUT_OF_MEMORY, false);
+        LINK_FAIL(GL_OUT_OF_MEMORY);
     }
     MGL_INFO("MGL DEBUG: Getting SPIRV IR\n");
     glslang_program_SPIRV_get(glsl_program, pptr->spirv[stage].ir);
@@ -3601,6 +3645,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     if (modes_only)
     {
         scanTessExecutionModes(pptr, stage);
+        glslang_program_delete(glsl_program);
 
         return true;
     }
@@ -3628,6 +3673,13 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
         free(v->ir);
         free(v->msl_str);
         free(v->entry_point);
+
+        if (v->mtl_function)
+            CFRelease(v->mtl_function);
+
+        if (v->mtl_library)
+            CFRelease(v->mtl_library);
+
         memset(v, 0, sizeof(*v));
 
         v->stage = (GLuint)stage;
@@ -3645,16 +3697,21 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     // ERROR_CHECK_RETURN_VALUE(pptr->spirv[stage].msl_str, GL_INVALID_OPERATION, false);
     if (pptr->spirv[stage].msl_str == NULL) {
         MGL_ERR("MGL Error: parseSPIRVShaderToMetal failed for stage %d\n", stage);
-        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+        LINK_FAIL(GL_INVALID_OPERATION);
     }
 
-    // the program owns this now; mglFreeProgram deletes it. Deleting it here as
-    // well left linked_glsl_program dangling and crashed on glDeleteProgram.
+    // The program owns this now; mglFreeProgram deletes it. Every stage makes
+    // one, and each links all the shaders, so the last one made is kept.
+    if (pptr->linked_glsl_program && pptr->linked_glsl_program != glsl_program)
+        glslang_program_delete(pptr->linked_glsl_program);
+
     pptr->linked_glsl_program = glsl_program;
     pptr->dirty_bits |= DIRTY_PROGRAM;
 
     return true;
 }
+
+#undef LINK_FAIL
 
 static void freeSyntheticGeometry(Program *pptr)
 {
@@ -3747,6 +3804,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         {
             pptr->link_status = GL_FALSE;
             pptr->validate_status = GL_FALSE;
+            free(pptr->log);
             pptr->log = strdup("link failed: a tessellation control shader needs an "
                                "evaluation shader to go with it");
 
@@ -3940,6 +3998,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         {
             pptr->link_status = GL_FALSE;
             pptr->validate_status = GL_FALSE;
+            free(pptr->log);
             pptr->log = strdup("link failed: Metal has no isoline tessellation");
             ctx->error_suppress--;
 
@@ -3949,7 +4008,8 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
     for (int stage=0; stage<_MAX_SHADER_TYPES; stage++)
     {
-        pptr->spirv[stage].msl_str = 0;
+        free(pptr->spirv[stage].msl_str);
+        pptr->spirv[stage].msl_str = NULL;
 
         if (pptr->shader_slots[stage] == NULL)
             continue;
@@ -4008,6 +4068,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     if (pptr->link_status == GL_TRUE && uniformLocationProblem(pptr))
     {
         pptr->link_status = GL_FALSE;
+        free(pptr->log);
         pptr->log = strdup(uniformLocationProblem(pptr));
     }
 
@@ -4535,6 +4596,7 @@ void mglDeleteProgramPipelines(GLMContext ctx, GLsizei n, const GLuint *pipeline
 
         // Remove from hash table and free
         deleteHashElement(&STATE(program_pipeline_table), pipelines[i]);
+        mglForgetObjectLabel(ctx, GL_PROGRAM_PIPELINE, pipelines[i], NULL);
         free(ptr);
     }
 }

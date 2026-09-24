@@ -306,6 +306,9 @@ void mglFreeShader(GLMContext ctx, Shader *ptr)
     free((void *)ptr->mtl_shader_type_name);
     free((void *)ptr->src);
     free(ptr->pp_src);
+    free((void *)ptr->entry_point);
+    free(ptr->spirv_binary);
+    mglFreeSubroutineInfo(&ptr->subroutines);
     if (ptr->log) free(ptr->log);
 
     free(ptr);
@@ -331,6 +334,7 @@ void mglDeleteShader(GLMContext ctx, GLuint shader)
     if (ptr->refcount == 0)
     {
         deleteHashElement(&STATE(shader_table), shader);
+        mglForgetObjectLabel(ctx, GL_SHADER, shader, NULL);
         mglFreeShader(ctx, ptr);
     }
 }
@@ -1693,7 +1697,11 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
         return;
     }
 
+    // A program linked from the old one never reads it again: with one shader
+    // per stage glslang's program borrows the shader's tree and never frees
+    // it, and MGL reads the program only to know that it linked.
     if (ptr->compiled_glsl_shader) {
+        glslang_shader_delete(ptr->compiled_glsl_shader);
         ptr->dirty_bits |= DIRTY_SHADER;
     }
 

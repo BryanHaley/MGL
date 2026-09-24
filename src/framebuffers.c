@@ -334,11 +334,15 @@ void mglDeleteFramebuffers(GLMContext ctx, GLsizei n, const GLuint *framebuffers
             
         // Remove from hash table
         deleteHashElement(&STATE(framebuffer_table), framebuffers[i]);
+        mglForgetObjectLabel(ctx, GL_FRAMEBUFFER, framebuffers[i], NULL);
         
         // Free the framebuffer
         free(fbo);
     }
-    
+
+    // a deleted texture it was the last to hold can go now
+    mglSweepRetiredTextures(ctx);
+
     STATE(dirty_bits) |= DIRTY_FBO;
 }
 
@@ -612,17 +616,12 @@ void mglDeleteRenderbuffers(GLMContext ctx, GLsizei n, const GLuint *renderbuffe
 
         if (rbo->tex)
         {
-            if (rbo->tex->mtl_data)
-            {
-                ctx->mtl_funcs.mtlDeleteMTLObj(ctx, rbo->tex->mtl_data);
-                rbo->tex->mtl_data = NULL;
-            }
-
-            free(rbo->tex);
+            mglFreeTextureObject(ctx, rbo->tex);
             rbo->tex = NULL;
         }
 
         deleteHashElement(&STATE(renderbuffer_table), renderbuffers[i]);
+        mglForgetObjectLabel(ctx, GL_RENDERBUFFER, renderbuffers[i], NULL);
 
         free(rbo);
     }
@@ -644,13 +643,7 @@ static void renderbufferStorage(GLMContext ctx, Renderbuffer *rbo, GLsizei sampl
     // re-specifying replaces the old image
     if (rbo->tex)
     {
-        if (rbo->tex->mtl_data)
-        {
-            ctx->mtl_funcs.mtlDeleteMTLObj(ctx, rbo->tex->mtl_data);
-            rbo->tex->mtl_data = NULL;
-        }
-
-        free(rbo->tex);
+        mglFreeTextureObject(ctx, rbo->tex);
         rbo->tex = NULL;
     }
 

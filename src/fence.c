@@ -134,6 +134,7 @@ void mglDeleteSync(GLMContext ctx, GLsync sync)
     if (ctx->mtl_funcs.mtlForgetSync)
         ctx->mtl_funcs.mtlForgetSync(ctx, sync);
 
+    mglForgetObjectLabel(ctx, 0, 0, sync);
     free(sync);
 }
 

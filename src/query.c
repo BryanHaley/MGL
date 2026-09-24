@@ -149,6 +149,7 @@ void mglDeleteQueries(GLMContext ctx, GLsizei n, const GLuint *ids)
                     ctx->state.active_query[t][s] = NULL;
 
         deleteHashElement(&ctx->state.query_table, ids[i]);
+        mglForgetObjectLabel(ctx, GL_QUERY, ids[i], NULL);
         free(q);
     }
 }

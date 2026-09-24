@@ -223,60 +223,9 @@ void deleteHashElement(HashTable *table, GLuint name)
         return;
     }
 
-    void *obj_data = table->keys[name].data;
-
-    // Perform Metal cleanup for different object types
-    if (obj_data) {
-        extern GLMContext _ctx;
-
-        // Check if this is a shader object
-        if (table == &_ctx->state.shader_table) {
-            // Shader-specific Metal cleanup
-            Shader *shader = (Shader *)obj_data;
-            if (shader->mtl_data.function || shader->mtl_data.library) {
-                MGL_DEBUG("MGL: Metal cleanup for shader object %u\n", name);
-                // In ARC mode, we just need to set the pointers to nil
-                // The memory will be automatically released
-                shader->mtl_data.function = NULL;
-                shader->mtl_data.library = NULL;
-            }
-        }
-        // Check if this is a program object
-        else if (table == &_ctx->state.program_table) {
-            // Program-specific Metal cleanup
-            Program *program = (Program *)obj_data;
-            if (program->mtl_data) {
-                MGL_DEBUG("MGL: Metal cleanup for program object %u\n", name);
-                // In ARC mode, we just need to set the pointer to nil
-                // The memory will be automatically released
-                program->mtl_data = NULL;
-            }
-        }
-        // Check if this is a texture object
-        else if (table == &_ctx->state.texture_table) {
-            // Texture-specific Metal cleanup
-            Texture *texture = (Texture *)obj_data;
-            if (texture->mtl_data) {
-                MGL_DEBUG("MGL: Metal cleanup for texture object %u\n", name);
-                // In ARC mode, we just need to set the pointer to nil
-                // The memory will be automatically released
-                texture->mtl_data = NULL;
-            }
-        }
-        // Check if this is a buffer object
-        else if (table == &_ctx->state.buffer_table) {
-            // Buffer-specific Metal cleanup
-            Buffer *buffer = (Buffer *)obj_data;
-            if (buffer->data.mtl_data) {
-                MGL_DEBUG("MGL: Metal cleanup for buffer object %u\n", name);
-                // In ARC mode, we just need to set the pointer to nil
-                // The memory will be automatically released
-                buffer->data.mtl_data = NULL;
-            }
-        }
-        // anything else owns no Metal object, so there is nothing to release
-    }
-
+    // The caller releases what the object owns. This used to clear the
+    // object's Metal pointers here, which only hid them from the caller's own
+    // release -- a deleted program's Metal objects were never freed.
     table->keys[name].data = NULL;
 
     releaseName(table, name);

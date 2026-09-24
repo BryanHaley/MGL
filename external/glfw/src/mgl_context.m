@@ -41,10 +41,16 @@ static void makeContextCurrentMGL(_GLFWwindow* window)
     }
     else
     {
-        // just so we have jump tables
-        MGLsetCurrentContext(createGLMContext(0, 0,
-                                              0, 0,
-                                              0, 0));
+        // Just so we have jump tables. One is made and kept: a new one each
+        // time was never freed, and GLFW does this on every window it destroys.
+        static GLMContext placeholder = NULL;
+
+        if (placeholder == NULL)
+            placeholder = createGLMContext(0, 0, 0, 0, 0, 0);
+
+        MGLsetCurrentContext(placeholder);
+
+        _glfwPlatformSetTls(&_glfw.contextSlot, NULL);
     }
 
     } // autoreleasepool
@@ -129,6 +135,15 @@ static void destroyContextMGL(_GLFWwindow* window)
 {
     @autoreleasepool {
 
+    if (window->context.mgl.ctx)
+        destroyGLMContext(window->context.mgl.ctx);
+
+    // the reference this file took when it made the renderer; the context
+    // gave back its own
+    [window->context.mgl.renderer release];
+
+    window->context.mgl.ctx = NULL;
+    window->context.mgl.renderer = nil;
 
     } // autoreleasepool
 }

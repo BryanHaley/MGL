@@ -195,11 +195,11 @@ void mglDeleteVertexArrays(GLMContext ctx, GLsizei n, const GLuint *arrays)
                 {
                     mglBindVertexArray(ctx, 0);
                 }
-
-                // delete any mtl_data
             }
 
             deleteHashElement(&STATE(vao_table), vao);
+            mglForgetObjectLabel(ctx, GL_VERTEX_ARRAY, vao, NULL);
+            free(ptr);
         }
     }
 }

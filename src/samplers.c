@@ -184,6 +184,7 @@ void mglDeleteSamplers(GLMContext ctx, GLsizei count, const GLuint *samplers)
         }
 
         deleteHashElement(&ctx->state.sampler_table, sampler);
+        mglForgetObjectLabel(ctx, GL_SAMPLER, sampler, NULL);
 
         if (ptr->mtl_data)
         {

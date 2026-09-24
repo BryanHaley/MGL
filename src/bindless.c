@@ -62,6 +62,20 @@ static MglHandle *newHandle(GLMContext ctx)
 {
     MglBindless *b = &ctx->bindless;
 
+    // a deleted texture's handle is dead, and its slot is reused before the
+    // table grows; GL leaves using such a handle undefined
+    for (GLuint i = 0; i < b->count; i++)
+    {
+        if (b->handles[i].tex == NULL)
+        {
+            GLuint slot = b->handles[i].tex_slot;
+
+            memset(&b->handles[i], 0, sizeof(b->handles[i]));
+            b->handles[i].tex_slot = slot;
+            return &b->handles[i];
+        }
+    }
+
     if (b->next_slot == 0)
         b->next_slot = 1;
 

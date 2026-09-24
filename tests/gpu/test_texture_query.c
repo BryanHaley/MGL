@@ -28,6 +28,9 @@ GPU_TEST(texture_query, set_and_get_tex_parameter)
     glCreateTextures(GL_TEXTURE_2D, 1, &tex);
     CHECK(tex != 0);
 
+    /* texture 0 keeps whatever earlier tests set on it, so query our own */
+    glBindTexture(GL_TEXTURE_2D, tex);
+
     /* Defaults per OpenGL 4.6 Core table 8.19 */
     glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &fv);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);

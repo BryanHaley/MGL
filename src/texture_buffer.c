@@ -116,6 +116,16 @@ static BufferTextureBinding *alloc_buf_tex_binding(GLuint texture)
     return NULL;
 }
 
+// a deleted texture's entry goes, or a later texture given the same name
+// inherits it, and the fixed table fills after 128 buffer textures
+void mglForgetBufferTexture(GLuint texture)
+{
+    BufferTextureBinding *bt = find_buf_tex_binding(texture);
+
+    if (bt)
+        memset(bt, 0, sizeof(*bt));
+}
+
 /* ---- internal helper shared by all four entry points ---- */
 
 static void tex_buffer_impl(GLMContext ctx, Texture *tex, GLenum internalformat,

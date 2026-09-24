@@ -24,6 +24,7 @@
 
 #import <simd/simd.h>
 #import <MetalKit/MetalKit.h>
+#import <QuartzCore/CATransaction.h>
 
 #include <mach/mach_vm.h>
 #include <mach/mach_init.h>
@@ -274,6 +275,8 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     size_t        _tessIndexOffset;
     MTLIndexType  _tessIndexType;
     bool          _tessIndexed;
+    // the default framebuffer's size has been set from the layer once
+    bool          _attachedToWindowSystem;
     // the element type and offset of the last element draw, as GL gave them
     GLenum        _gsElementType;
     size_t        _gsElementOffset;
@@ -2410,6 +2413,10 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
                     } else {
                         MGL_NSERR(@"MGL ERROR: Failed to allocate properly aligned texture data");
                     }
+
+                    // only the error paths above let go of it, and a render
+                    // target made this way kept its full size for good
+                    free(blackData);
                 } else {
                     MGL_NSERR(@"MGL ERROR: Failed to allocate aligned memory for texture fill (%lu bytes)", (unsigned long)dataSize);
                 }
@@ -4055,15 +4062,18 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     // same storage under the new channels; nothing drawn into it is lost.
     if (tex->mtl_data && packedSwizzle(&tex->params) != tex->mtl_swizzle)
     {
-        id<MTLTexture> base = (__bridge id<MTLTexture>)(tex->mtl_data);
+        // made from the storage itself, not the last view: a view keeps its
+        // parent alive, so every swizzle change used to add one to a chain
+        id<MTLTexture> current = (__bridge id<MTLTexture>)(tex->mtl_data);
+        id<MTLTexture> base = current.parentTexture ? current.parentTexture : current;
         MTLTextureSwizzleChannels sw = MTLTextureSwizzleChannelsMake(
             swizzleForGL(tex->params.swizzle_r, MTLTextureSwizzleRed),
             swizzleForGL(tex->params.swizzle_g, MTLTextureSwizzleGreen),
             swizzleForGL(tex->params.swizzle_b, MTLTextureSwizzleBlue),
             swizzleForGL(tex->params.swizzle_a, MTLTextureSwizzleAlpha));
 
-        id<MTLTexture> view = [base newTextureViewWithPixelFormat: base.pixelFormat
-                                                     textureType: base.textureType
+        id<MTLTexture> view = [base newTextureViewWithPixelFormat: current.pixelFormat
+                                                     textureType: current.textureType
                                                           levels: NSMakeRange(0, base.mipmapLevelCount)
                                                           slices: NSMakeRange(0, base.arrayLength *
                                                                               ((base.textureType == MTLTextureTypeCube ||
@@ -4416,9 +4426,9 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
         }
 
         {
-            Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel };
+            Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster };
 
-            for (int c = 0; c < 2; c++)
+            for (int c = 0; c < 3; c++)
             {
                 if (cull[c]->mtl_function)
                 {
@@ -4791,7 +4801,7 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     [self endRenderEncoding];
 
     // grab the next drawable from CAMetalLayer
-    if (_drawable == NULL)
+    if (_drawable == NULL && !([self isHeadless] && _attachedToWindowSystem))
     {
         if (!_layer) {
             MGL_NSERR(@"MGL ERROR: Cannot get drawable - no CAMetalLayer available");
@@ -4799,7 +4809,11 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
         }
 
         [self syncLayerSize];
+
+        if (![self isHeadless])
             _drawable = [_layer nextDrawable];
+
+        _attachedToWindowSystem = true;
 
 
         // late init of gl scissor box on attachment to window system
@@ -4921,8 +4935,8 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
             _drawBuffers[mgl_drawbuffer].stencilbuffer = NULL;
         }
 
-        // attach color buffer
-        if (mgl_drawbuffer == _FRONT)
+        // attach color buffer; headless, the front buffer is one of MGL's own
+        if (mgl_drawbuffer == _FRONT && ![self isHeadless])
         {
             // SAFETY: Ensure we have a valid drawable with texture
             if (!_drawable) {
@@ -9523,6 +9537,15 @@ bool mtlBindProgram(GLMContext glm_ctx, Program *ptr)
     CFBridgingRelease(obj);
 }
 
+// one of the references the renderer handed the context, given back as the
+// context goes
+void mtlReleaseRetained(void *obj)
+{
+    @autoreleasepool {
+        CFBridgingRelease(obj);
+    }
+}
+
 void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
 {
     @autoreleasepool {
@@ -9819,6 +9842,14 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
 #pragma mark C interface to mtlSwapBuffers
 -(void) mtlSwapBuffers:(GLMContext) glm_ctx
 {
+    // headless has nowhere to present; the frame's work just goes to the GPU
+    if ([self isHeadless])
+    {
+        RETURN_ON_FAILURE([self processGLState: false]);
+        [self flushCommandBuffer: false];
+        return;
+    }
+
     if (ctx->state.draw_buffer == GL_FRONT || ctx->state.draw_buffer == GL_COLOR_ATTACHMENT0)
     {
         // clear commands rely on processGLState
@@ -11946,6 +11977,14 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     return  (__bridge void *)(renderer);
 }
 
+// A view in no window is headless. Nothing is ever presented there, and
+// taking even one drawable made the system's frame pacing track every command
+// buffer after it for the rest of the process.
+- (bool) isHeadless
+{
+    return _view == nil || [_view window] == nil;
+}
+
 // setting drawableSize by hand stops CAMetalLayer tracking the view, so do it here
 - (void) syncLayerSize
 {
@@ -12351,7 +12390,20 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 
         if (_layer) {
             MGL_NSINFO(@"MGL INFO: Removing and releasing layer");
+
+            // With no run loop nothing commits Core Animation's implicit
+            // transaction, and it kept every destroyed context's layer, and
+            // the surface behind it, alive.
+            [CATransaction begin];
+            [CATransaction setDisableActions: YES];
             [_layer removeFromSuperlayer];
+
+            if (_view.layer == _layer)
+                [_view setLayer: nil];
+
+            [CATransaction commit];
+            [CATransaction flush];
+
             _layer = nil;
         }
 

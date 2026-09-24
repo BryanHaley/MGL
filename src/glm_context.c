@@ -32,6 +32,9 @@
 #include "MGLRenderer.h"
 #include "error.h"
 #include "mgl_log.h"
+#include "programs.h"
+#include "shaders.h"
+#include "buffers.h"
 
 extern void getMacOSDefaults(GLMContext glm_ctx);
 extern void init_dispatch(GLMContext ctx);
@@ -397,6 +400,62 @@ void MGLsetSwapInterval(GLMContext ctx, int interval)
 }
 
 // CRITICAL FIX: Proper context destruction to prevent memory leaks
+// Everything a table still holds, freed the way deleting it would.
+typedef void (*FreeObjectFunc)(GLMContext ctx, void *obj);
+
+static void freeTable(GLMContext ctx, HashTable *table, FreeObjectFunc free_obj)
+{
+    if (table->keys == NULL)
+        return;
+
+    for (size_t i = 0; i < table->size; i++)
+    {
+        void *obj = table->keys[i].data;
+
+        if (obj == NULL)
+            continue;
+
+        table->keys[i].data = NULL;
+        free_obj(ctx, obj);
+    }
+
+    free(table->keys);
+    table->keys = NULL;
+}
+
+static void freeProgramObj(GLMContext ctx, void *obj)   { mglFreeProgram(ctx, (Program *)obj); }
+static void freeShaderObj(GLMContext ctx, void *obj)    { mglFreeShader(ctx, (Shader *)obj); }
+static void freeTextureObj(GLMContext ctx, void *obj)   { mglFreeTextureObject(ctx, (Texture *)obj); }
+static void freePlainObj(GLMContext ctx, void *obj)     { (void)ctx; free(obj); }
+
+static void freeBufferObj(GLMContext ctx, void *obj)
+{
+    mglReleaseBufferStorage(ctx, (Buffer *)obj);
+    free(obj);
+}
+
+static void freeRenderbufferObj(GLMContext ctx, void *obj)
+{
+    Renderbuffer *rbo = (Renderbuffer *)obj;
+
+    if (rbo->tex)
+        mglFreeTextureObject(ctx, rbo->tex);
+
+    free(rbo);
+}
+
+static void freeSamplerObj(GLMContext ctx, void *obj)
+{
+    Sampler *smp = (Sampler *)obj;
+
+    if (smp->mtl_data)
+        ctx->mtl_funcs.mtlDeleteMTLObj(ctx, smp->mtl_data);
+
+    free(smp);
+}
+
+// Frees the context and everything in it. Whatever the GPU is still doing
+// finishes first, since it may be reading any of it.
 void destroyGLMContext(GLMContext ctx)
 {
     if (ctx == NULL)
@@ -404,61 +463,71 @@ void destroyGLMContext(GLMContext ctx)
 
     MGL_INFO("MGL INFO: Destroying GLMContext\n");
 
-    // CRITICAL FIX: Implement basic cleanup of context resources to prevent major memory leaks
-    // Clean up critical hash tables to prevent memory corruption
+    GLMContext save = _ctx;
 
-    // 1. Basic cleanup of programs and shaders (major memory leaks)
-    if (ctx->state.program_table.keys) {
-        free(ctx->state.program_table.keys);
-        ctx->state.program_table.keys = NULL;
+    _ctx = ctx;
+
+    if (ctx->mtl_funcs.mtlObj && ctx->mtl_funcs.mtlFlush)
+        ctx->mtl_funcs.mtlFlush(ctx, true);
+
+    // programs before shaders: freeing a program lets go of the shaders it
+    // held, and frees the ones already deleted
+    freeTable(ctx, &ctx->state.program_table, freeProgramObj);
+    freeTable(ctx, &ctx->state.shader_table, freeShaderObj);
+    freeTable(ctx, &ctx->state.texture_table, freeTextureObj);
+
+    for (GLuint i = 0; i < ctx->state.retired_texture_count; i++)
+        mglFreeTextureObject(ctx, ctx->state.retired_textures[i]);
+
+    for (int i = 0; i < _MAX_TEXTURE_TYPES; i++)
+        if (ctx->state.default_textures[i])
+            mglFreeTextureObject(ctx, ctx->state.default_textures[i]);
+
+    free(ctx->state.retired_textures);
+    ctx->state.retired_textures = NULL;
+    ctx->state.retired_texture_count = 0;
+
+    freeTable(ctx, &ctx->state.buffer_table, freeBufferObj);
+    freeTable(ctx, &ctx->state.renderbuffer_table, freeRenderbufferObj);
+    freeTable(ctx, &ctx->state.framebuffer_table, freePlainObj);
+    freeTable(ctx, &ctx->state.vao_table, freePlainObj);
+    freeTable(ctx, &ctx->state.sampler_table, freeSamplerObj);
+    freeTable(ctx, &ctx->state.query_table, freePlainObj);
+    freeTable(ctx, &ctx->state.transform_feedback_table, freePlainObj);
+    freeTable(ctx, &ctx->state.program_pipeline_table, freePlainObj);
+
+    if (ctx->state.client_indices)
+        freeBufferObj(ctx, ctx->state.client_indices);
+
+    while (ctx->state.sync_list)
+    {
+        Sync *sync = ctx->state.sync_list;
+
+        ctx->state.sync_list = sync->next;
+
+        if (ctx->mtl_funcs.mtlForgetSync)
+            ctx->mtl_funcs.mtlForgetSync(ctx, sync);
+
+        free(sync);
     }
 
-    if (ctx->state.shader_table.keys) {
-        free(ctx->state.shader_table.keys);
-        ctx->state.shader_table.keys = NULL;
-    }
+    free(ctx->bindless.handles);
 
-    // 2. Basic cleanup of textures (major memory leaks)
-    if (ctx->state.texture_table.keys) {
-        free(ctx->state.texture_table.keys);
-        ctx->state.texture_table.keys = NULL;
-    }
+    mglForgetContextLabels(ctx);
 
-    // 3. Basic cleanup of buffers (major memory leaks)
-    if (ctx->state.buffer_table.keys) {
-        free(ctx->state.buffer_table.keys);
-        ctx->state.buffer_table.keys = NULL;
-    }
+    // the renderer kept itself, and the view it draws into, alive through these
+    if (ctx->mtl_funcs.mtlView)
+        mtlReleaseRetained(ctx->mtl_funcs.mtlView);
 
-    // CRITICAL FIX: Basic cleanup for remaining hash tables to prevent major memory leaks
-    // These tables are also critical and would cause memory corruption if not cleaned
+    if (ctx->mtl_funcs.mtlObj)
+        mtlReleaseRetained(ctx->mtl_funcs.mtlObj);
 
-    if (ctx->state.renderbuffer_table.keys) {
-        free(ctx->state.renderbuffer_table.keys);
-        ctx->state.renderbuffer_table.keys = NULL;
-    }
-
-    if (ctx->state.framebuffer_table.keys) {
-        free(ctx->state.framebuffer_table.keys);
-        ctx->state.framebuffer_table.keys = NULL;
-    }
-
-    // 5. Clean up vertex arrays (VAO table)
-    if (ctx->state.vao_table.keys) {
-        free(ctx->state.vao_table.keys);
-        ctx->state.vao_table.keys = NULL;
-    }
-
-    // 6. Clean up samplers
-    if (ctx->state.sampler_table.keys) {
-        free(ctx->state.sampler_table.keys);
-        ctx->state.sampler_table.keys = NULL;
-    }
-
-    // 12. The MGLRenderer dealloc will handle Metal resource cleanup
+    ctx->mtl_funcs.mtlView = NULL;
     ctx->mtl_funcs.mtlObj = NULL;
 
-    printf("MGL INFO: Context cleanup completed successfully\n");
+    _ctx = (save == ctx) ? NULL : save;
+
+    free(ctx);
 }
 
 // CRITICAL FIX: Library destructor for proper cleanup
