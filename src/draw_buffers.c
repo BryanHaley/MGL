@@ -525,11 +525,30 @@ void mglDrawElementsInstancedBaseVertex(GLMContext ctx, GLenum mode, GLsizei cou
     endClientIndices(ctx, staged);
 }
 
+// the offset has to be 4-byte aligned and every command has to sit inside
+// the buffer, or the GPU reads past its end
+static GLenum indirect_error(GLMContext ctx, const void *indirect, GLsizei drawcount,
+                             GLsizei stride, size_t cmd_size)
+{
+    Buffer *buf = STATE(buffers[_DRAW_INDIRECT_BUFFER]);
+    intptr_t offset = (intptr_t)indirect;
+
+    if (!buf) return GL_INVALID_OPERATION;
+    if (offset < 0 || (offset & 3)) return GL_INVALID_VALUE;
+
+    size_t step = stride ? (size_t)stride : cmd_size;
+    size_t end = (size_t)offset + (size_t)(drawcount - 1) * step + cmd_size;
+    if (end > (size_t)buf->size) return GL_INVALID_OPERATION;
+
+    return GL_NO_ERROR;
+}
+
 void mglDrawArraysIndirect(GLMContext ctx, GLenum mode, const void *indirect)
 {
     ERROR_CHECK_RETURN(check_draw_modes(mode), GL_INVALID_ENUM);
 
-    ERROR_CHECK_RETURN(STATE(buffers[_DRAW_INDIRECT_BUFFER]), GL_INVALID_OPERATION);
+    GLenum err = indirect_error(ctx, indirect, 1, 0, 4 * sizeof(GLuint));
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
 
     if(validate_vao(ctx, false) == false)
     {
@@ -554,7 +573,8 @@ void mglDrawElementsIndirect(GLMContext ctx, GLenum mode, GLenum type, const voi
 
     ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
 
-    ERROR_CHECK_RETURN(STATE(buffers[_DRAW_INDIRECT_BUFFER]), GL_INVALID_OPERATION);
+    GLenum err = indirect_error(ctx, indirect, 1, 0, 5 * sizeof(GLuint));
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
 
     ctx->mtl_funcs.mtlDrawElementsIndirect(ctx, mode, type, indirect);
 }
@@ -735,7 +755,8 @@ void mglMultiDrawArraysIndirect(GLMContext ctx, GLenum mode, const void *indirec
 
     ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
 
-    ERROR_CHECK_RETURN(STATE(buffers[_DRAW_INDIRECT_BUFFER]), GL_INVALID_OPERATION);
+    GLenum err = indirect_error(ctx, indirect, drawcount, stride, 4 * sizeof(GLuint));
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
 
     ctx->mtl_funcs.mtlMultiDrawArraysIndirect(ctx, mode, indirect, drawcount, stride);
 }
@@ -759,7 +780,8 @@ void mglMultiDrawElementsIndirect(GLMContext ctx, GLenum mode, GLenum type, cons
 
     ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
 
-    ERROR_CHECK_RETURN(STATE(buffers[_DRAW_INDIRECT_BUFFER]), GL_INVALID_OPERATION);
+    GLenum err = indirect_error(ctx, indirect, drawcount, stride, 5 * sizeof(GLuint));
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
 
     ctx->mtl_funcs.mtlMultiDrawElementsIndirect(ctx, mode, type, indirect, drawcount, stride);
 }

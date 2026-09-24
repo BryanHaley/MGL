@@ -298,6 +298,66 @@ GPU_TEST(draw_variants, indirect_rejects_bad_element_type)
     glDeleteBuffers(1, &indirect_buf);
 }
 
+// a command that doesn't fit in the buffer must never reach the GPU
+GPU_TEST(draw_variants, indirect_rejects_commands_past_the_end)
+{
+    GLuint vao, indirect_buf;
+    char err[1024] = { 0 };
+    GLuint prog = mgl_build_program(VS_TRI, FS_RED, err, sizeof err);
+    CHECK_MSG(prog != 0, "link: %s", err);
+    if (!prog) return;
+
+    vao = make_vao_with_ibo();
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+
+    make_indirect_buffer(&indirect_buf);
+
+    glDrawArraysIndirect(GL_TRIANGLES, (const void *)2);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_SHORT, (const void *)6);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glDrawArraysIndirect(GL_TRIANGLES, (const void *)4);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glDrawArraysIndirect(GL_TRIANGLES, (const void *)-4);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    // 16 bytes holds an arrays command but not a 20-byte elements command
+    glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_SHORT, NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glMultiDrawArraysIndirect(GL_TRIANGLES, NULL, 2, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_SHORT, NULL, 1, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    {
+        const GLuint small[] = { 3, 1 };
+        glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof small, small, GL_STATIC_DRAW);
+    }
+    glDrawArraysIndirect(GL_TRIANGLES, NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    // the whole buffer is still fine
+    {
+        const GLuint cmd[] = { 3, 1, 0, 0 };
+        glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof cmd, cmd, GL_STATIC_DRAW);
+    }
+    glDrawArraysIndirect(GL_TRIANGLES, NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glFinish();
+    glUseProgram(0);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+    glDeleteBuffers(1, &indirect_buf);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+}
+
 /* ---------- glDrawRangeElementsBaseVertex ---------- */
 
 GPU_TEST(draw_variants, range_base_vertex_rejects_bad_arguments)
