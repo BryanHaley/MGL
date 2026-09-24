@@ -4828,16 +4828,16 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
 {
     MTLStencilOperation stencil_op;
 
-    switch(ctx->state.var.stencil_fail)
+    switch(op)
     {
         case GL_KEEP: stencil_op = MTLStencilOperationKeep; break;
         case GL_ZERO: stencil_op = MTLStencilOperationZero; break;
         case GL_REPLACE: stencil_op = MTLStencilOperationReplace; break;
         case GL_INCR: stencil_op = MTLStencilOperationIncrementClamp; break;
-        case GL_INCR_WRAP: stencil_op = MTLStencilOperationDecrementClamp; break;
-        case GL_DECR: stencil_op = MTLStencilOperationInvert; break;
-        case GL_DECR_WRAP: stencil_op = MTLStencilOperationIncrementWrap; break;
-        case GL_INVERT: stencil_op = MTLStencilOperationDecrementWrap; break;
+        case GL_INCR_WRAP: stencil_op = MTLStencilOperationIncrementWrap; break;
+        case GL_DECR: stencil_op = MTLStencilOperationDecrementClamp; break;
+        case GL_DECR_WRAP: stencil_op = MTLStencilOperationDecrementWrap; break;
+        case GL_INVERT: stencil_op = MTLStencilOperationInvert; break;
         default:
             // CRITICAL FIX: Handle assertion gracefully instead of crashing
             MGL_NSERR(@"MGL ERROR: Unknown stencil operation 0x%x", op);
