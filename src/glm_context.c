@@ -126,6 +126,7 @@ GLMContext createGLMContext(GLenum format, GLenum type,
 
     STATE(draw_buffer) = GL_FRONT;
     STATE(default_draw_buffer) = GL_FRONT;
+    STATE(default_read_buffer) = GL_FRONT;
     STATE(read_buffer) = GL_FRONT;
     STATE(active_texture) = 0;
 
@@ -486,6 +487,13 @@ void destroyGLMContext(GLMContext ctx)
     free(ctx->state.retired_textures);
     ctx->state.retired_textures = NULL;
     ctx->state.retired_texture_count = 0;
+
+    for (GLuint i = 0; i < ctx->state.retired_renderbuffer_count; i++)
+        freeRenderbufferObj(ctx, ctx->state.retired_renderbuffers[i]);
+
+    free(ctx->state.retired_renderbuffers);
+    ctx->state.retired_renderbuffers = NULL;
+    ctx->state.retired_renderbuffer_count = 0;
 
     freeTable(ctx, &ctx->state.buffer_table, freeBufferObj);
     freeTable(ctx, &ctx->state.renderbuffer_table, freeRenderbufferObj);

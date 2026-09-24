@@ -359,8 +359,11 @@ typedef struct Texture_t {
     GLuint mipmap_levels;
     TextureFace faces[6];
     void    *mtl_data;
-    // the swizzle the Metal texture was built with, so a later change is seen
-    GLuint  mtl_swizzle;
+    // what shaders sample: a view of mtl_data with GL's swizzle and the
+    // format's own missing channels folded in, and what it was made for
+    void    *mtl_sample_view;
+    void    *mtl_sample_base;
+    GLuint  mtl_sample_key;
     GLsizei samples;
     // a buffer texture is a view of one MTLBuffer; which one, so a buffer given
     // new storage gets a new view instead of reading the freed one
@@ -403,6 +406,8 @@ typedef struct VertexAttrib_t {
     GLuint  buffer_bindingindex;
     // set through glVertexAttribLPointer or LFormat: the shader reads doubles
     GLboolean is_long;
+    // set through glVertexAttribIPointer or IFormat: the shader reads integers
+    GLboolean is_integer;
 } VertexAttrib;
 
 typedef struct VertexElementArray_t {
@@ -684,6 +689,7 @@ void  mglForgetObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, const
 void  mglForgetContextLabels(GLMContext ctx);
 void  mtlReleaseRetained(void *obj);
 void  mglSweepRetiredTextures(GLMContext ctx);
+void  mglSweepRetiredRenderbuffers(GLMContext ctx);
 void  mglFreeTextureObject(GLMContext ctx, Texture *tex);
 bool  mglBufferTextureSource(GLMContext ctx, const Texture *tex, Buffer **buf,
                              GLintptr *offset, GLsizeiptr *size);
@@ -1055,6 +1061,8 @@ typedef struct Framebuffer_t {
     GLbitfield color_attachment_bitfield;
     // GL keeps the draw buffer per framebuffer, so each one remembers its own
     GLenum draw_buffer;
+    // glReadBuffer is kept per framebuffer, like the draw buffers
+    GLenum read_buffer;
     // glDrawBuffers names one buffer per shader output, and an attachment named
     // here may not exist yet -- so the list lives on the framebuffer rather than
     // only as a flag on each attachment.
@@ -1250,6 +1258,7 @@ typedef struct {
 
     GLuint draw_buffer; // GL_DRAW_BUFFER, of whichever framebuffer is bound
     GLuint default_draw_buffer; // the default framebuffer's own draw buffer
+    GLuint default_read_buffer; // and its own read buffer
     GLuint read_buffer; // GL_READ_BUFFER
     GLuint max_color_attachments; // GL_MAX_COLOR_ATTACHMENTS
     GLuint max_vertex_attribs; // GL_MAX_VERTEX_ATTRIBS
@@ -1289,6 +1298,9 @@ typedef struct {
     // no framebuffer points at it
     Texture **retired_textures;
     GLuint retired_texture_count;
+    // deleted renderbuffers a framebuffer that was not bound still holds
+    struct Renderbuffer_t **retired_renderbuffers;
+    GLuint retired_renderbuffer_count;
     // texture 0: one per target for the whole context, made the first time
     // something asks for it
     Texture *default_textures[_MAX_TEXTURE_TYPES];
@@ -1388,7 +1400,7 @@ struct GLMMetalFuncs {
 
     void (*mtlGenerateMipmaps)(GLMContext glm_ctx, Texture *tex);
     void (*mtlTexSubImage)(GLMContext glm_ctx, Texture *tex, Buffer *buf, size_t src_offset, size_t src_pitch, size_t src_image_size, size_t src_size, GLuint slice, GLuint level, size_t width, size_t height, size_t depth, size_t xoffset, size_t yoffset, size_t zoffset);
-    void (*mtlCopyTexSubImage)(GLMContext glm_ctx, Texture *tex, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+    void (*mtlCopyTexSubImage)(GLMContext glm_ctx, Texture *tex, GLint level, GLint xoffset, GLint yoffset, GLint slice, GLint x, GLint y, GLsizei width, GLsizei height);
     void (*mtlCopyImageSubData)(GLMContext glm_ctx, Texture *srcTex, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, Texture *dstTex, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei width, GLsizei height, GLsizei depth);
 
     // draw arrays / elements

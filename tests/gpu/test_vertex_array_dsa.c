@@ -149,7 +149,7 @@ GPU_TEST(vertex_array_dsa, element_buffer_rejects_bad_buffer)
     glCreateVertexArrays(1, &vao);
 
     glVertexArrayElementBuffer(vao, 999123);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glDeleteVertexArrays(1, &vao);
 }
@@ -662,8 +662,9 @@ GPU_TEST(vertex_array_dsa, bind_vertex_buffers_rejects_excessive_count)
     glCreateVertexArrays(1, &vao);
     glBindVertexArray(vao);
 
+    // more bindings than there are is an operation error
     glBindVertexBuffers(0, 9999, NULL, NULL, NULL);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glBindVertexArray(0);
     glDeleteVertexArrays(1, &vao);

@@ -114,10 +114,14 @@ Framebuffer *currentFBOForType(GLMContext ctx, GLenum target)
 // kept on the framebuffer and re-applied whenever the attachments change.
 void mglApplyDrawBuffers(GLMContext ctx, Framebuffer *fbo)
 {
-    (void)ctx;
-
     if (fbo == NULL)
         return;
+
+    // which attachment each fragment output lands in is part of the pass
+    fbo->dirty_bits |= DIRTY_FBO_BINDING;
+
+    if (ctx->state.framebuffer == fbo)
+        ctx->state.dirty_bits |= DIRTY_FBO;
 
     for (int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
     {
@@ -161,6 +165,7 @@ static Framebuffer *newFramebuffer(GLMContext ctx, GLuint framebuffer)
     ptr->name = framebuffer;
     ptr->draw_buffer = GL_COLOR_ATTACHMENT0;
     ptr->draw_buffers[0] = GL_COLOR_ATTACHMENT0;
+    ptr->read_buffer = GL_COLOR_ATTACHMENT0;
     ptr->n_draw_buffers = 1;
 
     return ptr;
@@ -225,9 +230,15 @@ void mglGenFramebuffers(GLMContext ctx, GLsizei n, GLuint *framebuffers)
 // GL_SAMPLES is whatever the attachments carry. An FBO with no attachments
 // falls back to the count set with glFramebufferParameteri, and the window's
 // framebuffer is single-sampled.
+GLsizei mglFramebufferSamples(Framebuffer *fbo);
+
 GLsizei mglDrawFramebufferSamples(GLMContext ctx)
 {
-    Framebuffer *fbo = ctx->state.framebuffer;
+    return mglFramebufferSamples(ctx->state.framebuffer);
+}
+
+GLsizei mglFramebufferSamples(Framebuffer *fbo)
+{
     Texture *tex;
 
     if (fbo == NULL)
@@ -268,6 +279,12 @@ GLsizei mglDrawFramebufferSamples(GLMContext ctx)
         return fbo->default_samples;
 
     return 0;
+}
+
+// the read buffer in effect is the one the bound read framebuffer keeps
+void mglSyncReadBuffer(GLMContext ctx)
+{
+    STATE(read_buffer) = STATE(readbuffer) ? STATE(readbuffer)->read_buffer : STATE(default_read_buffer);
 }
 
 void mglBindFramebuffer(GLMContext ctx, GLenum target, GLuint framebuffer)
@@ -313,6 +330,8 @@ void mglBindFramebuffer(GLMContext ctx, GLenum target, GLuint framebuffer)
 
     if (target == GL_FRAMEBUFFER || target == GL_READ_FRAMEBUFFER)
         STATE(var.read_framebuffer_binding) = framebuffer;
+
+    mglSyncReadBuffer(ctx);
 }
 
 void mglDeleteFramebuffers(GLMContext ctx, GLsizei n, const GLuint *framebuffers)
@@ -340,8 +359,11 @@ void mglDeleteFramebuffers(GLMContext ctx, GLsizei n, const GLuint *framebuffers
         free(fbo);
     }
 
-    // a deleted texture it was the last to hold can go now
+    // a deleted texture or renderbuffer it was the last to hold can go now
     mglSweepRetiredTextures(ctx);
+    mglSweepRetiredRenderbuffers(ctx);
+
+    mglSyncReadBuffer(ctx);
 
     STATE(dirty_bits) |= DIRTY_FBO;
 }
@@ -355,9 +377,11 @@ static Texture *attachmentImage(const FBOAttachment *a)
     return a->buf.tex;
 }
 
+// something is attached, whether or not it has storage yet: a renderbuffer
+// with none makes the framebuffer incomplete, not empty
 static bool attachmentUsed(const FBOAttachment *a)
 {
-    return a->textarget != 0 && attachmentImage(a) != NULL;
+    return a->textarget != 0 && a->texture != 0;
 }
 
 // How many layers a single-layer attachment may pick from at this level.
@@ -581,6 +605,69 @@ static void detachRenderbuffer(Framebuffer *fbo, Renderbuffer *rbo)
     fbo->dirty_bits |= DIRTY_FBO_BINDING;
 }
 
+static bool framebufferHoldsRenderbuffer(GLMContext ctx, const Renderbuffer *rbo)
+{
+    for (size_t k = 0; k < STATE(framebuffer_table).size; k++)
+    {
+        Framebuffer *fb = (Framebuffer *)STATE(framebuffer_table).keys[k].data;
+
+        if (fb == NULL)
+            continue;
+
+        for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+            if (fb->color_attachments[i].textarget == GL_RENDERBUFFER && fb->color_attachments[i].buf.rbo == rbo)
+                return true;
+
+        if ((fb->depth.textarget == GL_RENDERBUFFER && fb->depth.buf.rbo == rbo) ||
+            (fb->stencil.textarget == GL_RENDERBUFFER && fb->stencil.buf.rbo == rbo))
+            return true;
+    }
+
+    return false;
+}
+
+static void freeRenderbuffer(GLMContext ctx, Renderbuffer *rbo)
+{
+    if (ctx->state.renderbuffer == rbo)
+        ctx->state.renderbuffer = NULL;
+
+    if (rbo->tex)
+        mglFreeTextureObject(ctx, rbo->tex);
+
+    free(rbo);
+}
+
+static void retireRenderbuffer(GLMContext ctx, Renderbuffer *rbo)
+{
+    Renderbuffer **grown = (Renderbuffer **)realloc(STATE(retired_renderbuffers),
+                                                    (STATE(retired_renderbuffer_count) + 1) * sizeof(Renderbuffer *));
+
+    // with nowhere to note it, keeping it is safer than freeing it
+    if (grown == NULL)
+        return;
+
+    STATE(retired_renderbuffers) = grown;
+    STATE(retired_renderbuffers)[STATE(retired_renderbuffer_count)++] = rbo;
+}
+
+// a deleted renderbuffer goes once no framebuffer holds it any more
+void mglSweepRetiredRenderbuffers(GLMContext ctx)
+{
+    GLuint kept = 0;
+
+    for (GLuint i = 0; i < STATE(retired_renderbuffer_count); i++)
+    {
+        Renderbuffer *rbo = STATE(retired_renderbuffers)[i];
+
+        if (framebufferHoldsRenderbuffer(ctx, rbo))
+            STATE(retired_renderbuffers)[kept++] = rbo;
+        else
+            freeRenderbuffer(ctx, rbo);
+    }
+
+    STATE(retired_renderbuffer_count) = kept;
+}
+
 void mglDeleteRenderbuffers(GLMContext ctx, GLsizei n, const GLuint *renderbuffers)
 {
     ERROR_CHECK_RETURN(n >= 0, GL_INVALID_VALUE);
@@ -606,24 +693,22 @@ void mglDeleteRenderbuffers(GLMContext ctx, GLsizei n, const GLuint *renderbuffe
         if (ctx->state.renderbuffer == rbo)
             ctx->state.renderbuffer = NULL;
 
-        // GL detaches a deleted renderbuffer from the bound framebuffers and
-        // keeps it alive in any other. MGL frees it, so it comes off every
-        // framebuffer; left behind, it was a pointer into freed memory that
-        // the next status check read.
-        for (size_t k = 0; k < STATE(framebuffer_table).size; k++)
-            if (STATE(framebuffer_table).keys[k].data)
-                detachRenderbuffer((Framebuffer *)STATE(framebuffer_table).keys[k].data, rbo);
+        // GL detaches a deleted renderbuffer from the framebuffers bound now
+        // and nowhere else: one that is not bound keeps it, so the object
+        // lives on without its name until that framebuffer lets it go
+        if (STATE(framebuffer))
+            detachRenderbuffer(STATE(framebuffer), rbo);
 
-        if (rbo->tex)
-        {
-            mglFreeTextureObject(ctx, rbo->tex);
-            rbo->tex = NULL;
-        }
+        if (STATE(readbuffer) && STATE(readbuffer) != STATE(framebuffer))
+            detachRenderbuffer(STATE(readbuffer), rbo);
 
         deleteHashElement(&STATE(renderbuffer_table), renderbuffers[i]);
         mglForgetObjectLabel(ctx, GL_RENDERBUFFER, renderbuffers[i], NULL);
 
-        free(rbo);
+        if (framebufferHoldsRenderbuffer(ctx, rbo))
+            retireRenderbuffer(ctx, rbo);
+        else
+            freeRenderbuffer(ctx, rbo);
     }
 
     STATE(dirty_bits) |= DIRTY_FBO;
@@ -635,10 +720,24 @@ static void renderbufferStorage(GLMContext ctx, Renderbuffer *rbo, GLsizei sampl
     Texture *tex;
 
     ERROR_CHECK_RETURN(rbo, GL_INVALID_OPERATION);
+
+    // only something a framebuffer can draw into makes a renderbuffer
+    const MGLFormatDesc *fd = mglFormatDesc(mglFormatSizedForBase(internalformat));
+    bool renderable = fd->gl_format != 0 && !mglFormatIsCompressed(internalformat) &&
+                      (fd->color_renderable || fd->kind == MGL_FMT_DEPTH ||
+                       fd->kind == MGL_FMT_STENCIL || fd->kind == MGL_FMT_DEPTH_STENCIL);
+
+    ERROR_CHECK_RETURN(renderable, GL_INVALID_ENUM);
     ERROR_CHECK_RETURN(width >= 0 && height >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(samples >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(width <= (GLsizei)STATE(var.max_renderbuffer_size), GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(height <= (GLsizei)STATE(var.max_renderbuffer_size), GL_INVALID_VALUE);
+
+    // integer formats have their own, lower, limit
+    GLuint most = (fd->kind == MGL_FMT_COLOR_INT || fd->kind == MGL_FMT_COLOR_UINT)
+                ? STATE(var.max_integer_samples) : STATE(var.max_samples);
+
+    ERROR_CHECK_RETURN((GLuint)samples <= most, GL_INVALID_OPERATION);
 
     // re-specifying replaces the old image
     if (rbo->tex)
@@ -783,7 +882,15 @@ FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum attachm
 bool isColorAttachment(GLMContext ctx, GLuint attachment)
 {
     return ((attachment >= GL_COLOR_ATTACHMENT0) &&
-            (attachment <= (GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments))));
+            (attachment < (GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments))));
+}
+
+// COLOR_ATTACHMENTm past the limit is a real name used wrongly; anything
+// else is not a name at all
+static GLenum attachmentError(GLuint attachment)
+{
+    return (attachment >= GL_COLOR_ATTACHMENT0 && attachment <= GL_COLOR_ATTACHMENT31)
+           ? GL_INVALID_OPERATION : GL_INVALID_ENUM;
 }
 
 bool isCubeMapTarget(GLMContext ctx, GLuint textarget)
@@ -836,7 +943,7 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
                 break;
             }
 
-            ERROR_RETURN(GL_INVALID_ENUM);
+            ERROR_RETURN(attachmentError(attachment));
     }
 
     if (texture)
@@ -844,6 +951,9 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
         tex = findTexture(ctx, texture);
 
         ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+
+        // a buffer texture is not an image a framebuffer can hold
+        ERROR_CHECK_RETURN(tex->target != GL_TEXTURE_BUFFER, GL_INVALID_OPERATION);
 
         // glFramebufferTexture has no textarget, so take the texture's own
         if (textarget == GL_NONE)
@@ -976,6 +1086,10 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
 
     // the draw has to notice, not just the framebuffer
     STATE(dirty_bits) |= DIRTY_FBO;
+
+    // what this attachment replaced may have been all that kept one alive
+    mglSweepRetiredTextures(ctx);
+    mglSweepRetiredRenderbuffers(ctx);
 }
 
 /*
@@ -1067,6 +1181,17 @@ void mglFramebufferTexture3D(GLMContext ctx, GLenum target, GLenum attachment, G
 
 void mglFramebufferTextureLayer(GLMContext ctx, GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer)
 {
+    // the layer has to fit the kind of texture it names
+    Texture *t = texture ? findTexture(ctx, texture) : NULL;
+
+    if (t)
+    {
+        GLint most = t->target == GL_TEXTURE_3D ? (GLint)STATE_VAR(max_3d_texture_size)
+                                                : (GLint)STATE_VAR(max_array_texture_layers);
+
+        ERROR_CHECK_RETURN(layer >= 0 && layer < most, GL_INVALID_VALUE);
+    }
+
     framebufferTexture(ctx, target, GL_TEXTURE_3D, attachment, GL_TEXTURE_3D, texture, level, layer);
 }
 
@@ -1076,6 +1201,8 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
     Framebuffer *fbo;
     Renderbuffer *rbo;
     FBOAttachment *fbo_attachment_ptr;
+
+    ERROR_CHECK_RETURN(renderbuffertarget == GL_RENDERBUFFER, GL_INVALID_ENUM);
 
     fbo = currentFBOForType(ctx, target);
 
@@ -1106,7 +1233,7 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
                 break;
             }
 
-            ERROR_RETURN(GL_INVALID_ENUM);
+            ERROR_RETURN(attachmentError(attachment));
     }
 
     if (renderbuffer)
@@ -1142,6 +1269,10 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
 
     // the draw has to notice, not just the framebuffer
     STATE(dirty_bits) |= DIRTY_FBO;
+
+    // what this attachment replaced may have been all that kept one alive
+    mglSweepRetiredTextures(ctx);
+    mglSweepRetiredRenderbuffers(ctx);
 }
 
 #pragma mark =====
@@ -1195,26 +1326,16 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
 
             default:
                 // a framebuffer object has no FRONT/BACK/LEFT/RIGHT buffers
-                ERROR_CHECK_RETURN(isColorAttachment(ctx, attachment), GL_INVALID_ENUM);
+                ERROR_CHECK_RETURN(isColorAttachment(ctx, attachment), attachmentError(attachment));
         }
 
+        // depth and stencil have different component types, and the two
+        // halves only answer as one when they are the same image
         if (attachment == GL_DEPTH_STENCIL_ATTACHMENT)
         {
-            FBOAttachment *depth_attachment_ptr;
-            FBOAttachment *stencil_attachment_ptr;
-
-            depth_attachment_ptr = getFBOAttachment(ctx, fbo, GL_DEPTH_ATTACHMENT);
-            stencil_attachment_ptr = getFBOAttachment(ctx, fbo, GL_STENCIL_ATTACHMENT);
-
-            if ((depth_attachment_ptr != NULL) &&
-                (stencil_attachment_ptr != NULL) &&
-                (depth_attachment_ptr == stencil_attachment_ptr))
-            {
-                *params = GL_NONE;
-
-                return;
-            }
-
+            ERROR_CHECK_RETURN(pname != GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, GL_INVALID_OPERATION);
+            ERROR_CHECK_RETURN(fbo->depth.texture == fbo->stencil.texture &&
+                               fbo->depth.textarget == fbo->stencil.textarget, GL_INVALID_OPERATION);
         }
 
         fbo_attachment_ptr = getFBOAttachment(ctx, fbo, attachment);
@@ -1240,6 +1361,14 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
 
         level = fbo_attachment_ptr->level;
         target = fbo_attachment_ptr->textarget;
+
+        // a renderbuffer has no level, layer or face to ask about
+        if (target == GL_RENDERBUFFER &&
+            (pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL || pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER ||
+             pname == GL_FRAMEBUFFER_ATTACHMENT_LAYERED || pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE))
+        {
+            ERROR_RETURN(GL_INVALID_ENUM);
+        }
 
         if (target == GL_RENDERBUFFER)
         {
@@ -1622,27 +1751,56 @@ void mglGetFramebufferParameteriv(GLMContext ctx, GLenum target, GLenum pname, G
     getFramebufferParameter(ctx, fbo, pname, params);
 }
 
+// what glInvalidate*Framebuffer may name: a framebuffer object's own
+// attachments, or the window's COLOR, DEPTH and STENCIL
+static GLenum invalidateError(GLMContext ctx, Framebuffer *fbo, GLsizei n, const GLenum *atts)
+{
+    for (GLsizei i = 0; i < n; i++)
+    {
+        GLenum a = atts[i];
+
+        if (fbo)
+        {
+            if (a == GL_DEPTH_ATTACHMENT || a == GL_STENCIL_ATTACHMENT || a == GL_DEPTH_STENCIL_ATTACHMENT ||
+                isColorAttachment(ctx, a))
+                continue;
+
+            return attachmentError(a);
+        }
+
+        if (a != GL_COLOR && a != GL_DEPTH && a != GL_STENCIL &&
+            a != GL_FRONT_LEFT && a != GL_FRONT_RIGHT && a != GL_BACK_LEFT && a != GL_BACK_RIGHT)
+            return GL_INVALID_ENUM;
+    }
+
+    return GL_NO_ERROR;
+}
+
 void mglInvalidateFramebuffer(GLMContext ctx, GLenum target, GLsizei numAttachments, const GLenum *attachments)
 {
     bool ok;
-
-    fboForTarget(ctx, target, &ok);
+    Framebuffer *fbo = fboForTarget(ctx, target, &ok);
 
     ERROR_CHECK_RETURN(ok, GL_INVALID_ENUM);
     ERROR_CHECK_RETURN(numAttachments >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(numAttachments == 0 || attachments, GL_INVALID_VALUE);
+
+    GLenum err = invalidateError(ctx, fbo, numAttachments, attachments);
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
 }
 
 void mglInvalidateSubFramebuffer(GLMContext ctx, GLenum target, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height)
 {
     bool ok;
-
-    fboForTarget(ctx, target, &ok);
+    Framebuffer *fbo = fboForTarget(ctx, target, &ok);
 
     ERROR_CHECK_RETURN(ok, GL_INVALID_ENUM);
     ERROR_CHECK_RETURN(numAttachments >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(numAttachments == 0 || attachments, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(width >= 0 && height >= 0, GL_INVALID_VALUE);
+
+    GLenum err = invalidateError(ctx, fbo, numAttachments, attachments);
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
 }
 
 // implemented in draw_buffers.c
@@ -1686,6 +1844,8 @@ static bool pushFBO(GLMContext ctx, GLuint framebuffer, SavedFBO *saved)
     STATE(var.draw_framebuffer_binding) = framebuffer;
     STATE(var.read_framebuffer_binding) = framebuffer;
 
+    mglSyncReadBuffer(ctx);
+
     return true;
 }
 
@@ -1695,6 +1855,8 @@ static void popFBO(GLMContext ctx, SavedFBO *saved)
     STATE(readbuffer)  = saved->read;
     STATE(var.draw_framebuffer_binding) = saved->draw_name;
     STATE(var.read_framebuffer_binding) = saved->read_name;
+
+    mglSyncReadBuffer(ctx);
 
     STATE(dirty_bits) |= DIRTY_FBO;
 }
@@ -1742,6 +1904,13 @@ void mglNamedFramebufferTexture(GLMContext ctx, GLuint framebuffer, GLenum attac
     SavedFBO saved;
 
     ERROR_CHECK_RETURN(pushFBO(ctx, framebuffer, &saved), GL_INVALID_OPERATION);
+
+    // the DSA form calls a name that isn't a texture a bad value
+    if (texture && !findTexture(ctx, texture))
+    {
+        popFBO(ctx, &saved);
+        ERROR_RETURN(GL_INVALID_VALUE);
+    }
 
     mglFramebufferTexture(ctx, GL_FRAMEBUFFER, attachment, texture, level);
 
@@ -1797,8 +1966,13 @@ void mglInvalidateNamedFramebufferData(GLMContext ctx, GLuint framebuffer, GLsiz
     ERROR_CHECK_RETURN(numAttachments >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(numAttachments == 0 || attachments, GL_INVALID_VALUE);
 
+    Framebuffer *fbo = framebuffer ? findFrameBuffer(ctx, framebuffer) : NULL;
+
     if (framebuffer)
-        ERROR_CHECK_RETURN(findFrameBuffer(ctx, framebuffer), GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
+    GLenum err = invalidateError(ctx, fbo, numAttachments, attachments);
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
 }
 
 void mglInvalidateNamedFramebufferSubData(GLMContext ctx, GLuint framebuffer, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height)
@@ -1807,8 +1981,13 @@ void mglInvalidateNamedFramebufferSubData(GLMContext ctx, GLuint framebuffer, GL
     ERROR_CHECK_RETURN(numAttachments == 0 || attachments, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(width >= 0 && height >= 0, GL_INVALID_VALUE);
 
+    Framebuffer *fbo = framebuffer ? findFrameBuffer(ctx, framebuffer) : NULL;
+
     if (framebuffer)
-        ERROR_CHECK_RETURN(findFrameBuffer(ctx, framebuffer), GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
+    GLenum err = invalidateError(ctx, fbo, numAttachments, attachments);
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
 }
 
 void mglClearNamedFramebufferiv(GLMContext ctx, GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLint *value)
@@ -1875,11 +2054,13 @@ void mglBlitNamedFramebuffer(GLMContext ctx, GLuint readFramebuffer, GLuint draw
 
     STATE(readbuffer)  = rfbo;
     STATE(framebuffer) = dfbo;
+    mglSyncReadBuffer(ctx);
 
     mglBlitFramebuffer(ctx, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
 
     STATE(framebuffer) = save_draw;
     STATE(readbuffer)  = save_read;
+    mglSyncReadBuffer(ctx);
     STATE(dirty_bits) |= DIRTY_FBO;
 }
 

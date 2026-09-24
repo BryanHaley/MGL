@@ -751,8 +751,10 @@ GPU_TEST(framebuffer_status, deleting_an_attached_renderbuffer_leaves_no_danglin
         glDeleteTextures(1, &t);
     }
 
+    // GL keeps the image alive for a framebuffer that was not bound when it
+    // was deleted, so it is still complete -- and still reads real memory
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
     mgl_drain_errors();
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

@@ -46,6 +46,10 @@ bool bindVertexBuffer(GLMContext ctx, GLuint vaobj, GLuint bindingindex, GLuint 
         ERROR_CHECK_RETURN_VALUE(vao, GL_INVALID_OPERATION, false);
     }
 
+    ERROR_CHECK_RETURN_VALUE(offset >= 0, GL_INVALID_VALUE, false);
+    ERROR_CHECK_RETURN_VALUE(stride >= 0 && (GLuint)stride <= STATE_VAR(max_vertex_attrib_stride),
+                             GL_INVALID_VALUE, false);
+
     Buffer *buf;
 
     // zero unbinds whatever is on this binding point
@@ -81,7 +85,9 @@ void mglBindVertexBuffer(GLMContext ctx, GLuint bindingindex, GLuint buffer, GLi
 void mglBindVertexBuffers(GLMContext ctx, GLuint first, GLsizei count, const GLuint *buffers, const GLintptr *offsets, const GLsizei *strides)
 {
     ERROR_CHECK_RETURN(ctx->state.vao, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(first + count < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(first + (GLuint)count <= STATE_VAR(max_vertex_attrib_bindings) &&
+                       first + (GLuint)count <= MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(buffers, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(offsets, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(strides, GL_INVALID_VALUE);
@@ -138,8 +144,11 @@ void mglVertexArrayVertexBuffer(GLMContext ctx, GLuint vaobj, GLuint bindinginde
 
 void mglVertexArrayVertexBuffers(GLMContext ctx, GLuint vaobj, GLuint first, GLsizei count, const GLuint *buffers, const GLintptr *offsets, const GLsizei *strides)
 {
-    ERROR_CHECK_RETURN(ctx->state.vao, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(first + count < MAX_BINDABLE_BUFFERS, GL_INVALID_VALUE);
+    // the array named, not whichever is bound
+    ERROR_CHECK_RETURN(vaobj && namedVAO(ctx, vaobj), GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(first + (GLuint)count <= STATE_VAR(max_vertex_attrib_bindings) &&
+                       first + (GLuint)count <= MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(buffers, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(offsets, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(strides, GL_INVALID_VALUE);

@@ -215,6 +215,7 @@ GPU_TEST(framebuffer_dsa, named_invalidate)
 {
     GLuint fbo = 0, tex = 0;
     static const GLenum att[] = { GL_COLOR_ATTACHMENT0 };
+    static const GLenum win[] = { GL_COLOR };
 
     glCreateFramebuffers(1, &fbo);
     glGenTextures(1, &tex);
@@ -226,16 +227,20 @@ GPU_TEST(framebuffer_dsa, named_invalidate)
     glInvalidateNamedFramebufferData(fbo, 1, att);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
-    /* glInvalidateNamedFramebufferData with framebuffer 0 (default) */
-    glInvalidateNamedFramebufferData(0, 1, att);
+    /* glInvalidateNamedFramebufferData with framebuffer 0 (default): the
+       window has COLOR, DEPTH and STENCIL, and no attachment points */
+    glInvalidateNamedFramebufferData(0, 1, win);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glInvalidateNamedFramebufferData(0, 1, att);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     /* glInvalidateNamedFramebufferSubData with valid FBO */
     glInvalidateNamedFramebufferSubData(fbo, 1, att, 0, 0, FW, FH);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     /* glInvalidateNamedFramebufferSubData with framebuffer 0 */
-    glInvalidateNamedFramebufferSubData(0, 1, att, 0, 0, FW, FH);
+    glInvalidateNamedFramebufferSubData(0, 1, win, 0, 0, FW, FH);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     /* invalid framebuffer name */

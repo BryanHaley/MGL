@@ -179,13 +179,13 @@ static void tex_buffer_impl(GLMContext ctx, Texture *tex, GLenum internalformat,
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
-    /* size defaults to the rest of the buffer beyond offset */
-    if (size == 0 && is_range)
+    /* glTexBufferRange names its size; glTexBuffer takes the whole buffer */
+    if (is_range && size <= 0)
     {
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
-    if (!is_range || size < 0)
+    if (!is_range)
         size = buf->size - offset;
 
     /* validate the range */
@@ -321,6 +321,9 @@ void mglTextureBuffer(GLMContext ctx, GLuint texture, GLenum internalformat, GLu
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
+    // only a buffer texture takes a buffer
+    ERROR_CHECK_RETURN(tex->target == GL_TEXTURE_BUFFER, GL_INVALID_OPERATION);
+
     tex_buffer_impl(ctx, tex, internalformat, buffer, 0, 0, false);
 }
 
@@ -332,6 +335,9 @@ void mglTextureBufferRange(GLMContext ctx, GLuint texture, GLenum internalformat
     {
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
+
+    // only a buffer texture takes a buffer
+    ERROR_CHECK_RETURN(tex->target == GL_TEXTURE_BUFFER, GL_INVALID_OPERATION);
 
     tex_buffer_impl(ctx, tex, internalformat, buffer, offset, size, true);
 }

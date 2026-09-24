@@ -47,6 +47,7 @@ typedef struct {
 HashTable *createHashTable(GLuint size);
 void initHashTable(HashTable *ptr, GLuint size);
 GLuint getNewName(HashTable *table);
+bool isFreeName(HashTable *table, GLuint name);
 void insertHashElement(HashTable *table, GLuint name, void *data);
 void *searchHashTable(HashTable *table, GLuint name);
 void deleteHashElement(HashTable *table, GLuint name);

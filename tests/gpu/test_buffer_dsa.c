@@ -341,8 +341,9 @@ GPU_TEST(buffer_dsa, clear_named_buffer_rejects_bad_format)
     glCreateBuffers(1, &b);
     glNamedBufferData(b, 64, NULL, GL_STATIC_DRAW);
 
+    // ClearBufferData calls a format it does not know a value error
     glClearNamedBufferData(b, GL_R32UI, 0x9999, GL_UNSIGNED_INT, &v);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glDeleteBuffers(1, &b);
 }
@@ -529,7 +530,7 @@ GPU_TEST(buffer_dsa, get_named_buffer_parameteriv_rejects_bad_pname)
     glNamedBufferData(b, 64, NULL, GL_STATIC_DRAW);
 
     glGetNamedBufferParameteriv(b, 0x9999, &v);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glDeleteBuffers(1, &b);
 }
@@ -571,7 +572,7 @@ GPU_TEST(buffer_dsa, get_named_buffer_parameteri64v_rejects_bad_pname)
     glNamedBufferData(b, 64, NULL, GL_STATIC_DRAW);
 
     glGetNamedBufferParameteri64v(b, 0x9999, &v);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
     glDeleteBuffers(1, &b);
 }

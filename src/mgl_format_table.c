@@ -385,7 +385,7 @@ static const MGLFormatDesc gl_table[] = {
     { GL_RGB8I,     _INV, MTLPixelFormatRGBA8Sint,    1,1, 4, _CI, {8,8,8,0,0,0},  _BRGB, GL_RGB_INTEGER,  GL_BYTE,       false, true,  false, "GL_RGB8I" },
     { GL_RGB8UI,    _INV, MTLPixelFormatRGBA8Uint,    1,1, 4, _CU, {8,8,8,0,0,0},  _BRGB, GL_RGB_INTEGER,  GL_UNSIGNED_BYTE, false, true, false, "GL_RGB8UI" },
     { GL_RGB10,     _INV, MTLPixelFormatRGB10A2Unorm, 1,1, 4, _CF, {10,10,10,0,0,0}, _BRGB, GL_RGB, GL_UNSIGNED_SHORT,   false, true,  true,  "GL_RGB10" },
-    { GL_RGB12,     _INV, MTLPixelFormatRGBA8Unorm,   1,1, 4, _CF, {12,12,12,0,0,0}, _BRGB, GL_RGB, GL_UNSIGNED_BYTE,   false, true,  true,  "GL_RGB12" },
+    { GL_RGB12,     _INV, MTLPixelFormatRGBA16Unorm,  1,1, 8, _CF, {12,12,12,0,0,0}, _BRGB, GL_RGB, GL_UNSIGNED_SHORT,   false, true,  true,  "GL_RGB12" },
     { GL_RGB16,     _INV, MTLPixelFormatRGBA16Unorm,  1,1, 8, _CF, {16,16,16,0,0,0}, _BRGB, GL_RGB, GL_UNSIGNED_SHORT,  false, true,  true,  "GL_RGB16" },
     { GL_RGB16_SNORM,_INV, MTLPixelFormatRGBA16Snorm, 1,1, 8, _CF, {16,16,16,0,0,0}, _BRGB, GL_RGB, GL_SHORT,           false, true,  true,  "GL_RGB16_SNORM" },
     { GL_RGB16F,    _INV, MTLPixelFormatRGBA16Float,  1,1, 8, _CF, {16,16,16,0,0,0}, _BRGB, GL_RGB,  GL_HALF_FLOAT,      false, true,  true,  "GL_RGB16F" },

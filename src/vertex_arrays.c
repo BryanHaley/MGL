@@ -304,7 +304,7 @@ void mglGetVertexAttribdv(GLMContext ctx, GLuint index, GLenum pname, GLdouble *
             break;
 
         case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
-            *params = GL_FALSE;
+            *params = vao->attrib[index].is_integer;
             break;
 
         case GL_VERTEX_ATTRIB_ARRAY_LONG:
@@ -372,6 +372,7 @@ void setVertexAttrib(GLMContext ctx, GLuint index, GLint size, GLenum type, GLbo
     VAO_ATTRIB_STATE(index).type = type;
     VAO_ATTRIB_STATE(index).normalized = normalized;
     VAO_ATTRIB_STATE(index).is_long = GL_FALSE;
+    VAO_ATTRIB_STATE(index).is_integer = GL_FALSE;
     // GL hands these two straight back as they came in
     VAO_ATTRIB_STATE(index).stride = stride;
     VAO_ATTRIB_STATE(index).pointer = (GLubyte *)pointer - (GLubyte *)NULL;
@@ -470,6 +471,8 @@ void mglVertexAttribIPointer(GLMContext ctx, GLuint index, GLint size, GLenum ty
     }
 
     setVertexAttrib(ctx, index, size, type, 0, stride, pointer);
+
+    VAO_ATTRIB_STATE(index).is_integer = GL_TRUE;
 }
 
 
@@ -628,7 +631,7 @@ void mglVertexArrayElementBuffer(GLMContext ctx, GLuint vaobj, GLuint buffer)
     }
 
     buf_ptr = findBuffer(ctx, buffer);
-    ERROR_CHECK_RETURN(buf_ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(buf_ptr, GL_INVALID_OPERATION);
 
     ptr->element_array.buffer = buf_ptr;
 
@@ -671,6 +674,15 @@ void mglVertexArrayAttribBinding(GLMContext ctx, GLuint vaobj, GLuint attribinde
 void setAttribFormat(GLMContext ctx, VertexArray *vao, GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset)
 {
     ERROR_CHECK_RETURN(attribindex < MAX_ATTRIBS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(relativeoffset <= STATE_VAR(max_vertex_attrib_relative_offset), GL_INVALID_VALUE);
+
+    // BGRA order exists only for bytes and the packed 10-bit types, normalised
+    if (size == GL_BGRA)
+    {
+        ERROR_CHECK_RETURN(type == GL_UNSIGNED_BYTE || type == GL_INT_2_10_10_10_REV ||
+                           type == GL_UNSIGNED_INT_2_10_10_10_REV, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(normalized, GL_INVALID_OPERATION);
+    }
 
     switch(type)
     {
@@ -707,6 +719,7 @@ void setAttribFormat(GLMContext ctx, VertexArray *vao, GLuint attribindex, GLint
     vao->attrib[attribindex].size = size;
     vao->attrib[attribindex].type = type;
     vao->attrib[attribindex].is_long = GL_FALSE;
+    vao->attrib[attribindex].is_integer = GL_FALSE;
     vao->attrib[attribindex].normalized = normalized;
     vao->attrib[attribindex].relativeoffset = relativeoffset;
 
@@ -738,6 +751,7 @@ void mglVertexArrayAttribFormat(GLMContext ctx, GLuint vaobj, GLuint attribindex
 void setAttribIFormat(GLMContext ctx, VertexArray *vao, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset)
 {
     ERROR_CHECK_RETURN(attribindex < MAX_ATTRIBS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(relativeoffset <= STATE_VAR(max_vertex_attrib_relative_offset), GL_INVALID_VALUE);
 
     switch(type)
     {
@@ -757,6 +771,7 @@ void setAttribIFormat(GLMContext ctx, VertexArray *vao, GLuint attribindex, GLin
     vao->attrib[attribindex].size = size;
     vao->attrib[attribindex].type = type;
     vao->attrib[attribindex].is_long = GL_FALSE;
+    vao->attrib[attribindex].is_integer = GL_TRUE;
     vao->attrib[attribindex].normalized = 0;
     vao->attrib[attribindex].relativeoffset = relativeoffset;
 
@@ -788,6 +803,7 @@ void mglVertexArrayAttribIFormat(GLMContext ctx, GLuint vaobj, GLuint attribinde
 void setAttribLFormat(GLMContext ctx, VertexArray *vao, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset)
 {
     ERROR_CHECK_RETURN(attribindex < MAX_ATTRIBS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(relativeoffset <= STATE_VAR(max_vertex_attrib_relative_offset), GL_INVALID_VALUE);
 
     switch(type)
     {
@@ -802,6 +818,7 @@ void setAttribLFormat(GLMContext ctx, VertexArray *vao, GLuint attribindex, GLin
     vao->attrib[attribindex].size = size;
     vao->attrib[attribindex].type = type;
     vao->attrib[attribindex].is_long = GL_TRUE;
+    vao->attrib[attribindex].is_integer = GL_FALSE;
     vao->attrib[attribindex].normalized = 0;
     vao->attrib[attribindex].relativeoffset = relativeoffset;
 
@@ -941,7 +958,7 @@ static bool vertexArrayIndexedParam(GLMContext ctx, VertexArray *vao, GLuint ind
             return true;
 
         case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
-            *out = GL_FALSE;
+            *out = att->is_integer;
             return true;
 
         case GL_VERTEX_ATTRIB_ARRAY_LONG:

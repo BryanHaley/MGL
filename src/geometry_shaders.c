@@ -738,6 +738,9 @@ static int outputVertexCount(GLenum prim)
 static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *body)
 {
     size_t i = 0, copied = 0;
+    // stage inputs and outputs live at file scope; "out int a[2]" in a
+    // function's parameters is only a parameter
+    int nesting = 0;
 
     gi->in_primitive = GL_POINTS;
     gi->out_primitive = GL_POINTS;
@@ -762,7 +765,15 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
 
         if (!identChar(src[i]) || (i && identChar(src[i - 1])))
         {
+            if (src[i] == '(' || src[i] == '{') nesting++;
+            else if ((src[i] == ')' || src[i] == '}') && nesting > 0) nesting--;
             i++;
+            continue;
+        }
+
+        if (nesting > 0)
+        {
+            while (src[i] && identChar(src[i])) i++;
             continue;
         }
 
@@ -2819,7 +2830,7 @@ char *mglPassThroughGeometry(const char *tes_src, int input)
 {
     Buf out = {0};
     GsVarying outs[MAX_GS_VARYINGS];
-    int count = 0;
+    int count = 0, nesting = 0;
     char line[256];
 
     for (size_t i = 0; tes_src[i]; i++)
@@ -2842,7 +2853,11 @@ char *mglPassThroughGeometry(const char *tes_src, int input)
             continue;
         }
 
-        if ((i && identChar(tes_src[i - 1])) || !identChar(tes_src[i]))
+        if (tes_src[i] == '(' || tes_src[i] == '{') nesting++;
+        else if ((tes_src[i] == ')' || tes_src[i] == '}') && nesting > 0) nesting--;
+
+        // only file scope declares outputs
+        if ((i && identChar(tes_src[i - 1])) || !identChar(tes_src[i]) || nesting > 0)
             continue;
 
         if (readVarying(tes_src, i, true, &v, &is_varying) && is_varying && count < MAX_GS_VARYINGS)

@@ -24,6 +24,7 @@
 #include "glm_context.h"
 #include "mgl_log.h"
 #include "pixel_utils.h"
+#include "mgl_format_table.h"
 
 // Helpers shared with textures.c — these live there, we only call them.
 extern Texture *getTex(GLMContext ctx, GLuint name, GLenum target);
@@ -109,6 +110,17 @@ static bool validateMultisample(GLMContext ctx, GLenum target, GLsizei samples,
     }
 
     /* --- internal format --- */
+    /* something GL can render to at all, or it isn't a format here */
+    {
+        const MGLFormatDesc *fd = mglFormatDesc(mglFormatSizedForBase(internalformat));
+
+        if (fd->gl_format == 0 || mglFormatIsCompressed(internalformat) ||
+            !(fd->color_renderable || fd->kind == MGL_FMT_DEPTH ||
+              fd->kind == MGL_FMT_STENCIL || fd->kind == MGL_FMT_DEPTH_STENCIL)) {
+            ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
+        }
+    }
+
     if (!checkInternalFormatForMetal(ctx, internalformat)) {
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
     }

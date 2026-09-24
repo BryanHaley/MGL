@@ -28,6 +28,16 @@ static bool validBlendEquation(GLenum mode);
 #define ENABLE_CAP(_cap_)   ctx->state.caps._cap_ = true; break
 #define DISABLE_CAP(_cap_)   ctx->state.caps._cap_ = false; break
 
+// the render pass writes sRGB images through a different view, so a new
+// setting needs a new pass
+static void srgbChanged(GLMContext ctx)
+{
+    if (ctx->state.framebuffer)
+        ctx->state.framebuffer->dirty_bits |= DIRTY_FBO_BINDING;
+
+    ctx->state.dirty_bits |= DIRTY_FBO;
+}
+
 // glEnable(CLIP_DISTANCEi) is the same switch as glEnablei(CLIP_DISTANCE0, i);
 // the index rides in the enum. Returns false when cap is not a clip distance.
 static bool clipDistanceCap(GLMContext ctx, GLenum cap, GLuint *index)
@@ -69,7 +79,7 @@ void mglDisable(GLMContext ctx, GLenum cap)
         case GL_SAMPLE_ALPHA_TO_ONE: DISABLE_CAP(sample_alpha_to_one);
         case GL_SAMPLE_COVERAGE: DISABLE_CAP(sample_coverage);
         case GL_RASTERIZER_DISCARD: DISABLE_CAP(rasterizer_discard);
-        case GL_FRAMEBUFFER_SRGB: DISABLE_CAP(framebuffer_srgb);
+        case GL_FRAMEBUFFER_SRGB: srgbChanged(ctx); DISABLE_CAP(framebuffer_srgb);
         case GL_PRIMITIVE_RESTART: DISABLE_CAP(primitive_restart);
         case GL_DEPTH_CLAMP: DISABLE_CAP(depth_clamp);
         case GL_TEXTURE_CUBE_MAP_SEAMLESS: DISABLE_CAP(texture_cube_map_seamless);
@@ -125,7 +135,7 @@ void mglEnable(GLMContext ctx, GLenum cap)
         case GL_SAMPLE_ALPHA_TO_ONE: ENABLE_CAP(sample_alpha_to_one);
         case GL_SAMPLE_COVERAGE: ENABLE_CAP(sample_coverage);
         case GL_RASTERIZER_DISCARD: ENABLE_CAP(rasterizer_discard);
-        case GL_FRAMEBUFFER_SRGB: ENABLE_CAP(framebuffer_srgb);
+        case GL_FRAMEBUFFER_SRGB: srgbChanged(ctx); ENABLE_CAP(framebuffer_srgb);
         case GL_PRIMITIVE_RESTART: ENABLE_CAP(primitive_restart);
         case GL_DEPTH_CLAMP: ENABLE_CAP(depth_clamp);
         case GL_TEXTURE_CUBE_MAP_SEAMLESS: ENABLE_CAP(texture_cube_map_seamless);

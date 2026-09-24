@@ -224,7 +224,7 @@ GPU_TEST(query, writes_a_result_into_a_buffer)
 
     // past the end
     glGetQueryBufferObjectuiv(q, b, GL_QUERY_RESULT, 1024);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glDeleteBuffers(1, &b);

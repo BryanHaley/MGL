@@ -83,6 +83,16 @@ GLuint getNewName(HashTable *table)
     return table->current_name++;
 }
 
+// A name that was deleted and not handed out again: nobody holds it
+bool isFreeName(HashTable *table, GLuint name)
+{
+    for (size_t i = 0; i < table->free_count; i++)
+        if (table->free_names[i] == name)
+            return true;
+
+    return false;
+}
+
 // Remember a name so getNewName can hand it out again. Failing to grow the
 // list is harmless -- the name is simply never reused.
 static void releaseName(HashTable *table, GLuint name)

@@ -22,6 +22,8 @@ Query *newQuery(GLMContext ctx, GLuint name)
     ERROR_CHECK_RETURN_VALUE(q, GL_OUT_OF_MEMORY, NULL);
 
     q->name = name;
+    // a query that has never run has its (zero) result ready
+    q->have_result = GL_TRUE;
 
     insertHashElement(&ctx->state.query_table, name, q);
 
@@ -395,7 +397,7 @@ static void queryIntoBuffer(GLMContext ctx, GLuint id, GLuint buffer, GLenum pna
 
     ERROR_CHECK_RETURN(buf, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(buf->data.buffer_data, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN((GLuint64)offset + value_size <= (GLuint64)buf->size, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN((GLuint64)offset + value_size <= (GLuint64)buf->size, GL_INVALID_OPERATION);
 
     memcpy((char *)buf->data.buffer_data + offset, &value, value_size);
 }

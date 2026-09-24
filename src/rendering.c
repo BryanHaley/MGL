@@ -127,6 +127,29 @@ static bool clearDefaultFramebuffer(GLMContext ctx, GLenum buffer, GLint drawbuf
     return true;
 }
 
+// glClear runs its pass straight away; the per-buffer forms do the same, or a
+// framebuffer switched away from before its next draw kept the clear for later
+static void clearNow(GLMContext ctx)
+{
+    if (ctx->mtl_funcs.mtlClearBuffer)
+        ctx->mtl_funcs.mtlClearBuffer(ctx, 0, 0);
+}
+
+// glClearBuffer's drawbuffer is a draw buffer slot, not an attachment number:
+// it clears whatever glDrawBuffers put there, and nothing if that is GL_NONE
+static FBOAttachment *clearSlot(Framebuffer *fbo, GLint drawbuffer)
+{
+    if (drawbuffer >= fbo->n_draw_buffers)
+        return NULL;
+
+    GLenum b = fbo->draw_buffers[drawbuffer];
+
+    if (b < GL_COLOR_ATTACHMENT0 || b >= GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
+        return NULL;
+
+    return &fbo->color_attachments[b - GL_COLOR_ATTACHMENT0];
+}
+
 void mglClearBufferfv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLfloat *value)
 {
     Framebuffer * fbo = ctx->state.framebuffer;
@@ -146,7 +169,9 @@ void mglClearBufferfv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLf
     switch (buffer) {
         case GL_COLOR:
             ERROR_CHECK_RETURN(drawbuffer >= 0 && drawbuffer < MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE);
-            fboa = &fbo->color_attachments[drawbuffer];
+            fboa = clearSlot(fbo, drawbuffer);
+            if (fboa == NULL)
+                break;
             fboa->clear_bitmask |= GL_COLOR_BUFFER_BIT;
             fboa->clear_color[0] = value[0];
             fboa->clear_color[1] = value[1];
@@ -154,20 +179,19 @@ void mglClearBufferfv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLf
             fboa->clear_color[3] = value[3];
             break;
         case GL_DEPTH:
+            ERROR_CHECK_RETURN(drawbuffer == 0, GL_INVALID_VALUE);
             fboa = &fbo->depth;
             fboa->clear_bitmask |= GL_DEPTH_BUFFER_BIT;
             fboa->clear_color[0] = value[0];
             break;
-        case GL_STENCIL:
-            fboa = &fbo->stencil;
-            fboa->clear_bitmask |= GL_STENCIL_BUFFER_BIT;
-            fboa->clear_color[0] = value[0];
-            break;
+        // stencil is cleared through the integer and depth-stencil forms only
         default:
             MGL_ERR("MGL Error: mglClearBufferfv: invalid buffer 0x%x\n", buffer);
             ERROR_RETURN(GL_INVALID_ENUM);
             break;
     }
+
+    clearNow(ctx);
 }
 
 void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil)
@@ -201,6 +225,8 @@ void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat d
     fboa = &fbo->stencil;
     fboa->clear_bitmask |= GL_STENCIL_BUFFER_BIT;
     fboa->clear_color[0] = stencil;
+
+    clearNow(ctx);
 }
 
 void mglFinish(GLMContext ctx)
@@ -335,12 +361,9 @@ void mglDrawBuffer(GLMContext ctx, GLenum buf)
 
 void mglReadBuffer(GLMContext ctx, GLenum buf)
 {
-    if ((buf >= GL_COLOR_ATTACHMENT0) &&
-        (buf <= (GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments))))
-    {
-        // ok
-    }
-    else
+    Framebuffer *fbo = ctx->state.readbuffer;
+    bool attachment = buf >= GL_COLOR_ATTACHMENT0 && buf <= GL_COLOR_ATTACHMENT31;
+
     switch(buf)
     {
         case GL_FRONT:
@@ -353,19 +376,35 @@ void mglReadBuffer(GLMContext ctx, GLenum buf)
         case GL_LEFT:
         case GL_RIGHT:
         case GL_FRONT_AND_BACK:
-            // These read buffer modes are accepted but may not be fully implemented
             break;
 
         default:
+            if (attachment)
+                break;
+
             MGL_ERR("MGL Error: mglReadBuffer: invalid enum 0x%x\n", buf);
             ERROR_RETURN(GL_INVALID_ENUM);
     }
 
-    if ((buf >= GL_COLOR_ATTACHMENT0) &&
-        (buf <= (GL_COLOR_ATTACHMENT0 + STATE(max_color_attachments))))
+    if (fbo)
     {
-        // probably should validate current fbo..
+        // a framebuffer object reads only its own attachments
+        ERROR_CHECK_RETURN(buf == GL_NONE || attachment, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(!attachment || (GLint)(buf - GL_COLOR_ATTACHMENT0) < (GLint)STATE(max_color_attachments),
+                           GL_INVALID_OPERATION);
     }
+    else
+    {
+        // the window has no attachments and no right eye
+        ERROR_CHECK_RETURN(!attachment, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(buf != GL_FRONT_RIGHT && buf != GL_BACK_RIGHT && buf != GL_RIGHT,
+                           GL_INVALID_OPERATION);
+    }
+
+    if (fbo)
+        fbo->read_buffer = buf;
+    else
+        STATE(default_read_buffer) = buf;
 
     STATE(read_buffer) = buf;
     STATE(dirty_bits) |= DIRTY_STATE;
@@ -795,7 +834,9 @@ static void clearBufferInteger(GLMContext ctx, GLenum buffer, GLint drawbuffer,
         case GL_COLOR:
             ERROR_CHECK_RETURN(drawbuffer >= 0 && drawbuffer < MAX_COLOR_ATTACHMENTS, GL_INVALID_VALUE);
 
-            fboa = &fbo->color_attachments[drawbuffer];
+            fboa = clearSlot(fbo, drawbuffer);
+            if (fboa == NULL)
+                break;
             fboa->clear_bitmask |= GL_COLOR_BUFFER_BIT;
             memcpy(fboa->clear_color, v, 4 * sizeof(GLfloat));
             break;
@@ -812,6 +853,8 @@ static void clearBufferInteger(GLMContext ctx, GLenum buffer, GLint drawbuffer,
         default:
             ERROR_RETURN(GL_INVALID_ENUM);
     }
+
+    clearNow(ctx);
 }
 
 void mglClearBufferiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLint *value)

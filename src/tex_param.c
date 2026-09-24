@@ -29,7 +29,8 @@ extern Texture *newTexture(GLMContext ctx, GLenum target, GLuint texture);
 Texture *getTex(GLMContext ctx, GLuint name, GLenum target);
 
 // the texture a glTexture*() call names. A name handed out by glGenTextures
-// but never bound has no object yet, so make one, the same way a bind would.
+// but never bound has no object yet, so make one, the same way a bind would;
+// a deleted name is not one of those.
 static Texture *dsaTex(GLMContext ctx, GLuint texture)
 {
     Texture *tex;
@@ -38,7 +39,7 @@ static Texture *dsaTex(GLMContext ctx, GLuint texture)
 
     tex = findTexture(ctx, texture);
 
-    if (!tex && texture < STATE(texture_table.current_name))
+    if (!tex && texture < STATE(texture_table.current_name) && !isFreeName(&STATE(texture_table), texture))
     {
         tex = newTexture(ctx, GL_TEXTURE_2D, texture);
 
@@ -623,11 +624,59 @@ static void setTexParamfv(GLMContext ctx, Texture *tex, GLenum pname, const GLfl
 }
 
 #pragma mark tex param gl calls
+// the one-value setters cannot take a parameter that has four
+static bool vectorPname(GLenum pname)
+{
+    return pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA;
+}
+
+// What the texture's own target rules out for the DSA setters: a multisample
+// texture takes no sampler state, and a rectangle has no mip chain and does
+// not repeat
+static GLenum dsaParamError(Texture *tex, GLenum pname, GLint v)
+{
+    bool ms = tex->target == GL_TEXTURE_2D_MULTISAMPLE || tex->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+
+    switch (pname)
+    {
+        case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T: case GL_TEXTURE_WRAP_R:
+            if (ms) return GL_INVALID_OPERATION;
+            if (tex->target == GL_TEXTURE_RECTANGLE && v != GL_CLAMP_TO_EDGE && v != GL_CLAMP_TO_BORDER)
+                return GL_INVALID_ENUM;
+            break;
+
+        case GL_TEXTURE_MIN_FILTER:
+            if (ms) return GL_INVALID_OPERATION;
+            if (tex->target == GL_TEXTURE_RECTANGLE && v != GL_NEAREST && v != GL_LINEAR)
+                return GL_INVALID_ENUM;
+            break;
+
+        case GL_TEXTURE_MAG_FILTER: case GL_TEXTURE_MIN_LOD: case GL_TEXTURE_MAX_LOD:
+        case GL_TEXTURE_LOD_BIAS: case GL_TEXTURE_COMPARE_MODE: case GL_TEXTURE_COMPARE_FUNC:
+        case GL_TEXTURE_BORDER_COLOR: case GL_TEXTURE_MAX_ANISOTROPY:
+            if (ms) return GL_INVALID_OPERATION;
+            break;
+
+        case GL_TEXTURE_BASE_LEVEL:
+            if (v < 0) return GL_INVALID_VALUE;
+            if ((ms || tex->target == GL_TEXTURE_RECTANGLE) && v != 0) return GL_INVALID_OPERATION;
+            break;
+
+        case GL_TEXTURE_MAX_LEVEL:
+            if (v < 0) return GL_INVALID_VALUE;
+            break;
+    }
+
+    return GL_NO_ERROR;
+}
+
 void mglTexParameterf(GLMContext ctx, GLenum target, GLenum pname, GLfloat param)
 {
     Texture *tex;
 
     tex = getTex(ctx, 0, target);
+
+    ERROR_CHECK_RETURN(!vectorPname(pname), GL_INVALID_ENUM);
 
     if (tex)
         setTexParamfv(ctx, tex, pname, &param);
@@ -650,6 +699,8 @@ void mglTexParameteri(GLMContext ctx, GLenum target, GLenum pname, GLint param)
     Texture *tex;
 
     tex = getTex(ctx, 0, target);
+
+    ERROR_CHECK_RETURN(!vectorPname(pname), GL_INVALID_ENUM);
 
     if (tex)
         setTexParamiv(ctx, tex, pname, &param);
@@ -721,6 +772,14 @@ void mglTextureParameterf(GLMContext ctx, GLuint texture, GLenum pname, GLfloat 
 
     tex = dsaTex(ctx, texture);
 
+    ERROR_CHECK_RETURN(!vectorPname(pname), GL_INVALID_ENUM);
+
+    if (tex)
+    {
+        GLenum e = dsaParamError(tex, pname, (GLint)param);
+        ERROR_CHECK_RETURN(e == GL_NO_ERROR, e);
+    }
+
     if (tex)
         setTexParamfv(ctx, tex, pname, &param);
 }
@@ -734,6 +793,12 @@ void mglTextureParameterfv(GLMContext ctx, GLuint texture, GLenum pname, const G
     ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
 
     if (tex)
+    {
+        GLenum e = dsaParamError(tex, pname, (GLint)param[0]);
+        ERROR_CHECK_RETURN(e == GL_NO_ERROR, e);
+    }
+
+    if (tex)
         setTexParamfv(ctx, tex, pname, param);
 }
 
@@ -742,6 +807,14 @@ void mglTextureParameteri(GLMContext ctx, GLuint texture, GLenum pname, GLint pa
     Texture *tex;
 
     tex = dsaTex(ctx, texture);
+
+    ERROR_CHECK_RETURN(!vectorPname(pname), GL_INVALID_ENUM);
+
+    if (tex)
+    {
+        GLenum e = dsaParamError(tex, pname, param);
+        ERROR_CHECK_RETURN(e == GL_NO_ERROR, e);
+    }
 
     if (tex)
         setTexParamiv(ctx, tex, pname, &param);
@@ -754,6 +827,12 @@ void mglTextureParameteriv(GLMContext ctx, GLuint texture, GLenum pname, const G
     tex = dsaTex(ctx, texture);
 
     ERROR_CHECK_RETURN(param, GL_INVALID_VALUE);
+
+    if (tex)
+    {
+        GLenum e = dsaParamError(tex, pname, param[0]);
+        ERROR_CHECK_RETURN(e == GL_NO_ERROR, e);
+    }
 
     if (tex)
         setTexParamiv(ctx, tex, pname, param);
@@ -769,6 +848,11 @@ void mglTextureParameterIiv(GLMContext ctx, GLuint texture, GLenum pname, const 
 
     if (!tex)
         return;
+
+    {
+        GLenum e = dsaParamError(tex, pname, params[0]);
+        ERROR_CHECK_RETURN(e == GL_NO_ERROR, e);
+    }
 
     if (setTexParamsIiv(ctx, &tex->params, pname, params))
     {
@@ -793,6 +877,11 @@ void mglTextureParameterIuiv(GLMContext ctx, GLuint texture, GLenum pname, const
 
     if (!tex)
         return;
+
+    {
+        GLenum e = dsaParamError(tex, pname, (GLint)params[0]);
+        ERROR_CHECK_RETURN(e == GL_NO_ERROR, e);
+    }
 
     if (setTexParamsIuiv(ctx, &tex->params, pname, params))
     {

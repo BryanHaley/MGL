@@ -82,6 +82,8 @@ Buffer *newBuffer(GLMContext ctx, GLenum target, GLuint name)
 
     ptr->name = name;
     ptr->target = target;
+    ptr->usage = GL_STATIC_DRAW;   // GL's starting value, before any glBufferData
+    ptr->access = GL_READ_WRITE;
 
     // create buffers doesn't provide a target
     if (target)
@@ -406,9 +408,45 @@ static bool checkClearInternalFormat(GLenum internalformat)
 
 // Fills [offset, offset+size) with one texel, converted from the client's
 // format/type into the layout internalformat lives in, repeated over the range.
+// ClearBufferData calls a format or type it does not know GL_INVALID_VALUE,
+// where the texture calls say GL_INVALID_ENUM
+static bool clearFormatKnown(GLenum f)
+{
+    switch (f)
+    {
+        case GL_RED: case GL_RG: case GL_RGB: case GL_BGR: case GL_RGBA: case GL_BGRA:
+        case GL_RED_INTEGER: case GL_RG_INTEGER: case GL_RGB_INTEGER: case GL_BGR_INTEGER:
+        case GL_RGBA_INTEGER: case GL_BGRA_INTEGER:
+        case GL_STENCIL_INDEX: case GL_DEPTH_COMPONENT: case GL_DEPTH_STENCIL:
+            return true;
+    }
+    return false;
+}
+
+static bool clearTypeKnown(GLenum t)
+{
+    switch (t)
+    {
+        case GL_UNSIGNED_BYTE: case GL_BYTE: case GL_UNSIGNED_SHORT: case GL_SHORT:
+        case GL_UNSIGNED_INT: case GL_INT: case GL_HALF_FLOAT: case GL_FLOAT:
+        case GL_UNSIGNED_BYTE_3_3_2: case GL_UNSIGNED_BYTE_2_3_3_REV:
+        case GL_UNSIGNED_SHORT_5_6_5: case GL_UNSIGNED_SHORT_5_6_5_REV:
+        case GL_UNSIGNED_SHORT_4_4_4_4: case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+        case GL_UNSIGNED_SHORT_5_5_5_1: case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+        case GL_UNSIGNED_INT_8_8_8_8: case GL_UNSIGNED_INT_8_8_8_8_REV:
+        case GL_UNSIGNED_INT_10_10_10_2: case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_24_8: case GL_UNSIGNED_INT_10F_11F_11F_REV:
+        case GL_UNSIGNED_INT_5_9_9_9_REV: case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+            return true;
+    }
+    return false;
+}
+
 static bool clearBufferData(GLMContext ctx, Buffer *ptr, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void *data)
 {
     ERROR_CHECK_RETURN_VALUE(checkClearInternalFormat(internalformat), GL_INVALID_ENUM, false);
+    ERROR_CHECK_RETURN_VALUE(clearFormatKnown(format), GL_INVALID_VALUE, false);
+    ERROR_CHECK_RETURN_VALUE(clearTypeKnown(type), GL_INVALID_VALUE, false);
 
     MGLNativeFormat native = mglNativeFormatForGLInternalFormat(internalformat);
     ERROR_CHECK_RETURN_VALUE(native != MGL_NF_UNKNOWN, GL_INVALID_ENUM, false);
@@ -1524,7 +1562,7 @@ static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsize
             // the buffer being used, which the checks elsewhere allow for.
             ptr->mapped = GL_TRUE;
 
-            return (void *)ptr->data.buffer_data;
+            return (void *)(ptr->data.buffer_data + offset);
         }
 
         // if buffer was not marked with GL_MAP_PERSISTENT_BIT in storage flags
@@ -1792,6 +1830,16 @@ void mglGetBufferParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint 
     }
 }
 
+// where the application's mapping starts: the same address the map call handed
+// back, which is Metal's copy of the buffer once it has one
+static void *mappedPointer(GLMContext ctx, Buffer *ptr)
+{
+    if (!ptr->mapped)
+        return NULL;
+
+    return ctx->mtl_funcs.mtlMapUnmapBuffer(ctx, ptr, ptr->mapped_offset, 0, 0, true);
+}
+
 void mglGetBufferPointerv(GLMContext ctx, GLenum target, GLenum pname, void **params)
 {
     GLuint index;
@@ -1817,11 +1865,7 @@ void mglGetBufferPointerv(GLMContext ctx, GLenum target, GLenum pname, void **pa
 
     ERROR_CHECK_RETURN((ptr != NULL), GL_INVALID_OPERATION);
 
-    if (ptr->mapped) {
-        *params = (void *)ptr->data.buffer_data;
-    } else {
-        *params = NULL;
-    }
+    *params = mappedPointer(ctx, ptr);
 }
 
 void mglGetBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr size, void *data)
@@ -1932,7 +1976,7 @@ void mglGetNamedBufferParameteriv(GLMContext ctx, GLuint buffer, GLenum pname, G
             break;
 
         default:
-            ERROR_RETURN(GL_INVALID_OPERATION);
+            ERROR_RETURN(GL_INVALID_ENUM);
     }
 }
 
@@ -1988,7 +2032,7 @@ void mglGetNamedBufferParameteri64v(GLMContext ctx, GLuint buffer, GLenum pname,
             break;
 
         default:
-            ERROR_RETURN(GL_INVALID_OPERATION);
+            ERROR_RETURN(GL_INVALID_ENUM);
     }
 }
 
@@ -2000,7 +2044,7 @@ void mglGetNamedBufferPointerv(GLMContext ctx, GLuint buffer, GLenum pname, void
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(pname == GL_BUFFER_MAP_POINTER, GL_INVALID_ENUM);
 
-    *params = ptr->mapped ? (void *)(ptr->data.buffer_data + ptr->mapped_offset) : NULL;
+    *params = mappedPointer(ctx, ptr);
 }
 
 void mglGetNamedBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GLsizeiptr size, void *data)
@@ -2010,7 +2054,8 @@ void mglGetNamedBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GL
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(offset >= 0 && size >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(offset + size <= ptr->size, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(ptr->mapped == GL_FALSE, GL_INVALID_OPERATION);
+    // a persistent mapping leaves the buffer free to be read
+    ERROR_CHECK_RETURN(ptr->mapped == GL_FALSE || (ptr->access & GL_MAP_PERSISTENT_BIT), GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(data || size == 0, GL_INVALID_VALUE);
 
     if (size == 0)

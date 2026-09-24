@@ -277,6 +277,10 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
     bool          _tessIndexed;
     // the default framebuffer's size has been set from the layer once
     bool          _attachedToWindowSystem;
+    // the 3D slice readSourceTexture chose, for whoever copies out of it
+    NSUInteger    _readPlane;
+    // a pass that only clears, with nothing drawn: skip binding draw state
+    bool          _clearOnly;
     // the element type and offset of the last element draw, as GL gave them
     GLenum        _gsElementType;
     size_t        _gsElementOffset;
@@ -1279,15 +1283,6 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     return fallback;
 }
 
-- (void)swizzleTexDesc:(MTLTextureDescriptor *)tex_desc forTex:(Texture*)tex
-{
-    MTLTextureSwizzle channel_r = swizzleForGL(tex->params.swizzle_r, MTLTextureSwizzleRed);
-    MTLTextureSwizzle channel_g = swizzleForGL(tex->params.swizzle_g, MTLTextureSwizzleGreen);
-    MTLTextureSwizzle channel_b = swizzleForGL(tex->params.swizzle_b, MTLTextureSwizzleBlue);
-    MTLTextureSwizzle channel_a = swizzleForGL(tex->params.swizzle_a, MTLTextureSwizzleAlpha);
-
-    tex_desc.swizzle = MTLTextureSwizzleChannelsMake(channel_r, channel_g, channel_b, channel_a);
-}
 
 // A buffer texture is not a texture with storage of its own: Metal makes a
 // view straight onto the MTLBuffer, so the shader reads the buffer's own bytes.
@@ -1588,11 +1583,6 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     if (!tex_desc) {
         MGL_NSERR(@"MGL ERROR: Failed to create texture descriptor");
         return NULL;
-    }
-
-    if (tex->params.swizzled)
-    {
-        [self swizzleTexDesc:tex_desc forTex:tex];
     }
 
     // Metal asserts on a zero width or height instead of returning nil, so an
@@ -2039,6 +2029,16 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 
         MGL_NSINFO(@"MGL INFO: PROPER FIX - Processing texture fill (tex=%d, dims=%lux%lu)", tex->name, (unsigned long)texture.width, (unsigned long)texture.height);
 
+        MTLPixelFormat pf = texture.pixelFormat;
+        bool depth_or_stencil = pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float ||
+                                pf == MTLPixelFormatDepth24Unorm_Stencil8 || pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                                pf == MTLPixelFormatStencil8;
+
+        // a buffer copied into depth or stencil has to say which plane, and
+        // this fill does not; what it wrote stayed behind the next copy in
+        if (depth_or_stencil) {
+            MGL_NSINFO(@"MGL INFO: no fill for a depth or stencil texture");
+        } else
         if (texture.width == 0 || texture.height == 0 || texture.width > 16384 || texture.height > 16384) {
             MGL_NSERR(@"MGL WARNING: Skipping texture fill due to invalid dimensions: %lux%lu", (unsigned long)texture.width, (unsigned long)texture.height);
         } else {
@@ -2424,7 +2424,6 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
         }
     }
 
-    tex->mtl_swizzle = packedSwizzle(&tex->params);
     tex->dirty_bits = 0;
 
     // debug aid only; this corrupts render targets
@@ -3057,6 +3056,47 @@ static bool usesBindless(Program *program, int first, int last)
 // GL_TEXTURE_BASE_LEVEL chooses which mip the shader treats as level zero.
 // Metal says that with a view over the level range. The texture itself stays
 // whole, because glTexSubImage still counts its levels from zero.
+// What each channel reads before GL's swizzle: a channel the GL format lacks
+// reads 0, or 1 for alpha, whatever Metal's wider format holds there
+static void formatChannels(Texture *tex, id<MTLTexture> base, MTLTextureSwizzle out[4])
+{
+    const MGLFormatDesc *gl = mglFormatDesc(tex->internalformat);
+    GLenum want = gl->base_format;
+
+    out[0] = MTLTextureSwizzleRed;
+    out[1] = MTLTextureSwizzleGreen;
+    out[2] = MTLTextureSwizzleBlue;
+    out[3] = MTLTextureSwizzleAlpha;
+
+    switch (gl->kind)
+    {
+        case MGL_FMT_DEPTH:
+        case MGL_FMT_STENCIL:
+        case MGL_FMT_DEPTH_STENCIL:
+            want = GL_RED;
+            break;
+
+        default:
+            // nothing to do when Metal's format has the same channels
+            if (mglFormatDescForMetal((uint16_t)base.pixelFormat)->base_format == want)
+                return;
+            break;
+    }
+
+    switch (want)
+    {
+        case GL_RED:
+            out[1] = MTLTextureSwizzleZero;
+        // fall through
+        case GL_RG:
+            out[2] = MTLTextureSwizzleZero;
+        // fall through
+        case GL_RGB:
+            out[3] = MTLTextureSwizzleOne;
+            break;
+    }
+}
+
 - (id<MTLTexture>) samplingTexture: (Texture *)tex from: (id<MTLTexture>) base
 {
     if (base == nil || tex == NULL)
@@ -3073,22 +3113,79 @@ static bool usesBindless(Program *program, int first, int last)
         last = have - 1;
 
     // GL_TEXTURE_MAX_LEVEL trims the chain too, which textureQueryLevels sees
-    if (have <= 1 || (first == 0 && last == have - 1))
+    NSUInteger count = last >= first ? last - first + 1 : 1;
+
+    if (have <= 1)
+    {
+        first = 0;
+        count = have;
+    }
+
+    // GL's swizzle picks from the format's channels, not Metal's
+    MTLTextureSwizzle fmt[4];
+    formatChannels(tex, base, fmt);
+
+    GLenum gl_sw[4] = { tex->params.swizzle_r, tex->params.swizzle_g,
+                        tex->params.swizzle_b, tex->params.swizzle_a };
+    MTLTextureSwizzle sw[4];
+
+    for (int i = 0; i < 4; i++)
+    {
+        MTLTextureSwizzle c = swizzleForGL(gl_sw[i], (MTLTextureSwizzle)(MTLTextureSwizzleRed + i));
+
+        sw[i] = (c >= MTLTextureSwizzleRed && c <= MTLTextureSwizzleAlpha) ? fmt[c - MTLTextureSwizzleRed] : c;
+    }
+
+    bool plain = sw[0] == MTLTextureSwizzleRed && sw[1] == MTLTextureSwizzleGreen &&
+                 sw[2] == MTLTextureSwizzleBlue && sw[3] == MTLTextureSwizzleAlpha;
+
+    // GL_STENCIL_INDEX reads the stencil half, which Metal only shows through
+    // a stencil-only view
+    MTLPixelFormat format = base.pixelFormat;
+    bool stencil = false;
+
+    if (tex->params.depth_stencil_mode == GL_STENCIL_INDEX)
+    {
+        if (format == MTLPixelFormatDepth32Float_Stencil8)
+            format = MTLPixelFormatX32_Stencil8, stencil = true;
+        else if (format == MTLPixelFormatDepth24Unorm_Stencil8)
+            format = MTLPixelFormatX24_Stencil8, stencil = true;
+    }
+
+    if (plain && !stencil && first == 0 && count == have)
         return base;
 
-    NSUInteger count = last >= first ? last - first + 1 : 1;
+    GLuint key = (GLuint)sw[0] | (GLuint)sw[1] << 3 | (GLuint)sw[2] << 6 | (GLuint)sw[3] << 9 |
+                 (GLuint)first << 12 | (GLuint)count << 20 | (GLuint)stencil << 31;
+
+    if (tex->mtl_sample_view && tex->mtl_sample_base == (__bridge void *)base && tex->mtl_sample_key == key)
+        return (__bridge id<MTLTexture>)(tex->mtl_sample_view);
+
     NSUInteger slices = base.arrayLength;
 
     // a cube view counts each face as a slice
     if (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray)
         slices *= 6;
 
-    id<MTLTexture> view = [base newTextureViewWithPixelFormat: base.pixelFormat
+    id<MTLTexture> view = [base newTextureViewWithPixelFormat: format
                                                   textureType: base.textureType
                                                        levels: NSMakeRange(first, count)
-                                                       slices: NSMakeRange(0, slices)];
+                                                       slices: NSMakeRange(0, slices)
+                                                      swizzle: MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3])];
 
-    return view ? view : base;
+    if (view == nil)
+        return base;
+
+    // the view keeps its storage alive, so the base can't be freed and reused
+    // at the same address while it is remembered
+    if (tex->mtl_sample_view)
+        CFBridgingRelease(tex->mtl_sample_view);
+
+    tex->mtl_sample_view = (void *)CFBridgingRetain(view);
+    tex->mtl_sample_base = (__bridge void *)base;
+    tex->mtl_sample_key = key;
+
+    return view;
 }
 
 - (id<MTLTexture>) incompleteTexture
@@ -3630,118 +3727,206 @@ static bool mtlFormatIsStencil(MTLPixelFormat f)
     return dst;
 }
 
+static FBOAttachment *drawSlot(Framebuffer *fbo, int k);
+
+// Copies one rectangle between two images of the same format, stretching by
+// picking the nearest source texel -- columns into a scratch image first, then
+// rows into the target -- so it works for depth and stencil, which a shader
+// cannot sample back out as easily as it draws colour.
+- (void) nearestCopyFrom: (id<MTLTexture>) src plane: (NSUInteger) sp x: (NSUInteger) sx y: (NSUInteger) sy
+                       w: (NSUInteger) sw h: (NSUInteger) sh
+                      to: (id<MTLTexture>) dst plane: (NSUInteger) dp x: (NSUInteger) dx y: (NSUInteger) dy
+                       w: (NSUInteger) dw h: (NSUInteger) dh
+{
+    if (sw == 0 || sh == 0 || dw == 0 || dh == 0)
+        return;
+
+    id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
+
+    if (sw == dw && sh == dh)
+    {
+        [blit copyFromTexture: src sourceSlice: 0 sourceLevel: 0 sourceOrigin: MTLOriginMake(sx, sy, sp)
+                   sourceSize: MTLSizeMake(sw, sh, 1)
+                    toTexture: dst destinationSlice: 0 destinationLevel: 0 destinationOrigin: MTLOriginMake(dx, dy, dp)];
+        [blit endEncoding];
+        return;
+    }
+
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: src.pixelFormat
+                                                                                 width: dw
+                                                                                height: sh
+                                                                             mipmapped: NO];
+    d.storageMode = MTLStorageModePrivate;
+    d.usage = MTLTextureUsageShaderRead;
+
+    id<MTLTexture> tmp = [_device newTextureWithDescriptor: d];
+
+    if (tmp == nil)
+    {
+        [blit endEncoding];
+        return;
+    }
+
+    for (NSUInteger x = 0; x < dw; x++)
+    {
+        NSUInteger from = sx + (x * sw + sw / 2) / dw;
+
+        [blit copyFromTexture: src sourceSlice: 0 sourceLevel: 0 sourceOrigin: MTLOriginMake(from, sy, sp)
+                   sourceSize: MTLSizeMake(1, sh, 1)
+                    toTexture: tmp destinationSlice: 0 destinationLevel: 0 destinationOrigin: MTLOriginMake(x, 0, 0)];
+    }
+
+    for (NSUInteger y = 0; y < dh; y++)
+    {
+        NSUInteger from = (y * sh + sh / 2) / dh;
+
+        [blit copyFromTexture: tmp sourceSlice: 0 sourceLevel: 0 sourceOrigin: MTLOriginMake(0, from, 0)
+                   sourceSize: MTLSizeMake(dw, 1, 1)
+                    toTexture: dst destinationSlice: 0 destinationLevel: 0 destinationOrigin: MTLOriginMake(dx, dy + y, dp)];
+    }
+
+    [blit endEncoding];
+}
+
+// the image a framebuffer attachment names, ready to copy
+- (id<MTLTexture>) blitImage: (FBOAttachment *) a plane: (NSUInteger *) plane
+{
+    Texture *tex;
+
+    *plane = 0;
+
+    if (a == NULL || !a->texture)
+        return nil;
+
+    tex = (a->textarget == GL_RENDERBUFFER) ? (a->buf.rbo ? a->buf.rbo->tex : NULL) : a->buf.tex;
+
+    if (tex == NULL || ![self bindMTLTexture: tex] || tex->mtl_data == NULL)
+        return nil;
+
+    return [self attachmentView: a texture: tex plane: plane];
+}
+
 -(void)mtlBlitFramebuffer:(GLMContext)glm_ctx srcX0:(size_t)srcX0 srcY0:(size_t)srcY0 srcX1:(size_t)srcX1 srcY1:(size_t)srcY1 dstX0:(size_t)dstX0 dstY0:(size_t)dstY0 dstX1:(size_t)dstX1 dstY1:(size_t)dstY1 mask:(size_t)mask filter:(GLuint)filter
 {
-    Framebuffer * readfbo, * drawfbo;
-    //int readtex, drawtex;
+    Framebuffer *readfbo = ctx->state.readbuffer, *drawfbo = ctx->state.framebuffer;
+    NSUInteger sw = srcX1 - srcX0, sh = srcY1 - srcY0, dw = dstX1 - dstX0, dh = dstY1 - dstY0;
 
-    readfbo = ctx->state.readbuffer;
+    // glClear only records a mask, so run it before anything reads the result
+    [self applyPendingClears];
+    [self endRenderEncoding];
 
-    id<MTLTexture> readtexid = nil;
-
-    if (readfbo == NULL) {
-        readtexid = _drawable ? _drawable.texture : nil;
-    } else {
-        // GL starts a user framebuffer reading from attachment 0, and MGL only
-        // keeps one read buffer for everything, so fall back to it
-        GLenum read_from = STATE(read_buffer);
-        FBOAttachment *fboa;
-
-        if (read_from < GL_COLOR_ATTACHMENT0 || read_from > GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
-            read_from = GL_COLOR_ATTACHMENT0;
-
-        fboa = getFBOAttachment(ctx, readfbo, read_from);
-        Texture *readtexobj = NULL;
-
-        if (fboa)
-            readtexobj = (fboa->textarget == GL_RENDERBUFFER)
-                       ? (fboa->buf.rbo ? fboa->buf.rbo->tex : NULL)
-                       : fboa->buf.tex;
-
-        if (readtexobj && [self bindMTLTexture: readtexobj])
-            readtexid = (__bridge id<MTLTexture>)(readtexobj->mtl_data);
-    }
-
-    if (readtexid == nil)
+    if (mask & GL_COLOR_BUFFER_BIT)
     {
-        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
-        return;
-    }
+        id<MTLTexture> readtexid = nil;
+        NSUInteger readplane = 0;
 
+        if (readfbo == NULL)
+            readtexid = _drawable ? _drawable.texture : nil;
+        else
+        {
+            // GL starts a user framebuffer reading from attachment 0
+            GLenum read_from = STATE(read_buffer);
 
-    drawfbo = ctx->state.framebuffer;
+            if (read_from < GL_COLOR_ATTACHMENT0 || read_from >= GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
+                read_from = GL_COLOR_ATTACHMENT0;
 
-    id<MTLTexture> drawtexid = nil;
-
-    if (drawfbo == NULL) {
-        drawtexid = _drawable ? _drawable.texture : nil;
-    } else {
-        GLenum draw_to = STATE(draw_buffer);
-        FBOAttachment *fboa;
-
-        if (draw_to < GL_COLOR_ATTACHMENT0 || draw_to > GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
-            draw_to = GL_COLOR_ATTACHMENT0;
-
-        fboa = getFBOAttachment(ctx, drawfbo, draw_to);
-        Texture *drawtexobj = NULL;
-
-        if (fboa)
-            drawtexobj = (fboa->textarget == GL_RENDERBUFFER)
-                       ? (fboa->buf.rbo ? fboa->buf.rbo->tex : NULL)
-                       : fboa->buf.tex;
-
-        if (drawtexobj && [self bindMTLTexture: drawtexobj])
-            drawtexid = (__bridge id<MTLTexture>)(drawtexobj->mtl_data);
-    }
-
-    if (drawtexid == nil)
-    {
-        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
-        return;
-    }
-
-
-    // GL blits out of a multisampled framebuffer by resolving; everything
-    // downstream then deals with an ordinary single-sample texture.
-    if (readtexid.sampleCount > 1)
-    {
-        readtexid = [self resolveMultisample: readtexid];
+            readtexid = [self blitImage: getFBOAttachment(ctx, readfbo, read_from) plane: &readplane];
+        }
 
         if (readtexid == nil)
         {
             ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
             return;
         }
-    }
 
-    // A plain copy needs matching formats and a destination that is not
-    // framebuffer-only; the window is neither, so draw it instead.
-    if (readtexid.pixelFormat != drawtexid.pixelFormat || drawfbo == NULL)
-    {
-        if ([self shaderBlitFrom: readtexid
-                          origin: MTLOriginMake(srcX0, srcY0, 0)
-                            size: MTLSizeMake(srcX1 - srcX0, srcY1 - srcY0, 1)
-                              to: drawtexid
-                          origin: MTLOriginMake(dstX0, dstY0, 0)
-                            size: MTLSizeMake(dstX1 - dstX0, dstY1 - dstY0, 1)] == false)
+        // GL blits out of a multisampled framebuffer by resolving
+        if (readtexid.sampleCount > 1)
         {
-            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            readtexid = [self resolveMultisample: readtexid];
+
+            if (readtexid == nil)
+            {
+                ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
+                return;
+            }
         }
 
-        return;
+        // every draw buffer receives the same copy
+        for (int k = 0; k < (drawfbo ? MAX_COLOR_ATTACHMENTS : 1); k++)
+        {
+            id<MTLTexture> drawtexid = nil;
+            NSUInteger drawplane = 0;
+
+            if (drawfbo == NULL)
+                drawtexid = _drawable ? _drawable.texture : nil;
+            else
+            {
+                FBOAttachment *slot = drawSlot(drawfbo, k);
+
+                if (slot == NULL)
+                    continue;
+
+                drawtexid = [self blitImage: slot plane: &drawplane];
+            }
+
+            if (drawtexid == nil)
+                continue;
+
+            // a straight copy needs one format, one size and a target that
+            // is not the window; anything else is drawn
+            if (readtexid.pixelFormat == drawtexid.pixelFormat && drawfbo && sw == dw && sh == dh &&
+                readtexid.sampleCount == drawtexid.sampleCount)
+            {
+                [self nearestCopyFrom: readtexid plane: readplane x: srcX0 y: srcY0 w: sw h: sh
+                                   to: drawtexid plane: drawplane x: dstX0 y: dstY0 w: dw h: dh];
+            }
+            else if ([self shaderBlitFrom: readtexid
+                                   origin: MTLOriginMake(srcX0, srcY0, 0)
+                                     size: MTLSizeMake(sw, sh, 1)
+                                       to: drawtexid
+                                   origin: MTLOriginMake(dstX0, dstY0, 0)
+                                     size: MTLSizeMake(dw, dh, 1)] == false)
+            {
+                ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            }
+        }
     }
 
-    // end encoding on current render encoder
-    [self endRenderEncoding];
+    // depth and stencil need a framebuffer object on both sides, and copy
+    // a texel at a time -- GL allows only nearest filtering for them
+    if ((mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) && readfbo && drawfbo)
+    {
+        bool did_depth = false;
 
-    // start blit encoder
-    id<MTLBlitCommandEncoder> blitCommandEncoder;
-    blitCommandEncoder = [self newBlitEncoder];
-    [blitCommandEncoder
-        copyFromTexture:readtexid sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(srcX0, srcY0, 0) sourceSize:MTLSizeMake(srcX1-srcX0, srcY1-srcY0, 1)
-        toTexture:drawtexid destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(dstX0, dstY0, 0) /*destinationSize:MTLSizeMake(dstX1, dstY1, 0)*/ ];
-    [blitCommandEncoder endEncoding];
+        if (mask & GL_DEPTH_BUFFER_BIT)
+        {
+            NSUInteger rp = 0, dp = 0;
+            id<MTLTexture> from = [self blitImage: &readfbo->depth plane: &rp];
+            id<MTLTexture> to = [self blitImage: &drawfbo->depth plane: &dp];
 
+            if (from && to && from.pixelFormat == to.pixelFormat)
+            {
+                [self nearestCopyFrom: from plane: rp x: srcX0 y: srcY0 w: sw h: sh
+                                   to: to plane: dp x: dstX0 y: dstY0 w: dw h: dh];
+                did_depth = true;
+            }
+        }
+
+        if (mask & GL_STENCIL_BUFFER_BIT)
+        {
+            NSUInteger rp = 0, dp = 0;
+            id<MTLTexture> from = [self blitImage: &readfbo->stencil plane: &rp];
+            id<MTLTexture> to = [self blitImage: &drawfbo->stencil plane: &dp];
+
+            // a packed depth-stencil image went across whole with the depth
+            bool packed = did_depth && readfbo->stencil.buf.tex == readfbo->depth.buf.tex &&
+                          drawfbo->stencil.buf.tex == drawfbo->depth.buf.tex;
+
+            if (!packed && from && to && from.pixelFormat == to.pixelFormat)
+                [self nearestCopyFrom: from plane: rp x: srcX0 y: srcY0 w: sw h: sh
+                                   to: to plane: dp x: dstX0 y: dstY0 w: dw h: dh];
+        }
+    }
 }
 
 void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)
@@ -3766,6 +3951,97 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     MTL_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);
 
     return tex;
+}
+
+// Slot k holds the attachment glDrawBuffers put at k: fragment output k and
+// glClearBuffer's drawbuffer k both land there, whatever attachment it is
+static FBOAttachment *drawSlot(Framebuffer *fbo, int k)
+{
+    if (k >= fbo->n_draw_buffers)
+        return NULL;
+
+    GLenum b = fbo->draw_buffers[k];
+
+    if (b < GL_COLOR_ATTACHMENT0 || b >= GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
+        return NULL;
+
+    FBOAttachment *a = &fbo->color_attachments[b - GL_COLOR_ATTACHMENT0];
+
+    return a->texture ? a : NULL;
+}
+
+// The level and layer an attachment names, as a texture Metal can draw into,
+// blit and read. A 3D texture can't be viewed a slice at a time, so it comes
+// back whole with the slice in plane.
+- (id<MTLTexture>) attachmentView: (FBOAttachment *)att texture: (Texture *)tex plane: (NSUInteger *)plane
+{
+    id<MTLTexture> base = (__bridge id<MTLTexture>)(tex->mtl_data);
+
+    *plane = 0;
+
+    // a renderbuffer is one image, and a buffer texture has no views
+    if (base == nil || att->textarget == GL_RENDERBUFFER || base.textureType == MTLTextureTypeTextureBuffer)
+        return base;
+
+    NSUInteger level = att->level < base.mipmapLevelCount ? att->level : 0;
+    NSUInteger slice = att->layer;
+    MTLTextureType type = base.textureType;
+
+    // glFramebufferTexture2D names a cube face through its target
+    if (att->textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && att->textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)
+        slice = att->textarget - GL_TEXTURE_CUBE_MAP_POSITIVE_X;
+
+    NSUInteger slices = base.arrayLength;
+
+    if (type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray)
+        slices *= 6;
+
+    if (type == MTLTextureType3D)
+    {
+        *plane = att->layered ? 0 : att->layer;
+
+        if (level == 0)
+            return base;
+
+        return [base newTextureViewWithPixelFormat: base.pixelFormat textureType: type
+                                            levels: NSMakeRange(level, 1) slices: NSMakeRange(0, 1)] ?: base;
+    }
+
+    // every layer at once keeps the array, from the one level
+    if (att->layered)
+    {
+        if (level == 0)
+            return base;
+
+        return [base newTextureViewWithPixelFormat: base.pixelFormat textureType: type
+                                            levels: NSMakeRange(level, 1) slices: NSMakeRange(0, slices)] ?: base;
+    }
+
+    if (level == 0 && slice == 0 && (type == MTLTextureType2D || type == MTLTextureType2DMultisample))
+        return base;
+
+    if (slice >= slices)
+        slice = 0;
+
+    MTLTextureType one = (type == MTLTextureType2DMultisampleArray || type == MTLTextureType2DMultisample)
+                       ? MTLTextureType2DMultisample
+                       : (type == MTLTextureType1D || type == MTLTextureType1DArray) ? MTLTextureType1D
+                       : MTLTextureType2D;
+
+    return [base newTextureViewWithPixelFormat: base.pixelFormat textureType: one
+                                        levels: NSMakeRange(level, 1) slices: NSMakeRange(slice, 1)] ?: base;
+}
+
+// how many layers a draw into this attachment may pick from with gl_Layer
+static NSUInteger layerCount(id<MTLTexture> t)
+{
+    if (t.textureType == MTLTextureType3D)
+        return t.depth;
+
+    if (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray)
+        return t.arrayLength * 6;
+
+    return t.arrayLength;
 }
 
 // Upload pixel data into a Metal texture without replaceRegion, which the AGX
@@ -3976,15 +4252,6 @@ void mtlBlitFramebuffer(GLMContext glm_ctx, GLint srcX0, GLint srcY0, GLint srcX
     return true;
 }
 
-// Metal fixes the swizzle when a texture is made, so a change afterwards needs
-// a new one. Pack the four channels to notice when it moves.
-static GLuint packedSwizzle(const TextureParameter *p)
-{
-    return ((GLuint)(p->swizzle_r & 0xFF))
-         | ((GLuint)(p->swizzle_g & 0xFF) << 8)
-         | ((GLuint)(p->swizzle_b & 0xFF) << 16)
-         | ((GLuint)(p->swizzle_a & 0xFF) << 24);
-}
 
 // What a shader may do with the texture. Metal fixes usage when a texture is
 // made, and glBindImageTexture can ask for writes -- or atomic counting --
@@ -3997,12 +4264,6 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     // once an image unit has cast it, every remake keeps allowing that
     if (tex->format_view)
         usage |= MTLTextureUsagePixelFormatView;
-
-    // Metal will not make a swizzled texture that can be drawn into or written
-    if (tex->params.swizzled ||
-        tex->params.swizzle_r != GL_RED || tex->params.swizzle_g != GL_GREEN ||
-        tex->params.swizzle_b != GL_BLUE || tex->params.swizzle_a != GL_ALPHA)
-        return usage;
 
     // Metal fixes usage when the texture is made, and a texture attached to a
     // framebuffer later without it draws nothing, so anything GL can render
@@ -4058,40 +4319,17 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     bool storage_changed = (tex->dirty_bits & (DIRTY_TEXTURE_LEVEL | DIRTY_TEXTURE_DATA)) != 0;
     bool sampler_changed = (tex->dirty_bits & (DIRTY_TEXTURE_PARAM | DIRTY_TEXTURE_ACCESS)) != 0;
 
-    // A swizzle set after the texture exists was silently ignored. Re-view the
-    // same storage under the new channels; nothing drawn into it is lost.
-    if (tex->mtl_data && packedSwizzle(&tex->params) != tex->mtl_swizzle)
-    {
-        // made from the storage itself, not the last view: a view keeps its
-        // parent alive, so every swizzle change used to add one to a chain
-        id<MTLTexture> current = (__bridge id<MTLTexture>)(tex->mtl_data);
-        id<MTLTexture> base = current.parentTexture ? current.parentTexture : current;
-        MTLTextureSwizzleChannels sw = MTLTextureSwizzleChannelsMake(
-            swizzleForGL(tex->params.swizzle_r, MTLTextureSwizzleRed),
-            swizzleForGL(tex->params.swizzle_g, MTLTextureSwizzleGreen),
-            swizzleForGL(tex->params.swizzle_b, MTLTextureSwizzleBlue),
-            swizzleForGL(tex->params.swizzle_a, MTLTextureSwizzleAlpha));
-
-        id<MTLTexture> view = [base newTextureViewWithPixelFormat: current.pixelFormat
-                                                     textureType: current.textureType
-                                                          levels: NSMakeRange(0, base.mipmapLevelCount)
-                                                          slices: NSMakeRange(0, base.arrayLength *
-                                                                              ((base.textureType == MTLTextureTypeCube ||
-                                                                                base.textureType == MTLTextureTypeCubeArray) ? 6 : 1))
-                                                         swizzle: sw];
-
-        if (view)
-        {
-            CFBridgingRelease(tex->mtl_data);
-            tex->mtl_data = (void *)CFBridgingRetain(view);
-            tex->mtl_swizzle = packedSwizzle(&tex->params);
-        }
-    }
-
     if (storage_changed && tex->mtl_data)
     {
         CFBridgingRelease(tex->mtl_data);
         tex->mtl_data = NULL;
+    }
+
+    if (storage_changed && tex->mtl_sample_view)
+    {
+        CFBridgingRelease(tex->mtl_sample_view);
+        tex->mtl_sample_view = NULL;
+        tex->mtl_sample_base = NULL;
     }
 
     if ((sampler_changed || storage_changed) && tex->params.mtl_data)
@@ -4777,6 +5015,16 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     [self bindBindlessToRenderEncoder];
 }
 
+// GL only encodes into an sRGB image while GL_FRAMEBUFFER_SRGB is on; off, a
+// draw stores its values as they are, which Metal does through the linear twin
+static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
+{
+    if (ctx->state.caps.framebuffer_srgb)
+        return f;
+
+    return (MTLPixelFormat)mglMetalFormatDesc((uint16_t)f)->mtl_linear;
+}
+
 - (bool) newRenderEncoder
 {
     // I can't remember why this is here...
@@ -4837,36 +5085,35 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
 
         for (int i=0; i<MAX_COLOR_ATTACHMENTS; i++)
         {
-            if (fbo->color_attachments[i].texture)
+            FBOAttachment *att = drawSlot(fbo, i);
+
+            if (att == NULL)
+                continue;
+
+            Texture *tex = [self framebufferAttachmentTexture: att];
+
+            if (!tex || ![self bindMTLTexture: tex] || !tex->mtl_data)
             {
-                Texture *tex;
-
-                tex = [self framebufferAttachmentTexture: &fbo->color_attachments[i]];
-
-                if (!tex || ![self bindMTLTexture: tex] || !tex->mtl_data)
-                {
-                    MGL_NSERR(@"MGL ERROR: colour attachment %d has no metal texture", i);
-                    ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
-                    return false;
-                }
-
-                _renderPassDescriptor.colorAttachments[i].texture = (__bridge id<MTLTexture> _Nullable)(tex->mtl_data);
-
-                // buf is a union, so only read rbo when this really is one
-                bool is_draw = (fbo->color_attachments[i].textarget == GL_RENDERBUFFER)
-                             ? fbo->color_attachments[i].buf.rbo->is_draw_buffer
-                             : true;
-
-                if (is_draw)
-                {
-                    _renderPassDescriptor.renderTargetWidth = tex->width;
-                    _renderPassDescriptor.renderTargetHeight = tex->height;
-                }
+                MGL_NSERR(@"MGL ERROR: colour attachment %d has no metal texture", i);
+                ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
+                return false;
             }
 
-            // early out
-            if ((fbo->color_attachment_bitfield >> (i+1)) == 0)
-                break;
+            NSUInteger plane = 0;
+            id<MTLTexture> target = [self attachmentView: att texture: tex plane: &plane];
+            MTLPixelFormat want = drawFormat(ctx, target.pixelFormat);
+
+            if (want != target.pixelFormat)
+                target = [target newTextureViewWithPixelFormat: want] ?: target;
+
+            _renderPassDescriptor.colorAttachments[i].texture = target;
+            _renderPassDescriptor.colorAttachments[i].depthPlane = plane;
+
+            if (att->layered)
+                _renderPassDescriptor.renderTargetArrayLength = layerCount(target);
+
+            _renderPassDescriptor.renderTargetWidth = target.width;
+            _renderPassDescriptor.renderTargetHeight = target.height;
         }
 
         // depth attachment
@@ -4877,7 +5124,17 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
             tex = [self framebufferAttachmentTexture: &fbo->depth];
             MTL_CHECK_RETURN_FALSE(tex, GL_INVALID_OPERATION);
 
-            _renderPassDescriptor.depthAttachment.texture = (__bridge id<MTLTexture> _Nullable)(tex->mtl_data);
+            // made here if nothing has made it yet, or a clear has nothing to clear
+            MTL_CHECK_RETURN_FALSE([self bindMTLTexture: tex] && tex->mtl_data, GL_INVALID_FRAMEBUFFER_OPERATION);
+
+            NSUInteger plane = 0;
+            id<MTLTexture> target = [self attachmentView: &fbo->depth texture: tex plane: &plane];
+
+            _renderPassDescriptor.depthAttachment.texture = target;
+            _renderPassDescriptor.depthAttachment.depthPlane = plane;
+
+            if (fbo->depth.layered)
+                _renderPassDescriptor.renderTargetArrayLength = layerCount(target);
         }
 
         // stencil attachment
@@ -4888,7 +5145,23 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
             tex = [self framebufferAttachmentTexture: &fbo->stencil];
             MTL_CHECK_RETURN_FALSE(tex, GL_INVALID_OPERATION);
 
-            _renderPassDescriptor.stencilAttachment.texture = (__bridge id<MTLTexture> _Nullable)(tex->mtl_data);
+            // made here if nothing has made it yet, or a clear has nothing to clear
+            MTL_CHECK_RETURN_FALSE([self bindMTLTexture: tex] && tex->mtl_data, GL_INVALID_FRAMEBUFFER_OPERATION);
+
+            NSUInteger plane = 0;
+            id<MTLTexture> target = [self attachmentView: &fbo->stencil texture: tex plane: &plane];
+
+            // one packed depth-stencil image has to be the same object in both
+            if (fbo->depth.texture && fbo->depth.buf.tex == fbo->stencil.buf.tex &&
+                fbo->depth.level == fbo->stencil.level && fbo->depth.layer == fbo->stencil.layer &&
+                fbo->depth.textarget == fbo->stencil.textarget && _renderPassDescriptor.depthAttachment.texture)
+                target = _renderPassDescriptor.depthAttachment.texture;
+
+            _renderPassDescriptor.stencilAttachment.texture = target;
+            _renderPassDescriptor.stencilAttachment.depthPlane = plane;
+
+            if (fbo->stencil.layered)
+                _renderPassDescriptor.renderTargetArrayLength = layerCount(target);
         }
     }
     else
@@ -5065,10 +5338,9 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
             bool clear_all = (ctx->state.clear_bitmask & GL_COLOR_BUFFER_BIT) != 0;
 
             for(int i=0; i<STATE(max_color_attachments);i++) {
-                FBOAttachment * fboa;
-                fboa = &fbo->color_attachments[i];
+                FBOAttachment * fboa = drawSlot(fbo, i);
 
-                if (_renderPassDescriptor.colorAttachments[i].texture == nil)
+                if (fboa == NULL || _renderPassDescriptor.colorAttachments[i].texture == nil)
                     continue;
 
                 // glClearBuffer* is per attachment, plain glClear is all of them
@@ -5231,8 +5503,8 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
         _pendingScissorClear = 0;
     }
 
-    // only bind all this if there is a VAO
-    if (VAO())
+    // only bind all this if there is a VAO and something will be drawn
+    if (VAO() && !_clearOnly)
     {
         if ([self bindVertexBuffersToCurrentRenderEncoder] == false)
         {
@@ -7869,22 +8141,19 @@ static MTLWinding mtlWindingFor(const Program *p)
 
         for (int i=0; i<STATE(max_color_attachments); i++)
         {
-            if (fbo->color_attachments[i].texture)
-            {
-                Texture *tex;
+            FBOAttachment *att = drawSlot(fbo, i);
 
-                tex = [self framebufferAttachmentTexture: &fbo->color_attachments[i]];
-                MTL_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);
+            if (att == NULL)
+                continue;
 
-                RETURN_NULL_ON_FAILURE([self bindMTLTexture: tex]);
-                MTL_CHECK_RETURN_VALUE(tex->mtl_data, GL_OUT_OF_MEMORY, NULL);
+            Texture *tex = [self framebufferAttachmentTexture: att];
+            MTL_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);
 
-                pipelineStateDescriptor.colorAttachments[i].pixelFormat = mtlPixelFormatForGLTex(tex);
-            }
+            RETURN_NULL_ON_FAILURE([self bindMTLTexture: tex]);
+            MTL_CHECK_RETURN_VALUE(tex->mtl_data, GL_OUT_OF_MEMORY, NULL);
 
-            // early out
-            if ((fbo->color_attachment_bitfield >> (i+1)) == 0)
-                break;
+            pipelineStateDescriptor.colorAttachments[i].pixelFormat =
+                drawFormat(ctx, ((__bridge id<MTLTexture>)(tex->mtl_data)).pixelFormat);
         }
 
         // depth attachment
@@ -9999,7 +10268,7 @@ void mtlSwapBuffers (GLMContext glm_ctx)
 #pragma mark C interface to mtlClearBuffer
 -(void) mtlClearBuffer:(GLMContext) glm_ctx type:(GLuint) type mask:(GLbitfield) mask
 {
-    RETURN_ON_FAILURE([self processGLState: false]);
+    [self applyPendingClears];
 }
 
 void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
@@ -10110,9 +10379,52 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
 
 // Picks the texture a read should come from: an attachment when an FBO is bound
 // for reading, otherwise the default framebuffer's drawable.
+// glClear and glClearBuffer* only note what to clear, and the next render pass
+// does it. Anything reading an image back has to make that pass happen first.
+- (void) applyPendingClears
+{
+    Framebuffer *fb = ctx->state.framebuffer;
+    GLbitfield pending = ctx->state.clear_framebuffer == fb ? ctx->state.clear_bitmask : 0;
+
+    if (fb)
+    {
+        for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+            pending |= fb->color_attachments[i].clear_bitmask;
+
+        pending |= fb->depth.clear_bitmask | fb->stencil.clear_bitmask;
+    }
+
+    if (!pending)
+        return;
+
+    // A clear is a pass of its own: what was drawn before it stays before it,
+    // and nothing drawn after it can be wiped when some later pass begins.
+    [self endRenderEncoding];
+
+    if (_currentCommandBuffer == nil && [self newCommandBuffer] == false)
+        return;
+
+    _clearOnly = true;
+
+    if ([self newRenderEncoder])
+        [self endRenderEncoding];
+
+    _clearOnly = false;
+
+    // the next draw builds its encoder, and binds everything on it, afresh
+    ctx->state.dirty_bits |= DIRTY_VAO | DIRTY_TEX | DIRTY_RENDER_STATE;
+}
+
+- (NSUInteger) readPlane
+{
+    return _readPlane;
+}
+
 -(id<MTLTexture>) readSourceTexture: (GLMContext) glm_ctx forFormat: (GLenum) format
 {
     Framebuffer *fbo = glm_ctx->state.readbuffer;
+
+    _readPlane = 0;
 
     if (fbo)
     {
@@ -10166,7 +10478,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
             return nil;
         }
 
-        return (__bridge id<MTLTexture>)(tex->mtl_data);
+        return [self attachmentView: att texture: tex plane: &_readPlane];
     }
 
     // default framebuffer: FRONT and BACK are the same surface here
@@ -10307,8 +10619,7 @@ static bool isCombinedDepthStencil(MTLPixelFormat f)
         return;
 
     // glClear only sets a bitmask, so force the pass through first
-    if (glm_ctx->state.clear_bitmask)
-        [self processGLState: false];
+    [self applyPendingClears];
 
     [self endRenderEncoding];
 
@@ -10372,7 +10683,7 @@ static bool isCombinedDepthStencil(MTLPixelFormat f)
         [blit copyFromTexture: src
                   sourceSlice: 0
                   sourceLevel: 0
-                 sourceOrigin: MTLOriginMake(x, flipped_y, 0)
+                 sourceOrigin: MTLOriginMake(x, flipped_y, _readPlane)
                    sourceSize: MTLSizeMake(w, h, 1)
                      toBuffer: staging
             destinationOffset: 0
@@ -10407,6 +10718,7 @@ static bool isCombinedDepthStencil(MTLPixelFormat f)
     if (!tex || !pixelBytes)
         return;
 
+    [self applyPendingClears];
     [self endRenderEncoding];
 
     if (![self bindMTLTexture: tex] || !tex->mtl_data)
@@ -11865,7 +12177,7 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
     glm_ctx->mtl_funcs.mtlFlushBufferRange = mtlFlushBufferRange;
 
     // both live in MGLBlit.m
-    void mtlCopyTexSubImage(GLMContext glm_ctx, Texture *tex, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+    void mtlCopyTexSubImage(GLMContext glm_ctx, Texture *tex, GLint level, GLint xoffset, GLint yoffset, GLint slice, GLint x, GLint y, GLsizei width, GLsizei height);
     void mtlCopyImageSubData(GLMContext glm_ctx, Texture *srcTex, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, Texture *dstTex, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei width, GLsizei height, GLsizei depth);
 
     glm_ctx->mtl_funcs.mtlCopyTexSubImage = mtlCopyTexSubImage;
@@ -12161,6 +12473,17 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
         .supports_astc_hdr = [_device supportsFamily: MTLGPUFamilyApple6],
     };
     mglFormatTableSetDevice(&fmtCaps);
+
+    // The context picked its window formats before anyone knew the GPU, and
+    // the table said no to all of them: the default framebuffer came up with
+    // no depth, so a shader writing gl_FragDepth there had no pipeline.
+    if (glm_ctx->depth_format.format)
+        glm_ctx->depth_format.mtl_pixel_format =
+            mtlPixelFormatForGLFormatType(glm_ctx->depth_format.format, glm_ctx->depth_format.type);
+
+    if (glm_ctx->stencil_format.format)
+        glm_ctx->stencil_format.mtl_pixel_format =
+            mtlPixelFormatForGLFormatType(glm_ctx->stencil_format.format, glm_ctx->stencil_format.type);
 
     _scratchPool = [[MGLScratchBufferPool alloc] initWithDevice: _device];
     _kernels = [[MGLKernelLibrary alloc] initWithDevice: _device];

@@ -296,10 +296,10 @@ GPU_TEST(query_xfb, get_query_buffer_object)
 
     // offset past the end
     glGetQueryBufferObjectiv(q, b, GL_QUERY_RESULT, 61);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glGetQueryBufferObjecti64v(q, b, GL_QUERY_RESULT, 60);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     // invalid query
     glGetQueryBufferObjectiv(9999, b, GL_QUERY_RESULT_AVAILABLE, 0);

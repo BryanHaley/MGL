@@ -319,9 +319,9 @@ GPU_TEST(texture_query, texture_level_parameter_dsa_missing_validation)
     GLuint tex = 0;
     GLint iv = 0;
 
-    /* No such texture — the DSA version does not set an error */
+    /* No such texture */
     glGetTextureLevelParameteriv(999123, 0, GL_TEXTURE_WIDTH, &iv);
-    /* The implementation currently returns 0 without setting error */
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glCreateTextures(GL_TEXTURE_2D, 1, &tex);
     glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 8);

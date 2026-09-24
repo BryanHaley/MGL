@@ -33,11 +33,13 @@
 - (id<MTLCommandBuffer>) liveCommandBuffer;
 - (void) endRenderEncoding;
 - (id<MTLTexture>) readSourceTexture:(GLMContext)glm_ctx forFormat:(GLenum)format;
+- (NSUInteger) readPlane;
+- (void) applyPendingClears;
 - (bool) bindMTLTexture:(Texture *)tex;
 @end
 
 void mtlCopyTexSubImage(GLMContext glm_ctx, Texture *tex, GLint level,
-    GLint xoffset, GLint yoffset, GLint x, GLint y,
+    GLint xoffset, GLint yoffset, GLint slice, GLint x, GLint y,
     GLsizei width, GLsizei height)
 {
     @autoreleasepool {
@@ -52,6 +54,7 @@ void mtlCopyTexSubImage(GLMContext glm_ctx, Texture *tex, GLint level,
 
         id<MTLTexture> dstTex = (__bridge id<MTLTexture>)(tex->mtl_data);
 
+        [renderer applyPendingClears];
         [renderer endRenderEncoding];
 
         id<MTLBlitCommandEncoder> blit = [[renderer liveCommandBuffer] blitCommandEncoder];
@@ -68,12 +71,13 @@ void mtlCopyTexSubImage(GLMContext glm_ctx, Texture *tex, GLint level,
         [blit copyFromTexture:srcTex
                  sourceSlice:0
                  sourceLevel:0
-                sourceOrigin:MTLOriginMake((NSUInteger)x, srcY, 0)
+                sourceOrigin:MTLOriginMake((NSUInteger)x, srcY, [renderer readPlane])
                   sourceSize:MTLSizeMake((NSUInteger)width, (NSUInteger)height, 1)
                    toTexture:dstTex
-          destinationSlice:0
+          destinationSlice:(dstTex.textureType == MTLTextureType3D ? 0 : (NSUInteger)slice)
           destinationLevel:(NSUInteger)level
-         destinationOrigin:MTLOriginMake((NSUInteger)xoffset, (NSUInteger)yoffset, 0)];
+         destinationOrigin:MTLOriginMake((NSUInteger)xoffset, (NSUInteger)yoffset,
+                                         dstTex.textureType == MTLTextureType3D ? (NSUInteger)slice : 0)];
 
         [blit endEncoding];
     }
