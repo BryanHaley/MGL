@@ -43,6 +43,7 @@ extern int mglLowerAtomicCounters(const unsigned int *words, size_t count,
 #include "shaders.h"
 #include "buffers.h"
 #include "mgl_log.h"
+#include "mgl.h"
 
 // A block declared in two stages is one block to GL. Shared with uniforms.c's
 // enumeration so a member's block index matches the block queries.
@@ -1978,7 +1979,15 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
                                                           &sb_list, &sb_count) == SPVC_SUCCESS)
             {
                 for (size_t sb = 0; sb < sb_count; sb++)
+                {
+                    // atomic counters became storage blocks in a set of their
+                    // own, and share binding numbers with the real ones
+                    if (strncmp(sb_list[sb].name, "MglAtomicCounters", 17) == 0 ||
+                        strncmp(sb_list[sb].name, "mglAtomic", 9) == 0)
+                        continue;
+
                     spvc_compiler_set_decoration(compiler_msl, sb_list[sb].id, SpvDecorationDescriptorSet, 1);
+                }
             }
         }
     }
@@ -3725,9 +3734,116 @@ static void freeSyntheticGeometry(Program *pptr)
     pptr->geom_shader = NULL;
 }
 
+typedef void (*MatSetF)(GLMContext, GLuint, GLint, GLsizei, GLboolean, const GLfloat *);
+typedef void (*MatSetD)(GLMContext, GLuint, GLint, GLsizei, GLboolean, const GLdouble *);
+
+// Gives one uniform the value its declaration starts it with.
+static void setUniformInitializer(GLMContext ctx, Program *pptr, const MglUniformInit *u)
+{
+    // [columns - 2][rows - 2]
+    static const MatSetF matf[3][3] = {
+        { mglProgramUniformMatrix2fv,   mglProgramUniformMatrix2x3fv, mglProgramUniformMatrix2x4fv },
+        { mglProgramUniformMatrix3x2fv, mglProgramUniformMatrix3fv,   mglProgramUniformMatrix3x4fv },
+        { mglProgramUniformMatrix4x2fv, mglProgramUniformMatrix4x3fv, mglProgramUniformMatrix4fv },
+    };
+    static const MatSetD matd[3][3] = {
+        { mglProgramUniformMatrix2dv,   mglProgramUniformMatrix2x3dv, mglProgramUniformMatrix2x4dv },
+        { mglProgramUniformMatrix3x2dv, mglProgramUniformMatrix3dv,   mglProgramUniformMatrix3x4dv },
+        { mglProgramUniformMatrix4x2dv, mglProgramUniformMatrix4x3dv, mglProgramUniformMatrix4dv },
+    };
+    GLint loc = mglGetUniformLocation(ctx, pptr->name, u->name);
+    int n = u->rows ? u->cols * u->rows : u->cols;
+    GLfloat f[16];
+    GLint i[16];
+    GLuint ui[16];
+
+    if (loc < 0 || u->cols < 1 || u->cols > 4 || (u->rows && (u->rows < 2 || u->cols < 2)))
+        return;
+
+    for (int c = 0; c < n; c++)
+    {
+        f[c] = (GLfloat)u->values[c];
+        i[c] = (GLint)u->values[c];
+        ui[c] = (GLuint)u->values[c];
+    }
+
+    if (u->rows)
+    {
+        if (u->kind == 'd')
+            matd[u->cols - 2][u->rows - 2](ctx, pptr->name, loc, 1, GL_FALSE, u->values);
+        else
+            matf[u->cols - 2][u->rows - 2](ctx, pptr->name, loc, 1, GL_FALSE, f);
+
+        return;
+    }
+
+    switch (u->kind)
+    {
+        case 'f':
+        {
+            static void (*const set[4])(GLMContext, GLuint, GLint, GLsizei, const GLfloat *) = {
+                mglProgramUniform1fv, mglProgramUniform2fv, mglProgramUniform3fv, mglProgramUniform4fv };
+            set[u->cols - 1](ctx, pptr->name, loc, 1, f);
+            break;
+        }
+        case 'd':
+        {
+            static void (*const set[4])(GLMContext, GLuint, GLint, GLsizei, const GLdouble *) = {
+                mglProgramUniform1dv, mglProgramUniform2dv, mglProgramUniform3dv, mglProgramUniform4dv };
+            set[u->cols - 1](ctx, pptr->name, loc, 1, u->values);
+            break;
+        }
+        case 'u':
+        {
+            static void (*const set[4])(GLMContext, GLuint, GLint, GLsizei, const GLuint *) = {
+                mglProgramUniform1uiv, mglProgramUniform2uiv, mglProgramUniform3uiv, mglProgramUniform4uiv };
+            set[u->cols - 1](ctx, pptr->name, loc, 1, ui);
+            break;
+        }
+        default:
+        {
+            static void (*const set[4])(GLMContext, GLuint, GLint, GLsizei, const GLint *) = {
+                mglProgramUniform1iv, mglProgramUniform2iv, mglProgramUniform3iv, mglProgramUniform4iv };
+            set[u->cols - 1](ctx, pptr->name, loc, 1, i);
+            break;
+        }
+    }
+}
+
+// Uniforms declared with a value start with it after every successful link.
+static void applyUniformInitializers(GLMContext ctx, Program *pptr)
+{
+    MglUniformInit *inits;
+
+    if (pptr->link_status != GL_TRUE)
+        return;
+
+    inits = (MglUniformInit *)malloc(256 * sizeof(MglUniformInit));
+
+    if (inits == NULL)
+        return;
+
+    for (int s = 0; s < _MAX_SHADER_TYPES; s++)
+    {
+        Shader *sh = pptr->shader_slots[s];
+        int n;
+
+        if (sh == NULL || sh->compiled_glsl_shader == NULL || sh->spirv_binary)
+            continue;
+
+        n = mglUniformInitializers(sh->compiled_glsl_shader, sh->pp_src ? sh->pp_src : sh->src,
+                                   mglGlslangResource(ctx), inits, 256);
+
+        for (int k = 0; k < n; k++)
+            setUniformInitializer(ctx, pptr, &inits[k]);
+    }
+
+    free(inits);
+}
+
 // What the program interface queries answer from, worked out once the link
 // has succeeded.
-static void reflectProgram(Program *pptr)
+static void reflectProgram(GLMContext ctx, Program *pptr)
 {
     void *shaders[_MAX_SHADER_TYPES] = { 0 };
     const char *sources[_MAX_SHADER_TYPES] = { 0 };
@@ -3749,6 +3865,7 @@ static void reflectProgram(Program *pptr)
     }
 
     mglReflectProgram(shaders, sources, _MAX_SHADER_TYPES, &pptr->resources);
+    applyUniformInitializers(ctx, pptr);
 }
 
 void mglLinkProgram(GLMContext ctx, GLuint program)
@@ -3788,6 +3905,23 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
         if (pptr->shader_slots[s] && pptr->shader_slots[s]->src)
             pptr->stage_src[s] = strdup(pptr->shader_slots[s]->src);
+    }
+
+    // a compute shader shares its program with no other stage
+    if (pptr->shader_slots[_COMPUTE_SHADER])
+    {
+        for (int s = 0; s < _MAX_SHADER_TYPES; s++)
+        {
+            if (s != _COMPUTE_SHADER && pptr->shader_slots[s])
+            {
+                pptr->link_status = GL_FALSE;
+                pptr->validate_status = GL_FALSE;
+                free(pptr->log);
+                pptr->log = strdup("link failed: a compute shader cannot be linked with other stages");
+
+                return;
+            }
+        }
     }
 
     // GL 4.6 section 7.3: a program with one tessellation stage and not the
@@ -3911,7 +4045,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     {
         assignUniformLocations(pptr);
         pptr->validate_status = pptr->link_status;
-        reflectProgram(pptr);
+        reflectProgram(ctx, pptr);
         ctx->error_suppress--;
 
         return;
@@ -3975,7 +4109,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         }
 
         pptr->validate_status = pptr->link_status;
-        reflectProgram(pptr);
+        reflectProgram(ctx, pptr);
         ctx->error_suppress--;
 
         return;
@@ -4101,7 +4235,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         pptr->log = strdup("link failed: no usable shader stage");
 
     pptr->validate_status = pptr->link_status;
-    reflectProgram(pptr);
+    reflectProgram(ctx, pptr);
 
     /* Only call mtlBindProgram if Metal functions are initialized */
     if (ctx->mtl_funcs.mtlBindProgram) {
@@ -4485,14 +4619,12 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
             *params = programLongestName(pptr, SPVC_RESOURCE_TYPE_UNIFORM_BUFFER);
             break;
         case GL_COMPUTE_WORK_GROUP_SIZE:
-            if (pptr->shader_slots[_COMPUTE_SHADER]) {
-                /* Return local workgroup size for compute shaders */
-                params[0] = pptr->local_workgroup_size.x;
-                params[1] = pptr->local_workgroup_size.y;
-                params[2] = pptr->local_workgroup_size.z;
-            } else {
-                params[0] = params[1] = params[2] = 0;
-            }
+            // only a successfully linked program with a compute stage has one
+            ERROR_CHECK_RETURN(pptr->link_status == GL_TRUE && pptr->stage_src[_COMPUTE_SHADER],
+                               GL_INVALID_OPERATION);
+            params[0] = pptr->local_workgroup_size.x;
+            params[1] = pptr->local_workgroup_size.y;
+            params[2] = pptr->local_workgroup_size.z;
             break;
         // what the tessellation stages declared, read out of their SPIR-V
         case GL_TESS_CONTROL_OUTPUT_VERTICES:

@@ -279,6 +279,9 @@ static void drawTransformFeedbackCommon(GLMContext ctx, GLenum mode, GLuint id, 
     ERROR_CHECK_RETURN(validate_vao(ctx, false), GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
 
+    if (mglConditionalRenderSkips(ctx))
+        return;
+
     ctx->mtl_funcs.mtlDrawArraysInstanced(ctx, mode, 0, count, instancecount);
 }
 

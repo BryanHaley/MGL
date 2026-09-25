@@ -41,7 +41,7 @@ void mglClear(GLMContext ctx, GLbitfield mask)
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
-    if (!mglDrawFramebufferComplete(ctx))
+    if (!mglDrawFramebufferComplete(ctx) || mglConditionalRenderSkips(ctx))
         return;
 
     ctx->state.clear_bitmask = mask;
@@ -155,7 +155,7 @@ void mglClearBufferfv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLf
     Framebuffer * fbo = ctx->state.framebuffer;
     FBOAttachment * fboa;
 
-    if (!mglDrawFramebufferComplete(ctx))
+    if (!mglDrawFramebufferComplete(ctx) || mglConditionalRenderSkips(ctx))
         return;
 
     ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
@@ -199,7 +199,7 @@ void mglClearBufferfi(GLMContext ctx, GLenum buffer, GLint drawbuffer, GLfloat d
     Framebuffer * fbo = ctx->state.framebuffer;
     FBOAttachment * fboa;
 
-    if (!mglDrawFramebufferComplete(ctx))
+    if (!mglDrawFramebufferComplete(ctx) || mglConditionalRenderSkips(ctx))
         return;
 
     if (buffer != GL_DEPTH_STENCIL)
@@ -863,7 +863,7 @@ void mglClearBufferiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GLi
 
     ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
 
-    if (!mglDrawFramebufferComplete(ctx))
+    if (!mglDrawFramebufferComplete(ctx) || mglConditionalRenderSkips(ctx))
         return;
 
     for (int i = 0; i < 4; i++)
@@ -878,7 +878,7 @@ void mglClearBufferuiv(GLMContext ctx, GLenum buffer, GLint drawbuffer, const GL
 
     ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
 
-    if (!mglDrawFramebufferComplete(ctx))
+    if (!mglDrawFramebufferComplete(ctx) || mglConditionalRenderSkips(ctx))
         return;
 
     for (int i = 0; i < 4; i++)

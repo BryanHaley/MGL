@@ -421,3 +421,41 @@ void mglGetQueryBufferObjectui64v(GLMContext ctx, GLuint id, GLuint buffer, GLen
 {
     queryIntoBuffer(ctx, id, buffer, pname, offset, sizeof(GLuint64));
 }
+
+// True while glBeginConditionalRender's query says to throw draws, clears and
+// dispatches away. MGL always waits for the answer, which the NO_WAIT modes
+// allow too.
+bool mglConditionalRenderSkips(GLMContext ctx)
+{
+    GLenum mode = ctx->state.var.conditional_render_mode;
+    Query *q;
+    bool passed;
+
+    if (ctx->state.var.conditional_render_query == 0)
+        return false;
+
+    q = findQuery(ctx, ctx->state.var.conditional_render_query);
+
+    if (q == NULL)
+        return false;
+
+    if (isOcclusionTarget(q->target) && q->visibility_offset >= 0)
+    {
+        ctx->mtl_funcs.mtlFlush(ctx, true);
+        ctx->mtl_funcs.mtlQueryResult(ctx, q);
+    }
+
+    passed = q->result != 0;
+
+    switch (mode)
+    {
+        case GL_QUERY_WAIT_INVERTED:
+        case GL_QUERY_NO_WAIT_INVERTED:
+        case GL_QUERY_BY_REGION_WAIT_INVERTED:
+        case GL_QUERY_BY_REGION_NO_WAIT_INVERTED:
+            passed = !passed;
+            break;
+    }
+
+    return !passed;
+}

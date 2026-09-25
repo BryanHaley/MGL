@@ -217,3 +217,66 @@ GPU_TEST(atomics, image_ops_on_3d_and_array)
     glDeleteTextures(3, tex);
     glDeleteBuffers(1, &buf);
 }
+
+// Two counters on two bindings, counted up and down across many work groups:
+// every invocation gets its own number from each.
+GPU_TEST(atomics, counters_on_two_bindings_hand_out_unique_numbers)
+{
+    static const char *CS =
+        "#version 460\n"
+        "layout(local_size_x = 4, local_size_y = 3, local_size_z = 2) in;\n"
+        "layout(std430, binding = 0) buffer Output { uint inc_data[576]; uint dec_data[576]; };\n"
+        "layout(binding = 0, offset = 0) uniform atomic_uint g_inc_counter;\n"
+        "layout(binding = 1, offset = 0) uniform atomic_uint g_dec_counter;\n"
+        "void main() {\n"
+        "  const uint index = atomicCounterIncrement(g_inc_counter);\n"
+        "  inc_data[index] = index;\n"
+        "  dec_data[index] = atomicCounterDecrement(g_dec_counter);\n"
+        "}\n";
+    char log[1024] = { 0 };
+    GLuint prog = mgl_build_compute_program(CS, log, sizeof log);
+    GLuint out, counters[2], start[2] = { 0, 576 }, value[2] = { 0, 0 };
+    GLuint *data;
+    int wrong = 0;
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    glGenBuffers(1, &out);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, out);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint) * 576 * 2, NULL, GL_DYNAMIC_DRAW);
+
+    glGenBuffers(2, counters);
+    for (int i = 0; i < 2; i++)
+    {
+        glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, (GLuint)i, counters[i]);
+        glBufferData(GL_ATOMIC_COUNTER_BUFFER, sizeof(GLuint), &start[i], GL_STREAM_DRAW);
+    }
+
+    glUseProgram(prog);
+    glDispatchCompute(2, 3, 4);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+
+    data = (GLuint *)malloc(sizeof(GLuint) * 576 * 2);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint) * 576 * 2, data);
+
+    for (GLuint i = 0; i < 576 && data; i++)
+        if (data[i] != i && wrong++ == 0)
+            CHECK_MSG(0, "inc_data[%u] = %u", i, data[i]);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, counters[i]);
+        glGetBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof(GLuint), &value[i]);
+    }
+    CHECK_EQ_UINT(value[0], 576);
+    CHECK_EQ_UINT(value[1], 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    free(data);
+    glUseProgram(0);
+    glDeleteBuffers(1, &out);
+    glDeleteBuffers(2, counters);
+    glDeleteProgram(prog);
+}

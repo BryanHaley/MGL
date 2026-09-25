@@ -104,6 +104,21 @@ int mglXfbLayout(void *shader, MglXfbItem *items, int max_items, GLint *stride_b
 // the stage's limit. The limits are in locations; 0 skips that direction.
 bool mglVaryingLocationsFit(void *shader, int max_in, int max_out, char *msg, size_t msg_size);
 
+// One uniform the shader gives a starting value, split down to single
+// vectors or matrices so each can be set by name.
+typedef struct MglUniformInit_t {
+    char   name[160];
+    char   kind;                // 'f' float, 'd' double, 'i' int, 'u' uint, 'b' bool
+    GLint  cols;                // a vector's size, or a matrix's columns
+    GLint  rows;                // a matrix's rows, 0 otherwise
+    double values[16];
+} MglUniformInit;
+
+// The starting values a stage's uniforms are declared with. resource is the
+// glslang resource limits the stage was compiled with. Returns how many.
+int mglUniformInitializers(void *shader, const char *source, const void *resource,
+                           MglUniformInit *out, int max);
+
 #ifdef __cplusplus
 }
 #endif

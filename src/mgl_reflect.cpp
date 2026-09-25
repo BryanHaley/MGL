@@ -796,3 +796,148 @@ extern "C" bool mglVaryingLocationsFit(void *shader, int max_in, int max_out, ch
 
     return true;
 }
+
+// Relaxed parsing throws away a uniform's initializer, so the stage is parsed
+// again under plain GL rules just to read those constant values back.
+static bool hasUniformInitializer(const char *src)
+{
+    for (const char *p = src; (p = std::strstr(p, "uniform")) != nullptr; p += 7)
+    {
+        bool word = (p == src || !(std::isalnum((unsigned char)p[-1]) || p[-1] == '_')) &&
+                    !(std::isalnum((unsigned char)p[7]) || p[7] == '_');
+
+        if (!word)
+            continue;
+
+        for (const char *q = p + 7; *q && *q != ';' && *q != '{'; q++)
+            if (*q == '=')
+                return true;
+    }
+
+    return false;
+}
+
+static char initKind(glslang::TBasicType t)
+{
+    switch (t)
+    {
+        case glslang::EbtFloat:  return 'f';
+        case glslang::EbtDouble: return 'd';
+        case glslang::EbtInt:    return 'i';
+        case glslang::EbtUint:   return 'u';
+        case glslang::EbtBool:   return 'b';
+        default:                 return 0;
+    }
+}
+
+static void addInitializers(const glslang::TType &t, const std::string &name,
+                            const glslang::TConstUnionArray &values, int &at,
+                            std::vector<MglUniformInit> &out)
+{
+    if (t.isArray())
+    {
+        glslang::TType element(t, 0);
+        int n = t.getOuterArraySize();
+
+        for (int k = 0; k < n; k++)
+            addInitializers(element, name + "[" + std::to_string(k) + "]", values, at, out);
+
+        return;
+    }
+
+    if (t.isStruct())
+    {
+        for (const glslang::TTypeLoc &m : *t.getStruct())
+            addInitializers(*m.type, name + "." + m.type->getFieldName().c_str(), values, at, out);
+
+        return;
+    }
+
+    MglUniformInit init;
+    int n = t.computeNumComponents();
+
+    std::memset(&init, 0, sizeof(init));
+    init.kind = initKind(t.getBasicType());
+    init.cols = t.isMatrix() ? t.getMatrixCols() : t.getVectorSize();
+    init.rows = t.isMatrix() ? t.getMatrixRows() : 0;
+
+    for (int c = 0; c < n && c < 16 && at + c < values.size(); c++)
+    {
+        const glslang::TConstUnion &v = values[at + c];
+
+        switch (v.getType())
+        {
+            case glslang::EbtFloat:
+            case glslang::EbtDouble: init.values[c] = v.getDConst(); break;
+            case glslang::EbtInt:    init.values[c] = v.getIConst(); break;
+            case glslang::EbtUint:   init.values[c] = v.getUConst(); break;
+            case glslang::EbtBool:   init.values[c] = v.getBConst() ? 1 : 0; break;
+            default: break;
+        }
+    }
+
+    at += n;
+
+    if (init.kind && n <= 16 && name.size() < sizeof(init.name))
+    {
+        std::strcpy(init.name, name.c_str());
+        out.push_back(init);
+    }
+}
+
+extern "C" int mglUniformInitializers(void *shader, const char *source, const void *resource,
+                                      MglUniformInit *out, int max)
+{
+    if (shader == nullptr || source == nullptr || resource == nullptr ||
+        ((CShaderHandle *)shader)->shader == nullptr || !hasUniformInitializer(source))
+        return 0;
+
+    const glslang::TShader *compiled = ((CShaderHandle *)shader)->shader;
+    const glslang::TIntermediate *old = compiled->getIntermediate();
+
+    if (old == nullptr)
+        return 0;
+
+    glslang::TShader strict(old->getStage());
+
+    strict.setStrings(&source, 1);
+
+    if (!strict.parse((const TBuiltInResource *)resource, old->getVersion(), old->getProfile(),
+                      false, false, EShMsgDefault))
+        return 0;
+
+    const glslang::TIntermediate *interm = strict.getIntermediate();
+    glslang::TIntermAggregate *root = interm && interm->getTreeRoot() ? interm->getTreeRoot()->getAsAggregate() : nullptr;
+    std::vector<MglUniformInit> found;
+
+    if (root == nullptr)
+        return 0;
+
+    for (TIntermNode *n : root->getSequence())
+    {
+        glslang::TIntermAggregate *linker = n->getAsAggregate();
+
+        if (linker == nullptr || linker->getOp() != glslang::EOpLinkerObjects)
+            continue;
+
+        for (TIntermNode *obj : linker->getSequence())
+        {
+            glslang::TIntermSymbol *sym = obj->getAsSymbolNode();
+            int at = 0;
+
+            if (sym == nullptr || sym->getQualifier().storage != glslang::EvqUniform ||
+                sym->getConstArray().empty() || sym->getType().getBasicType() == glslang::EbtBlock)
+                continue;
+
+            addInitializers(sym->getType(), sym->getName().c_str(), sym->getConstArray(), at, found);
+        }
+    }
+
+    int count = 0;
+
+    for (const MglUniformInit &init : found)
+        if (count < max)
+            out[count++] = init;
+
+    return count;
+}

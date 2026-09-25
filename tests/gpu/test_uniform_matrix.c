@@ -398,3 +398,60 @@ GPU_TEST(uniform_matrix, errors)
     glUniformMatrix2dv(9999, 1, GL_FALSE, dval);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 }
+
+// Metal reads each column of a three-row matrix, and each vec3 of an array,
+// 16 bytes apart; GL hands them over packed. A draw used to see them skewed.
+GPU_TEST(uniform_matrix, three_row_matrices_reach_a_fragment_shader)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main(){gl_Position=vec4(p,0,1);}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "uniform mat3 m;\n"
+        "uniform mat4x3 w;\n"
+        "uniform vec3 a[2];\n"
+        "out vec4 o;\n"
+        "void main(){\n"
+        "  bool good = m == mat3(1,2,3,4,5,6,7,8,9) &&\n"
+        "              w == mat4x3(1,2,3,4,5,6,7,8,9,10,11,12) &&\n"
+        "              a[0] == vec3(1,2,3) && a[1] == vec3(4,5,6);\n"
+        "  o = good ? vec4(0,1,0,1) : vec4(1,0,0,1);\n"
+        "}\n";
+    static const GLfloat v[12] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    char err[1024] = { 0 };
+    MGLTestTarget t;
+    GLuint prog, vao, vbo;
+    unsigned char *px, c[4] = { 0 };
+
+    prog = mgl_build_program(VS, FS, err, sizeof err);
+    CHECK_MSG(prog != 0, "link: %s", err);
+    if (!prog) return;
+
+    mgl_target_create(&t, 4, 4, GL_RGBA8, 0);
+    mgl_target_bind(&t);
+    glViewport(0, 0, 4, 4);
+    vao = mgl_fullscreen_quad(&vbo);
+
+    glUseProgram(prog);
+    glUniformMatrix3fv(glGetUniformLocation(prog, "m"), 1, GL_FALSE, v);
+    glUniformMatrix4x3fv(glGetUniformLocation(prog, "w"), 1, GL_FALSE, v);
+    glUniform3fv(glGetUniformLocation(prog, "a"), 2, v);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 1, 1, c);
+        free(px);
+    }
+    CHECK_MSG(c[0] == 0 && c[1] == 255, "got %d,%d,%d", c[0], c[1], c[2]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

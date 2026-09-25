@@ -175,6 +175,46 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
 }
 
 // Main class performing the rendering
+// GL keeps a plain uniform packed tight, but Metal puts each three-component
+// column, and each vec3 of an array, 16 bytes apart. Writes the Metal layout
+// to out and returns its size, or 0 when the stored bytes already fit.
+static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyte *out, size_t room)
+{
+    size_t vectors, have;
+    GLint columns;
+
+    switch (map->uniform_type)
+    {
+        // a lone vec3 already reads right
+        case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3:
+            columns = map->uniform_count > 1 ? 1 : 0;
+            break;
+
+        case GL_FLOAT_MAT2x3: columns = 2; break;
+        case GL_FLOAT_MAT3:   columns = 3; break;
+        case GL_FLOAT_MAT4x3: columns = 4; break;
+        default:              columns = 0; break;
+    }
+
+    if (columns == 0 || map->offset != 0 || buf->data.buffer_data == 0)
+        return 0;
+
+    vectors = (size_t)columns * (size_t)map->uniform_count;
+    have = (size_t)buf->size;
+
+    // more than packed floats means something else is stored there
+    if (vectors * 16 > room || have > vectors * 12)
+        return 0;
+
+    memset(out, 0, vectors * 16);
+
+    for (size_t v = 0; v * 12 < have; v++)
+        memcpy(out + v * 16, (const GLubyte *)buf->data.buffer_data + v * 12,
+               have - v * 12 < 12 ? have - v * 12 : 12);
+
+    return vectors * 16;
+}
+
 @implementation MGLRenderer
 {
     NSView *_view;
@@ -748,7 +788,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                     [self getProgramMSLIndex:stage type:spvc_type index: i] < 0)
                 {
                     buffers_to_be_mapped--;
-                    RETURN_FALSE_ON_FAILURE(i < MAX_ATTRIBS);
+                    RETURN_FALSE_ON_FAILURE(i < count);
                     continue;
                 }
 
@@ -760,7 +800,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                         ctx->state.program->spirv_resources_list[stage][spvc_type].list[i].name))
                 {
                     buffers_to_be_mapped--;
-                    RETURN_FALSE_ON_FAILURE(i < MAX_ATTRIBS);
+                    RETURN_FALSE_ON_FAILURE(i < count);
                     continue;
                 }
 
@@ -800,12 +840,22 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                             return false;
                         }
 
+                        if (buffer_map->count >= MAX_MAPPED_BUFFERS)
+                        {
+                            MGL_NSERR(@"MGL: stage %d needs more than %d buffers", stage, MAX_MAPPED_BUFFERS);
+                            return false;
+                        }
+
                         buffer_map->buffers[buffer_map->count].attribute_mask = 0; // non attribute.. no bits set
                         buffer_map->buffers[buffer_map->count].buffer_base_index = base_slot + (GLuint)e;
                         buffer_map->buffers[buffer_map->count].buf = buf;
                         buffer_map->buffers[buffer_map->count].offset = buffers[slot_binding].offset;
                         buffer_map->buffers[buffer_map->count].size = buffers[slot_binding].size;
                         buffer_map->buffers[buffer_map->count].gl_buffer_type = (GLubyte)gl_buffer_type;
+                        buffer_map->buffers[buffer_map->count].uniform_type =
+                            spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT ? res->gl_type : 0;
+                        buffer_map->buffers[buffer_map->count].uniform_count =
+                            res->array_size > 1 ? res->array_size : 1;
                         buffer_map->count++;
                     }
 
@@ -813,7 +863,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                 }
 
                 // endless loop
-                RETURN_FALSE_ON_FAILURE(i < MAX_ATTRIBS);
+                RETURN_FALSE_ON_FAILURE(i < count);
             }
         }
     }
@@ -920,6 +970,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                         return false;
                     }
 
+                    buffer_map->buffers[buffer_map->count].uniform_type = 0;
                     buffer_map->buffers[buffer_map->count].attribute_mask = (0x1 << att);
                     buffer_map->buffers[buffer_map->count].buf = gl_buffer;
                     buffer_map->buffers[buffer_map->count].offset = base;
@@ -1156,6 +1207,18 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
         bool writable = (map->gl_buffer_type == _SHADER_STORAGE_BUFFER ||
                          map->gl_buffer_type == _ATOMIC_COUNTER_BUFFER);
 
+        {
+            GLubyte laid[4096];
+            size_t laid_len = metalUniformLayout(map, ptr, laid, sizeof laid);
+
+            if (laid_len)
+            {
+                [_currentRenderEncoder setVertexBytes: laid length: laid_len atIndex: map->buffer_base_index];
+                ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
+                continue;
+            }
+        }
+
         if (!writable && ptr->size < 4096 && ptr->data.mtl_data == NULL)
         {
             // An offset past the end leaves nothing to bind, and a slot Metal
@@ -1225,6 +1288,18 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
                          map->gl_buffer_type == _ATOMIC_COUNTER_BUFFER);
 
         GLintptr inline_len = offset < ptr->size ? ptr->size - offset : 0;
+
+        {
+            GLubyte laid[4096];
+            size_t laid_len = metalUniformLayout(map, ptr, laid, sizeof laid);
+
+            if (laid_len)
+            {
+                [_currentRenderEncoder setFragmentBytes: laid length: laid_len atIndex: map->buffer_base_index];
+                ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
+                continue;
+            }
+        }
 
         if (!writable && ptr->size < 4096 && ptr->data.mtl_data == NULL)
         {
@@ -9298,6 +9373,18 @@ static MTLWinding mtlWindingFor(const Program *p)
         // shader writes always does.
         GLintptr inline_len = map->offset < ptr->size ? ptr->size - map->offset : 0;
 
+        {
+            GLubyte laid[4096];
+            size_t laid_len = metalUniformLayout(map, ptr, laid, sizeof laid);
+
+            if (laid_len)
+            {
+                [computeCommandEncoder setBytes: laid length: laid_len atIndex: index];
+                ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
+                continue;
+            }
+        }
+
         if (!writable && ptr->size < 4096 && ptr->data.mtl_data == NULL)
         {
             static const uint32_t none = 0;
@@ -9627,9 +9714,41 @@ void mtlMemoryBarrier(GLMContext glm_ctx, GLbitfield barriers)
     }
 }
 
+// The group counts come from the buffer bound to GL_DISPATCH_INDIRECT_BUFFER,
+// which the GPU reads itself -- a compute pass may have just written them
 -(void)mtlDispatchComputeIndirect:(GLMContext)glm_ctx indirect:(GLintptr)indirect
 {
+    Buffer *buf = glm_ctx->state.buffers[_DISPATCH_INDIRECT_BUFFER];
+    Program *ptr = glm_ctx->state.program;
 
+    if (buf == NULL || ptr == NULL)
+        return;
+
+    [self prepareComputeTextures];
+
+    id <MTLComputeCommandEncoder> computeCommandEncoder = [self liveComputeEncoder];
+
+    if (!computeCommandEncoder)
+    {
+        glm_ctx->error_func(glm_ctx, __FUNCTION__, GL_OUT_OF_MEMORY);
+        return;
+    }
+
+    RETURN_ON_FAILURE([self processCompute:computeCommandEncoder]);
+    RETURN_ON_FAILURE([self processBuffer: buf]);
+
+    id<MTLBuffer> args = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
+
+    if (args == nil)
+        return;
+
+    MTLSize threadsPerThreadgroup = MTLSizeMake(ptr->local_workgroup_size.x ? ptr->local_workgroup_size.x : 1,
+                                                ptr->local_workgroup_size.y ? ptr->local_workgroup_size.y : 1,
+                                                ptr->local_workgroup_size.z ? ptr->local_workgroup_size.z : 1);
+
+    [computeCommandEncoder dispatchThreadgroupsWithIndirectBuffer: args
+                                             indirectBufferOffset: (NSUInteger)indirect
+                                            threadsPerThreadgroup: threadsPerThreadgroup];
 }
 
 void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)

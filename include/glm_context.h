@@ -562,6 +562,7 @@ typedef struct CullInfo_t {
 
 void  mglReadColorFormatAndType(GLMContext ctx, GLenum *format, GLenum *type);
 bool  mglDrawFramebufferComplete(GLMContext ctx);
+bool  mglConditionalRenderSkips(GLMContext ctx);
 GLint mglCullDistanceSize(const char *src);
 bool  mglBuildCullShaders(const char *vs_src, CullInfo *ci);
 void  mglFreeCullInfo(CullInfo *ci);
@@ -845,6 +846,9 @@ typedef struct BufferMap_t {
     // which GL buffer kind this slot came from. A shader can write a storage
     // buffer, so it must be a real MTLBuffer; a uniform can go through setBytes.
     GLubyte     gl_buffer_type;
+    // a plain uniform's type and element count, 0 for anything else
+    GLenum      uniform_type;
+    GLint       uniform_count;
 } BufferMap;
 
 typedef struct BufferMapList_t {

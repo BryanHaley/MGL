@@ -46,6 +46,9 @@ void mglDispatchCompute(GLMContext ctx, GLuint num_groups_x, GLuint num_groups_y
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
 
+    if (mglConditionalRenderSkips(ctx))
+        return;
+
     ctx->mtl_funcs.mtlDispatchCompute(ctx, num_groups_x, num_groups_y, num_groups_z);
 }
 
@@ -58,6 +61,9 @@ void mglDispatchComputeIndirect(GLMContext ctx, GLintptr indirect)
     ERROR_CHECK_RETURN((indirect & 3) == 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(indirect + 12 <= buf->size, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(STATE(program), GL_INVALID_OPERATION);
+
+    if (mglConditionalRenderSkips(ctx))
+        return;
 
     ctx->mtl_funcs.mtlDispatchComputeIndirect(ctx, indirect);
 }

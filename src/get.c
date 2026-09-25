@@ -134,6 +134,17 @@ int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *
 {
     int buffer_base = bufferBaseForPname(pname);
 
+    // the compute limits come in threes, and every getter form reads them
+    if (pname == GL_MAX_COMPUTE_WORK_GROUP_COUNT || pname == GL_MAX_COMPUTE_WORK_GROUP_SIZE)
+    {
+        if (index >= 3) return -1;
+
+        out[0] = pname == GL_MAX_COMPUTE_WORK_GROUP_COUNT
+               ? (GLdouble)ctx->state.var.max_compute_work_group_count[index]
+               : (GLdouble)ctx->state.var.max_compute_work_group_size[index];
+        return 1;
+    }
+
     if (buffer_base >= 0)
     {
         const BufferBaseTarget *bound;
