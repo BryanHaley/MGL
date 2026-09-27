@@ -3315,13 +3315,31 @@ static void linkGeometryCapture(Program *pptr)
                                  items, 64, strides, &from_shader);
 
     if (n <= 0)
+    {
+        if (pptr->xfb_varying_count > 0)
+        {
+            pptr->link_status = GL_FALSE;
+            pptr->validate_status = GL_FALSE;
+            free(pptr->log);
+            pptr->log = strdup(
+                "link failed: the geometry shader's varyings could not be matched for transform feedback\n");
+        }
         return;
+    }
 
     words = mglGsGatherTable(&pptr->geom, items, n, table, 256);
 
     if (words <= 0)
     {
         MGL_INFO("MGL INFO: transform feedback of this geometry shader's outputs is not supported\n");
+        if (pptr->xfb_varying_count > 0)
+        {
+            pptr->link_status = GL_FALSE;
+            pptr->validate_status = GL_FALSE;
+            free(pptr->log);
+            pptr->log = strdup(
+                "link failed: the geometry shader's outputs could not be captured for transform feedback\n");
+        }
         return;
     }
 

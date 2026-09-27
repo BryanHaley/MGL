@@ -342,9 +342,29 @@ static bool queryObjectValue(GLMContext ctx, GLuint id, GLenum pname, GLuint64 *
     ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
 }
 
+static void queryIntoBuffer(GLMContext ctx, GLuint id, GLuint buffer, GLenum pname,
+                            GLintptr offset, size_t value_size);
+
+// With a buffer bound to GL_QUERY_BUFFER, params is an offset into it rather
+// than a pointer, and the result is written there
+static bool queryToBoundBuffer(GLMContext ctx, GLuint id, GLenum pname, const void *params, size_t size)
+{
+    Buffer *buf = ctx->state.buffers[_QUERY_BUFFER];
+
+    if (buf == NULL)
+        return false;
+
+    queryIntoBuffer(ctx, id, buf->name, pname, (GLintptr)params, size);
+
+    return true;
+}
+
 void mglGetQueryObjectiv(GLMContext ctx, GLuint id, GLenum pname, GLint *params)
 {
     GLuint64 value;
+
+    if (queryToBoundBuffer(ctx, id, pname, params, sizeof(GLint)))
+        return;
 
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
@@ -356,6 +376,9 @@ void mglGetQueryObjectuiv(GLMContext ctx, GLuint id, GLenum pname, GLuint *param
 {
     GLuint64 value;
 
+    if (queryToBoundBuffer(ctx, id, pname, params, sizeof(GLuint)))
+        return;
+
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
     if (queryObjectValue(ctx, id, pname, &value))
@@ -366,6 +389,9 @@ void mglGetQueryObjecti64v(GLMContext ctx, GLuint id, GLenum pname, GLint64 *par
 {
     GLuint64 value;
 
+    if (queryToBoundBuffer(ctx, id, pname, params, sizeof(GLint64)))
+        return;
+
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
     if (queryObjectValue(ctx, id, pname, &value))
@@ -375,6 +401,9 @@ void mglGetQueryObjecti64v(GLMContext ctx, GLuint id, GLenum pname, GLint64 *par
 void mglGetQueryObjectui64v(GLMContext ctx, GLuint id, GLenum pname, GLuint64 *params)
 {
     GLuint64 value;
+
+    if (queryToBoundBuffer(ctx, id, pname, params, sizeof(GLuint64)))
+        return;
 
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 

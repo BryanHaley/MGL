@@ -1741,6 +1741,19 @@ void mglNamedBufferStorage(GLMContext ctx, GLuint buffer, GLsizeiptr size, const
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
+    // GL 4.6 §6.2: MAP_PERSISTENT_BIT requires at least one of MAP_READ_BIT
+    // or MAP_WRITE_BIT; MAP_COHERENT_BIT requires MAP_PERSISTENT_BIT.
+    if ((storage_flags & GL_MAP_PERSISTENT_BIT) &&
+        !(storage_flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT)))
+    {
+        ERROR_RETURN(GL_INVALID_VALUE);
+    }
+    if ((storage_flags & GL_MAP_COHERENT_BIT) &&
+        !(storage_flags & GL_MAP_PERSISTENT_BIT))
+    {
+        ERROR_RETURN(GL_INVALID_VALUE);
+    }
+
     bufferStorage(ctx, ptr, 0, 0, size, data, storage_flags, 0);
 }
 

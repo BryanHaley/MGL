@@ -83,7 +83,8 @@ static GLsizei maxSamplesForFormat(GLMContext ctx, GLenum internalformat)
 // ---------------------------------------------------------------------------
 static bool validateMultisample(GLMContext ctx, GLenum target, GLsizei samples,
                                 GLenum internalformat, GLsizei width,
-                                GLsizei height, GLsizei depth, bool is_3d)
+                                GLsizei height, GLsizei depth, bool is_3d,
+                                bool storage)
 {
     /* --- target --- */
     switch (target) {
@@ -126,9 +127,18 @@ static bool validateMultisample(GLMContext ctx, GLenum target, GLsizei samples,
     }
 
     /* --- dimensions --- */
-    // GL 4.6 8.8 makes only a *negative* size an error; a zero-sized level is
-    // legal and is how a texture's storage gets released.
-    if (width < 0 || height < 0 || depth < 0) {
+    // TexImage*Multisample takes a zero size; the Storage forms need at least 1
+    if (width < 0 || height < 0 || depth < 0 ||
+        (storage && (width == 0 || height == 0 || depth == 0))) {
+        ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
+    }
+
+    // past the size limit is INVALID_VALUE, not an out-of-memory
+    if (width > (GLsizei)ctx->state.var.max_texture_size ||
+        height > (GLsizei)ctx->state.var.max_texture_size) {
+        ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
+    }
+    if (depth > (GLsizei)ctx->state.var.max_array_texture_layers) {
         ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
     }
 
@@ -149,7 +159,7 @@ void mglTexStorage2DMultisample(GLMContext ctx, GLenum target, GLsizei samples,
     GLboolean proxy = false;
 
     if (!validateMultisample(ctx, target, samples, internalformat,
-                              width, height, 1, false))
+                              width, height, 1, false, true))
         return;
 
     if (target == GL_PROXY_TEXTURE_2D_MULTISAMPLE)
@@ -181,7 +191,7 @@ void mglTexStorage3DMultisample(GLMContext ctx, GLenum target, GLsizei samples,
     GLboolean proxy    = false;
 
     if (!validateMultisample(ctx, target, samples, internalformat,
-                              width, height, depth, true))
+                              width, height, depth, true, true))
         return;
 
     if (target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
@@ -215,7 +225,7 @@ void mglTexImage2DMultisample(GLMContext ctx, GLenum target, GLsizei samples,
     Texture *tex;
 
     if (!validateMultisample(ctx, target, samples, internalformat,
-                              width, height, 1, false))
+                              width, height, 1, false, false))
         return;
 
     tex = getTex(ctx, 0, target);
@@ -249,7 +259,7 @@ void mglTexImage3DMultisample(GLMContext ctx, GLenum target, GLsizei samples,
     GLboolean is_array = false;
 
     if (!validateMultisample(ctx, target, samples, internalformat,
-                              width, height, depth, true))
+                              width, height, depth, true, false))
         return;
 
     if (target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
@@ -291,7 +301,7 @@ void mglTextureStorage2DMultisample(GLMContext ctx, GLuint texture,
     }
 
     if (!validateMultisample(ctx, tex->target, samples, internalformat,
-                              width, height, 1, false))
+                              width, height, 1, false, true))
         return;
 
     if (tex->immutable_storage) {
@@ -327,7 +337,7 @@ void mglTextureStorage3DMultisample(GLMContext ctx, GLuint texture,
     }
 
     if (!validateMultisample(ctx, tex->target, samples, internalformat,
-                              width, height, depth, true))
+                              width, height, depth, true, true))
         return;
 
     if (tex->immutable_storage) {

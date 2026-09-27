@@ -348,6 +348,12 @@ static bool copyImageTexComplete(const Texture *t)
 	if (base >= t->mipmap_levels)
 		return false;
 
+	// multisample textures have exactly one level; the mipmap_levels
+	// field is set to the full chain by initBaseTexLevel, but levels
+	// beyond 0 are never defined, so only check the base level.
+	if (t->samples > 0)
+		return copyImageLevelExists(t, (GLint)base);
+
 	if (last >= t->mipmap_levels)
 		last = t->mipmap_levels - 1;
 

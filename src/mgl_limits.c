@@ -119,6 +119,7 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_tess_control_output_components, 128);
     at_least(&v->max_tess_control_total_output_components, 4096);
     at_least(&v->max_tess_control_texture_image_units, 16);
+    at_least(&v->max_tess_control_image_uniforms, 8);
     at_least(&v->max_tess_control_uniform_components, 1024);
     at_least(&v->max_tess_control_uniform_blocks, 14);
     at_least(&v->max_tess_control_atomic_counters, 8);
@@ -154,6 +155,7 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_combined_clip_and_cull_distances, 8);
 
     at_least(&v->max_image_units, 8);
+    // Metal cannot write a multisample texture, so no multisample images
     at_least(&v->max_image_samples, 0);
     at_least(&v->max_atomic_counter_buffer_bindings, 8);
     at_least(&v->max_atomic_counter_buffer_size, 32768);

@@ -1186,6 +1186,10 @@ void mglFramebufferTextureLayer(GLMContext ctx, GLenum target, GLenum attachment
 
     if (t)
     {
+        // GL 4.6 §9.2.8: a rectangle texture cannot be attached to a layered
+        // framebuffer attachment point (it has no layers).
+        ERROR_CHECK_RETURN(t->target != GL_TEXTURE_RECTANGLE, GL_INVALID_OPERATION);
+
         GLint most = t->target == GL_TEXTURE_3D ? (GLint)STATE_VAR(max_3d_texture_size)
                                                 : (GLint)STATE_VAR(max_array_texture_layers);
 

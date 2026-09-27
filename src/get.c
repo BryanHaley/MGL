@@ -229,6 +229,27 @@ int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *
             return 1;
         }
 
+        case GL_IMAGE_BINDING_NAME:
+        case GL_IMAGE_BINDING_LEVEL:
+        case GL_IMAGE_BINDING_LAYERED:
+        case GL_IMAGE_BINDING_LAYER:
+        case GL_IMAGE_BINDING_ACCESS:
+        case GL_IMAGE_BINDING_FORMAT:
+        {
+            if (index >= TEXTURE_UNITS) return -1;
+            ImageUnit *iu = &ctx->state.image_units[index];
+            switch(pname)
+            {
+                case GL_IMAGE_BINDING_NAME:   out[0] = (GLdouble)iu->texture; break;
+                case GL_IMAGE_BINDING_LEVEL:  out[0] = (GLdouble)iu->level; break;
+                case GL_IMAGE_BINDING_LAYERED:out[0] = (GLdouble)iu->layered; break;
+                case GL_IMAGE_BINDING_LAYER:  out[0] = (GLdouble)iu->layer; break;
+                case GL_IMAGE_BINDING_ACCESS: out[0] = (GLdouble)iu->access; break;
+                default:                      out[0] = (GLdouble)iu->internalformat; break;
+            }
+            return 1;
+        }
+
         case GL_CURRENT_VERTEX_ATTRIB:
             if (index >= ctx->state.max_vertex_attribs) return -1;
             for(int i=0; i<4; i++)

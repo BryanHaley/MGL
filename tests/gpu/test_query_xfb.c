@@ -6,6 +6,7 @@
  * begin / end / pause / resume, object creation, and state queries.
  */
 
+#include <stdint.h>
 #include "mgl_test.h"
 #include "harness.h"
 
@@ -319,5 +320,35 @@ GPU_TEST(query_xfb, get_query_buffer_object)
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glDeleteBuffers(1, &b);
+    glDeleteQueries(1, &q);
+}
+
+// With a buffer bound to GL_QUERY_BUFFER, glGetQueryObject* takes its last
+// argument as an offset into that buffer. MGL used to write through it as a
+// pointer, which crashed at address 8.
+GPU_TEST(query_xfb, query_result_lands_in_the_bound_query_buffer)
+{
+    static const GLuint fill[4] = { 0xEEEEEEEEu, 0xEEEEEEEEu, 0xEEEEEEEEu, 0xEEEEEEEEu };
+    GLuint q = 0, buf = 0;
+    GLuint got[4] = { 0, 0, 0, 0 };
+
+    glGenQueries(1, &q);
+    glBeginQuery(GL_TIME_ELAPSED, q);
+    glEndQuery(GL_TIME_ELAPSED);
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_QUERY_BUFFER, buf);
+    glBufferData(GL_QUERY_BUFFER, sizeof fill, fill, GL_DYNAMIC_COPY);
+
+    glGetQueryObjectuiv(q, GL_QUERY_RESULT_AVAILABLE, (GLuint *)(uintptr_t)8);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetBufferSubData(GL_QUERY_BUFFER, 0, sizeof got, got);
+    CHECK_EQ_UINT(got[2], GL_TRUE);
+    CHECK_EQ_UINT(got[0], 0xEEEEEEEEu);
+    CHECK_EQ_UINT(got[3], 0xEEEEEEEEu);
+
+    glBindBuffer(GL_QUERY_BUFFER, 0);
+    glDeleteBuffers(1, &buf);
     glDeleteQueries(1, &q);
 }

@@ -385,6 +385,13 @@ void mglShaderSource(GLMContext ctx, GLuint shader, GLsizei count, const GLchar 
     ptr->src_len = len;
     ptr->src = src;
     ptr->dirty_bits |= DIRTY_SHADER;
+
+    // ARB_gl_spirv: giving a shader source breaks any association it had with
+    // a SPIR-V module, and SPIR_V_BINARY goes back to FALSE.
+    free(ptr->spirv_binary);
+    ptr->spirv_binary = NULL;
+    ptr->spirv_binary_length = 0;
+    ptr->specialized = GL_FALSE;
 }
 
 static bool isWord(const char *p, const char *start, const char *word)
@@ -1412,6 +1419,10 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
+    // ARB_gl_spirv 7.1: a shader carrying a SPIR-V module is finalized with
+    // SpecializeShader, never CompileShader.
+    ERROR_CHECK_RETURN(ptr->spirv_binary == NULL, GL_INVALID_OPERATION);
+
     // no source was ever accepted for this shader, so there is nothing to compile
     if (ptr->src == NULL)
     {
@@ -1759,6 +1770,13 @@ void mglGetShaderiv(GLMContext ctx, GLuint shader, GLenum pname, GLint *params)
 
         case GL_SHADER_SOURCE_LENGTH:
             *params = (GLint)ptr->src_len;
+            break;
+
+        // ARB_gl_spirv / GL 4.6: TRUE while the shader is associated with a
+        // SPIR-V module from ShaderBinary. GL_SPIR_V_BINARY_ARB is the same
+        // token (0x9552), so one case answers both spellings.
+        case GL_SPIR_V_BINARY:
+            *params = ptr->spirv_binary ? GL_TRUE : GL_FALSE;
             break;
 
         default:

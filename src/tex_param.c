@@ -935,6 +935,12 @@ void getTexParamiv(GLMContext ctx, TextureParameter *tex_params, GLenum pname, G
         return;
     }
 
+    if (pname == GL_IMAGE_FORMAT_COMPATIBILITY_TYPE)
+    {
+        *params = GL_IMAGE_FORMAT_COMPATIBILITY_BY_SIZE;
+        return;
+    }
+
     ERROR_RETURN(GL_INVALID_ENUM);
 }
 

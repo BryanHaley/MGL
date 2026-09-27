@@ -2507,8 +2507,13 @@ static bool componentOffset(const char *type, int c, int *bytes)
         return true;
     }
 
+    // A double in the struct is uint2 (8 bytes), so two words per component.
+    // The kind 'd' case in the caller writes both words.
     if (!strncmp(type, "double", 6) || !strncmp(type, "dvec", 4) || !strncmp(type, "dmat", 4))
-        return false;
+    {
+        *bytes = c * 8;
+        return true;
+    }
 
     *bytes = c * 4;
     return true;
@@ -2527,9 +2532,6 @@ int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
         const char *open = strchr(it->expr, '[');
         int offset = -1;
         char type[32] = "";
-
-        if (it->kind == 'd')
-            return -1;
 
         snprintf(base, sizeof(base), "%.*s", open ? (int)(open - it->expr) : (int)strlen(it->expr), it->expr);
 
@@ -2556,6 +2558,31 @@ int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
 
         if (offset < 0)
             return -1;
+
+        if (it->kind == 'd')
+        {
+            // A double in the struct is uint2 (8 bytes), so each component
+            // writes two words. Emit two table entries per component.
+            for (int c = 0; c < it->components; c++)
+            {
+                int at;
+                if (!componentOffset(type, c, &at))
+                    return -1;
+                if (words + 1 >= max_words)
+                    return -1;
+                // low word
+                table[words * 3] = (GLuint)(offset + at);
+                table[words * 3 + 1] = (GLuint)it->buffer;
+                table[words * 3 + 2] = (GLuint)(it->offset / 4 + 2 * c);
+                words++;
+                // high word
+                table[words * 3] = (GLuint)(offset + at + 4);
+                table[words * 3 + 1] = (GLuint)it->buffer;
+                table[words * 3 + 2] = (GLuint)(it->offset / 4 + 2 * c + 1);
+                words++;
+            }
+            continue;
+        }
 
         for (int c = 0; c < it->components; c++)
         {

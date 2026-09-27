@@ -88,6 +88,9 @@ VertexArray *newVAO(GLMContext ctx, GLuint vao)
     bzero((void *)ptr, sizeof(VertexArray));
 
     ptr->name = vao;
+    for(int i=0; i<MAX_BINDABLE_BUFFERS; i++) {
+        ptr->bindings[i].stride = 16;
+    }
 
     for(int i=0; i<MAX_ATTRIBS; i++)
     {
