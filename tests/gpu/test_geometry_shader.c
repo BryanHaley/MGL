@@ -292,6 +292,7 @@ GPU_TEST(geometry_shader, limits_meet_the_floor)
         { "GL_MAX_GEOMETRY_OUTPUT_COMPONENTS",       0x9124, 128 },
         { "GL_MAX_GEOMETRY_SHADER_INVOCATIONS",      0x8E5A, 32 },
         { "GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS",     0x8C29, 16 },
+        { "GL_MAX_GEOMETRY_IMAGE_UNIFORMS",          0x90CD, 8 },
         { "GL_MAX_GEOMETRY_UNIFORM_COMPONENTS",      0x8DDF, 1024 },
         { "GL_MAX_VERTEX_STREAMS",                   0x8E71, 1 },
         { "GL_MAX_VARYING_COMPONENTS",               0x8B4B, 60 },

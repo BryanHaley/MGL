@@ -40,6 +40,7 @@ extern int mglLowerAtomicCounters(const unsigned int *words, size_t count,
                                   unsigned int **out_words, size_t *out_count,
                                   unsigned int *block_ids, unsigned int *block_bindings,
                                   int max_blocks);
+extern bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count);
 #include "shaders.h"
 #include "buffers.h"
 #include "mgl_log.h"
@@ -3092,6 +3093,11 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
 
     // parseSPIRVShaderToMetal reads the shader slot for its entry point name,
     // which a generated stage does not have, so it is compiled here instead
+
+    // its stand-ins for gl_Layer and gl_ViewportIndex become real built-ins
+    if (sp == &pptr->gs_passthrough)
+        mglPatchGsPassthroughBuiltins(sp->ir, sp->size);
+
     sp->msl_str = parseSPIRVShaderToMetal(ctx, pptr, spirv_slot >= 0 ? spirv_slot : _COMPUTE_SHADER,
                                           sp, entry);
 

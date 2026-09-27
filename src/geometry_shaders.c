@@ -223,6 +223,9 @@ typedef struct {
 typedef struct {
     GsVarying in[MAX_GS_VARYINGS];  int in_count;
     GsVarying out[MAX_GS_VARYINGS]; int out_count;
+    // built-ins the shader writes; only those are passed on to the draw
+    bool uses_layer;
+    bool uses_viewport_index;
 } GsScan;
 
 // gl_ClipDistance and gl_CullDistance travel through the generated structs
@@ -675,11 +678,11 @@ static int structStride(GsVarying *v, int count, bool is_out)
     int offset = 0, worst = 16;
 
     // vec4 mglPos, float mglPointSize, and for the output side mglValid,
-    // mglLayer and mglPrimitiveID
+    // mglLayer, mglPrimitiveID and mglViewportIndex
     offset = 16 + 4;
 
     if (is_out)
-        offset += 4 + 4 + 4;
+        offset += 4 + 4 + 4 + 4;
 
     for (int i = 0; i < count; i++)
     {
@@ -1026,6 +1029,7 @@ static int locationsFor(const char *type)
     "  if (mglGsIn[mglFetch(0)].mglPointSize == 0.0) return;\n" \
     "  mglBase = mglId * mglGsCap;\n" \
     "  mglCur.mglPointSize = mglGsIn[mglFetch(0)].mglPointSize;\n" \
+    "  mglCur.mglLayer = 0;\n  mglCur.mglViewportIndex = 0;\n" \
     "  mglWritten = 0;\n  mglStripLen = 0;\n  mglStripFlip = false;\n"
 
 // ---------------------------------------------------------------------------
@@ -1092,7 +1096,8 @@ static bool rewriteBody(const char *src, GsScan *sc, Buf *out)
         else if (wordAt(src, i, "gl_InvocationID"))    { simple = "mglInvocationID"; skip = 15; }
         else if (wordAt(src, i, "gl_Position"))        { simple = "mglCur.mglPos"; skip = 11; }
         else if (wordAt(src, i, "gl_PointSize"))       { simple = "mglCur.mglPointSize"; skip = 12; }
-        else if (wordAt(src, i, "gl_Layer"))           { simple = "mglCur.mglLayer"; skip = 8; }
+        else if (wordAt(src, i, "gl_Layer"))           { simple = "mglCur.mglLayer"; skip = 8; sc->uses_layer = true; }
+        else if (wordAt(src, i, "gl_ViewportIndex"))  { simple = "mglCur.mglViewportIndex"; skip = 16; sc->uses_viewport_index = true; }
         else if (wordAt(src, i, "gl_PrimitiveID"))     { simple = "mglCur.mglPrimitiveID"; skip = 14; }
         else if (wordAt(src, i, "gl_ClipDistance") || wordAt(src, i, "gl_CullDistance"))
         {
@@ -1397,7 +1402,7 @@ static bool emitStructs(GsScan *sc, Buf *b)
     }
 
     if (!bufAdd(b, "};\n\nstruct MglGsOutV {\n  vec4 mglPos;\n  float mglPointSize;\n"
-                   "  float mglValid;\n  int mglLayer;\n  int mglPrimitiveID;\n"))
+                   "  float mglValid;\n  int mglLayer;\n  int mglPrimitiveID;\n  int mglViewportIndex;\n"))
         return false;
 
     for (int i = 0; i < sc->out_count; i++)
@@ -1515,7 +1520,7 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
     // the same walk as structStride, keeping each output's offset
     {
-        int offset = 16 + 4 + 4 + 4 + 4;
+        int offset = 16 + 4 + 4 + 4 + 4 + 4;
 
         gi->out_count = 0;
 
@@ -1803,6 +1808,16 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
         }
     }
 
+    // glslang will not let a vertex shader write gl_Layer or gl_ViewportIndex,
+    // so they go out under these names and are turned into built-ins later.
+    // Only one viewport reaches Metal so far, so the index is carried but
+    // cannot pick a different viewport yet.
+    if (sc.uses_layer && !bufAdd(&pass, "out int mglLayerBuiltin;\n"))
+        goto done;
+
+    if (sc.uses_viewport_index && !bufAdd(&pass, "out int mglViewportIndexBuiltin;\n"))
+        goto done;
+
     if (!bufAdd(&pass, "\nvoid main()\n{\n  MglGsOutV v = mglGsOut[gl_VertexID];\n"))
         goto done;
 
@@ -1837,8 +1852,21 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     // a slot the geometry shader never wrote is pushed outside the frustum,
     // where it covers nothing rather than drawing a stray primitive
     if (!bufAdd(&pass,
-        "  gl_Position = v.mglValid > 0.5 ? v.mglPos : vec4(2.0, 2.0, 2.0, 1.0);\n"
-        "  gl_PointSize = v.mglPointSize;\n}\n"))
+        "  gl_Position = v.mglValid > 0.5 ? v.mglPos : vec4(2.0, 2.0, 2.0, 1.0);\n"))
+        goto done;
+
+    // Metal only accepts a point size when drawing points
+    if (gi->out_primitive == GL_POINTS &&
+        !bufAdd(&pass, "  gl_PointSize = v.mglPointSize;\n"))
+        goto done;
+
+    if (sc.uses_layer && !bufAdd(&pass, "  mglLayerBuiltin = v.mglLayer;\n"))
+        goto done;
+
+    if (sc.uses_viewport_index && !bufAdd(&pass, "  mglViewportIndexBuiltin = v.mglViewportIndex;\n"))
+        goto done;
+
+    if (!bufAdd(&pass, "}\n"))
         goto done;
 
     // ---- what the vertex shader has to be given to feed all this ----

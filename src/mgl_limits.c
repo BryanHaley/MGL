@@ -108,7 +108,7 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_geometry_texture_image_units, 16);
     at_least(&v->max_geometry_shader_invocations, 32);
     at_least(&v->max_geometry_varying_components, 64);
-    at_least(&v->max_geometry_image_uniforms, 0);
+    at_least(&v->max_geometry_image_uniforms, 8);
     at_least(&v->max_geometry_atomic_counters, 8);
     at_least(&v->max_geometry_atomic_counter_buffers, 1);
 

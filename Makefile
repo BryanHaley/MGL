@@ -498,8 +498,9 @@ $(GLFW_BUILD_DIR)/%.o: $(GLFW_SRC_DIR)/%.m
 	@mkdir -p $(dir $@)
 	clang -fno-objc-arc -fmodules -MMD $(CFLAGS) $(GLFW_FRAMEWORKS) -c $< -o $@
 
+# everything in the build folder except the CTS results kept in cts-work
 clean:
-	rm -rf $(build_dir)
+	if [ -d $(build_dir) ]; then find $(build_dir) -mindepth 1 -maxdepth 1 ! -name cts-work -exec rm -rf {} +; fi
 	rm -f $(generated)
 	rm -f libmoogl.dylib
 	rm -f libmoogles.dylib

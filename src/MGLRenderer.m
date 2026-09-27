@@ -6640,6 +6640,18 @@ static MTLPrimitiveType gsOutputPrimitive(GLenum prim)
     }
 }
 
+// Metal wants the primitive class named when the vertex function writes the
+// layer or viewport index, so it follows what the geometry shader emits
+static MTLPrimitiveTopologyClass gsOutputTopologyClass(GLenum prim)
+{
+    switch (prim)
+    {
+        case GL_LINE_STRIP:     return MTLPrimitiveTopologyClassLine;
+        case GL_TRIANGLE_STRIP: return MTLPrimitiveTopologyClassTriangle;
+        default:                return MTLPrimitiveTopologyClassPoint;
+    }
+}
+
 static MTLTessellationPartitionMode mtlPartitionForSpv(GLuint mode);
 
 - (bool) buildGeometryPipelines: (Program *) program
@@ -6715,7 +6727,7 @@ static MTLTessellationPartitionMode mtlPartitionForSpv(GLuint mode);
     draw.vertexFunction = pfn;
     draw.fragmentFunction = ffn;
     draw.vertexDescriptor = nil;
-    draw.inputPrimitiveTopology = MTLPrimitiveTopologyClassUnspecified;
+    draw.inputPrimitiveTopology = gsOutputTopologyClass(program->geom.out_primitive);
 
     // the usual pipeline block was skipped for this program, and the write
     // masks it keeps start out closed

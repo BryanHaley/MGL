@@ -110,6 +110,72 @@ extern "C" bool mglInlineSpirv(const unsigned int *words, size_t count,
 }
 
 // ---------------------------------------------------------------------------
+// Layer and viewport index from the geometry rewrite
+//
+// glslang will not let a vertex shader write gl_Layer or gl_ViewportIndex, so
+// the geometry rewrite's pass-through writes them as plain outputs named
+// mglLayerBuiltin and mglViewportIndexBuiltin. Their Location decoration is
+// turned into the matching BuiltIn here, which SPIRV-Cross then writes as
+// [[render_target_array_index]] and [[viewport_array_index]].
+// ---------------------------------------------------------------------------
+
+extern "C" bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count)
+{
+    const uint32_t OpName = 5, OpDecorate = 71;
+    const uint32_t DecBuiltIn = 11, DecLocation = 30;
+    const uint32_t BuiltInLayer = 9, BuiltInViewportIndex = 10;
+    uint32_t layer = 0, viewport = 0;
+    bool patched = false;
+
+    if (words == nullptr || count < 5 || words[0] != 0x07230203)
+        return false;
+
+    for (size_t i = 5; i < count;)
+    {
+        uint32_t wc = words[i] >> 16, op = words[i] & 0xffff;
+
+        if (wc == 0 || i + wc > count)
+            return false;
+
+        if (op == OpName && wc >= 3)
+        {
+            size_t room = (wc - 2) * 4;
+            const char *name = (const char *)&words[i + 2];
+
+            if (strnlen(name, room) < room)
+            {
+                if (strcmp(name, "mglLayerBuiltin") == 0)
+                    layer = words[i + 1];
+                else if (strcmp(name, "mglViewportIndexBuiltin") == 0)
+                    viewport = words[i + 1];
+            }
+        }
+
+        i += wc;
+    }
+
+    if (layer == 0 && viewport == 0)
+        return false;
+
+    for (size_t i = 5; i < count; i += words[i] >> 16)
+    {
+        uint32_t wc = words[i] >> 16, op = words[i] & 0xffff;
+
+        if (op != OpDecorate || wc < 4 || words[i + 2] != DecLocation)
+            continue;
+
+        if (words[i + 1] == layer || words[i + 1] == viewport)
+        {
+            words[i + 3] = words[i + 1] == layer ? BuiltInLayer : BuiltInViewportIndex;
+            words[i + 2] = DecBuiltIn;
+            patched = true;
+        }
+    }
+
+    return patched;
+}
+
+// ---------------------------------------------------------------------------
 // Atomic counters
 //
 // SPIRV-Cross turns an atomic operation into Metal's atomic_fetch_add_explicit

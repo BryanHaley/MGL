@@ -431,3 +431,355 @@ GPU_TEST(framebuffer_dsa, renderbuffer_multisample)
 
     glDeleteRenderbuffers(1, &rb);
 }
+
+/* ---------- DSA depth-stencil renderbuffer readback ---------- */
+
+/* glNamedRenderbufferStorage takes the same storage path as the bound
+   glRenderbufferStorage, but through the DSA entry point. A depth24_stencil8
+   renderbuffer has to come back through both glReadPixels(GL_DEPTH_COMPONENT)
+   and glReadPixels(GL_STENCIL_INDEX). */
+
+GPU_TEST(framebuffer_dsa, stencil_renderbuffer_readback)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "void main(){vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));"
+        "gl_Position=vec4(p[gl_VertexID],0,1);}\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main(){gl_FragDepth=0.5;o=vec4(1,0,0,1);}\n";
+    GLuint rb = 0, fb = 0, vao = 0, prog = 0;
+    GLubyte stencil[FW * FH];
+    GLfloat depth[FW * FH];
+    char log[512] = { 0 };
+    int bad_stencil = 0, bad_depth = 0;
+
+    glCreateRenderbuffers(1, &rb);
+    glNamedRenderbufferStorage(rb, GL_DEPTH24_STENCIL8, FW, FH);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glCreateFramebuffers(1, &fb);
+    glNamedFramebufferRenderbuffer(fb, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    /* a depth-stencil-only framebuffer is complete on its own (GL 4.6 9.4.2) */
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fb, GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glViewport(0, 0, FW, FH);
+
+    glClearStencil(0);
+    glClearDepth(1.0);
+    glClear(GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "depth-stencil program did not build: %s", log);
+
+    if (prog)
+    {
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        glUseProgram(prog);
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_ALWAYS);
+        glEnable(GL_STENCIL_TEST);
+        /* the triangle covers the whole viewport, so every pixel takes ref 5 */
+        glStencilFunc(GL_ALWAYS, 5, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_STENCIL_TEST);
+
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+
+        memset(stencil, 0xAA, sizeof stencil);
+        glReadPixels(0, 0, FW, FH, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencil);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        for (int i = 0; i < FW * FH; i++)
+            if (stencil[i] != 5)
+                bad_stencil++;
+
+        CHECK_MSG(bad_stencil == 0,
+                  "%d of %d stencil texels are not the written 5", bad_stencil, FW * FH);
+
+        memset(depth, 0, sizeof depth);
+        glReadPixels(0, 0, FW, FH, GL_DEPTH_COMPONENT, GL_FLOAT, depth);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        for (int i = 0; i < FW * FH; i++)
+            if (fabs((double)depth[i] - 0.5) > 0.01)
+                bad_depth++;
+
+        CHECK_MSG(bad_depth == 0,
+                  "%d of %d depth texels are not the written 0.5", bad_depth, FW * FH);
+
+        glUseProgram(0);
+        glDeleteVertexArrays(1, &vao);
+        glDeleteProgram(prog);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
+}
+
+/* The CTS storage_multisample case attaches one packed depth-stencil
+   renderbuffer to GL_DEPTH_ATTACHMENT and GL_STENCIL_ATTACHMENT as two
+   separate calls, then asks the framebuffer what is on each. That layout is
+   worth pinning on its own: the two attachment slots end up pointing at the
+   same image. */
+
+GPU_TEST(framebuffer_dsa, depth_and_stencil_attached_separately)
+{
+    GLuint rb = 0, fb = 0;
+    GLint v = -1;
+
+    glCreateRenderbuffers(1, &rb);
+    glNamedRenderbufferStorage(rb, GL_DEPTH24_STENCIL8, FW, FH);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glCreateFramebuffers(1, &fb);
+    glNamedFramebufferRenderbuffer(fb, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb);
+    glNamedFramebufferRenderbuffer(fb, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fb, GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    v = -1;
+    glGetNamedFramebufferAttachmentParameteriv(fb, GL_DEPTH_ATTACHMENT,
+                                               GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, GL_RENDERBUFFER);
+
+    v = -1;
+    glGetNamedFramebufferAttachmentParameteriv(fb, GL_DEPTH_ATTACHMENT,
+                                               GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &v);
+    CHECK_EQ_INT(v, (GLint)rb);
+
+    v = -1;
+    glGetNamedFramebufferAttachmentParameteriv(fb, GL_STENCIL_ATTACHMENT,
+                                               GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &v);
+    CHECK_EQ_INT(v, (GLint)rb);
+
+    /* the packed format answers for both halves when they are one image */
+    v = -1;
+    glGetNamedFramebufferAttachmentParameteriv(fb, GL_DEPTH_ATTACHMENT,
+                                               GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &v);
+    CHECK_EQ_INT(v, 24);
+
+    v = -1;
+    glGetNamedFramebufferAttachmentParameteriv(fb, GL_STENCIL_ATTACHMENT,
+                                               GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &v);
+    CHECK_EQ_INT(v, 8);
+
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
+}
+
+/* ---------- DSA integer renderbuffer ---------- */
+/* ---------- DSA integer renderbuffer ---------- */
+
+/* An integer renderbuffer keeps integer values exactly, so the fragment
+   shader's ivec4 output has to reach glReadPixels(GL_RED_INTEGER, GL_INT)
+   unchanged. */
+
+GPU_TEST(framebuffer_dsa, integer_renderbuffer_readback)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "void main(){vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));"
+        "gl_Position=vec4(p[gl_VertexID],0,1);}\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out ivec4 o;\n"
+        "void main(){o=ivec4(42,43,44,45);}\n";
+    GLuint rb = 0, fb = 0, vao = 0, prog = 0;
+    GLint px[FW * FH];
+    const GLint clear[4] = { 0, 0, 0, 0 };
+    char log[512] = { 0 };
+    int bad = 0;
+
+    glCreateRenderbuffers(1, &rb);
+    glNamedRenderbufferStorage(rb, GL_R32I, FW, FH);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glCreateFramebuffers(1, &fb);
+    glNamedFramebufferRenderbuffer(fb, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fb, GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glViewport(0, 0, FW, FH);
+
+    glClearBufferiv(GL_COLOR, 0, clear);
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "integer program did not build: %s", log);
+
+    if (prog)
+    {
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        glUseProgram(prog);
+        glDisable(GL_DITHER);
+
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        memset(px, 0, sizeof px);
+        glReadPixels(0, 0, FW, FH, GL_RED_INTEGER, GL_INT, px);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        /* R32I holds only the red channel; 42 is what the shader wrote */
+        for (int i = 0; i < FW * FH; i++)
+            if (px[i] != 42)
+                bad++;
+
+        CHECK_MSG(bad == 0,
+                  "%d of %d integer texels are not the written 42", bad, FW * FH);
+
+        glEnable(GL_DITHER);
+        glUseProgram(0);
+        glDeleteVertexArrays(1, &vao);
+        glDeleteProgram(prog);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
+}
+
+/* ---------- DSA multisample renderbuffer storage and query ---------- */
+
+/* This is the shape of the direct_state_access.renderbuffers_storage_multisample
+   harness case: create, give storage through the DSA entry point, query every
+   renderbuffer parameter, attach it and query the attachment. */
+
+GPU_TEST(framebuffer_dsa, renderbuffer_storage_multisample_dsa)
+{
+    GLuint rb = 0, fb = 0;
+    GLint v = -1;
+
+    glCreateRenderbuffers(1, &rb);
+    glNamedRenderbufferStorageMultisample(rb, 4, GL_RGBA8, FW, FH);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    v = -1;
+    glGetNamedRenderbufferParameteriv(rb, GL_RENDERBUFFER_SAMPLES, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, 4);
+
+    v = -1;
+    glGetNamedRenderbufferParameteriv(rb, GL_RENDERBUFFER_WIDTH, &v);
+    CHECK_EQ_INT(v, FW);
+
+    v = -1;
+    glGetNamedRenderbufferParameteriv(rb, GL_RENDERBUFFER_HEIGHT, &v);
+    CHECK_EQ_INT(v, FH);
+
+    v = -1;
+    glGetNamedRenderbufferParameteriv(rb, GL_RENDERBUFFER_INTERNAL_FORMAT, &v);
+    CHECK_EQ_INT(v, GL_RGBA8);
+
+    glCreateFramebuffers(1, &fb);
+    glNamedFramebufferRenderbuffer(fb, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    v = -1;
+    glGetNamedFramebufferAttachmentParameteriv(fb, GL_COLOR_ATTACHMENT0,
+                                               GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, GL_RENDERBUFFER);
+
+    v = -1;
+    glGetNamedFramebufferAttachmentParameteriv(fb, GL_COLOR_ATTACHMENT0,
+                                               GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &v);
+    CHECK_EQ_INT(v, (GLint)rb);
+
+    /* a multisample renderbuffer is still a complete attachment */
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fb, GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
+
+    /* the CTS case also re-specifies the same renderbuffer with zero samples,
+       which is the non-multisample path through the same entry point */
+    glCreateRenderbuffers(1, &rb);
+    glNamedRenderbufferStorageMultisample(rb, 0, GL_RGBA8, FW, FH);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    v = -1;
+    glGetNamedRenderbufferParameteriv(rb, GL_RENDERBUFFER_SAMPLES, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, 0);
+
+    v = -1;
+    glGetNamedRenderbufferParameteriv(rb, GL_RENDERBUFFER_INTERNAL_FORMAT, &v);
+    CHECK_EQ_INT(v, GL_RGBA8);
+
+    glDeleteRenderbuffers(1, &rb);
+}
+
+/* ---------- DSA compressed texture sub-image ---------- */
+
+/* A compressed format names no client format, so glTextureStorage2D has to
+   size the level from the block layout alone. glCompressedTextureSubImage2D
+   then has to land in it. */
+
+GPU_TEST(framebuffer_dsa, compressed_texture_sub_image_dsa)
+{
+    /* 64x64 BC1 is 16x16 blocks of 8 bytes (GL 4.6 table 8.19) */
+    enum { BLOCK_W = 4, BLOCK_H = 4, BLOCK_BYTES = 8 };
+    enum { BLOCKS = (FW / BLOCK_W) * (FH / BLOCK_H) };
+    unsigned char data[BLOCKS * BLOCK_BYTES];
+    unsigned char got[BLOCKS * BLOCK_BYTES];
+    GLint n = 0, i, supported = 0;
+    GLint list[128];
+    GLuint tex = 0;
+
+    glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &n);
+
+    if (n > 0 && n <= (GLint)(sizeof list / sizeof list[0]))
+    {
+        glGetIntegerv(GL_COMPRESSED_TEXTURE_FORMATS, list);
+
+        for (i = 0; i < n; i++)
+            if ((GLenum)list[i] == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT)
+                supported = 1;
+    }
+
+    if (!supported)
+        SKIP("GL_COMPRESSED_RGBA_S3TC_DXT1_EXT is not supported by this device");
+
+    for (i = 0; i < (GLint)sizeof data; i++)
+        data[i] = (unsigned char)(i * 7);
+
+    glCreateTextures(GL_TEXTURE_2D, 1, &tex);
+    glTextureStorage2D(tex, 1, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, FW, FH);
+
+    if (mgl_drain_errors() != GL_NO_ERROR)
+    {
+        glDeleteTextures(1, &tex);
+        SKIP("compressed immutable storage is not supported by this device");
+    }
+
+    glCompressedTextureSubImage2D(tex, 0, 0, 0, FW, FH,
+                                  GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                                  (GLsizei)sizeof data, data);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    /* reading the compressed image back proves the bytes landed */
+    memset(got, 0xCD, sizeof got);
+    glGetCompressedTextureImage(tex, 0, (GLsizei)sizeof got, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK(memcmp(got, data, sizeof data) == 0);
+
+    glDeleteTextures(1, &tex);
+}
