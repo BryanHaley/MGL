@@ -276,3 +276,154 @@ GPU_TEST(draw_indirect, arb_base_vertex_still_compiles)
     CHECK_MSG(prog != 0, "link: %s", log);
     glDeleteProgram(prog);
 }
+
+static GLuint linkWithGeometry(const char *vs, const char *gs, const char *fs)
+{
+    const char *src[3] = { vs, gs, fs };
+    GLenum types[3] = { GL_VERTEX_SHADER, GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER };
+    GLuint prog = glCreateProgram();
+    GLint ok = 0;
+
+    for (int i = 0; i < 3; i++)
+    {
+        GLuint sh = glCreateShader(types[i]);
+
+        glShaderSource(sh, 1, &src[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(prog, sh);
+        glDeleteShader(sh);
+    }
+
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+
+    if (!ok)
+    {
+        glDeleteProgram(prog);
+        return 0;
+    }
+
+    return prog;
+}
+
+// An indirect draw through a geometry shader runs that shader, from a
+// command away from the start of the buffer. Indirect draws went straight to
+// Metal, which crashed on a geometry program, and their offset was taken in
+// commands rather than bytes.
+GPU_TEST(draw_indirect, indirect_draws_run_the_geometry_stage)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *GS =
+        "#version 460 core\n"
+        "layout(points) in;\n"
+        "layout(triangle_strip, max_vertices = 4) out;\n"
+        "void main() {\n"
+        "    gl_Position = vec4(-1, -1, 0, 1); EmitVertex();\n"
+        "    gl_Position = vec4( 1, -1, 0, 1); EmitVertex();\n"
+        "    gl_Position = vec4(-1,  1, 0, 1); EmitVertex();\n"
+        "    gl_Position = vec4( 1,  1, 0, 1); EmitVertex();\n"
+        "}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+    // a decoy, then the command: count, instanceCount, first, baseInstance
+    static const GLuint cmds[8] = { 0, 0, 0, 0,   1, 1, 0, 0 };
+    MGLTestTarget t;
+    GLuint prog, vao, ind;
+    unsigned char *px, c[4] = { 0 };
+
+    prog = linkWithGeometry(VS, GS, FS);
+    CHECK(prog != 0);
+    if (!prog) return;
+
+    mgl_target_create(&t, 4, 4, GL_RGBA8, 0);
+    mgl_target_bind(&t);
+    glViewport(0, 0, 4, 4);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &ind);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, ind);
+    glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof cmds, cmds, GL_STATIC_DRAW);
+    glUseProgram(prog);
+    glDrawArraysIndirect(GL_POINTS, (const void *)16);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 2, 2, c);
+        free(px);
+    }
+    CHECK_MSG(c[1] == 255 && c[0] == 0, "the geometry stage drew %u %u %u", c[0], c[1], c[2]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &ind);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// A fan has no Metal primitive, so a multi-draw of fans read each command and
+// drew it the expanded way. It was refused with GL_INVALID_OPERATION.
+GPU_TEST(draw_indirect, multi_draw_indirect_draws_fans)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+    static const float quad[8] = { -1, -1,  1, -1,  1, 1,  -1, 1 };
+    static const GLuint cmds[8] = { 4, 1, 0, 0,   4, 1, 0, 0 };
+    char log[1024];
+    MGLTestTarget t;
+    GLuint prog, vao, vbo, ind;
+    unsigned char *px, c[4] = { 0 };
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    mgl_target_create(&t, 4, 4, GL_RGBA8, 0);
+    mgl_target_bind(&t);
+    glViewport(0, 0, 4, 4);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+    glGenBuffers(1, &ind);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, ind);
+    glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof cmds, cmds, GL_STATIC_DRAW);
+    glUseProgram(prog);
+    glMultiDrawArraysIndirect(GL_TRIANGLE_FAN, NULL, 2, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 1, 1, c);
+        free(px);
+    }
+    CHECK_MSG(c[1] == 255, "the fans drew %u %u %u", c[0], c[1], c[2]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ind);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

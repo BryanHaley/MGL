@@ -24,6 +24,7 @@ Query *newQuery(GLMContext ctx, GLuint name)
     q->name = name;
     // a query that has never run has its (zero) result ready
     q->have_result = GL_TRUE;
+    q->visibility_offset = -1;
 
     insertHashElement(&ctx->state.query_table, name, q);
 
@@ -53,6 +54,17 @@ static int queryTargetIndex(GLenum target)
         case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:     return _QUERY_TF_STREAM_OVERFLOW;
         case GL_TIME_ELAPSED:                           return _QUERY_TIME_ELAPSED;
         case GL_TIMESTAMP:                              return _QUERY_TIMESTAMP;
+        case GL_VERTICES_SUBMITTED:                     return _QUERY_VERTICES_SUBMITTED;
+        case GL_PRIMITIVES_SUBMITTED:                   return _QUERY_PRIMITIVES_SUBMITTED;
+        case GL_VERTEX_SHADER_INVOCATIONS:              return _QUERY_VERTEX_SHADER_INVOCATIONS;
+        case GL_TESS_CONTROL_SHADER_PATCHES:            return _QUERY_TESS_CONTROL_SHADER_PATCHES;
+        case GL_TESS_EVALUATION_SHADER_INVOCATIONS:     return _QUERY_TESS_EVALUATION_SHADER_INVOCATIONS;
+        case GL_GEOMETRY_SHADER_INVOCATIONS:            return _QUERY_GEOMETRY_SHADER_INVOCATIONS;
+        case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED:     return _QUERY_GEOMETRY_SHADER_PRIMITIVES_EMITTED;
+        case GL_FRAGMENT_SHADER_INVOCATIONS:            return _QUERY_FRAGMENT_SHADER_INVOCATIONS;
+        case GL_COMPUTE_SHADER_INVOCATIONS:             return _QUERY_COMPUTE_SHADER_INVOCATIONS;
+        case GL_CLIPPING_INPUT_PRIMITIVES:              return _QUERY_CLIPPING_INPUT_PRIMITIVES;
+        case GL_CLIPPING_OUTPUT_PRIMITIVES:             return _QUERY_CLIPPING_OUTPUT_PRIMITIVES;
     }
 
     return -1;
@@ -73,12 +85,63 @@ static bool targetAllowsStream(int t, GLuint index)
     return index == 0;
 }
 
-// The three targets Metal counts fragments for.
+// The targets Metal counts fragments for. Fragment shader invocations are
+// counted as the samples that pass, the same counter occlusion uses.
 static bool isOcclusionTarget(GLenum target)
 {
     return target == GL_SAMPLES_PASSED ||
            target == GL_ANY_SAMPLES_PASSED ||
-           target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE;
+           target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE ||
+           target == GL_FRAGMENT_SHADER_INVOCATIONS;
+}
+
+// Adds to the statistics query running on target, if there is one.
+void mglAddStatistic(GLMContext ctx, GLenum target, GLuint64 n)
+{
+    int t = queryTargetIndex(target);
+    Query *q = t >= 0 ? ctx->state.active_query[t][0] : NULL;
+
+    if (q)
+        q->result += n;
+}
+
+bool mglStatisticActive(GLMContext ctx, GLenum target)
+{
+    int t = queryTargetIndex(target);
+
+    return t >= 0 && ctx->state.active_query[t][0] != NULL;
+}
+
+bool mglAnyStatisticActive(GLMContext ctx)
+{
+    for (int t = _QUERY_VERTICES_SUBMITTED; t <= _QUERY_CLIPPING_OUTPUT_PRIMITIVES; t++)
+        if (ctx->state.active_query[t][0])
+            return true;
+
+    return false;
+}
+
+// What a draw was asked to make, before any shader runs. Geometry and
+// tessellation numbers, and clipping behind them, the renderer adds itself.
+void mglCountDrawStatistics(GLMContext ctx, GLuint64 vertices, GLuint64 primitives, GLsizei instances)
+{
+    Program *p = ctx->state.program;
+    GLuint64 n = instances > 0 ? (GLuint64)instances : 1;
+    bool tess = p && p->tess.active;
+    bool gs = p && mglProgramHasGeometry(p);
+
+    mglAddStatistic(ctx, GL_VERTICES_SUBMITTED, vertices * n);
+    mglAddStatistic(ctx, GL_PRIMITIVES_SUBMITTED, primitives * n);
+    mglAddStatistic(ctx, GL_VERTEX_SHADER_INVOCATIONS, vertices * n);
+
+    if (tess && p->tess.has_control)
+        mglAddStatistic(ctx, GL_TESS_CONTROL_SHADER_PATCHES, primitives * n);
+
+    if (!tess && !gs)
+    {
+        mglAddStatistic(ctx, GL_CLIPPING_INPUT_PRIMITIVES, primitives * n);
+        mglAddStatistic(ctx, GL_CLIPPING_OUTPUT_PRIMITIVES, primitives * n);
+    }
 }
 
 static GLuint64 hostTimeNS(void)
@@ -150,6 +213,9 @@ void mglDeleteQueries(GLMContext ctx, GLsizei n, const GLuint *ids)
                 if (ctx->state.active_query[t][s] == q)
                     ctx->state.active_query[t][s] = NULL;
 
+        if (q->visibility_offset >= 0 && ctx->mtl_funcs.mtlQueryResult)
+            ctx->mtl_funcs.mtlQueryResult(ctx, q);
+
         deleteHashElement(&ctx->state.query_table, ids[i]);
         mglForgetObjectLabel(ctx, GL_QUERY, ids[i], NULL);
         free(q);
@@ -191,6 +257,10 @@ void mglBeginQueryIndexed(GLMContext ctx, GLenum target, GLuint index, GLuint id
 
     ERROR_CHECK_RETURN(q->target == 0 || q->target == target, GL_INVALID_OPERATION);
 
+    // counter slots from a run nobody read the answer of go back first
+    if (q->visibility_offset >= 0 && ctx->mtl_funcs.mtlQueryResult)
+        ctx->mtl_funcs.mtlQueryResult(ctx, q);
+
     q->target = target;
     q->index = index;
     q->active = GL_TRUE;
@@ -222,13 +292,14 @@ void mglEndQueryIndexed(GLMContext ctx, GLenum target, GLuint index)
     if (target == GL_TIME_ELAPSED)
         q->result = hostTimeNS() - q->start_time;
 
-    if (isOcclusionTarget(target) && ctx->mtl_funcs.mtlQueryEnd)
-        ctx->mtl_funcs.mtlQueryEnd(ctx, q);
-
     q->active = GL_FALSE;
     q->have_result = GL_TRUE;
 
     ctx->state.active_query[t][index] = NULL;
+
+    // the renderer keeps counting for any other fragment query still running
+    if (isOcclusionTarget(target) && ctx->mtl_funcs.mtlQueryEnd)
+        ctx->mtl_funcs.mtlQueryEnd(ctx, q);
 }
 
 void mglBeginQuery(GLMContext ctx, GLenum target, GLuint id)
@@ -283,7 +354,7 @@ static void getQueryTargetiv(GLMContext ctx, GLenum target, GLuint index, GLenum
             break;
 
         case GL_QUERY_COUNTER_BITS:
-            *params = (target == GL_TIMESTAMP || target == GL_TIME_ELAPSED) ? 64 : 32;
+            *params = (target == GL_TIMESTAMP || target == GL_TIME_ELAPSED || t >= _QUERY_VERTICES_SUBMITTED) ? 64 : 32;
             break;
 
         default:

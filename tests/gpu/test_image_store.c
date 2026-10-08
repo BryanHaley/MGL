@@ -27,6 +27,8 @@
 #include "mgl_test.h"
 #include "harness.h"
 
+typedef struct { GLint v[4]; } ivec4_t;
+
 static GLuint storeProgram(const char *layout, const char *type, const char *value)
 {
     char src[512], log[2048] = "";
@@ -668,4 +670,122 @@ GPU_TEST(image_store, too_many_image_uniforms_fails_the_link)
     if (prog)
         glDeleteProgram(prog);
     mgl_drain_errors();
+}
+
+// Two textures cast to R32I and R32UI, counted into by atomics and read back
+// by a second compute pass. kind 0 counts from a compute shader, kind 1 from a
+// fragment shader, as the CTS cast cases do.
+static void castRound(int kind, ivec4_t *out)
+{
+    static const char *count_cs =
+        "#version 460 core\n"
+        "layout(local_size_x = 11, local_size_y = 11) in;\n"
+        "layout(r32i, binding = 0) coherent uniform iimage2D g_image0;\n"
+        "layout(r32ui, binding = 1) coherent uniform uimage2D g_image1;\n"
+        "void main() {\n"
+        "  ivec2 coord = ivec2(gl_LocalInvocationID);\n"
+        "  imageAtomicAdd(g_image0, coord, 2); imageAtomicAdd(g_image0, coord, -1);\n"
+        "  imageAtomicAdd(g_image1, coord, 1u); imageAtomicAdd(g_image1, coord, 2u);\n"
+        "}\n";
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 pos;\n"
+        "void main() { gl_Position = vec4(pos, 0.0, 1.0); }\n";
+    static const char *count_fs =
+        "#version 460 core\n"
+        "layout(r32i, binding = 0) coherent uniform iimage2D g_image0;\n"
+        "layout(r32ui, binding = 1) coherent uniform uimage2D g_image1;\n"
+        "void main() {\n"
+        "  ivec2 coord = ivec2(gl_FragCoord.xy);\n"
+        "  imageAtomicAdd(g_image0, coord, 2); imageAtomicAdd(g_image0, coord, -1);\n"
+        "  imageAtomicAdd(g_image1, coord, 1u); imageAtomicAdd(g_image1, coord, 2u);\n"
+        "}\n";
+    static const char *read_cs =
+        "#version 460 core\n"
+        "layout(local_size_x = 11, local_size_y = 11) in;\n"
+        "layout(r32i, binding = 0) uniform iimage2D gi_image;\n"
+        "layout(r32ui, binding = 1) uniform uimage2D gu_image;\n"
+        "layout(std430, binding = 0) buffer out_data { ivec4 data[121]; };\n"
+        "void main() {\n"
+        "  ivec2 coord = ivec2(gl_LocalInvocationID);\n"
+        "  data[gl_LocalInvocationIndex] = ivec4(imageLoad(gi_image, coord).x, int(imageLoad(gu_image, coord).x), 0, 0);\n"
+        "}\n";
+    enum { K = 11 };
+    static GLubyte zeros[K * K * 16];
+    char log[2048] = "";
+    GLuint count = kind ? mgl_build_program(vs, count_fs, log, sizeof log)
+                        : mgl_build_compute_program(count_cs, log, sizeof log);
+    GLuint reader = mgl_build_compute_program(read_cs, log, sizeof log);
+    GLuint tex[2], buf, vao = 0, vbo = 0;
+    MGLTestTarget t;
+
+    CHECK_MSG(count && reader, "programs did not build: %s", log);
+    if (!count || !reader)
+        return;
+
+    glGenTextures(2, tex);
+    glGenBuffers(1, &buf);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glActiveTexture(i ? GL_TEXTURE15 : GL_TEXTURE11);
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, K, K);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, K, K, GL_RGBA, GL_UNSIGNED_BYTE, zeros);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+
+    glBindImageTexture(0, tex[0], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32I);
+    glBindImageTexture(1, tex[1], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32UI);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof zeros, zeros, GL_STATIC_DRAW);
+
+    glUseProgram(count);
+
+    if (kind)
+    {
+        vao = mgl_fullscreen_quad(&vbo);
+        mgl_target_create(&t, 64, 64, GL_RGBA8, 0);
+        mgl_target_bind(&t);
+        glViewport(0, 0, K, K);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+    else
+    {
+        glDispatchCompute(1, 1, 1);
+    }
+
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    glUseProgram(reader);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(ivec4_t), out);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteTextures(2, tex);
+    if (vao)
+    {
+        glDeleteBuffers(1, &vbo);
+        glDeleteVertexArrays(1, &vao);
+        mgl_target_destroy(&t);
+    }
+    glActiveTexture(GL_TEXTURE0);
+}
+
+// The fragment-shader round came back with nothing counted on its unsigned
+// image whenever an earlier round had run in the same context.
+GPU_TEST(image_store, a_cast_round_after_another_still_counts)
+{
+    ivec4_t got;
+
+    for (int kind = 0; kind < 2; kind++)
+    {
+        memset(&got, 0, sizeof got);
+        castRound(kind, &got);
+        CHECK_MSG(got.v[0] == 1 && got.v[1] == 3, "round %d counted %d and %d, want 1 and 3",
+                  kind, got.v[0], got.v[1]);
+    }
 }

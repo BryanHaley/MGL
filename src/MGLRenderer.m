@@ -368,6 +368,16 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
     // One slot per encoder an occlusion query stays live across, summed later.
     id<MTLBuffer> _visibilityBuffer;
     GLuint        _visibilityNextSlot;
+    GLuint        _visibilityHolders;   // queries holding slots not yet read
+    id<MTLBuffer> _tessLevelsUsed;      // the factors the last tessellated draw read
+
+    // glMemoryBarrier: the encoder that wrote signals one of these, and every
+    // encoder opened after it waits. An encoder never signals the one it
+    // waited on, which Metal does not allow.
+    id<MTLFence>  _barrierFences[2];
+    int           _barrierArmed;
+    int           _renderWaited;
+    int           _computeWaited;
 
     GLuint _blitOperationComplete;
 
@@ -5755,6 +5765,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
         return false;
     }
     _currentRenderEncoder.label = @"GL Render Encoder";
+    _renderWaited = [self waitForBarrier: nil render: _currentRenderEncoder];
 
     [self beginOcclusionCountingOnEncoder];
 
@@ -7075,6 +7086,56 @@ static const char *mgl_gs_capture_msl =
     return true;
 }
 
+// The statistics behind a geometry stage: one invocation per slot, and what
+// it emitted, which is also what reaches clipping. Counting what was emitted
+// waits for the stage to run.
+- (void) countGeometry: (Program *) program
+                output: (id<MTLBuffer>) out_buf
+                 slots: (NSUInteger) slots
+{
+    GeometryInfo *gi = &program->geom;
+    // one MGL made to carry tessellation is no stage the application has
+    bool real = program->synthetic_gs == NULL;
+
+    if (real)
+        mglAddStatistic(ctx, GL_GEOMETRY_SHADER_INVOCATIONS, slots);
+
+    if (!(real && mglStatisticActive(ctx, GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED)) &&
+        !mglStatisticActive(ctx, GL_CLIPPING_INPUT_PRIMITIVES) &&
+        !mglStatisticActive(ctx, GL_CLIPPING_OUTPUT_PRIMITIVES))
+        return;
+
+    if ([self buildGsCapturePipelines] == false)
+        return;
+
+    id<MTLBuffer> before = [_scratchPool bufferOfLength: (slots + 1) * sizeof(uint32_t)
+                                       forCommandBuffer: _currentCommandBuffer];
+    id<MTLComputeCommandEncoder> enc = before ? [self liveComputeEncoder] : nil;
+
+    if (enc == nil)
+        return;
+
+    uint32_t cfg[3] = { (uint32_t)(gi->out_stride / 4), (uint32_t)gi->slot_capacity, (uint32_t)slots };
+
+    [enc setComputePipelineState: _gsCountPipeline];
+    [enc setBuffer: out_buf offset: 0 atIndex: 0];
+    [enc setBuffer: before offset: 0 atIndex: 1];
+    [enc setBytes: cfg length: sizeof(cfg) atIndex: 2];
+    [enc dispatchThreads: MTLSizeMake(1, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+    [self endComputeEncoding];
+    [self flushCommandBuffer: true];
+
+    // strips were split into separate primitives as they were emitted
+    GLuint per = gi->out_primitive == GL_POINTS ? 1 : gi->out_primitive == GL_LINE_STRIP ? 2 : 3;
+    GLuint64 prims = ((uint32_t *)before.contents)[slots] / per;
+
+    if (real)
+        mglAddStatistic(ctx, GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED, prims);
+
+    mglAddStatistic(ctx, GL_CLIPPING_INPUT_PRIMITIVES, prims);
+    mglAddStatistic(ctx, GL_CLIPPING_OUTPUT_PRIMITIVES, prims);
+}
+
 // Copies what the geometry stage emitted into the bound feedback buffers, in
 // the order GL records it, then waits so the next draw knows where to go on.
 - (void) captureGeometry: (Program *) program
@@ -7233,6 +7294,7 @@ static const char *mgl_gs_capture_msl =
     uint32_t *all = NULL;
     size_t all_count = 0, all_cap = 0;
     GLint total = 0;
+    GLuint64 evaluated = 0;
 
     if (_tessGenCoords == nil || coords == NULL || local == NULL)
     {
@@ -7271,6 +7333,8 @@ static const char *mgl_gs_capture_msl =
 
         if (verts < 0)
             verts = prims = 0;
+
+        evaluated += (GLuint64)verts;
 
         float *block = dst + (size_t)p * MGL_TES_GEN_STRIDE * 4;
 
@@ -7339,6 +7403,8 @@ static const char *mgl_gs_capture_msl =
         for (GLuint p = 0; p < patches * 6; p++)
             levels[p] = f;
     }
+
+    mglAddStatistic(ctx, GL_TESS_EVALUATION_SHADER_INVOCATIONS, evaluated);
 
     // what the pipeline produced, which the input count said nothing about
     for (int t = 0; t < _MAX_QUERY_TARGETS; t++)
@@ -7655,6 +7721,7 @@ static const char *mgl_gs_capture_msl =
                               vertexCount: slots * (NSUInteger)gi->slot_capacity];
 
     [self captureGeometry: program output: out_buf slots: slots];
+    [self countGeometry: program output: out_buf slots: slots];
 
     return true;
 }
@@ -8051,7 +8118,64 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
         MGL_NSERR(@"MGL ERROR: drawPatches failed: %@", exception);
     }
 
+    [self countTessellation: patches];
+
     return true;
+}
+
+// What Metal's tessellator made, which it does not report: the CPU
+// tessellator cuts each patch again at the levels the control stage wrote.
+// That waits for the control stage.
+- (void) countTessellation: (GLuint) patches
+{
+    TessInfo *ti = &ctx->state.program->tess;
+    id<MTLBuffer> levels = _tessLevelsUsed;
+
+    if (!mglStatisticActive(ctx, GL_TESS_EVALUATION_SHADER_INVOCATIONS) &&
+        !mglStatisticActive(ctx, GL_CLIPPING_INPUT_PRIMITIVES) &&
+        !mglStatisticActive(ctx, GL_CLIPPING_OUTPUT_PRIMITIVES))
+        return;
+
+    if (levels == nil)
+        return;
+
+    [self flushCommandBuffer: true];
+
+    enum { MAX_INDEX = 2 * MGL_TES_MAX_LEVEL * MGL_TES_MAX_LEVEL * 3 };
+    MglTessCoord *coords = malloc(sizeof(MglTessCoord) * MGL_TES_GEN_VERTS);
+    uint32_t *index = malloc(sizeof(uint32_t) * MAX_INDEX);
+    const __fp16 *half = (const __fp16 *)levels.contents;
+    bool triangles = ti->patch_kind == SpvExecutionModeTriangles;
+    int stride = triangles ? 4 : 6, edges = triangles ? 3 : 4;
+    GLuint64 verts = 0, prims = 0;
+
+    for (GLuint p = 0; coords && index && p < patches; p++)
+    {
+        float outer[4] = { 0 }, inner[2] = { 0 };
+        int made = 0, n;
+
+        for (int e = 0; e < edges; e++)
+            outer[e] = (float)half[p * stride + e];
+
+        inner[0] = (float)half[p * stride + edges];
+        inner[1] = triangles ? 0.0f : (float)half[p * stride + 5];
+
+        n = mglTessellate(ti->gl_domain, ti->gl_spacing, ti->gl_points, ti->gl_cw,
+                          outer, inner, coords, MGL_TES_GEN_VERTS, index, MAX_INDEX, &made);
+
+        if (n > 0)
+        {
+            verts += (GLuint64)n;
+            prims += (GLuint64)made;
+        }
+    }
+
+    free(coords);
+    free(index);
+
+    mglAddStatistic(ctx, GL_TESS_EVALUATION_SHADER_INVOCATIONS, verts);
+    mglAddStatistic(ctx, GL_CLIPPING_INPUT_PRIMITIVES, prims);
+    mglAddStatistic(ctx, GL_CLIPPING_OUTPUT_PRIMITIVES, prims);
 }
 
 // With no control shader the tessellation levels are context state, so they
@@ -8430,6 +8554,7 @@ static const char *mgl_isoline_levels_msl =
     [_currentRenderEncoder setVertexBuffer: patch_out offset: 0 atIndex: MGL_TESS_PATCH_OUT_INDEX];
     [_currentRenderEncoder setVertexBuffer: levels offset: 0 atIndex: MGL_TESS_LEVEL_INDEX];
     [_currentRenderEncoder setTessellationFactorBuffer: levels offset: 0 instanceStride: 0];
+    _tessLevelsUsed = levels;
 
     return true;
 }
@@ -8996,34 +9121,41 @@ static MTLWinding mtlWindingFor(const Program *p)
     return _visibilityBuffer;
 }
 
-- (Query *) activeOcclusionQuery
+// The queries counting fragments right now: occlusion, and fragment shader
+// invocations, which are counted the same way.
+static int countingQueries(GLMContext ctx, Query **out)
 {
+    int n = 0;
+
     for (int t = 0; t < _MAX_QUERY_TARGETS; t++)
     {
         Query *q = ctx->state.active_query[t][0];
 
-        if (q == NULL)
-            continue;
-
-        if (q->target == GL_SAMPLES_PASSED ||
-            q->target == GL_ANY_SAMPLES_PASSED ||
-            q->target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE)
-            return q;
+        if (q && (q->target == GL_SAMPLES_PASSED || q->target == GL_ANY_SAMPLES_PASSED ||
+                  q->target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE ||
+                  q->target == GL_FRAGMENT_SHADER_INVOCATIONS))
+            out[n++] = q;
     }
 
-    return NULL;
+    return n;
 }
 
+// Every query counting takes the new slot, so each one's slots stay in one
+// run. Once no query holds a slot they all go back.
 - (void) beginOcclusionCountingOnEncoder
 {
-    Query *q = [self activeOcclusionQuery];
+    Query *qs[_MAX_QUERY_TARGETS];
+    int n = countingQueries(ctx, qs);
 
-    if (q == NULL || _currentRenderEncoder == nil)
+    if (n == 0 || _currentRenderEncoder == nil)
         return;
+
+    if (_visibilityHolders == 0)
+        _visibilityNextSlot = 0;
 
     if (_visibilityNextSlot >= MGL_VISIBILITY_SLOTS)
     {
-        MGL_NSERR(@"MGL WARNING: out of occlusion counter slots, query %u will undercount", q->name);
+        MGL_NSERR(@"MGL WARNING: out of occlusion counter slots, queries will undercount");
         return;
     }
 
@@ -9031,23 +9163,35 @@ static MTLWinding mtlWindingFor(const Program *p)
 
     ((uint64_t *)[self visibilityBuffer].contents)[slot] = 0;
 
-    if (q->visibility_offset < 0)
+    for (int i = 0; i < n; i++)
     {
-        q->visibility_offset = (GLint)slot;
-        q->visibility_slots = 1;
-    }
-    else
-    {
-        q->visibility_slots++;
+        Query *q = qs[i];
+
+        if (q->visibility_offset < 0)
+        {
+            q->visibility_offset = (GLint)slot;
+            _visibilityHolders++;
+        }
+
+        q->visibility_slots = (GLint)slot - q->visibility_offset + 1;
     }
 
     [_currentRenderEncoder setVisibilityResultMode: MTLVisibilityResultModeCounting
                                             offset: slot * 8];
 }
 
+// A query just ended. Any still running go on in a slot of their own, so the
+// ended one's count stops here.
 - (void) endOcclusionCountingOnEncoder
 {
-    if (_currentRenderEncoder)
+    Query *qs[_MAX_QUERY_TARGETS];
+
+    if (_currentRenderEncoder == nil)
+        return;
+
+    if (countingQueries(ctx, qs) > 0)
+        [self beginOcclusionCountingOnEncoder];
+    else
         [_currentRenderEncoder setVisibilityResultMode: MTLVisibilityResultModeDisabled
                                                 offset: 0];
 }
@@ -9066,6 +9210,9 @@ static MTLWinding mtlWindingFor(const Program *p)
 
     q->visibility_offset = -1;
     q->visibility_slots = 0;
+
+    if (_visibilityHolders > 0)
+        _visibilityHolders--;
 }
 
 - (id<MTLBlitCommandEncoder>) newBlitEncoder
@@ -9105,6 +9252,7 @@ static MTLWinding mtlWindingFor(const Program *p)
     [self endRenderEncoding];
 
     _currentComputeEncoder = [cmd computeCommandEncoder];
+    _computeWaited = [self waitForBarrier: _currentComputeEncoder render: nil];
 
     if (mglDebugCompute())
         MGL_INFO("MGLCOMP: opened a compute encoder\n");
@@ -10007,16 +10155,58 @@ void mtlDispatchCompute(GLMContext glm_ctx, GLuint num_groups_x, GLuint num_grou
 // memoryBarrierWithScope: provides. Across encoder types -- compute to draw, or
 // either to the CPU -- Metal tracks the hazard itself once the encoder ends,
 // which is what creating a render encoder or committing already does.
+// The fence an encoder that waited on `waited` may signal.
+- (int) barrierFenceAfter: (int) waited
+{
+    int f = waited == 0 ? 1 : 0;
+
+    if (_barrierFences[f] == nil)
+        _barrierFences[f] = [_device newFence];
+
+    return f;
+}
+
+// A new encoder waits for the last barrier's writes. Returns the fence it
+// waited on, or -1.
+- (int) waitForBarrier: (id<MTLComputeCommandEncoder>) compute render: (id<MTLRenderCommandEncoder>) render
+{
+    if (_barrierArmed < 0 || _barrierFences[_barrierArmed] == nil)
+        return -1;
+
+    if (compute)
+        [compute waitForFence: _barrierFences[_barrierArmed]];
+    else if (render)
+        [render waitForFence: _barrierFences[_barrierArmed] beforeStages: MTLRenderStageVertex];
+
+    return _barrierArmed;
+}
+
 -(void)mtlMemoryBarrier:(GLMContext)glm_ctx barriers:(GLbitfield)barriers
 {
     // Draws in one render pass need not see each other's writes: a texture
     // rendered to, or an image or buffer a shader wrote, reaches memory when
     // the pass ends. So the pass ends here and the next draw starts another.
     if (_currentRenderEncoder && barriers)
+    {
+        int f = [self barrierFenceAfter: _renderWaited];
+
+        [_currentRenderEncoder updateFence: _barrierFences[f] afterStages: MTLRenderStageFragment];
+        _barrierArmed = f;
         [self endRenderEncoding];
+    }
 
     if (!_currentComputeEncoder)
         return;
+
+    // the barrier below orders this encoder's own dispatches; the fence orders
+    // whatever encoder comes next
+    if (barriers)
+    {
+        int f = [self barrierFenceAfter: _computeWaited];
+
+        [_currentComputeEncoder updateFence: _barrierFences[f]];
+        _barrierArmed = f;
+    }
 
     MTLBarrierScope scope = 0;
 
@@ -11820,6 +12010,15 @@ Buffer *getIndirectBuffer(GLMContext ctx)
     return true;
 }
 
+// Geometry and tessellation are run by MGL itself, through the instanced
+// draws; Metal cannot draw such a program on its own.
+static bool drawRunsStages(GLMContext ctx)
+{
+    Program *p = ctx->state.program;
+
+    return p && (mglProgramHasGeometry(p) || p->tess.active);
+}
+
 #pragma mark C interface to mtlDrawArrays
 -(void) mtlDrawArrays: (GLMContext) ctx mode:(GLenum) mode first: (GLint) first count: (GLsizei) count
 {
@@ -12317,7 +12516,7 @@ void mtlDrawElementsInstancedBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei
 {
     MTLPrimitiveType primitiveType;
 
-    if (primitive_mode_needs_expand(mode))
+    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx))
     {
         DrawArraysIndirectCommand cmd;
 
@@ -12343,7 +12542,7 @@ void mtlDrawElementsInstancedBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei
     id <MTLBuffer>indirectBuffer = (__bridge id<MTLBuffer>)(gl_indirect_buffer->data.mtl_data);
     MTL_CHECK_RETURN(indirectBuffer, GL_OUT_OF_MEMORY);
 
-    [_currentRenderEncoder drawPrimitives:primitiveType indirectBuffer:indirectBuffer indirectBufferOffset:(DrawArraysIndirectCommand *)indirect - (DrawArraysIndirectCommand *)NULL];
+    [_currentRenderEncoder drawPrimitives:primitiveType indirectBuffer:indirectBuffer indirectBufferOffset:(NSUInteger)(uintptr_t)indirect];
 }
 
 void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect)
@@ -12360,7 +12559,7 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode))
+    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx))
     {
         DrawElementsIndirectCommand cmd;
         GLuint index_size = type == GL_UNSIGNED_BYTE ? 1 : type == GL_UNSIGNED_SHORT ? 2 : 4;
@@ -12398,7 +12597,7 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
     MTL_CHECK_RETURN(indirectBuffer, GL_OUT_OF_MEMORY);
 
     // draw indexed primitive
-    [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexType:indexType indexBuffer: indexBuffer indexBufferOffset:src.offset indirectBuffer:indirectBuffer indirectBufferOffset:(DrawElementsIndirectCommand *)indirect - (DrawElementsIndirectCommand *)NULL];
+    [_currentRenderEncoder drawIndexedPrimitives:primitiveType indexType:indexType indexBuffer: indexBuffer indexBufferOffset:src.offset indirectBuffer:indirectBuffer indirectBufferOffset:(NSUInteger)(uintptr_t)indirect];
 }
 
 void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const void *indirect)
@@ -12412,6 +12611,13 @@ void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const
 #pragma mark C interface to mtlDrawArraysInstancedBaseInstance
 -(void) mtlDrawArraysInstancedBaseInstance: (GLMContext) glm_ctx mode:(GLenum) mode first: (GLint) first count: (GLsizei) count instancecount:(GLsizei) instancecount baseinstance:(GLuint) baseinstance
 {
+    // those stages take no base instance yet
+    if (drawRunsStages(ctx))
+    {
+        [self mtlDrawArraysInstanced: glm_ctx mode: mode first: first count: count instancecount: instancecount];
+        return;
+    }
+
     MTLPrimitiveType primitiveType;
 
     [self updateTransformFeedbackUniforms: first count: count];
@@ -12444,6 +12650,13 @@ void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint f
 #pragma mark C interface to mtlDrawElementsInstancedBaseInstance
 -(void) mtlDrawElementsInstancedBaseInstance: (GLMContext) glm_ctx mode:(GLenum) mode  count: (GLsizei) count type:(GLenum) type indices:(const void *)indices instancecount:(GLsizei) instancecount baseinstance:(GLuint) baseinstance
 {
+    if (drawRunsStages(ctx))
+    {
+        [self mtlDrawElementsInstanced: glm_ctx mode: mode count: count type: type indices: indices
+                         instancecount: instancecount];
+        return;
+    }
+
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
@@ -12495,6 +12708,13 @@ void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsiz
 -(void) mtlDrawElementsInstancedBaseVertexBaseInstance: (GLMContext) glm_ctx mode:(GLenum) mode count: (GLsizei) count type:(GLenum) type indices:(const void *)indices
                                                         instancecount:(GLsizei) instancecount basevertex:(GLint) basevertex baseinstance:(GLuint) baseinstance
 {
+    if (drawRunsStages(ctx))
+    {
+        [self mtlDrawElementsInstancedBaseVertex: glm_ctx mode: mode count: count type: type indices: indices
+                                   instancecount: instancecount basevertex: basevertex];
+        return;
+    }
+
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
@@ -12668,17 +12888,24 @@ void mtlMultiDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, const GLsiz
 {
     MTLPrimitiveType primitiveType;
 
-    [self setDrawTopologyForMode: mode];
-    RETURN_ON_FAILURE([self processGLState: true]);
-
-    // the draw parameters live in a GPU buffer, so there is nothing to expand
-    // from here yet; refusing beats aborting the process
-    if (primitive_mode_needs_expand(mode))
+    // modes MGL expands and stages it runs need each command read first,
+    // which the single indirect draw does
+    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx))
     {
-        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        size_t step = stride ? (size_t)stride : sizeof(DrawArraysIndirectCommand);
+
+        for (GLsizei i = 0; i < drawcount; i++)
+        {
+            [self bindDrawID: (uint32_t)i];
+            [self mtlDrawArraysIndirect: glm_ctx mode: mode
+                               indirect: (const void *)((uintptr_t)indirect + (size_t)i * step)];
+        }
 
         return;
     }
+
+    [self setDrawTopologyForMode: mode];
+    RETURN_ON_FAILURE([self processGLState: true]);
 
     primitiveType = getMTLPrimitiveType(mode);
 
@@ -12720,21 +12947,25 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if ((primitive_mode_needs_expand(mode) == false || geometryReadsIndices(ctx)) &&
-        [self resolveIndices: type offset: 0 count: 0 into: &src] == false)
+    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx))
+    {
+        size_t step = stride ? (size_t)stride : sizeof(DrawElementsIndirectCommand);
+
+        for (GLsizei i = 0; i < drawcount; i++)
+        {
+            [self bindDrawID: (uint32_t)i];
+            [self mtlDrawElementsIndirect: glm_ctx mode: mode type: type
+                                 indirect: (const void *)((uintptr_t)indirect + (size_t)i * step)];
+        }
+
+        return;
+    }
+
+    if ([self resolveIndices: type offset: 0 count: 0 into: &src] == false)
         return;
 
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
-
-    // the draw parameters live in a GPU buffer, so there is nothing to expand
-    // from here yet; refusing beats aborting the process
-    if (primitive_mode_needs_expand(mode))
-    {
-        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
-
-        return;
-    }
 
     primitiveType = getMTLPrimitiveType(mode);
 
@@ -13151,6 +13382,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     }
 
     _commandQueue = [_device newCommandQueueWithDescriptor:queueDescriptor];
+    _barrierArmed = _renderWaited = _computeWaited = -1;
     if (!_commandQueue) {
         MGL_NSERR(@"MGL ERROR: Failed to create Metal command queue");
         return;

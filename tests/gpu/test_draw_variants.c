@@ -582,6 +582,31 @@ GPU_TEST(draw_variants, client_side_indices_reach_the_draw)
 
     CHECK_MSG(c[0] > 200, "the instanced client-side index draw left red %u at the centre", c[0]);
 
+    // the copy of the indices was left bound after a range draw with a base
+    // vertex, and after a draw conditional rendering threw away
+    {
+        GLint bound = -1;
+        GLuint q;
+
+        glDrawRangeElementsBaseVertex(GL_TRIANGLES, 0, 3, 6, GL_UNSIGNED_SHORT, idx, 0);
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &bound);
+        CHECK_EQ_INT(bound, 0);
+
+        glGenQueries(1, &q);
+        glBeginQuery(GL_SAMPLES_PASSED, q);
+        glEndQuery(GL_SAMPLES_PASSED);
+        glBeginConditionalRender(q, GL_QUERY_WAIT);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, idx);
+        glEndConditionalRender();
+        glDeleteQueries(1, &q);
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &bound);
+        CHECK_EQ_INT(bound, 0);
+
+        // with nothing bound, a null offset has no indices to read
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, NULL);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    }
+
     glUseProgram(0);
     glBindVertexArray(0);
     glDeleteBuffers(1, &vbo);

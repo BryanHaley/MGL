@@ -582,6 +582,10 @@ typedef struct CullInfo_t {
 void  mglReadColorFormatAndType(GLMContext ctx, GLenum *format, GLenum *type);
 bool  mglDrawFramebufferComplete(GLMContext ctx);
 bool  mglConditionalRenderSkips(GLMContext ctx);
+void  mglAddStatistic(GLMContext ctx, GLenum target, GLuint64 n);
+bool  mglStatisticActive(GLMContext ctx, GLenum target);
+bool  mglAnyStatisticActive(GLMContext ctx);
+void  mglCountDrawStatistics(GLMContext ctx, GLuint64 vertices, GLuint64 primitives, GLsizei instances);
 GLint mglCullDistanceSize(const char *src);
 bool  mglBuildCullShaders(const char *vs_src, CullInfo *ci);
 void  mglFreeCullInfo(CullInfo *ci);
@@ -999,6 +1003,17 @@ typedef enum {
     _QUERY_TF_STREAM_OVERFLOW,
     _QUERY_TIME_ELAPSED,
     _QUERY_TIMESTAMP,
+    _QUERY_VERTICES_SUBMITTED,
+    _QUERY_PRIMITIVES_SUBMITTED,
+    _QUERY_VERTEX_SHADER_INVOCATIONS,
+    _QUERY_TESS_CONTROL_SHADER_PATCHES,
+    _QUERY_TESS_EVALUATION_SHADER_INVOCATIONS,
+    _QUERY_GEOMETRY_SHADER_INVOCATIONS,
+    _QUERY_GEOMETRY_SHADER_PRIMITIVES_EMITTED,
+    _QUERY_FRAGMENT_SHADER_INVOCATIONS,
+    _QUERY_COMPUTE_SHADER_INVOCATIONS,
+    _QUERY_CLIPPING_INPUT_PRIMITIVES,
+    _QUERY_CLIPPING_OUTPUT_PRIMITIVES,
     _MAX_QUERY_TARGETS
 } QueryTargetIndex;
 

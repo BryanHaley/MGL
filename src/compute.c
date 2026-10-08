@@ -18,8 +18,26 @@
  *
  */
 
+#include <string.h>
+
 #include "glm_context.h"
 #include "mgl_log.h"
+
+// One invocation per thread of every workgroup.
+static void countDispatch(GLMContext ctx, GLuint x, GLuint y, GLuint z)
+{
+    Program *p = STATE(program);
+    GLuint64 local;
+
+    if (p == NULL || !mglStatisticActive(ctx, GL_COMPUTE_SHADER_INVOCATIONS))
+        return;
+
+    local = (GLuint64)(p->local_workgroup_size.x ? p->local_workgroup_size.x : 1) *
+            (p->local_workgroup_size.y ? p->local_workgroup_size.y : 1) *
+            (p->local_workgroup_size.z ? p->local_workgroup_size.z : 1);
+
+    mglAddStatistic(ctx, GL_COMPUTE_SHADER_INVOCATIONS, (GLuint64)x * y * z * local);
+}
 
 
 void mglDispatchCompute(GLMContext ctx, GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z)
@@ -49,6 +67,7 @@ void mglDispatchCompute(GLMContext ctx, GLuint num_groups_x, GLuint num_groups_y
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    countDispatch(ctx, num_groups_x, num_groups_y, num_groups_z);
     ctx->mtl_funcs.mtlDispatchCompute(ctx, num_groups_x, num_groups_y, num_groups_z);
 }
 
@@ -64,6 +83,16 @@ void mglDispatchComputeIndirect(GLMContext ctx, GLintptr indirect)
 
     if (mglConditionalRenderSkips(ctx))
         return;
+
+    // the group counts may be the GPU's own work, so they are read once it lands
+    if (mglStatisticActive(ctx, GL_COMPUTE_SHADER_INVOCATIONS) && buf->data.buffer_data)
+    {
+        GLuint groups[3];
+
+        ctx->mtl_funcs.mtlFlush(ctx, true);
+        memcpy(groups, (const uint8_t *)buf->data.buffer_data + indirect, sizeof groups);
+        countDispatch(ctx, groups[0], groups[1], groups[2]);
+    }
 
     ctx->mtl_funcs.mtlDispatchComputeIndirect(ctx, indirect);
 }
