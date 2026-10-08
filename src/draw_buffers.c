@@ -329,6 +329,7 @@ void mglDrawArrays(GLMContext ctx, GLenum mode, GLint first, GLsizei count)
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_FALSE;
     ctx->mtl_funcs.mtlDrawArrays(ctx, mode, first, count);
 }
 
@@ -360,6 +361,7 @@ void mglDrawElements(GLMContext ctx, GLenum mode, GLsizei count, GLenum type, co
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlDrawElements(ctx, mode, count, type, indices);
 
     endClientIndices(ctx, staged);
@@ -390,6 +392,7 @@ void mglDrawRangeElements(GLMContext ctx, GLenum mode, GLuint start, GLuint end,
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlDrawRangeElements(ctx, mode, start, end, count, type, indices);
 
     endClientIndices(ctx, staged);
@@ -428,6 +431,7 @@ void mglDrawArraysInstanced(GLMContext ctx, GLenum mode, GLint first, GLsizei co
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_FALSE;
     ctx->mtl_funcs.mtlDrawArraysInstanced(ctx, mode, first, count, instancecount);
 }
 
@@ -459,6 +463,7 @@ void mglDrawElementsInstanced(GLMContext ctx, GLenum mode, GLsizei count, GLenum
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlDrawElementsInstanced(ctx, mode, count, type, indices, instancecount);
 
     endClientIndices(ctx, staged);
@@ -486,6 +491,7 @@ void mglDrawElementsBaseVertex(GLMContext ctx, GLenum mode, GLsizei count, GLenu
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlDrawElementsBaseVertex(ctx, mode, count, type, indices, basevertex);
 
     endClientIndices(ctx, staged);
@@ -516,6 +522,7 @@ void mglDrawRangeElementsBaseVertex(GLMContext ctx, GLenum mode, GLuint start, G
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlDrawRangeElementsBaseVertex(ctx, mode, start, end, count, type, indices, basevertex);
 }
 
@@ -544,6 +551,7 @@ void mglDrawElementsInstancedBaseVertex(GLMContext ctx, GLenum mode, GLsizei cou
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlDrawElementsInstancedBaseVertex(ctx, mode, count, type, indices, instancecount, basevertex);
 
     endClientIndices(ctx, staged);
@@ -584,6 +592,7 @@ void mglDrawArraysIndirect(GLMContext ctx, GLenum mode, const void *indirect)
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_FALSE;
     ctx->mtl_funcs.mtlDrawArraysIndirect(ctx, mode, indirect);
 }
 
@@ -606,6 +615,7 @@ void mglDrawElementsIndirect(GLMContext ctx, GLenum mode, GLenum type, const voi
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlDrawElementsIndirect(ctx, mode, type, indirect);
 }
 
@@ -631,6 +641,7 @@ void mglDrawArraysInstancedBaseInstance(GLMContext ctx, GLenum mode, GLint first
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_FALSE;
     ctx->mtl_funcs.mtlDrawArraysInstancedBaseInstance(ctx, mode, first, count, instancecount, baseinstance);
 }
 
@@ -659,6 +670,7 @@ void mglDrawElementsInstancedBaseInstance(GLMContext ctx, GLenum mode, GLsizei c
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlDrawElementsInstancedBaseInstance(ctx, mode, count, type, indices, instancecount, baseinstance);
 
     endClientIndices(ctx, staged);
@@ -689,6 +701,7 @@ void mglDrawElementsInstancedBaseVertexBaseInstance(GLMContext ctx, GLenum mode,
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlDrawElementsInstancedBaseVertexBaseInstance(ctx, mode, count, type, indices, instancecount, basevertex, baseinstance);
 
     endClientIndices(ctx, staged);
@@ -729,6 +742,7 @@ void mglMultiDrawArrays(GLMContext ctx, GLenum mode, const GLint *first, const G
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_FALSE;
     ctx->mtl_funcs.mtlMultiDrawArrays(ctx, mode, first, count, drawcount);
 }
 
@@ -756,6 +770,7 @@ void mglMultiDrawElements(GLMContext ctx, GLenum mode, const GLsizei *count, GLe
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlMultiDrawElements(ctx, mode, count, type, indices, drawcount);
 }
 
@@ -783,6 +798,7 @@ void mglMultiDrawElementsBaseVertex(GLMContext ctx, GLenum mode, const GLsizei *
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlMultiDrawElementsBaseVertex(ctx, mode, count, type, indices, drawcount, basevertex);
 }
 
@@ -809,6 +825,7 @@ void mglMultiDrawArraysIndirect(GLMContext ctx, GLenum mode, const void *indirec
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_FALSE;
     ctx->mtl_funcs.mtlMultiDrawArraysIndirect(ctx, mode, indirect, drawcount, stride);
 }
 
@@ -837,34 +854,57 @@ void mglMultiDrawElementsIndirect(GLMContext ctx, GLenum mode, GLenum type, cons
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_TRUE;
     ctx->mtl_funcs.mtlMultiDrawElementsIndirect(ctx, mode, type, indirect, drawcount, stride);
 }
 
 
-// The draw count lives in a buffer bound to GL_PARAMETER_BUFFER, which MGL has
-// no target for yet, so these validate and then report that they cannot run.
-static void multiDrawIndirectCount(GLMContext ctx, GLenum mode, GLintptr drawcount,
-                                   GLsizei maxdrawcount, GLsizei stride)
+// The draw count sits at byte offset drawcount of the buffer bound to
+// GL_PARAMETER_BUFFER. It is read back here, waiting for any GPU work that
+// writes it, and the draw then runs as an ordinary multi-draw of that many
+// commands, never more than maxdrawcount. Returns -1 after raising an error.
+static GLsizei indirectDrawCount(GLMContext ctx, GLenum mode, GLintptr drawcount,
+                                 GLsizei maxdrawcount, GLsizei stride)
 {
-    ERROR_CHECK_RETURN(check_draw_modes(mode), GL_INVALID_ENUM);
-    ERROR_CHECK_RETURN(drawcount >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN((drawcount & 3) == 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(maxdrawcount >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(stride >= 0 && (stride % 4) == 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(STATE(buffers[_DRAW_INDIRECT_BUFFER]), GL_INVALID_OPERATION);
+    Buffer *param = STATE(buffers[_PARAMETER_BUFFER]);
+    GLuint count;
 
-    ERROR_RETURN(GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN_VALUE(check_draw_modes(mode), GL_INVALID_ENUM, -1);
+    ERROR_CHECK_RETURN_VALUE(drawcount >= 0 && (drawcount & 3) == 0, GL_INVALID_VALUE, -1);
+    ERROR_CHECK_RETURN_VALUE(maxdrawcount >= 0, GL_INVALID_VALUE, -1);
+    ERROR_CHECK_RETURN_VALUE(stride >= 0 && (stride % 4) == 0, GL_INVALID_VALUE, -1);
+    ERROR_CHECK_RETURN_VALUE(STATE(buffers[_DRAW_INDIRECT_BUFFER]), GL_INVALID_OPERATION, -1);
+    ERROR_CHECK_RETURN_VALUE(param, GL_INVALID_OPERATION, -1);
+    ERROR_CHECK_RETURN_VALUE(drawcount + 4 <= param->size, GL_INVALID_OPERATION, -1);
+    ERROR_CHECK_RETURN_VALUE(param->mapped == GL_FALSE || (param->access & GL_MAP_PERSISTENT_BIT),
+                             GL_INVALID_OPERATION, -1);
+
+    if (maxdrawcount == 0 || param->data.buffer_data == 0)
+        return 0;
+
+    ctx->mtl_funcs.mtlFlush(ctx, true);
+    memcpy(&count, (const void *)(param->data.buffer_data + drawcount), sizeof count);
+
+    return count < (GLuint)maxdrawcount ? (GLsizei)count : maxdrawcount;
 }
 
 void mglMultiDrawArraysIndirectCount(GLMContext ctx, GLenum mode, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride)
 {
-    multiDrawIndirectCount(ctx, mode, drawcount, maxdrawcount, stride);
+    GLsizei n = indirectDrawCount(ctx, mode, drawcount, maxdrawcount, stride);
+
+    if (n > 0)
+        mglMultiDrawArraysIndirect(ctx, mode, indirect, n, stride);
 }
 
 void mglMultiDrawElementsIndirectCount(GLMContext ctx, GLenum mode, GLenum type, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride)
 {
+    GLsizei n;
+
     ERROR_CHECK_RETURN(type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT ||
                        type == GL_UNSIGNED_INT, GL_INVALID_ENUM);
 
-    multiDrawIndirectCount(ctx, mode, drawcount, maxdrawcount, stride);
+    n = indirectDrawCount(ctx, mode, drawcount, maxdrawcount, stride);
+
+    if (n > 0)
+        mglMultiDrawElementsIndirect(ctx, mode, type, indirect, n, stride);
 }

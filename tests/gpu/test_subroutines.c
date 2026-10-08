@@ -400,3 +400,35 @@ GPU_TEST(subroutines, all_five_stages_keep_theirs)
 
     glDeleteProgram(prog);
 }
+
+// A subroutine's program resource index is its subroutine index, including
+// one layout(index) sets. The resource queries used the storage position.
+GPU_TEST(subroutines, resource_index_is_the_subroutine_index)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "subroutine float st(float x);\n"
+        "layout(index = 5) subroutine(st) float twice(float x) { return x * 2.0; }\n"
+        "layout(index = 2) subroutine(st) float half_(float x) { return x * 0.5; }\n"
+        "subroutine uniform st routine;\n"
+        "void main() { gl_Position = vec4(routine(1.0)); }\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1); }\n";
+    char log[2048] = { 0 }, name[32] = { 0 };
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    CHECK_EQ_UINT(glGetSubroutineIndex(prog, GL_VERTEX_SHADER, "twice"), 5);
+    CHECK_EQ_UINT(glGetProgramResourceIndex(prog, GL_VERTEX_SUBROUTINE, "twice"), 5);
+    CHECK_EQ_UINT(glGetProgramResourceIndex(prog, GL_VERTEX_SUBROUTINE, "half_"), 2);
+
+    glGetProgramResourceName(prog, GL_VERTEX_SUBROUTINE, 5, sizeof name, NULL, name);
+    CHECK_MSG(!strcmp(name, "twice"), "resource 5 is named \"%s\"", name);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(prog);
+}

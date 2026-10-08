@@ -188,19 +188,20 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     STATE(var.point_size) = 1.0f;
     STATE(var.polygon_mode) = GL_FILL;
 
-    STATE(scissor[0].x) = 0;
-    STATE(scissor[0].y) = 0;
-    STATE(scissor[0].width) = 0;   // needs to be set on binding to window
-    STATE(scissor[0].height) = 0;  // needs to be set on binding to window
-
-    // Initialize viewport to default size - critical for rendering
-    STATE(viewport[0].x) = 0;
-    STATE(viewport[0].y) = 0;
-    STATE(viewport[0].w) = 1024;  // Default width - should be updated when window is bound
-    STATE(viewport[0].h) = 768;   // Default height - should be updated when window is bound
-
     for(int i=0; i<MAX_VIEWPORTS; i++)
     {
+        // the scissor box is set again once a window is attached
+        STATE(scissor[i].x) = 0;
+        STATE(scissor[i].y) = 0;
+        STATE(scissor[i].width) = 0;
+        STATE(scissor[i].height) = 0;
+
+        // until a window says otherwise
+        STATE(viewport[i].x) = 0;
+        STATE(viewport[i].y) = 0;
+        STATE(viewport[i].w) = 1024;
+        STATE(viewport[i].h) = 768;
+
         STATE(depth_range[i].znear) = 0.0;
         STATE(depth_range[i].zfar) = 1.0;
     }

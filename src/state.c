@@ -28,6 +28,12 @@ static bool validBlendEquation(GLenum mode);
 #define ENABLE_CAP(_cap_)   ctx->state.caps._cap_ = true; break
 #define DISABLE_CAP(_cap_)   ctx->state.caps._cap_ = false; break
 
+static void setScissorTests(GLMContext ctx, GLboolean on)
+{
+    for (int i = 0; i < MAX_VIEWPORTS; i++)
+        ctx->state.caps.scissor_test_i[i] = on;
+}
+
 // the render pass writes sRGB images through a different view, so a new
 // setting needs a new pass
 static void srgbChanged(GLMContext ctx)
@@ -69,7 +75,7 @@ void mglDisable(GLMContext ctx, GLenum cap)
         case GL_DEPTH_TEST: DISABLE_CAP(depth_test);
         case GL_STENCIL_TEST: DISABLE_CAP(stencil_test);
         case GL_DITHER: DISABLE_CAP(dither);
-        case GL_SCISSOR_TEST: DISABLE_CAP(scissor_test);
+        case GL_SCISSOR_TEST: setScissorTests(ctx, false); DISABLE_CAP(scissor_test);
         case GL_COLOR_LOGIC_OP: DISABLE_CAP(color_logic_op);
         case GL_POLYGON_OFFSET_POINT: DISABLE_CAP(polygon_offset_point);
         case GL_POLYGON_OFFSET_LINE: DISABLE_CAP(polygon_offset_line);
@@ -124,7 +130,7 @@ void mglEnable(GLMContext ctx, GLenum cap)
         case GL_DEPTH_TEST: ENABLE_CAP(depth_test);
         case GL_STENCIL_TEST: ENABLE_CAP(stencil_test);
         case GL_DITHER: ENABLE_CAP(dither);
-        case GL_SCISSOR_TEST: ENABLE_CAP(scissor_test);
+        case GL_SCISSOR_TEST: setScissorTests(ctx, true); ENABLE_CAP(scissor_test);
         case GL_COLOR_LOGIC_OP: ENABLE_CAP(color_logic_op);
         case GL_POLYGON_OFFSET_POINT: ENABLE_CAP(polygon_offset_point);
         case GL_POLYGON_OFFSET_LINE: ENABLE_CAP(polygon_offset_line);
@@ -255,10 +261,14 @@ void mglScissor(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height)
     ERROR_CHECK_RETURN(width >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(height >= 0, GL_INVALID_VALUE);
 
-    ctx->state.scissor[0].x = x;
-    ctx->state.scissor[0].y = y;
-    ctx->state.scissor[0].width = width;
-    ctx->state.scissor[0].height = height;
+    // glScissor sets every viewport's box at once
+    for (int i = 0; i < MAX_VIEWPORTS; i++)
+    {
+        ctx->state.scissor[i].x = x;
+        ctx->state.scissor[i].y = y;
+        ctx->state.scissor[i].width = width;
+        ctx->state.scissor[i].height = height;
+    }
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
 }
@@ -533,8 +543,11 @@ void mglDepthRange(GLMContext ctx, GLdouble n, GLdouble f)
     n = _clamp(n);
     f = _clamp(f);
 
-    ctx->state.depth_range[0].znear = n;
-    ctx->state.depth_range[0].zfar = f;
+    for (int i = 0; i < MAX_VIEWPORTS; i++)
+    {
+        ctx->state.depth_range[i].znear = n;
+        ctx->state.depth_range[i].zfar = f;
+    }
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
 }
@@ -545,10 +558,14 @@ void mglViewport(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height
     ERROR_CHECK_RETURN(width >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(height >= 0, GL_INVALID_VALUE);
 
-    ctx->state.viewport[0].x = (GLfloat)x;
-    ctx->state.viewport[0].y = (GLfloat)y;
-    ctx->state.viewport[0].w = (GLfloat)width;
-    ctx->state.viewport[0].h = (GLfloat)height;
+    // glViewport sets every viewport at once
+    for (int i = 0; i < MAX_VIEWPORTS; i++)
+    {
+        ctx->state.viewport[i].x = (GLfloat)x;
+        ctx->state.viewport[i].y = (GLfloat)y;
+        ctx->state.viewport[i].w = (GLfloat)width;
+        ctx->state.viewport[i].h = (GLfloat)height;
+    }
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
 }
@@ -628,13 +645,12 @@ static bool setIndexedCap(GLMContext ctx, GLenum target, GLuint index, bool on)
         case GL_SCISSOR_TEST:
             ERROR_CHECK_RETURN_VALUE(index < MAX_VIEWPORTS, GL_INVALID_VALUE, true);
 
-            // MGL rasterises through one scissor rectangle, so only the first
-            // viewport's enable has anywhere to go
+            ctx->state.caps.scissor_test_i[index] = on;
+
             if (index == 0)
-            {
                 ctx->state.caps.scissor_test = on;
-                ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
-            }
+
+            ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
             return true;
 
         case GL_CLIP_DISTANCE0: case GL_CLIP_DISTANCE1:
@@ -680,7 +696,7 @@ GLboolean mglIsEnabledi(GLMContext ctx, GLenum target, GLuint index)
         case GL_SCISSOR_TEST:
             ERROR_CHECK_RETURN_VALUE(index < MAX_VIEWPORTS, GL_INVALID_VALUE, false);
 
-            return ctx->state.caps.scissor_test;
+            return ctx->state.caps.scissor_test_i[index];
 
         case GL_CLIP_DISTANCE0: case GL_CLIP_DISTANCE1:
         case GL_CLIP_DISTANCE2: case GL_CLIP_DISTANCE3:

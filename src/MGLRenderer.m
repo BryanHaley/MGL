@@ -375,9 +375,8 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
     GLsizei _currentSyncName;
 
     // scissored glClear is done with a draw, since a load action ignores scissor
-    id<MTLRenderPipelineState> _clearPipeline;
+    NSMutableDictionary<NSString *, id<MTLRenderPipelineState>> *_clearPipelines;
     id<MTLDepthStencilState>   _clearDepthState;
-    MTLPixelFormat             _clearPipelineFormat;
     GLbitfield                 _pendingScissorClear;
 
     // fans, loops, adjacency: modes Metal has no type for, expanded to indexed draws
@@ -4989,73 +4988,71 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
                                                backReferenceValue: ctx->state.var.stencil_back_ref];
     }
 
-    if (ctx->state.caps.scissor_test)
     {
-        MTLScissorRect rect;
-        GLint x = ctx->state.scissor[0].x;
-        GLint y = ctx->state.scissor[0].y;
-        GLint w = ctx->state.scissor[0].width;
-        GLint h = ctx->state.scissor[0].height;
-
+        // GL has sixteen viewports, each with its own scissor box, scissor
+        // enable and depth range, and a geometry shader picks one per
+        // primitive. Metal takes them all at once.
         NSUInteger tw = _renderPassDescriptor.renderTargetWidth;
         NSUInteger th = _renderPassDescriptor.renderTargetHeight;
+        bool flipped = [self renderTargetIsFlipped];
+        MTLViewport vps[MAX_VIEWPORTS];
+        MTLScissorRect rects[MAX_VIEWPORTS];
 
-        if (w < 0) w = 0;
-        if (h < 0) h = 0;
-
-        // GL counts scissor rows from the bottom, Metal from the top -- unless
-        // the viewport is already flipped for this target
-        GLint flipped_y = [self renderTargetIsFlipped] ? y
-                        : ((th > 0) ? (GLint)th - (y + h) : y);
-
-        if (x < 0) { w += x; x = 0; }
-        if (flipped_y < 0) { h += flipped_y; flipped_y = 0; }
-        if (w < 0) w = 0;
-        if (h < 0) h = 0;
-
-        if (tw > 0 && (NSUInteger)(x + w) > tw) w = (GLint)tw - x;
-        if (th > 0 && (NSUInteger)(flipped_y + h) > th) h = (GLint)th - flipped_y;
-
-        rect.x = (NSUInteger)(x < 0 ? 0 : x);
-        rect.y = (NSUInteger)(flipped_y < 0 ? 0 : flipped_y);
-        rect.width = (NSUInteger)(w < 0 ? 0 : w);
-        rect.height = (NSUInteger)(h < 0 ? 0 : h);
-
-        if (rect.width && rect.height)
-            [_currentRenderEncoder setScissorRect:rect];
-    }
-
-    {
-        // Metal stores a render target top row first, GL bottom row first. For
-        // the drawable that cancels out on screen, but an FBO texture is read
-        // back by a shader, where GL expects v=0 at the bottom. So flip the
-        // viewport when drawing into an FBO and the texture comes out the way
-        // GL says it should. Without this every render to texture -- the whole
-        // post processing pass of any game -- came out upside down.
-        GLfloat vx = ctx->state.viewport[0].x;
-        GLfloat vy = ctx->state.viewport[0].y;
-        GLfloat vw = ctx->state.viewport[0].w;
-        GLfloat vh = ctx->state.viewport[0].h;
-
-        if ([self renderTargetIsFlipped])
+        for (int i = 0; i < MAX_VIEWPORTS; i++)
         {
-            vy = vy + vh;
-            vh = -vh;
-        }
-        else
-        {
-            // GL counts viewport rows from the bottom of the target, Metal from
-            // the top. Without this a partial viewport drew at the wrong end of
-            // the default framebuffer -- glViewport(0,0,256,256) landed in the
-            // top 256 rows and readback, which does flip, found nothing.
-            GLfloat th = (GLfloat)_renderPassDescriptor.renderTargetHeight;
+            // Metal stores a render target top row first, GL bottom row
+            // first. Drawing into an FBO flips the viewport so a texture
+            // reads back the way GL expects; on the window, rows are counted
+            // from the other end instead.
+            GLfloat vx = ctx->state.viewport[i].x;
+            GLfloat vy = ctx->state.viewport[i].y;
+            GLfloat vw = ctx->state.viewport[i].w;
+            GLfloat vh = ctx->state.viewport[i].h;
 
-            if (th > 0.0f)
-                vy = th - (vy + vh);
+            if (flipped)
+            {
+                vy = vy + vh;
+                vh = -vh;
+            }
+            else if (th > 0)
+            {
+                vy = (GLfloat)th - (vy + vh);
+            }
+
+            vps[i] = (MTLViewport){ vx, vy, vw, vh,
+                                    ctx->state.depth_range[i].znear, ctx->state.depth_range[i].zfar };
+
+            // a viewport without the scissor test is clipped only by the target
+            rects[i] = (MTLScissorRect){ 0, 0, tw, th };
+
+            if (ctx->state.caps.scissor_test_i[i])
+            {
+                GLint x = ctx->state.scissor[i].x;
+                GLint y = ctx->state.scissor[i].y;
+                GLint w = ctx->state.scissor[i].width;
+                GLint h = ctx->state.scissor[i].height;
+
+                // GL counts scissor rows from the bottom, Metal from the top,
+                // unless the viewport is already flipped for this target
+                GLint fy = flipped ? y : ((th > 0) ? (GLint)th - (y + h) : y);
+
+                if (x < 0) { w += x; x = 0; }
+                if (fy < 0) { h += fy; fy = 0; }
+                if (tw > 0 && (NSUInteger)x > tw) x = (GLint)tw;
+                if (th > 0 && (NSUInteger)fy > th) fy = (GLint)th;
+                if (tw > 0 && (NSUInteger)(x + w) > tw) w = (GLint)tw - x;
+                if (th > 0 && (NSUInteger)(fy + h) > th) h = (GLint)th - fy;
+
+                // a zero-sized box lets nothing through, which is what GL asks
+                rects[i] = (MTLScissorRect){ (NSUInteger)x, (NSUInteger)fy,
+                                             (NSUInteger)(w < 0 ? 0 : w), (NSUInteger)(h < 0 ? 0 : h) };
+            }
         }
 
-        [_currentRenderEncoder setViewport:(MTLViewport){vx, vy, vw, vh,
-                                            ctx->state.depth_range[0].znear, ctx->state.depth_range[0].zfar}];
+        [_currentRenderEncoder setViewports:vps count:MAX_VIEWPORTS];
+
+        if (tw > 0 && th > 0)
+            [_currentRenderEncoder setScissorRects:rects count:MAX_VIEWPORTS];
     }
 
     if (ctx->state.caps.cull_face)
@@ -5158,8 +5155,11 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
         NSRect frame;
         frame = [_layer frame];
 
-        ctx->state.scissor[0].width = frame.size.width;
-        ctx->state.scissor[0].height = frame.size.height;
+        for (int i = 0; i < MAX_VIEWPORTS; i++)
+        {
+            ctx->state.scissor[i].width = frame.size.width;
+            ctx->state.scissor[i].height = frame.size.height;
+        }
     }
 
     _renderPassDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -5400,9 +5400,11 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
 
     GLbitfield wanted_clear = ctx->state.clear_bitmask | attachment_clear;
 
-    // A load action always covers the whole attachment, so a clipped scissor
-    // has to be done with a draw after the encoder exists.
-    bool scissored_clear = wanted_clear && [self scissorClipsTarget];
+    // A load action always covers the whole attachment and ignores the write
+    // masks, so a clipped scissor or a masked glClear has to be done with a
+    // draw after the encoder exists.
+    bool scissored_clear = wanted_clear &&
+        ([self scissorClipsTarget] || (attachment_clear == 0 && [self clearIsMasked: wanted_clear]));
 
     _pendingScissorClear = scissored_clear ? wanted_clear : 0;
 
@@ -5695,20 +5697,6 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
     return _currentCommandBuffer;
 }
 
-static const char *MGL_CLEAR_SHADER =
-"#include <metal_stdlib>\n"
-"using namespace metal;\n"
-"struct ClearIn { float4 color; float depth; };\n"
-"vertex float4 mgl_clear_vs(uint vid [[vertex_id]], constant ClearIn &c [[buffer(0)]])\n"
-"{\n"
-"    float2 p = float2(float((vid << 1) & 2), float(vid & 2)) * 2.0 - 1.0;\n"
-"    return float4(p, c.depth, 1.0);\n"
-"}\n"
-"fragment float4 mgl_clear_fs(constant ClearIn &c [[buffer(0)]])\n"
-"{\n"
-"    return c.color;\n"
-"}\n";
-
 typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
 // True when the scissor box does not cover the whole render target, which is the
@@ -5732,53 +5720,181 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     return !(x <= 0 && y <= 0 && (NSUInteger)(x + w) >= tw && (NSUInteger)(y + h) >= th);
 }
 
-- (bool) buildClearPipelineFor: (MTLPixelFormat) fmt
+// True when a write mask keeps glClear from writing everything it names
+- (bool) clearIsMasked: (GLbitfield) mask
 {
-    if (_clearPipeline && _clearPipelineFormat == fmt)
+    if ((mask & GL_DEPTH_BUFFER_BIT) && !ctx->state.var.depth_writemask)
         return true;
 
-    id<MTLLibrary> lib = [self compileShader: MGL_CLEAR_SHADER];
+    if ((mask & GL_STENCIL_BUFFER_BIT) && (ctx->state.var.stencil_writemask & 0xFF) != 0xFF)
+        return true;
+
+    if (mask & GL_COLOR_BUFFER_BIT)
+        for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+            if (ctx->state.caps.use_color_mask[i] &&
+                !(ctx->state.var.color_writemask[i][0] && ctx->state.var.color_writemask[i][1] &&
+                  ctx->state.var.color_writemask[i][2] && ctx->state.var.color_writemask[i][3]))
+                return true;
+
+    return false;
+}
+
+// Metal's colour type for a format: 'f' float, 'i' signed int, 'u' unsigned
+static char clearColorKind(MTLPixelFormat f)
+{
+    const MGLFormatDesc *d = mglFormatDescForMetal((uint16_t)f);
+
+    if (d && d->kind == MGL_FMT_COLOR_INT)  return 'i';
+    if (d && d->kind == MGL_FMT_COLOR_UINT) return 'u';
+    return 'f';
+}
+
+// A clear through the scissor box is a draw, so its shader has to write
+// every draw buffer the pass has, in each buffer's own type, and, for a
+// layered attachment, every layer.
+- (id<MTLRenderPipelineState>) clearPipelineWithMasks: (const MTLColorWriteMask *) masks
+                                               layers: (NSUInteger) layers
+{
+    MTLRenderPassDescriptor *rp = _renderPassDescriptor;
+    NSMutableString *key = [NSMutableString stringWithFormat: @"L%d", layers > 1];
+    NSMutableString *out = [NSMutableString string];
+    NSMutableString *body = [NSMutableString string];
+    NSUInteger samples = 1;
+
+    for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+    {
+        id<MTLTexture> t = rp.colorAttachments[i].texture;
+
+        if (!t)
+            continue;
+
+        char kind = clearColorKind(t.pixelFormat);
+        const char *type = kind == 'i' ? "int4" : kind == 'u' ? "uint4" : "float4";
+
+        [key appendFormat: @"_%d:%lu:%lu", i, (unsigned long)t.pixelFormat, (unsigned long)masks[i]];
+        [out appendFormat: @"    %s c%d [[color(%d)]];\n", type, i, i];
+        [body appendFormat: @"    o.c%d = %s(c.color);\n", i, type];
+        samples = t.sampleCount;
+    }
+
+    id<MTLTexture> dt = rp.depthAttachment.texture, st = rp.stencilAttachment.texture;
+
+    if (dt) samples = dt.sampleCount;
+    [key appendFormat: @"_d%lu_s%lu_n%lu", (unsigned long)(dt ? dt.pixelFormat : 0),
+                       (unsigned long)(st ? st.pixelFormat : 0), (unsigned long)samples];
+
+    if (_clearPipelines == nil)
+        _clearPipelines = [NSMutableDictionary dictionary];
+
+    id<MTLRenderPipelineState> ps = _clearPipelines[key];
+
+    if (ps)
+        return ps;
+
+    NSString *src = [NSString stringWithFormat:
+        @"#include <metal_stdlib>\n"
+         "using namespace metal;\n"
+         "struct ClearIn { float4 color; float depth; };\n"
+         "struct VOut { float4 pos [[position]]; %@ };\n"
+         "vertex VOut mgl_clear_vs(uint vid [[vertex_id]], uint iid [[instance_id]], constant ClearIn &c [[buffer(0)]])\n"
+         "{\n"
+         "    VOut o;\n"
+         "    float2 p = float2(float((vid << 1) & 2), float(vid & 2)) * 2.0 - 1.0;\n"
+         "    o.pos = float4(p, c.depth, 1.0);\n"
+         "%@"
+         "    return o;\n"
+         "}\n"
+         "%@",
+        layers > 1 ? @"uint layer [[render_target_array_index]];" : @"",
+        layers > 1 ? @"    o.layer = iid;\n" : @"",
+        // a clear of only depth or stencil writes no colour at all
+        out.length
+            ? [NSString stringWithFormat:
+                  @"struct FOut {\n%@};\n"
+                   "fragment FOut mgl_clear_fs(constant ClearIn &c [[buffer(0)]])\n"
+                   "{\n    FOut o;\n%@    return o;\n}\n", out, body]
+            : @"fragment void mgl_clear_fs() {}\n"];
+
+    id<MTLLibrary> lib = [self compileShader: [src UTF8String]];
 
     if (!lib)
-        return false;
+        return nil;
 
     MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
 
     desc.label = @"MGL scissored clear";
     desc.vertexFunction = [lib newFunctionWithName: @"mgl_clear_vs"];
     desc.fragmentFunction = [lib newFunctionWithName: @"mgl_clear_fs"];
-    desc.colorAttachments[0].pixelFormat = fmt;
+    desc.rasterSampleCount = samples;
 
-    if (_renderPassDescriptor.depthAttachment.texture)
-        desc.depthAttachmentPixelFormat = _renderPassDescriptor.depthAttachment.texture.pixelFormat;
+    // writing the layer index needs the primitive class named
+    if (layers > 1)
+        desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
 
-    if (_renderPassDescriptor.stencilAttachment.texture)
-        desc.stencilAttachmentPixelFormat = _renderPassDescriptor.stencilAttachment.texture.pixelFormat;
+    for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+    {
+        id<MTLTexture> t = rp.colorAttachments[i].texture;
+
+        if (!t)
+            continue;
+
+        desc.colorAttachments[i].pixelFormat = t.pixelFormat;
+        desc.colorAttachments[i].writeMask = masks[i];
+    }
+
+    if (dt)
+        desc.depthAttachmentPixelFormat = dt.pixelFormat;
+
+    if (st)
+        desc.stencilAttachmentPixelFormat = st.pixelFormat;
 
     NSError *err = nil;
-    id<MTLRenderPipelineState> ps = [_device newRenderPipelineStateWithDescriptor: desc error: &err];
+
+    ps = [_device newRenderPipelineStateWithDescriptor: desc error: &err];
 
     if (!ps)
     {
         MGL_NSERR(@"MGL ERROR: clear pipeline failed: %@", [err localizedDescription]);
-        return false;
+        return nil;
     }
 
-    _clearPipeline = ps;
-    _clearPipelineFormat = fmt;
+    _clearPipelines[key] = ps;
 
-    return true;
+    return ps;
 }
 
-// Draws the clear colour/depth through the scissor rect.
+// Draws the clear colour, depth and stencil through the scissor box, into
+// every draw buffer and every layer, ignoring the viewport as GL does.
 - (void) drawScissoredClear: (GLbitfield) mask
 {
     if (_currentRenderEncoder == nil || mask == 0)
         return;
 
-    id<MTLTexture> color = _renderPassDescriptor.colorAttachments[0].texture;
+    MTLColorWriteMask masks[MAX_COLOR_ATTACHMENTS];
+    NSUInteger layers = _renderPassDescriptor.renderTargetArrayLength;
 
-    if (!color || ![self buildClearPipelineFor: color.pixelFormat])
+    for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+    {
+        masks[i] = MTLColorWriteMaskNone;
+
+        if (!(mask & GL_COLOR_BUFFER_BIT))
+            continue;
+
+        if (!ctx->state.caps.use_color_mask[i])
+        {
+            masks[i] = MTLColorWriteMaskAll;
+            continue;
+        }
+
+        if (ctx->state.var.color_writemask[i][0]) masks[i] |= MTLColorWriteMaskRed;
+        if (ctx->state.var.color_writemask[i][1]) masks[i] |= MTLColorWriteMaskGreen;
+        if (ctx->state.var.color_writemask[i][2]) masks[i] |= MTLColorWriteMaskBlue;
+        if (ctx->state.var.color_writemask[i][3]) masks[i] |= MTLColorWriteMaskAlpha;
+    }
+
+    id<MTLRenderPipelineState> ps = [self clearPipelineWithMasks: masks layers: layers];
+
+    if (ps == nil)
         return;
 
     MGLClearIn in;
@@ -5792,7 +5908,7 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
     MTLDepthStencilDescriptor *dsd = [[MTLDepthStencilDescriptor alloc] init];
 
     dsd.depthCompareFunction = MTLCompareFunctionAlways;
-    dsd.depthWriteEnabled = (mask & GL_DEPTH_BUFFER_BIT) ? YES : NO;
+    dsd.depthWriteEnabled = (mask & GL_DEPTH_BUFFER_BIT) && ctx->state.var.depth_writemask ? YES : NO;
 
     if (mask & GL_STENCIL_BUFFER_BIT)
     {
@@ -5800,20 +5916,33 @@ typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
 
         sd.stencilCompareFunction = MTLCompareFunctionAlways;
         sd.depthStencilPassOperation = MTLStencilOperationReplace;
-        sd.writeMask = 0xFF;
+        sd.writeMask = ctx->state.var.stencil_writemask;
 
         dsd.frontFaceStencil = sd;
         dsd.backFaceStencil = sd;
     }
 
-    [_currentRenderEncoder setRenderPipelineState: _clearPipeline];
+    NSUInteger tw = _renderPassDescriptor.renderTargetWidth;
+    NSUInteger th = _renderPassDescriptor.renderTargetHeight;
+
+    [_currentRenderEncoder setRenderPipelineState: ps];
     [_currentRenderEncoder setDepthStencilState: [_device newDepthStencilStateWithDescriptor: dsd]];
     [_currentRenderEncoder setStencilReferenceValue: (uint32_t)ctx->state.var.stencil_clear_value];
     [_currentRenderEncoder setCullMode: MTLCullModeNone];
+    {
+        // as many viewports as there are scissor boxes, all the whole target
+        MTLViewport full[MAX_VIEWPORTS];
+
+        for (int v = 0; v < MAX_VIEWPORTS; v++)
+            full[v] = (MTLViewport){ 0, 0, (double)tw, (double)th, 0.0, 1.0 };
+
+        [_currentRenderEncoder setViewports: full count: MAX_VIEWPORTS];
+    }
     [_currentRenderEncoder setVertexBytes: &in length: sizeof in atIndex: 0];
     [_currentRenderEncoder setFragmentBytes: &in length: sizeof in atIndex: 0];
 
-    [_currentRenderEncoder drawPrimitives: MTLPrimitiveTypeTriangle vertexStart: 0 vertexCount: 3];
+    [_currentRenderEncoder drawPrimitives: MTLPrimitiveTypeTriangle vertexStart: 0 vertexCount: 3
+                            instanceCount: layers > 1 ? layers : 1];
 
     // whatever the app had set has been trampled
     ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
@@ -8881,6 +9010,27 @@ static MTLWinding mtlWindingFor(const Program *p)
 #pragma mark processGLState for resolving opengl state into metal state
 #pragma mark ------------------------------------------------------------------------------------------
 
+// gl_DrawID reaches the vertex shader through a buffer SPIRV-Cross reads at
+// a fixed slot. It is bound only for a program that reads it, because
+// otherwise another buffer may sit in that slot.
+- (void) bindDrawID: (uint32_t) draw_id
+{
+    Program *p = ctx->state.program;
+
+    if (_currentRenderEncoder == nil || p == NULL)
+        return;
+
+    if (p->uses_draw_id < 0)
+    {
+        const char *msl = p->spirv[_VERTEX_SHADER].msl_str;
+
+        p->uses_draw_id = (msl && strstr(msl, "spvDrawIndex")) ? 1 : 0;
+    }
+
+    if (p->uses_draw_id)
+        [_currentRenderEncoder setVertexBytes: &draw_id length: sizeof draw_id atIndex: MGL_DRAW_ID_MSL_SLOT];
+}
+
 - (bool) processGLState: (bool) draw_command
 {
     // REMOVED: Thread synchronization was causing deadlocks
@@ -8933,6 +9083,8 @@ static MTLWinding mtlWindingFor(const Program *p)
         GLsizei n = mglDrawFramebufferSamples(ctx);
 
         mglWriteNumSamples(ctx, ctx->state.program, n > 1 ? n : 1);
+
+        mglWriteIndexedDraw(ctx, ctx->state.program, ctx->state.draw_indexed ? 1 : 0);
 
         // and GL ignores gl_SampleMask entirely when there is only one sample
         mglWriteSampleMaskOff(ctx, ctx->state.program, n > 1 ? 0 : 1);
@@ -9333,6 +9485,10 @@ static MTLWinding mtlWindingFor(const Program *p)
     }
 
     [self bindBindlessToRenderEncoder];
+
+    // a single draw is draw 0; a multi-draw sets each one's number itself
+    if (draw_command)
+        [self bindDrawID: 0];
 
     // Create a render command encoder.
     if (_pipelineState && !mglProgramHasGeometry(ctx->state.program))
@@ -12144,6 +12300,8 @@ void mtlDrawElementsInstancedBaseVertexBaseInstance(GLMContext glm_ctx, GLenum m
 
     for(int i=0; i<drawcount; i++)
     {
+        [self bindDrawID: (uint32_t)i];
+
          if ([self expandDraw:mode count:count[i] type:0 indices:NULL instanceCount:1 baseVertex:first[i] baseInstance:0])
              continue;
 
@@ -12181,6 +12339,8 @@ void mtlMultiDrawArrays(GLMContext glm_ctx, GLenum mode, const GLint *first, con
 
     for(int i=0; i<drawcount; i++)
     {
+        [self bindDrawID: (uint32_t)i];
+
         size_t offset;
 
         offset = src.offset + (size_t)(uintptr_t)indices[i] * src.scale;
@@ -12225,6 +12385,8 @@ void mtlMultiDrawElements(GLMContext glm_ctx, GLenum mode, const GLsizei *count,
 
     for(int i=0; i<drawcount; i++)
     {
+        [self bindDrawID: (uint32_t)i];
+
         size_t offset;
         // GL leaves basevertex optional in practice; no array means no offset
         NSInteger base = basevertex ? basevertex[i] : 0;
@@ -12276,6 +12438,8 @@ void mtlMultiDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, const GLsiz
 
     for(int i=0; i<drawcount; i++)
     {
+        [self bindDrawID: (uint32_t)i];
+
         size_t offset;
 
         // stride 0 means the commands are packed back to back
@@ -12335,6 +12499,8 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
 
     for(int i=0; i<drawcount; i++)
     {
+        [self bindDrawID: (uint32_t)i];
+
         size_t offset;
 
         // stride 0 means the commands are packed back to back

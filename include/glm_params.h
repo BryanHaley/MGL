@@ -90,6 +90,9 @@ typedef struct GLMCaps_t {
     // every attachment follows the single blend enable above.
     GLboolean use_blend_i;
     GLboolean blend_i[MAX_COLOR_ATTACHMENTS];
+
+    // the scissor test is switched per viewport; scissor_test mirrors index 0
+    GLboolean scissor_test_i[MAX_VIEWPORTS];
 } GLMCaps;
 
 typedef struct GLMParams_t {

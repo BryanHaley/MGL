@@ -633,7 +633,8 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x825A: RET_TYPE_VAR(type, program_pipeline_binding); break; // GL_PROGRAM_PIPELINE_BINDING
         case 0x825B: RET_TYPE_VAR(type, max_viewports); break; // GL_MAX_VIEWPORTS
         case 0x825C: RET_TYPE_VAR(type, viewport_subpixel_bits); break; // GL_VIEWPORT_SUBPIXEL_BITS
-        case 0x825D: RET_TYPE_VAR(type, viewport_bounds_range); break; // GL_VIEWPORT_BOUNDS_RANGE
+        // a pair, and at least [-32768, 32767] by the 4.6 limits table
+        case 0x825D: RET_PAIR(-32768.0, 32767.0); break; // GL_VIEWPORT_BOUNDS_RANGE
         case 0x825E: RET_TYPE_VAR(type, layer_provoking_vertex); break; // GL_LAYER_PROVOKING_VERTEX
         case 0x825F: RET_TYPE_VAR(type, viewport_index_provoking_vertex); break; // GL_VIEWPORT_INDEX_PROVOKING_VERTEX
         case 0x90BC: RET_TYPE_VAR(type, min_map_buffer_alignment); break; // GL_MIN_MAP_BUFFER_ALIGNMENT
@@ -660,6 +661,7 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
 
         case 0x90EF: RET_BOUND_BUFFER(_DISPATCH_INDIRECT_BUFFER); break; // GL_DISPATCH_INDIRECT_BUFFER_BINDING
         case 0x8F43: RET_BOUND_BUFFER(_DRAW_INDIRECT_BUFFER); break;     // GL_DRAW_INDIRECT_BUFFER_BINDING
+        case 0x80EF: RET_BOUND_BUFFER(_PARAMETER_BUFFER); break;         // GL_PARAMETER_BUFFER_BINDING
 
         case 0x935C: RET_TYPE_VAR(type, clip_origin); break;     // GL_CLIP_ORIGIN
         case 0x935D: RET_TYPE_VAR(type, clip_depth); break;      // GL_CLIP_DEPTH_MODE

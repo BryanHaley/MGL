@@ -2928,60 +2928,49 @@ static Texture *clearableTexture(GLMContext ctx, GLuint texture, GLint level, GL
 }
 
 #pragma mark clear tex image
+void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *data);
+
 void mglClearTexImage(GLMContext ctx, GLuint texture, GLint level, GLenum format, GLenum type, const void *data)
 {
-    MGL_INFO("MGL: glClearTexImage called - texture=%u level=%d\n", texture, level);
-
     Texture *tex = clearableTexture(ctx, texture, level, format);
+    GLsizei w, h, d;
 
     if (!tex)
         return;
 
-    // For now, use texSubImage to clear - fill with the clear data
-    GLsizei width = tex->width >> level;
-    GLsizei height = tex->height >> level;
-    if (width < 1) width = 1;
-    if (height < 1) height = 1;
-    
-    // If data is NULL, clear to zero
-    if (data == NULL) {
-        size_t pixel_size = sizeForFormatType(format, type);
+    // the whole level: every layer of an array, every slice of a 3D texture
+    // and every face of a cube, which the sub-image clear already handles
+    w = tex->width >> level;
+    h = tex->height >> level;
+    d = 1;
 
-        // CRITICAL SECURITY FIX: Prevent integer overflow in texture clear allocation
-        if (width > SIZE_MAX / height / pixel_size) {
-            MGL_ERR("MGL SECURITY ERROR: Texture clear allocation would overflow: %dx%dx%zu\n", width, height, pixel_size);
-            STATE(error) = GL_OUT_OF_MEMORY;
-            return;
-        }
+    switch (tex->target)
+    {
+        case GL_TEXTURE_1D:
+            h = 1;
+            break;
 
-        size_t size = width * height * pixel_size;
-        void *clear_data = calloc(1, size);
-        if (clear_data) {
-            texSubImage(ctx, tex, 0, level, 0, 0, 0, width, height, 1, format, type, clear_data);
-            free(clear_data);
-        }
-    } else {
-        // Fill entire texture with the provided clear value
-        size_t pixel_size = sizeForFormatType(format, type);
+        case GL_TEXTURE_1D_ARRAY:
+            h = tex->height;
+            break;
 
-        // CRITICAL SECURITY FIX: Prevent integer overflow in texture fill allocation
-        if (width > SIZE_MAX / height / pixel_size) {
-            MGL_ERR("MGL SECURITY ERROR: Texture fill allocation would overflow: %dx%dx%zu\n", width, height, pixel_size);
-            STATE(error) = GL_OUT_OF_MEMORY;
-            return;
-        }
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            d = tex->depth;
+            break;
 
-        size_t size = width * height * pixel_size;
-        void *fill_data = malloc(size);
-        if (fill_data) {
-            // Replicate the clear value across the entire buffer
-            for (size_t i = 0; i < width * height; i++) {
-                memcpy((char*)fill_data + i * pixel_size, data, pixel_size);
-            }
-            texSubImage(ctx, tex, 0, level, 0, 0, 0, width, height, 1, format, type, fill_data);
-            free(fill_data);
-        }
+        case GL_TEXTURE_3D:
+            d = tex->depth >> level;
+            break;
+
+        case GL_TEXTURE_CUBE_MAP:
+            d = 6;
+            break;
     }
+
+    mglClearTexSubImage(ctx, texture, level, 0, 0, 0,
+                        w > 0 ? w : 1, h > 0 ? h : 1, d > 0 ? d : 1, format, type, data);
 }
 
 void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *data)

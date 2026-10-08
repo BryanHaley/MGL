@@ -798,6 +798,88 @@ static char *rewriteNumSamples(const char *src)
     return out;
 }
 
+// GL's gl_BaseVertex is the draw's base vertex, and zero for a draw that has
+// none, such as glDrawArrays. Metal's base vertex for an array draw is its
+// first vertex instead, so every read is multiplied by a driver uniform that
+// is 1 for an element draw and 0 for an array draw.
+// Returns a new string when something changed, NULL when nothing did.
+static char *rewriteBaseVertex(const char *src)
+{
+    // each name is kept, since the ARB one may be the only one declared
+    static const char *names[] = { "gl_BaseVertexARB", "gl_BaseVertex" };
+    static const char tail[] = " * " MGL_INDEXED_DRAW_NAME ")";
+    static const char decl[] = "uniform int " MGL_INDEXED_DRAW_NAME ";\n";
+    size_t hits = 0, cap;
+    char *out, *q;
+    const char *p = src, *ins;
+
+    for (const char *s = src; *s; s++)
+        if (!strncmp(s, "gl_BaseVertex", 13))
+            hits++;
+
+    if (hits == 0)
+        return NULL;
+
+    cap = strlen(src) + hits * (sizeof(tail) + 1) + sizeof(decl) + 1;
+    out = (char *)malloc(cap);
+
+    if (out == NULL)
+        return NULL;
+
+    // the declaration goes after the #version and #extension lines
+    ins = src;
+    for (const char *line = src; *line; )
+    {
+        const char *nl = strchr(line, '\n');
+        const char *t = line;
+
+        while (*t == ' ' || *t == '\t')
+            t++;
+
+        if (!strncmp(t, "#version", 8) || !strncmp(t, "#extension", 10))
+            ins = nl ? nl + 1 : line + strlen(line);
+
+        if (nl == NULL)
+            break;
+        line = nl + 1;
+    }
+
+    q = out;
+    memcpy(q, src, (size_t)(ins - src));
+    q += ins - src;
+    memcpy(q, decl, sizeof(decl) - 1);
+    q += sizeof(decl) - 1;
+
+    for (p = ins; *p; )
+    {
+        bool replaced = false;
+        char before = (p == src) ? ' ' : p[-1];
+
+        for (int k = 0; k < 2 && !isalnum((unsigned char)before) && before != '_'; k++)
+        {
+            size_t n = strlen(names[k]);
+
+            if (!strncmp(p, names[k], n) && !isalnum((unsigned char)p[n]) && p[n] != '_')
+            {
+                *q++ = '(';
+                memcpy(q, p, n);
+                q += n;
+                memcpy(q, tail, sizeof(tail) - 1);
+                q += sizeof(tail) - 1;
+                p += n;
+                replaced = true;
+                break;
+            }
+        }
+
+        if (!replaced)
+            *q++ = *p++;
+    }
+
+    *q = 0;
+    return out;
+}
+
 // A fragment shader's gl_SampleMask only counts when the target is
 // multisampled; GL ignores it otherwise. Metal always applies it, so a shader
 // that masks a sample off threw the fragment away on a single-sampled target
@@ -1569,6 +1651,17 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
                         fixed = tested;
                     }
 #endif
+                }
+
+                if (ptr->glm_type == _VERTEX_SHADER)
+                {
+                    char *based = rewriteBaseVertex(fixed);
+
+                    if (based)
+                    {
+                        free(fixed);
+                        fixed = based;
+                    }
                 }
 
                 glslang_shader_set_preprocessed_code(glsl_shader, fixed);

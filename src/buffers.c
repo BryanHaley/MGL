@@ -55,6 +55,7 @@ GLuint bufferIndexFromTarget(GLMContext ctx, GLenum target)
         case GL_COPY_READ_BUFFER: return _COPY_READ_BUFFER;
         case GL_COPY_WRITE_BUFFER: return _COPY_WRITE_BUFFER;
         case GL_DISPATCH_INDIRECT_BUFFER: return _DISPATCH_INDIRECT_BUFFER;
+        case GL_PARAMETER_BUFFER: return _PARAMETER_BUFFER;
         case GL_DRAW_INDIRECT_BUFFER: return _DRAW_INDIRECT_BUFFER;
         case GL_SHADER_STORAGE_BUFFER: return _SHADER_STORAGE_BUFFER;
 
@@ -148,6 +149,7 @@ bool checkTarget(GLMContext ctx, GLenum target)
         case GL_COPY_WRITE_BUFFER:
         case GL_DISPATCH_INDIRECT_BUFFER:
         case GL_DRAW_INDIRECT_BUFFER:
+        case GL_PARAMETER_BUFFER:
         case GL_SHADER_STORAGE_BUFFER:
             return true;
     }

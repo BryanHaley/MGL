@@ -92,6 +92,7 @@ enum {
     _COPY_WRITE_BUFFER,
     _DISPATCH_INDIRECT_BUFFER,
     _DRAW_INDIRECT_BUFFER,
+    _PARAMETER_BUFFER,
     _MAX_BUFFER_TYPES
 };
 
@@ -503,6 +504,8 @@ int mglTessellate(int domain, int spacing, bool point_mode, bool cw,
 
 // where a stage finds the table of buffer lengths .length() reads
 #define MGL_BUFFER_SIZES_MSL_SLOT 21
+// where SPIRV-Cross reads gl_DrawID from
+#define MGL_DRAW_ID_MSL_SLOT 19
 
 // Cull distance needs a pass of its own before the draw, and five buffers.
 #define MGL_CULL_FIRST_BINDING  20
@@ -884,6 +887,7 @@ typedef struct Program_t {
     GLboolean binary_retrievable_hint;
     // where the rewritten gl_NumSamples lives, or -1 when the shader never asked
     GLint num_samples_loc;
+    GLint indexed_draw_loc;     // mglIndexedDraw, -1 when gl_BaseVertex is unused
     GLint sample_mask_off_loc;
 #ifdef MGL_COMPAT_PROFILE
     GLint alpha_func_loc;
@@ -931,6 +935,8 @@ typedef struct Program_t {
     // pipeline can link its stages together again (pipeline_draw.c)
     char   *stage_src[_MAX_SHADER_TYPES];
     GLuint  link_serial;
+    // does the vertex stage read gl_DrawID; -1 until the first draw asks
+    GLint   uses_draw_id;
     GLboolean linked_separable;     // PROGRAM_SEPARABLE as of the last link
 } Program;
 
@@ -1134,6 +1140,8 @@ size_t mglPixelStoreSkipBytes2D(const PixelStore *ps, GLuint pixel_size, size_t 
 // is deliberately the same length as gl_NumSamples so the rename is in place.
 #define MGL_NUM_SAMPLES_NAME "mglNumSamples"
 #define MGL_SAMPLE_MASK_FORCE "mglSampleMaskOff"
+// 1 while an element draw runs, 0 for an array draw; scales gl_BaseVertex
+#define MGL_INDEXED_DRAW_NAME "mglIndexedDraw"
 // same length as gl_SampleMask, so the rewrite swaps it in place
 #define MGL_SAMPLE_MASK_TMP   "mglSMaskValue"
 #define MGL_SAMPLE_MASK_BODY  "mglSampleMaskBody"
@@ -1155,7 +1163,8 @@ static inline bool mglIsDriverUniform(const char *name)
     if (name == NULL)
         return false;
 
-    if (!strcmp(name, MGL_NUM_SAMPLES_NAME) || !strcmp(name, MGL_SAMPLE_MASK_FORCE))
+    if (!strcmp(name, MGL_NUM_SAMPLES_NAME) || !strcmp(name, MGL_SAMPLE_MASK_FORCE) ||
+        !strcmp(name, MGL_INDEXED_DRAW_NAME))
         return true;
 
 #ifdef MGL_COMPAT_PROFILE
@@ -1193,6 +1202,7 @@ TransformFeedback *getTransformFeedback(GLMContext ctx, GLuint name);
 GLint mglFindNumSamplesLocation(Program *pptr);
 GLint mglFindUniformByName(Program *pptr, const char *name);
 void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples);
+void mglWriteIndexedDraw(GLMContext ctx, Program *pptr, GLint indexed);
 GLint mglFindSampleMaskOffLocation(Program *pptr);
 void mglWriteSampleMaskOff(GLMContext ctx, Program *pptr, GLint off);
 #ifdef MGL_COMPAT_PROFILE
@@ -1352,6 +1362,8 @@ typedef struct {
     
     // put at end, big chunk of yuck
     GLMParams   var;
+    // the draw about to run reads an element array
+    GLboolean draw_indexed;
 } GLMState;
 
 static_assert(TEXTURE_UNITS == 128, "active_texture_mask relies on this");

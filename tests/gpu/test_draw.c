@@ -650,3 +650,53 @@ GPU_TEST(draw, a_program_with_no_fragment_shader_still_writes_depth)
     glDeleteTextures(1, &color);
     glDeleteTextures(1, &depth);
 }
+
+// glClear writes only what the write masks allow. A Metal load action ignores
+// masks, so a masked clear used to wipe every channel, depth and stencil.
+GPU_TEST(draw, clear_respects_write_masks)
+{
+    MGLTestTarget t;
+    unsigned char *px, c[4] = { 0 };
+    GLubyte stencil[16];
+    GLfloat depth[16];
+
+    mgl_target_create(&t, 4, 4, GL_RGBA8, 1);
+    mgl_target_bind(&t);
+    glViewport(0, 0, 4, 4);
+
+    glClearColor(0, 0, 0, 0);
+    glClearDepth(0.25);
+    glClearStencil(0x0F);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+    // green masked off, depth masked off, only the high stencil bits writable
+    glColorMask(GL_TRUE, GL_FALSE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_FALSE);
+    glStencilMask(0xF0);
+    glClearColor(1, 1, 1, 1);
+    glClearDepth(1.0);
+    glClearStencil(0xFF);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_TRUE);
+    glStencilMask(0xFF);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 1, 1, c);
+        free(px);
+    }
+    CHECK_MSG(c[0] == 255 && c[1] == 0 && c[2] == 255 && c[3] == 255,
+              "colour %d,%d,%d,%d, want 255,0,255,255", c[0], c[1], c[2], c[3]);
+
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, 4, 4, GL_DEPTH_COMPONENT, GL_FLOAT, depth);
+    glReadPixels(0, 0, 4, 4, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencil);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(depth[5] > 0.24f && depth[5] < 0.26f, "depth %g, want 0.25", depth[5]);
+    CHECK_MSG(stencil[5] == 0xFF, "stencil 0x%x, want 0xff", stencil[5]);
+
+    mgl_target_destroy(&t);
+}

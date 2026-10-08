@@ -41,6 +41,8 @@ extern int mglLowerAtomicCounters(const unsigned int *words, size_t count,
                                   unsigned int *block_ids, unsigned int *block_bindings,
                                   int max_blocks);
 extern bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count);
+extern bool mglZeroBaseInstance(const unsigned int *words, size_t count,
+                                unsigned int **out_words, size_t *out_count);
 #include "shaders.h"
 #include "buffers.h"
 #include "mgl_log.h"
@@ -1637,11 +1639,24 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         }
     }
 
-    // Parse the SPIR-V.
-    if (atomic_blocks > 0)
-        parse_res = spvc_context_parse_spirv(context, lowered, lowered_count, &ir);
-    else
-        parse_res = spvc_context_parse_spirv(context, spirv, word_count, &ir);
+    {
+        const unsigned int *src = atomic_blocks > 0 ? lowered : spirv;
+        size_t n = atomic_blocks > 0 ? lowered_count : word_count;
+        unsigned int *zeroed = NULL;
+        size_t zeroed_count = 0;
+
+        // GL's gl_InstanceID starts at zero, Metal's at the base instance. The
+        // tessellation path runs the vertex stage as compute, where it has none.
+        if (stage == _VERTEX_SHADER && !ptr->tess.active &&
+            mglZeroBaseInstance(src, n, &zeroed, &zeroed_count))
+        {
+            src = zeroed;
+            n = zeroed_count;
+        }
+
+        parse_res = spvc_context_parse_spirv(context, src, n, &ir);
+        free(zeroed);
+    }
 
     free(lowered);
     lowered = NULL;
@@ -2251,8 +2266,16 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
                 {
                     Shader *sh = ptr->shader_slots[s];
 
-                    if (sh && sh->src)
-                        declared = explicitUniformLayout(sh->src, list[i].name, "binding");
+                    // the preprocessed text, so a binding given through a
+                    // #define reads as the number it expands to
+                    const char *text = sh && sh->compiled_glsl_shader
+                        ? glslang_shader_get_preprocessed_code(sh->compiled_glsl_shader) : NULL;
+
+                    if (text == NULL && sh)
+                        text = sh->src;
+
+                    if (text)
+                        declared = explicitUniformLayout(text, list[i].name, "binding");
                 }
 
                 ptr->spirv_resources_list[stage][res_type].list[i].tex_unit = declared >= 0 ? declared : 0;
@@ -3920,6 +3943,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     // every link gets a number no other link has had
     static GLuint serial;
     pptr->link_serial = ++serial;
+    pptr->uses_draw_id = -1;
     pptr->linked_separable = pptr->separable;
 
     for (int s = 0; s < _MAX_SHADER_TYPES; s++)
@@ -4107,6 +4131,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
                 pptr->log = strdup(uniformLocationProblem(pptr));
         }
         pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
+        pptr->indexed_draw_loc = mglFindUniformByName(pptr, MGL_INDEXED_DRAW_NAME);
         pptr->sample_mask_off_loc = mglFindSampleMaskOffLocation(pptr);
 #ifdef MGL_COMPAT_PROFILE
         mglFindAlphaTestLocations(pptr);
@@ -4233,6 +4258,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     resolveTransformCaptureUniforms(pptr);
 
     pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
+    pptr->indexed_draw_loc = mglFindUniformByName(pptr, MGL_INDEXED_DRAW_NAME);
     pptr->sample_mask_off_loc = mglFindSampleMaskOffLocation(pptr);
 #ifdef MGL_COMPAT_PROFILE
     mglFindAlphaTestLocations(pptr);
@@ -5415,6 +5441,20 @@ static bool piqItem(Program *p, GLenum iface, GLint index, PiqItem *it)
     it->res.block_index = -1;
     it->res.atomic_buffer = -1;
 
+    // a subroutine's resource index is its subroutine index, which
+    // layout(index = N) can set, not where it happens to be stored
+    if (stage && !u)
+    {
+        SubroutineInfo *si = stageSubroutines(p, stage);
+        GLint slot = index < 0 ? -1 : mglSubroutineSlot(si, (GLuint)index);
+
+        if (slot < 0)
+            return false;
+
+        it->name = si->fn_names[slot];
+        return true;
+    }
+
     if (index < 0 || index >= piqCount(p, iface))
         return false;
 
@@ -5428,13 +5468,6 @@ static bool piqItem(Program *p, GLenum iface, GLint index, PiqItem *it)
     if (stage)
     {
         SubroutineInfo *si = stageSubroutines(p, stage);
-
-        if (!u)
-        {
-            it->name = si->fn_names[index];
-            return true;
-        }
-
         GLint size = si->uniform_array_size[index] ? (GLint)si->uniform_array_size[index] : 1;
 
         if (size > 1)
@@ -5598,6 +5631,23 @@ static GLint piqFind(Program *p, GLenum iface, const char *name)
 
     if (iface == GL_TRANSFORM_FEEDBACK_VARYING && xfbSpecial(name, &skip))
         return -1;
+
+    // subroutines are found by name and answered with their subroutine index
+    {
+        bool is_uniform;
+        GLenum stage = subroutineStage(iface, &is_uniform);
+
+        if (stage && !is_uniform)
+        {
+            SubroutineInfo *si = stageSubroutines(p, stage);
+
+            for (GLuint i = 0; si && i < si->fn_count; i++)
+                if (si->fn_names[i] && !strcmp(si->fn_names[i], name))
+                    return si->fn_index ? (GLint)si->fn_index[i] : (GLint)i;
+
+            return -1;
+        }
+    }
 
     snprintf(with_zero, sizeof(with_zero), "%s[0]", name);
 

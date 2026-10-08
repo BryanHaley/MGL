@@ -1200,6 +1200,15 @@ void mglWriteProgramUniform(GLMContext ctx, Program *pptr, GLint location, GLint
     programUniformWrite(ctx, pptr, location, &value, sizeof(GLint));
 }
 
+// gl_BaseVertex is only the Metal base vertex for an element draw
+void mglWriteIndexedDraw(GLMContext ctx, Program *pptr, GLint indexed)
+{
+    if (pptr == NULL || pptr->indexed_draw_loc < 0)
+        return;
+
+    programUniformWrite(ctx, pptr, pptr->indexed_draw_loc, &indexed, sizeof(GLint));
+}
+
 // GL's gl_NumSamples is the draw framebuffer's sample count, so it is written
 // at draw time rather than by the application.
 void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples)

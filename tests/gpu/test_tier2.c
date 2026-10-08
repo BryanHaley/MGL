@@ -1110,7 +1110,7 @@ GPU_TEST(clear_buffer, indirect_count_draws_validate)
     glMultiDrawElementsIndirectCount(GL_TRIANGLES, GL_FLOAT, NULL, 0, 1, 20);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
-    // well formed, but there is no parameter buffer target yet
+    // well formed, but nothing is bound to GL_PARAMETER_BUFFER
     glMultiDrawArraysIndirectCount(GL_TRIANGLES, NULL, 0, 1, 16);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 

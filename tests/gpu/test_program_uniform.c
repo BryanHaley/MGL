@@ -806,3 +806,36 @@ GPU_TEST(program_uniform, location_minus_one_is_silent)
 
     glDeleteProgram(p);
 }
+
+// A sampler's starting unit is its layout(binding), however the number is
+// written: hex, octal, or through a #define. The #define form read as 0.
+GPU_TEST(program_uniform, sampler_binding_as_hex_octal_and_macro)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "#define UNIT 5\n"
+        "layout(binding = 0x3) uniform sampler2D hex;\n"
+        "layout(binding = 07) uniform sampler2D oct;\n"
+        "layout(binding = UNIT) uniform sampler2D mac;\n"
+        "out vec4 o;\n"
+        "void main() { o = texture(hex, vec2(0)) + texture(oct, vec2(0)) + texture(mac, vec2(0)); }\n";
+    char log[2048] = { 0 };
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log);
+    GLint unit = -1;
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    glGetUniformiv(prog, glGetUniformLocation(prog, "hex"), &unit);
+    CHECK_EQ_INT(unit, 3);
+    glGetUniformiv(prog, glGetUniformLocation(prog, "oct"), &unit);
+    CHECK_EQ_INT(unit, 7);
+    glGetUniformiv(prog, glGetUniformLocation(prog, "mac"), &unit);
+    CHECK_EQ_INT(unit, 5);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(prog);
+}

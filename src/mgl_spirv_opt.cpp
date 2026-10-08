@@ -191,6 +191,7 @@ extern "C" bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count)
 // ---------------------------------------------------------------------------
 
 #include <map>
+#include <set>
 
 namespace {
 
@@ -542,4 +543,163 @@ extern "C" int mglCountAtomicCounters(const unsigned int *words, size_t count)
     }
 
     return total;
+}
+
+// ---------------------------------------------------------------------------
+// gl_InstanceID from zero
+//
+// GL counts gl_InstanceID from zero whatever the draw's base instance, while
+// Metal's [[instance_id]] starts at the base instance. Every read of the
+// instance built-in is turned into that read minus gl_BaseInstance.
+// SPIRV-Cross has an option for this, but it moves gl_VertexID as well, and
+// GL's gl_VertexID does include the base vertex.
+// ---------------------------------------------------------------------------
+
+extern "C" bool mglZeroBaseInstance(const unsigned int *words, size_t count,
+                                    unsigned int **out_words, size_t *out_count);
+
+extern "C" bool mglZeroBaseInstance(const unsigned int *words, size_t count,
+                                    unsigned int **out_words, size_t *out_count)
+{
+    const uint32_t OpExtension = 10, OpCapability = 17, OpEntryPoint = 15,
+                   OpVariable = 59, OpLoad = 61, OpDecorate = 71, OpISub = 130;
+    const uint32_t DecBuiltIn = 11, BuiltInInstanceId = 6, BuiltInInstanceIndex = 43,
+                   BuiltInBaseInstance = 4425, CapDrawParameters = 4427, SCInput = 1;
+
+    *out_words = nullptr;
+    *out_count = 0;
+
+    if (words == nullptr || count < 5 || words[0] != 0x07230203)
+        return false;
+
+    std::vector<Inst> ins;
+    for (size_t i = 5; i < count;)
+    {
+        uint32_t wc = words[i] >> 16;
+        if (wc == 0 || i + wc > count)
+            return false;
+        ins.emplace_back(words + i, words + i + wc);
+        i += wc;
+    }
+
+    std::set<uint32_t> instVars;
+    uint32_t baseVar = 0, ptrType = 0;
+    bool haveCap = false, haveExt = false;
+
+    for (auto &in : ins)
+    {
+        uint32_t op = in[0] & 0xffff;
+        if (op == OpDecorate && in.size() >= 4 && in[2] == DecBuiltIn)
+        {
+            if (in[3] == BuiltInInstanceId || in[3] == BuiltInInstanceIndex)
+                instVars.insert(in[1]);
+            else if (in[3] == BuiltInBaseInstance)
+                baseVar = in[1];
+        }
+        else if (op == OpCapability && in.size() >= 2 && in[1] == CapDrawParameters)
+            haveCap = true;
+        else if (op == OpExtension && in.size() >= 2 &&
+                 !strcmp((const char *)&in[1], "SPV_KHR_shader_draw_parameters"))
+            haveExt = true;
+    }
+
+    if (instVars.empty())
+        return false;
+
+    for (auto &in : ins)
+        if ((in[0] & 0xffff) == OpVariable && in.size() >= 4 && instVars.count(in[2]))
+            ptrType = in[1];
+
+    if (ptrType == 0)
+        return false;
+
+    uint32_t bound = words[3];
+    auto fresh = [&bound]() { return bound++; };
+    bool addBase = baseVar == 0;
+
+    if (addBase)
+        baseVar = fresh();
+
+    std::vector<Inst> out;
+    bool placedCap = false, placedVar = false;
+
+    for (size_t k = 0; k < ins.size(); k++)
+    {
+        Inst &in = ins[k];
+        uint32_t op = in[0] & 0xffff;
+
+        // capabilities come first, then extensions
+        if (!placedCap && op != OpCapability)
+        {
+            if (!haveCap)
+                out.push_back(make(OpCapability, {CapDrawParameters}));
+            if (!haveExt)
+                out.push_back(makeString(OpExtension, 0, "SPV_KHR_shader_draw_parameters"));
+            placedCap = true;
+        }
+
+        if (op == OpEntryPoint && addBase)
+        {
+            Inst e = in;
+            e.push_back(baseVar);
+            e[0] = ((uint32_t)e.size() << 16) | op;
+            out.push_back(e);
+            continue;
+        }
+
+        if (op == OpDecorate && addBase && !placedVar)
+        {
+            out.push_back(make(OpDecorate, {baseVar, DecBuiltIn, BuiltInBaseInstance}));
+            placedVar = true;
+        }
+
+        if (op == OpVariable && addBase && in.size() >= 4 && instVars.count(in[2]))
+        {
+            out.push_back(in);
+            out.push_back(make(OpVariable, {ptrType, baseVar, SCInput}));
+            continue;
+        }
+
+        if (op == OpLoad && in.size() >= 4 && instVars.count(in[3]))
+        {
+            uint32_t type = in[1], result = in[2], raw = fresh(), base = fresh();
+
+            out.push_back(make(OpLoad, {type, raw, in[3]}));
+            out.push_back(make(OpLoad, {type, base, baseVar}));
+            out.push_back(make(OpISub, {type, result, raw, base}));
+            continue;
+        }
+
+        out.push_back(in);
+    }
+
+    // makeString puts the target first; OpExtension has none
+    for (auto &in : out)
+        if ((in[0] & 0xffff) == OpExtension && in.size() >= 2 && in[1] == 0)
+        {
+            in.erase(in.begin() + 1);
+            in[0] = ((uint32_t)in.size() << 16) | OpExtension;
+        }
+
+    size_t total = 5;
+    for (auto &in : out)
+        total += in.size();
+
+    unsigned int *res = (unsigned int *)malloc(total * sizeof(unsigned int));
+    if (res == nullptr)
+        return false;
+
+    memcpy(res, words, 5 * sizeof(unsigned int));
+    res[3] = bound;
+
+    size_t at = 5;
+    for (auto &in : out)
+    {
+        memcpy(res + at, in.data(), in.size() * sizeof(uint32_t));
+        at += in.size();
+    }
+
+    *out_words = res;
+    *out_count = total;
+    return true;
 }

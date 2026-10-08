@@ -282,6 +282,7 @@ static void drawTransformFeedbackCommon(GLMContext ctx, GLenum mode, GLuint id, 
     if (mglConditionalRenderSkips(ctx))
         return;
 
+    ctx->state.draw_indexed = GL_FALSE;
     ctx->mtl_funcs.mtlDrawArraysInstanced(ctx, mode, 0, count, instancecount);
 }
 
