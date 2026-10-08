@@ -420,6 +420,15 @@ static int enter(GLMContext ctx, bool compute)
         return SKIP;
     }
 
+    // later stages with no vertex stage to feed them are an error
+    if (!compute && pp->stage_programs[_VERTEX_SHADER] == NULL &&
+        (pp->stage_programs[_GEOMETRY_SHADER] || pp->stage_programs[_TESS_CONTROL_SHADER] ||
+         pp->stage_programs[_TESS_EVALUATION_SHADER]))
+    {
+        STATE(error) = GL_INVALID_OPERATION;
+        return SKIP;
+    }
+
     // GL leaves a draw without a vertex or fragment stage undefined, but
     // raising an error for it is not allowed
     if (!compute && (pp->stage_programs[_VERTEX_SHADER] == NULL ||

@@ -1453,8 +1453,9 @@ void getFramebufferAttachmentParameteriv(GLMContext ctx, GLuint framebuffer, GLe
                 *params = mglFormatIsSRGB(tex->internalformat) ? GL_SRGB : GL_LINEAR;
                 return;
 
+            // glFramebufferTexture on an array, cube or 3D texture attaches every layer
             case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
-                *params = GL_FALSE;
+                *params = fbo_attachment_ptr->layered ? GL_TRUE : GL_FALSE;
                 return;
 
             case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:

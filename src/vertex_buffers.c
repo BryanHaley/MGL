@@ -23,6 +23,8 @@
 
 #include "glm_context.h"
 
+bool isBuffer(GLMContext ctx, GLuint buffer);
+
 extern Buffer *findBuffer(GLMContext ctx, GLuint buffer);
 extern int isVAO(GLMContext ctx, GLuint vao);
 extern VertexArray *getVAO(GLMContext ctx, GLuint vao);
@@ -88,19 +90,22 @@ void mglBindVertexBuffers(GLMContext ctx, GLuint first, GLsizei count, const GLu
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(first + (GLuint)count <= STATE_VAR(max_vertex_attrib_bindings) &&
                        first + (GLuint)count <= MAX_BINDABLE_BUFFERS, GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(buffers, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(offsets, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(strides, GL_INVALID_VALUE);
+    // with no buffers every binding in the span is emptied, and the offsets
+    // and strides are not read
+    ERROR_CHECK_RETURN(!buffers || (offsets && strides), GL_INVALID_VALUE);
 
     for(int i=0; i<count; i++)
     {
-        GLuint bindingindex;
-        GLuint buffer;
+        GLuint buffer = buffers ? buffers[i] : 0;
 
-        bindingindex = first + i;
-        buffer = buffers[i];
+        // a bad name is an error for its own binding only; the rest still bind
+        if (buffer && !isBuffer(ctx, buffer))
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            continue;
+        }
 
-        bindVertexBuffer(ctx, 0, bindingindex, buffer, offsets[i], strides[i]);
+        bindVertexBuffer(ctx, 0, first + i, buffer, buffers ? offsets[i] : 0, buffers ? strides[i] : 16);
     }
 }
 

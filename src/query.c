@@ -63,9 +63,9 @@ static bool targetAllowsStream(int t, GLuint index)
 {
     switch (t)
     {
+        // overflow of the whole object has no stream to name
         case _QUERY_PRIMITIVES_GENERATED:
         case _QUERY_TF_PRIMITIVES_WRITTEN:
-        case _QUERY_TF_OVERFLOW:
         case _QUERY_TF_STREAM_OVERFLOW:
             return true;
     }

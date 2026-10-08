@@ -25,6 +25,7 @@
 #include "mgl_format_table.h"
 
 void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data);
+GLuint textureIndexFromTarget(GLMContext ctx, GLenum target);
 
 // these cast a void ptr to a type and value
 #define RET_BOOL(__value__) *((GLboolean *)data) = (__value__) ? GL_TRUE : GL_FALSE; break;
@@ -166,7 +167,7 @@ int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *
             case GL_SHADER_STORAGE_BUFFER_SIZE:
             case GL_ATOMIC_COUNTER_BUFFER_SIZE:
             case GL_TRANSFORM_FEEDBACK_BUFFER_SIZE:
-                out[0] = (GLdouble)bound->size;
+                out[0] = bound->whole ? 0.0 : (GLdouble)bound->size;
                 break;
 
             default:
@@ -179,6 +180,41 @@ int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *
 
     switch(pname)
     {
+        // glGetIntegeri_v reads any unit's binding, not just the active one's
+        case GL_TEXTURE_BINDING_1D: case GL_TEXTURE_BINDING_1D_ARRAY:
+        case GL_TEXTURE_BINDING_2D: case GL_TEXTURE_BINDING_2D_ARRAY:
+        case GL_TEXTURE_BINDING_3D: case GL_TEXTURE_BINDING_BUFFER:
+        case GL_TEXTURE_BINDING_CUBE_MAP: case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_BINDING_RECTANGLE: case GL_TEXTURE_BINDING_2D_MULTISAMPLE:
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY:
+        {
+            static const GLenum targets[][2] = {
+                { GL_TEXTURE_BINDING_1D, GL_TEXTURE_1D }, { GL_TEXTURE_BINDING_1D_ARRAY, GL_TEXTURE_1D_ARRAY },
+                { GL_TEXTURE_BINDING_2D, GL_TEXTURE_2D }, { GL_TEXTURE_BINDING_2D_ARRAY, GL_TEXTURE_2D_ARRAY },
+                { GL_TEXTURE_BINDING_3D, GL_TEXTURE_3D }, { GL_TEXTURE_BINDING_BUFFER, GL_TEXTURE_BUFFER },
+                { GL_TEXTURE_BINDING_CUBE_MAP, GL_TEXTURE_CUBE_MAP },
+                { GL_TEXTURE_BINDING_CUBE_MAP_ARRAY, GL_TEXTURE_CUBE_MAP_ARRAY },
+                { GL_TEXTURE_BINDING_RECTANGLE, GL_TEXTURE_RECTANGLE },
+                { GL_TEXTURE_BINDING_2D_MULTISAMPLE, GL_TEXTURE_2D_MULTISAMPLE },
+                { GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY, GL_TEXTURE_2D_MULTISAMPLE_ARRAY },
+            };
+            GLuint which = 0;
+            Texture *tex;
+
+            if (index >= (GLuint)ctx->state.var.max_combined_texture_image_units || index >= TEXTURE_UNITS)
+                return -1;
+
+            for (size_t k = 0; k < sizeof targets / sizeof targets[0]; k++)
+                if (targets[k][0] == pname)
+                    which = textureIndexFromTarget(ctx, targets[k][1]);
+
+            tex = which < _MAX_TEXTURE_TYPES ? ctx->state.texture_units[index].textures[which] : NULL;
+
+            // the default texture has no name
+            out[0] = tex && tex->name != TEX_OBJ_RES_NAME ? tex->name : 0;
+            return 1;
+        }
+
         case GL_SAMPLER_BINDING:
             if (index >= TEXTURE_UNITS) return -1;
             out[0] = ctx->state.texture_samplers[index] ?
@@ -572,6 +608,8 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x8905: RET_TYPE_VAR(type, max_program_texel_offset); break; // GL_MAX_PROGRAM_TEXEL_OFFSET
         case 0x8C1C: RET_TYPE_VAR(type, texture_binding_1d_array); break; // GL_TEXTURE_BINDING_1D_ARRAY
         case 0x8C1D: RET_TYPE_VAR(type, texture_binding_2d_array); break; // GL_TEXTURE_BINDING_2D_ARRAY
+        // the active unit's, read the same way as the indexed form
+        case 0x900A: { GLdouble v[4]; int n = mglIndexedStateValues(ctx, GL_TEXTURE_BINDING_CUBE_MAP_ARRAY, ctx->state.active_texture, v); mglWriteTypedValues(data, type, v, n); } break; // GL_TEXTURE_BINDING_CUBE_MAP_ARRAY
         case 0x84E8: RET_TYPE_VAR(type, max_renderbuffer_size); break; // GL_MAX_RENDERBUFFER_SIZE
         case 0x8CA6: RET_TYPE_VAR(type, draw_framebuffer_binding); break; // GL_DRAW_FRAMEBUFFER_BINDING
         case 0x8CA7: RET_TYPE_VAR(type, renderbuffer_binding); break; // GL_RENDERBUFFER_BINDING
@@ -698,6 +736,7 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
 
         case 0x8C80: RET_TYPE_VAR(type, max_transform_feedback_separate_components); break; // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS
         case 0x8C8A: RET_TYPE_VAR(type, max_transform_feedback_interleaved_components); break; // GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS
+        case 0x8C8F: RET_BOUND_BUFFER(_TRANSFORM_FEEDBACK_BUFFER); break; // GL_TRANSFORM_FEEDBACK_BUFFER_BINDING
         // this one is a loop bound in the CTS's state reset, so it has to be
         // the number of binding points we actually accept
         case 0x8C8B: RET_TYPE_VAR(type, max_transform_feedback_separate_attribs); break; // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS
@@ -861,6 +900,7 @@ static const char * const mgl_extensions[] = {
     "GL_ARB_texture_storage",
     "GL_ARB_texture_storage_multisample",
     "GL_ARB_texture_multisample",
+    "GL_ARB_texture_barrier",
     "GL_ARB_texture_cube_map_array",
     "GL_ARB_texture_buffer_object",
     "GL_ARB_texture_buffer_range",
@@ -951,9 +991,13 @@ static const char * const mgl_extensions[] = {
     "GL_ARB_transform_feedback_overflow_query",
     "GL_KHR_debug",
     "GL_KHR_robustness",
+    // Apple GPUs decode ASTC themselves, and the format table maps every LDR size
+    "GL_KHR_texture_compression_astc_ldr",
     "GL_EXT_texture_filter_anisotropic",
     "GL_EXT_texture_sRGB",
     "GL_EXT_texture_compression_s3tc",
+    // mix() on integers and booleans, core since GLSL 4.50, which glslang takes
+    "GL_EXT_shader_integer_mix",
     // Core since 3.0 and 3.3, and named here because tests and applications
     // check for the old string rather than the version.
     "GL_EXT_texture_integer",

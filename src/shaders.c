@@ -1790,7 +1790,10 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
     char where[256];
 
-    if (!mglVaryingLocationsFit(glsl_shader, max_in, max_out, where, sizeof where))
+    if (!mglVaryingLocationsFit(glsl_shader, max_in, max_out, where, sizeof where) ||
+        !mglBindingsFit(glsl_shader, ctx->state.var.max_uniform_buffer_bindings,
+                        ctx->state.var.max_shader_storage_buffer_bindings,
+                        ctx->state.var.max_image_units, where, sizeof where))
     {
         ptr->log = strdup(where);
         glslang_shader_delete(glsl_shader);
@@ -1885,22 +1888,27 @@ void mglGetShaderInfoLog(GLMContext ctx, GLuint shader, GLsizei bufSize, GLsizei
     ptr = findShader(ctx, shader);
 
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
 
-    if (ptr->log)
+    // as much as fits with its terminator, and an empty string when there is
+    // no log. Nothing at all was written then, or when the log was too long,
+    // and the caller read whatever its buffer already held.
+    const char *src = ptr->log ? ptr->log : "";
+    GLsizei n = 0;
+
+    if (infoLog && bufSize > 0)
     {
-        if (length)
+        while (n < bufSize - 1 && src[n])
         {
-            *length = (GLsizei)strlen(ptr->log);
+            infoLog[n] = src[n];
+            n++;
         }
 
-        if (infoLog)
-        {
-            if (bufSize >= strlen(ptr->log))
-            {
-                memcpy(infoLog, ptr->log, strlen(ptr->log));
-            }
-        }
+        infoLog[n] = 0;
     }
+
+    if (length)
+        *length = n;
 }
 
 void mglGetShaderSource(GLMContext ctx, GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *source)

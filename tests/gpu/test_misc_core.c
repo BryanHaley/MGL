@@ -524,3 +524,208 @@ GPU_TEST(misc_core, buffer_offset_alignments_are_real)
         CHECK_MSG(a > 0 && a <= 256 && (a & (a - 1)) == 0, "pname 0x%x answers %d", pnames[i], a);
     }
 }
+
+// GL_EXT_shader_integer_mix is advertised: a shader that requires it and
+// picks between integer vectors with a bool vector has to build and draw.
+GPU_TEST(misc_core, integer_mix_extension_builds_and_selects)
+{
+    static const char *VS =
+        "#version 330 core\n"
+        "#extension GL_EXT_shader_integer_mix : require\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); gl_PointSize = 1.0; }\n";
+    static const char *FS =
+        "#version 330 core\n"
+        "#extension GL_EXT_shader_integer_mix : require\n"
+        "out vec4 o;\n"
+        "void main() {\n"
+        "    ivec4 v = mix(ivec4(0), ivec4(255), bvec4(true, false, true, false));\n"
+        "    o = vec4(v) / 255.0;\n"
+        "}\n";
+    MGLTestTarget t;
+    GLuint prog, vao;
+    char log[2048] = { 0 };
+    unsigned char *px, c[4] = { 0 };
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    mgl_target_create(&t, 1, 1, GL_RGBA8, 0);
+    mgl_target_bind(&t);
+    glViewport(0, 0, 1, 1);
+    glClearColor(0, 1, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glDisable(GL_PROGRAM_POINT_SIZE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 0, 0, c);
+        free(px);
+    }
+    CHECK_MSG(c[0] == 255 && c[1] == 0 && c[2] == 255 && c[3] == 0, "got %d,%d,%d,%d", c[0], c[1], c[2], c[3]);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// glTextureBarrier makes what was drawn visible to a later draw that samples
+// the same texture. It did nothing, so the second draw read the old texels.
+GPU_TEST(misc_core, texture_barrier_shows_earlier_rendering)
+{
+    static const char *VS =
+        "#version 450 core\n"
+        "void main() {\n"
+        "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;\n"
+        "    gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const char *FS =
+        "#version 450 core\n"
+        "layout(binding = 0) uniform sampler2D self;\n"
+        "uniform int pass_no;\n"
+        "out vec4 o;\n"
+        "void main() {\n"
+        "    vec4 seen = texelFetch(self, ivec2(gl_FragCoord.xy), 0);\n"
+        "    o = pass_no == 0 ? vec4(0.25, 0.0, 0.0, 1.0) : vec4(seen.r * 2.0, 0.0, 0.0, 1.0);\n"
+        "}\n";
+    GLuint prog, vao, tex, fb;
+    char log[2048] = { 0 };
+    GLubyte px[4 * 4 * 4] = { 0 };
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glViewport(0, 0, 4, 4);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    glUniform1i(glGetUniformLocation(prog, "pass_no"), 0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glTextureBarrier();
+    glUniform1i(glGetUniformLocation(prog, "pass_no"), 1);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(px[0] >= 126 && px[0] <= 130, "second draw wrote %d, want about 128", px[0]);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(prog);
+}
+
+// The multi-bind calls: a bad entry fails alone, the span is checked against
+// the limits GL reports, a missing array empties the span, and each unit's
+// texture binding can be read by index.
+GPU_TEST(misc_core, multi_bind_entries_stand_alone)
+{
+    GLuint bufs[3], tex, cube;
+    GLint max_atomic = 0, v = -1, units = 0;
+    GLuint names[3];
+    static const GLubyte texel[4 * 6] = { 0 };
+
+    glGenBuffers(3, bufs);
+    for (int i = 0; i < 3; i++)
+    {
+        glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, bufs[i]);
+        glBufferData(GL_ATOMIC_COUNTER_BUFFER, 16, NULL, GL_DYNAMIC_COPY);
+    }
+
+    // the middle name was never made: it alone fails
+    names[0] = bufs[0];
+    names[1] = 0x7FFFFFF0u;
+    names[2] = bufs[2];
+    glBindBuffersBase(GL_ATOMIC_COUNTER_BUFFER, 0, 3, names);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glGetIntegeri_v(GL_ATOMIC_COUNTER_BUFFER_BINDING, 2, &v);
+    CHECK_EQ_INT(v, (GLint)bufs[2]);
+
+    glGetIntegerv(GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS, &max_atomic);
+    glBindBuffersBase(GL_ATOMIC_COUNTER_BUFFER, (GLuint)max_atomic - 1, 2, bufs);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glBindBuffersBase(GL_ATOMIC_COUNTER_BUFFER, 0, 3, NULL);
+    glGetIntegeri_v(GL_ATOMIC_COUNTER_BUFFER_BINDING, 2, &v);
+    CHECK_EQ_INT(v, 0);
+
+    // a texture bound to unit 3 reads back through that index
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 1, 1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindTextures(3, 1, &tex);
+    glGetIntegeri_v(GL_TEXTURE_BINDING_2D, 3, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, (GLint)tex);
+
+    glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &units);
+    glBindTextures((GLuint)units, 1, &tex);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glBindTextures(3, 1, NULL);
+
+    // an image bound by the multi-bind form comes off again with no array
+    glBindImageTextures(0, 1, &tex);
+    glGetIntegeri_v(GL_IMAGE_BINDING_NAME, 0, &v);
+    CHECK_EQ_INT(v, (GLint)tex);
+    glBindImageTextures(0, 1, NULL);
+    glGetIntegeri_v(GL_IMAGE_BINDING_NAME, 0, &v);
+    CHECK_EQ_INT(v, 0);
+
+    // one face of one cube of a cube map array takes a sub-image
+    glGenTextures(1, &cube);
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, cube);
+    glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 1, GL_RGBA8, 1, 1, 6);
+    glTexSubImage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 0, 0, 0, 0, 1, 1, 6, GL_RGBA, GL_UNSIGNED_BYTE, texel);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, 0);
+
+    glDeleteTextures(1, &cube);
+    glDeleteTextures(1, &tex);
+    glDeleteBuffers(3, bufs);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// GL_TEXTURE_BINDING_CUBE_MAP_ARRAY reads back like every other binding.
+// It was an unknown enum.
+GPU_TEST(misc_core, cube_map_array_binding_reads_back)
+{
+    GLuint tex;
+    GLint v = -1;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, tex);
+    glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP_ARRAY, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, (GLint)tex);
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, 0);
+    glDeleteTextures(1, &tex);
+}

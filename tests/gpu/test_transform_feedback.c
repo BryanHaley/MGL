@@ -699,3 +699,74 @@ GPU_TEST(transform_feedback, indexed_draws_record_in_element_order)
     glDeleteBuffers(1, &xfb);
     glDeleteVertexArrays(1, &vao);
 }
+
+// The feedback rules the API checks: the generic binding reads back, a buffer
+// cannot be swapped while recording, the overflow query has no stream to
+// name, and varyings with nothing to write them do not link.
+GPU_TEST(transform_feedback, api_rules_follow_the_spec)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "out float v;\n"
+        "void main() { v = 1.0; gl_Position = vec4(0.0); }\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const char *varyings[] = { "v" };
+    GLuint buf, prog, vs, fs, fs_only, vao, q;
+    GLint v = -1, ok = 1;
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 64, NULL, GL_DYNAMIC_COPY);
+    glGetIntegerv(GL_TRANSFORM_FEEDBACK_BUFFER_BINDING, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(v, (GLint)buf);
+
+    vs = glCreateShader(GL_VERTEX_SHADER);
+    fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(vs, 1, &VS, NULL);
+    glShaderSource(fs, 1, &FS, NULL);
+    glCompileShader(vs);
+    glCompileShader(fs);
+
+    prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glTransformFeedbackVaryings(prog, 1, varyings, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+
+    glUseProgram(prog);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
+    glBeginTransformFeedback(GL_POINTS);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glEndTransformFeedback();
+    glUseProgram(0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGenQueries(1, &q);
+    glGetQueryIndexediv(GL_TRANSFORM_FEEDBACK_OVERFLOW, 1, GL_CURRENT_QUERY, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    fs_only = glCreateProgram();
+    glAttachShader(fs_only, fs);
+    glTransformFeedbackVaryings(fs_only, 1, varyings, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(fs_only);
+    glGetProgramiv(fs_only, GL_LINK_STATUS, &ok);
+    CHECK(!ok);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteQueries(1, &q);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    glDeleteProgram(fs_only);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    glDeleteBuffers(1, &buf);
+}

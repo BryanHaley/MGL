@@ -839,3 +839,282 @@ GPU_TEST(program_uniform, sampler_binding_as_hex_octal_and_macro)
 
     glDeleteProgram(prog);
 }
+
+static int compilesFS(const char *fmt, int n)
+{
+    char src[512];
+    const char *p = src;
+    GLuint s = glCreateShader(GL_FRAGMENT_SHADER);
+    GLint ok = 0;
+
+    snprintf(src, sizeof src, fmt, n);
+    glShaderSource(s, 1, &p, NULL);
+    glCompileShader(s);
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    glDeleteShader(s);
+
+    return ok;
+}
+
+// A block or image binding past the last binding point does not compile,
+// counting every element of an array. Only sampler and counter bindings
+// were checked.
+GPU_TEST(program_uniform, bindings_past_the_limit_do_not_compile)
+{
+    static const char *UBO =
+        "#version 440\nout vec4 o;\n"
+        "layout(binding = %d, std140) uniform B { float x; } b;\n"
+        "void main() { o = vec4(b.x); }\n";
+    static const char *SSBO =
+        "#version 440\nout vec4 o;\n"
+        "layout(binding = %d, std430) buffer S { float x; } s[2];\n"
+        "void main() { o = vec4(s[0].x + s[1].x); }\n";
+    static const char *IMG =
+        "#version 440\nout vec4 o;\n"
+        "layout(binding = %d, rgba8) readonly uniform image2D img;\n"
+        "void main() { o = imageLoad(img, ivec2(0)); }\n";
+    GLint ubos = 0, ssbos = 0, images = 0;
+
+    glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS, &ubos);
+    glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &ssbos);
+    glGetIntegerv(GL_MAX_IMAGE_UNITS, &images);
+
+    CHECK(compilesFS(UBO, ubos - 1));
+    CHECK(!compilesFS(UBO, ubos));
+    CHECK(compilesFS(SSBO, ssbos - 2));
+    CHECK(!compilesFS(SSBO, ssbos - 1));
+    CHECK(compilesFS(IMG, images - 1));
+    CHECK(!compilesFS(IMG, images));
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// A uniform the shader never reads is not active and has no location, even
+// with an explicit one; both location queries agree. glGetUniformLocation
+// used to hand back the explicit location anyway.
+GPU_TEST(program_uniform, an_unused_uniform_has_no_location)
+{
+    static const char *VS =
+        "#version 430 core\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 430 core\n"
+        "layout(location = 2) uniform vec3 unused;\n"
+        "layout(location = 5) uniform float used;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(used); }\n";
+    char log[2048] = { 0 };
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    CHECK_EQ_INT(glGetUniformLocation(prog, "used"), 5);
+    CHECK_EQ_INT(glGetProgramResourceLocation(prog, GL_UNIFORM, "used"), 5);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "unused"), -1);
+    CHECK_EQ_INT(glGetProgramResourceLocation(prog, GL_UNIFORM, "unused"), -1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(prog);
+}
+
+// Every location taken explicitly leaves none for an implicit uniform, and the
+// link fails. It linked, with the implicit one numbered off the end.
+GPU_TEST(program_uniform, running_out_of_locations_fails_the_link)
+{
+    static const char *VS =
+        "#version 430 core\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 430 core\n"
+        "layout(location = 0) uniform float all_of_them[1024];\n"
+        "uniform float one_more;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(all_of_them[1023] + one_more); }\n";
+    char log[2048] = { 0 };
+    GLint max = 0;
+    GLuint prog;
+
+    glGetIntegerv(GL_MAX_UNIFORM_LOCATIONS, &max);
+    CHECK_EQ_INT(max, 1024);
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog == 0, "linked although no location was left");
+    if (prog)
+        glDeleteProgram(prog);
+    mgl_drain_errors();
+}
+
+// The members of a struct with layout(location) take the locations after it,
+// one per element. They were numbered as if the struct had none.
+GPU_TEST(program_uniform, struct_members_follow_the_structs_location)
+{
+    static const char *VS =
+        "#version 430 core\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 430 core\n"
+        "struct S { vec4 m0; float m1[2]; mat2 m2; };\n"
+        "layout(location = 1) uniform S u0[3];\n"
+        "out vec4 o;\n"
+        "void main() {\n"
+        "    vec4 sum = vec4(0.0);\n"
+        "    for (int i = 0; i < 3; i++) sum += u0[i].m0 + vec4(u0[i].m1[0] + u0[i].m1[1]) + vec4(u0[i].m2[0], u0[i].m2[1]);\n"
+        "    o = sum;\n"
+        "}\n";
+    char log[2048] = { 0 };
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[0].m0"), 1);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[0].m1[0]"), 2);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[0].m1[1]"), 3);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[0].m2"), 4);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[1].m0"), 5);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[2].m2"), 12);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(prog);
+}
+
+// A shader's info log comes back terminated, cut to the buffer, and empty
+// when there is none. Nothing was written in those cases, so callers read
+// whatever their buffer already held.
+GPU_TEST(program_uniform, shader_info_log_is_always_a_string)
+{
+    static const char *bad = "#version 430 core\nvoid main() { this is not glsl }\n";
+    static const char *good = "#version 430 core\nvoid main() { }\n";
+    GLuint s = glCreateShader(GL_VERTEX_SHADER);
+    char buf[8];
+    GLsizei len = -1;
+
+    glShaderSource(s, 1, &good, NULL);
+    glCompileShader(s);
+    memset(buf, 'x', sizeof buf);
+    glGetShaderInfoLog(s, sizeof buf, &len, buf);
+    CHECK_EQ_INT(buf[0], 0);
+    CHECK_EQ_INT(len, 0);
+
+    glShaderSource(s, 1, &bad, NULL);
+    glCompileShader(s);
+    memset(buf, 'x', sizeof buf);
+    glGetShaderInfoLog(s, sizeof buf, &len, buf);
+    CHECK_EQ_INT(len, (GLsizei)sizeof buf - 1);
+    CHECK_EQ_INT(buf[sizeof buf - 1], 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteShader(s);
+}
+
+// A fragment stage may read as many samplers as GL_MAX_TEXTURE_IMAGE_UNITS
+// says, and a program that does links. The limit said 128, past the 16
+// samplers Metal binds to one stage, so such a program failed in Metal.
+GPU_TEST(program_uniform, fragment_samplers_up_to_the_limit_link)
+{
+    static const char *VS =
+        "#version 430 core\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    char fs[512];
+    char log[2048] = { 0 };
+    GLint max = 0;
+    GLuint prog;
+
+    glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &max);
+    CHECK_EQ_INT(max, 16);
+
+    snprintf(fs, sizeof fs,
+             "#version 430 core\n"
+             "uniform sampler2D s[%d];\n"
+             "out vec4 o;\n"
+             "void main() { vec4 c = vec4(0); for (int i = 0; i < %d; i++) c += texture(s[i], vec2(0.5)); o = c; }\n",
+             max, max);
+
+    prog = mgl_build_program(VS, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (prog)
+        glDeleteProgram(prog);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// Two uniform block arrays may start at the same binding and then read the
+// same buffers. SPIRV-Cross refused to translate that.
+GPU_TEST(program_uniform, block_arrays_may_share_a_binding)
+{
+    static const char *CS =
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(binding = 0, std140) uniform A { float a; } ua[2];\n"
+        "layout(binding = 0, std140) uniform B { float b; } ub[2];\n"
+        "layout(std430, binding = 0) buffer Out { vec4 got; };\n"
+        "void main() { got = vec4(ua[0].a, ua[1].a, ub[0].b, ub[1].b); }\n";
+    static const GLfloat one[4] = { 1, 0, 0, 0 }, two[4] = { 2, 0, 0, 0 };
+    GLfloat got[4] = { 0 };
+    GLuint prog, ubo[2], out;
+    char log[2048] = { 0 };
+
+    prog = mgl_build_compute_program(CS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    glGenBuffers(2, ubo);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo[0]);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof one, one, GL_STATIC_DRAW);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo[1]);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof two, two, GL_STATIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo[0]);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 1, ubo[1]);
+
+    glGenBuffers(1, &out);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof got, got, GL_DYNAMIC_COPY);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, out);
+
+    glUseProgram(prog);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof got, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(got[0] == 1 && got[1] == 2 && got[2] == 1 && got[3] == 2,
+              "read %g %g %g %g, want 1 2 1 2", got[0], got[1], got[2], got[3]);
+
+    glUseProgram(0);
+    glDeleteBuffers(2, ubo);
+    glDeleteBuffers(1, &out);
+    glDeleteProgram(prog);
+}
+
+// Every element of an array of arrays has a location, the last subscript
+// changing fastest. Only the innermost size was counted, and a name with
+// two subscripts was not found at all.
+GPU_TEST(program_uniform, array_of_arrays_elements_have_locations)
+{
+    static const char *VS =
+        "#version 430 core\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 430 core\n"
+        "layout(location = 2) uniform vec4 u0[2][3];\n"
+        "out vec4 o;\n"
+        "void main() { vec4 s = vec4(0); for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) s += u0[i][j]; o = s; }\n";
+    char log[2048] = { 0 };
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log);
+    GLfloat got[4] = { 0 };
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[0][0]"), 2);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[0][2]"), 4);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[1][0]"), 5);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "u0[1][2]"), 7);
+
+    glUseProgram(prog);
+    glUniform4f(7, 1, 2, 3, 4);
+    glGetUniformfv(prog, 7, got);
+    CHECK_MSG(got[0] == 1 && got[3] == 4, "u0[1][2] read %g .. %g", got[0], got[3]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+}

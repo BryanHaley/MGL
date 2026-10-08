@@ -272,3 +272,40 @@ GPU_TEST(ssbo, atomic_add_counts_every_invocation)
     glDeleteProgram(prog);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 }
+
+// glBindBufferBase reports a start and size of 0, a range has to start on
+// the target's alignment, and a shader's name is the wrong kind of object.
+GPU_TEST(ssbo, binding_queries_and_errors_follow_the_spec)
+{
+    GLuint buf, sh;
+    GLint64 size = -1;
+    GLint align = 0;
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 1024, NULL, GL_DYNAMIC_DRAW);
+
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, 0, &size);
+    CHECK_EQ_INT((GLint)size, 0);
+
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &align);
+    if (align > 1)
+    {
+        glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buf, align / 2, 16);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    }
+
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buf, align, 16);
+    glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, 0, &size);
+    CHECK_EQ_INT((GLint)size, 16);
+
+    sh = glCreateShader(GL_VERTEX_SHADER);
+    glShaderStorageBlockBinding(sh, 0, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glDeleteShader(sh);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, 0);
+    glDeleteBuffers(1, &buf);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}

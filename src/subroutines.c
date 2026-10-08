@@ -795,6 +795,8 @@ static bool scanAndStrip(const char *src, Scan *sc, Buf *out)
                 k = skipSpace(src, k);
             }
 
+            size_t dims_end = k;
+
             if (src[k] == ';')
                 k++;
 
@@ -816,7 +818,7 @@ static bool scanAndStrip(const char *src, Scan *sc, Buf *out)
                 u->array_size = arr;
                 u->dims = dims;
                 snprintf(u->dims_text, sizeof(u->dims_text), "%.*s",
-                         (int)(k - dims_start), src + dims_start);
+                         (int)(dims_end - dims_start), src + dims_start);
                 u->location = location;
 
                 // the selector the driver writes, plus a prototype so calls

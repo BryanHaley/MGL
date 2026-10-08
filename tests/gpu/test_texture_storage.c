@@ -763,3 +763,35 @@ GPU_TEST(texture_storage, copy_into_one_3D_layer_spares_the_rest)
     glDeleteTextures(1, &src_tex);
     glDeleteTextures(1, &dst_tex);
 }
+
+// glTexSubImage changes only the texels it names. It used to make the Metal
+// texture again from the CPU copy, which wiped whatever had been drawn into it.
+GPU_TEST(texture_storage, sub_image_keeps_what_was_drawn)
+{
+    static const GLubyte red[4] = { 255, 0, 0, 255 };
+    GLuint tex, fb;
+    GLubyte px[4 * 4 * 4] = { 0 };
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glViewport(0, 0, 4, 4);
+    glClearColor(0, 1, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, red);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    CHECK_MSG(px[(1 * 4 + 1) * 4] == 255 && px[(1 * 4 + 1) * 4 + 1] == 0, "the new texel is %d,%d",
+              px[20], px[21]);
+    CHECK_MSG(px[1] == 255 && px[0] == 0, "a drawn texel is now %d,%d,%d", px[0], px[1], px[2]);
+
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}

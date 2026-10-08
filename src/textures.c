@@ -399,21 +399,26 @@ void mglBindTexture(GLMContext ctx, GLenum target, GLuint texture)
     syncTextureBindings(ctx);
 }
 
+// An empty image unit reads back as GL's defaults: read-only, GL_R8
+void mglResetImageUnit(GLMContext ctx, GLuint unit)
+{
+    bzero(&ctx->state.image_units[unit], sizeof(ImageUnit));
+    ctx->state.image_units[unit].access = GL_READ_ONLY;
+    ctx->state.image_units[unit].internalformat = GL_R8;
+    ctx->state.dirty_bits |= DIRTY_IMAGE_UNIT_STATE;
+}
+
 void mglBindImageTexture(GLMContext ctx, GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum internalformat)
 {
     Texture *ptr;
 
-    // ERROR_CHECK_RETURN(unit < TEXTURE_UNITS, GL_INVALID_VALUE);
-    if (unit >= TEXTURE_UNITS) {
-        MGL_ERR("MGL Error: mglBindImageTexture: unit >= TEXTURE_UNITS (%d)\n", unit);
-        ERROR_RETURN(GL_INVALID_VALUE);
-    }
+    // the units GL reports, not however many MGL has room for
+    ERROR_CHECK_RETURN(unit < (GLuint)STATE_VAR(max_image_units) && unit < TEXTURE_UNITS, GL_INVALID_VALUE);
 
     if (texture == 0)
     {
         // zero breaks whatever was bound to the unit
-        bzero(&ctx->state.image_units[unit], sizeof(ImageUnit));
-        ctx->state.dirty_bits |= DIRTY_IMAGE_UNIT_STATE;
+        mglResetImageUnit(ctx, unit);
         return;
     }
 
@@ -521,15 +526,34 @@ static bool framebufferHolds(GLMContext ctx, const Texture *tex)
     return false;
 }
 
+static void retireTexture(GLMContext ctx, Texture *tex);
+
 // everything a texture object owns, and the object
 void mglFreeTextureObject(GLMContext ctx, Texture *tex)
 {
+    Texture *orig = tex->view_of;
+
+    // views still read its storage; the last of them to go frees it
+    if (tex->view_count)
+    {
+        tex->deleted = GL_TRUE;
+        return;
+    }
+
     invalidateTexture(ctx, tex);
 
     if (tex->params.mtl_data)
         ctx->mtl_funcs.mtlDeleteMTLObj(ctx, tex->params.mtl_data);
 
     free(tex);
+
+    if (orig && orig->view_count && --orig->view_count == 0 && orig->deleted)
+    {
+        if (framebufferHolds(ctx, orig))
+            retireTexture(ctx, orig);
+        else
+            mglFreeTextureObject(ctx, orig);
+    }
 }
 
 static void retireTexture(GLMContext ctx, Texture *tex)
@@ -602,23 +626,23 @@ void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
             for(int i=0; i<TEXTURE_UNITS; i++)
             {
                 if(ctx->state.image_units[i].texture == name)
-                {
-                    bzero(&ctx->state.image_units[i], sizeof(ImageUnit));
-
-                    ctx->state.dirty_bits |= DIRTY_IMAGE_UNIT_STATE;
-                }
+                    mglResetImageUnit(ctx, (GLuint)i);
             }
 
             mglBindlessForgetTexture(ctx, tex);
 
-            if (tex->mtl_data)
+            // views keep the storage alive, so only the name goes
+            if (tex->view_count == 0)
             {
-                ctx->mtl_funcs.mtlDeleteMTLObj(ctx, tex->mtl_data);
-                tex->mtl_data = NULL;
-            }
+                if (tex->mtl_data)
+                {
+                    ctx->mtl_funcs.mtlDeleteMTLObj(ctx, tex->mtl_data);
+                    tex->mtl_data = NULL;
+                }
 
-            // the name has to stop existing or glIsTexture keeps saying yes
-            invalidateTexture(ctx, tex);
+                // the name has to stop existing or glIsTexture keeps saying yes
+                invalidateTexture(ctx, tex);
+            }
 
             deleteHashElement(&STATE(texture_table), name);
             mglForgetObjectLabel(ctx, GL_TEXTURE, name, NULL);
@@ -671,16 +695,37 @@ void mglInvalidateTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint
 
 void mglBindImageTextures(GLMContext ctx, GLuint first, GLsizei count, const GLuint *textures)
 {
-    MGL_INFO("MGL: glBindImageTextures called first=%u count=%d\n", first, count);
-    // Bind multiple image textures
-    for (GLsizei i = 0; i < count; i++) {
-        GLuint tex_name = textures ? textures[i] : 0;
-        if (tex_name != 0) {
-            Texture *tex = findTexture(ctx, tex_name);
-            if (tex) {
-                mglBindImageTexture(ctx, first + i, tex_name, 0, GL_FALSE, 0, tex->access ? tex->access : GL_READ_ONLY, tex->internalformat);
-            }
+    ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN((GLuint64)first + (GLuint64)count <= (GLuint64)STATE_VAR(max_image_units), GL_INVALID_OPERATION);
+
+    for (GLsizei i = 0; i < count; i++)
+    {
+        GLuint name = textures ? textures[i] : 0;
+        Texture *tex;
+        bool layered;
+
+        // zero, or no array at all, empties the unit
+        if (name == 0)
+        {
+            mglResetImageUnit(ctx, first + i);
+            continue;
         }
+
+        // a bad entry is an error for its own unit only; the rest still bind
+        tex = findTexture(ctx, name);
+
+        if (tex == NULL || tex->mipmap_levels == 0)
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            continue;
+        }
+
+        // level 0, every layer, read and write, in the texture's own format
+        layered = tex->target == GL_TEXTURE_1D_ARRAY || tex->target == GL_TEXTURE_2D_ARRAY ||
+                  tex->target == GL_TEXTURE_3D || tex->target == GL_TEXTURE_CUBE_MAP ||
+                  tex->target == GL_TEXTURE_CUBE_MAP_ARRAY || tex->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+
+        mglBindImageTexture(ctx, first + i, name, 0, layered, 0, GL_READ_WRITE, tex->internalformat);
     }
 }
 
@@ -716,11 +761,13 @@ void mglBindTextures(GLMContext ctx, GLuint first, GLsizei count, const GLuint *
 
     // first is a zero-based unit index, and the active unit is left alone
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(first + count <= TEXTURE_UNITS, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN((GLuint64)first + (GLuint64)count <= (GLuint64)STATE_VAR(max_combined_texture_image_units),
+                       GL_INVALID_OPERATION);
 
     for (GLsizei i = 0; i < count; i++)
     {
-        // a null array unbinds the whole span
+        // a null array unbinds the whole span; a bad name only fails its own
+        // unit, which mglBindTextureUnit reports
         mglBindTextureUnit(ctx, first + i, textures ? textures[i] : 0);
     }
 }
@@ -965,6 +1012,9 @@ void invalidateTexture(GLMContext ctx, Texture *tex)
             free(tex->faces[i].levels);
     }
 
+    if (tex->mtl_view_src)
+        ctx->mtl_funcs.mtlDeleteMTLObj(ctx, tex->mtl_view_src);
+
     // the object itself stays bound and keeps its name, so only wipe its
     // contents -- clearing target/index/params here left the texture
     // unusable for every later draw
@@ -974,8 +1024,15 @@ void invalidateTexture(GLMContext ctx, Texture *tex)
     GLboolean immutable_storage = tex->immutable_storage;
     GLenum access = tex->access;
     TextureParameter params = tex->params;
+    Texture *view_of = tex->view_of;
+    GLuint view_count = tex->view_count;
+    GLboolean deleted = tex->deleted;
 
     bzero(tex, sizeof(Texture));
+
+    tex->view_of = view_of;
+    tex->view_count = view_count;
+    tex->deleted = deleted;
 
     tex->name = name;
     tex->target = target;
@@ -2242,6 +2299,114 @@ void mglTexImage3D(GLMContext ctx, GLenum target, GLint level, GLint internalfor
 // TexImage3DMultisample moved to texture_multisample.c
 
 #pragma mark texSubImage
+static bool compressedTexSubLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data);
+
+// Compresses a rectangle of plain pixels into RGTC blocks and stores them
+// like glCompressedTexSubImage would
+static bool compressedSubImageFromPixels(GLMContext ctx, Texture *tex, GLuint face, GLint level,
+                                         GLint xoffset, GLint yoffset, GLint zoffset,
+                                         GLsizei width, GLsizei height, GLsizei depth,
+                                         GLenum format, GLenum type, const void *pixels, size_t src_pitch)
+{
+    GLsizei d = depth > 0 ? depth : 1;
+    size_t slice = mglFormatImageSize(tex->internalformat, width, height, 1);
+    size_t rows_per_image = ctx->state.unpack.image_height > 0 ? (size_t)ctx->state.unpack.image_height
+                                                                : (size_t)height;
+    GLubyte *blocks = (GLubyte *)calloc(slice ? slice * (size_t)d : 1, 1);
+    Buffer *pbo = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
+    bool ok = blocks != NULL && slice != 0;
+
+    for (GLsizei z = 0; ok && z < d; z++)
+        ok = mglCompressToRGTC((const GLubyte *)pixels + (size_t)z * src_pitch * rows_per_image, src_pitch,
+                               format, type, blocks + (size_t)z * slice, tex->internalformat,
+                               width, height) == GL_TRUE;
+
+    if (!ok)
+    {
+        free(blocks);
+        ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
+    }
+
+    // the blocks are in memory here, not in the unpack buffer the pixels came from
+    STATE(buffers[_PIXEL_UNPACK_BUFFER]) = NULL;
+    ok = compressedTexSubLevel(ctx, tex, face, level, xoffset, yoffset, zoffset, width, height, d,
+                               tex->internalformat, (GLsizei)(slice * (size_t)d), blocks);
+    STATE(buffers[_PIXEL_UNPACK_BUFFER]) = pbo;
+
+    free(blocks);
+
+    return ok;
+}
+
+// A view has no pixels of its own: each of its layers is a layer of the
+// original, written there in the view's own format
+static bool viewSubImage(GLMContext ctx, Texture *view, GLuint face, GLint level,
+                         GLint xoffset, GLint yoffset, GLint zoffset,
+                         GLsizei width, GLsizei height, GLsizei depth,
+                         GLenum format, GLenum type, const void *pixels, size_t src_pitch)
+{
+    Texture *orig = view->view_of, shim;
+    GLuint olevel = (GLuint)level + view->view_min_level;
+    size_t rows_per_image = ctx->state.unpack.image_height > 0 ? (size_t)ctx->state.unpack.image_height
+                                                                : (size_t)height;
+    bool by_row = view->target == GL_TEXTURE_1D_ARRAY;
+    bool by_slice = view->target == GL_TEXTURE_2D_ARRAY || view->target == GL_TEXTURE_CUBE_MAP_ARRAY ||
+                    view->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    GLint first = 0, count = 1;
+    size_t step = 0;
+
+    if (by_row)
+    {
+        first = yoffset; count = height; step = src_pitch;
+    }
+    else if (by_slice)
+    {
+        first = zoffset; count = depth; step = src_pitch * rows_per_image;
+    }
+    else if (view->target == GL_TEXTURE_CUBE_MAP)
+    {
+        first = (GLint)face;
+    }
+
+    // the original's storage, converted into as the view's format
+    shim = *orig;
+    shim.internalformat = view->internalformat;
+
+    for (GLint i = 0; i < count; i++)
+    {
+        GLuint layer = view->view_min_layer + (GLuint)(first + i), oface = 0;
+        GLint y = by_row ? 0 : yoffset, z = by_slice ? 0 : zoffset;
+        GLsizei h = by_row ? 1 : height, d = by_slice ? 1 : depth;
+        TextureLevel *lvl;
+
+        switch (orig->target)
+        {
+            case GL_TEXTURE_CUBE_MAP:       oface = layer; break;
+            case GL_TEXTURE_1D_ARRAY:       y = (GLint)layer; break;
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+            case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: z = (GLint)layer; break;
+        }
+
+        lvl = &orig->faces[oface].levels[olevel];
+        ERROR_CHECK_RETURN_VALUE(lvl->data, GL_INVALID_OPERATION, false);
+
+        if (!unpackTexture(ctx, &shim, oface, olevel, format, type, (GLubyte *)pixels + (size_t)i * step,
+                           (void *)lvl->data, src_pitch, (size_t)xoffset, (size_t)y, (size_t)z,
+                           (size_t)width, (size_t)h, (size_t)d))
+            return false;
+
+        if (!(ctx->mtl_funcs.mtlUpdateTexRegion &&
+              ctx->mtl_funcs.mtlUpdateTexRegion(ctx, orig, oface, olevel, (size_t)xoffset, (size_t)y, (size_t)z,
+                                                (size_t)width, (size_t)h, (size_t)d)))
+            orig->dirty_bits |= DIRTY_TEXTURE_DATA;
+    }
+
+    STATE(dirty_bits) |= DIRTY_TEX;
+
+    return true;
+}
+
 bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, void *pixels)
 {
     // Debug: Log large texture uploads (VM framebuffer size)
@@ -2315,6 +2480,21 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
                   : mglPixelStoreSkipBytes2D(&ctx->state.unpack, src_pixel_size, src_pitch));
     }
 
+    if (tex->view_of)
+        return viewSubImage(ctx, tex, face, level, xoffset, yoffset, zoffset, width, height, depth,
+                            format, type, pixels, src_pitch);
+
+    // plain pixels into an RGTC texture are compressed on the way in, as
+    // glTexImage already does
+    {
+        GLuint channels = 0;
+        GLboolean is_signed = GL_FALSE;
+
+        if (mglFormatIsRGTC(tex->internalformat, &channels, &is_signed))
+            return compressedSubImageFromPixels(ctx, tex, face, level, xoffset, yoffset, zoffset,
+                                                width, height, depth, format, type, pixels, src_pitch);
+    }
+
     void *texture_data;
 
     texture_data = (void *)tex->faces[face].levels[level].data;
@@ -2350,7 +2530,13 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
         return true;
     } while(false);
 
-    // use process gl to upload texture data
+    // straight into the Metal texture where it already exists, otherwise
+    // the next draw makes it from the CPU copy
+    if (ctx->mtl_funcs.mtlUpdateTexRegion &&
+        ctx->mtl_funcs.mtlUpdateTexRegion(ctx, tex, face, (GLuint)level, (size_t)xoffset, (size_t)yoffset,
+                                          (size_t)zoffset, (size_t)width, (size_t)height, (size_t)depth))
+        return true;
+
     tex->dirty_bits |= DIRTY_TEXTURE_DATA;
     
     return true;
@@ -2554,6 +2740,8 @@ void mglTexSubImage3D(GLMContext ctx, GLenum target, GLint level, GLint xoffset,
     {
         case GL_TEXTURE_3D:
         case GL_TEXTURE_2D_ARRAY:
+        // every face of every cube is a layer, as in glTexImage3D
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
             break;
 
         default:
@@ -3280,6 +3468,37 @@ static bool compressedTexLevel(GLMContext ctx, Texture *tex, GLuint face, GLint 
 }
 
 // Patches block rows into a level that already exists.
+// Where a level's pixels start. A view has none of its own: they are in
+// its original, at the view's first layer.
+static vm_address_t levelData(const Texture *tex, GLuint face, GLint level)
+{
+    const Texture *orig = tex->view_of;
+    const TextureLevel *l;
+    GLuint layer, olevel;
+
+    if (orig == NULL)
+        return tex->faces[face].levels[level].data;
+
+    layer = tex->view_min_layer + (tex->target == GL_TEXTURE_CUBE_MAP ? face : 0);
+    olevel = (GLuint)level + tex->view_min_level;
+
+    if (orig->target == GL_TEXTURE_CUBE_MAP)
+        return orig->faces[layer].levels[olevel].data;
+
+    l = &orig->faces[0].levels[olevel];
+
+    if (l->data == 0)
+        return 0;
+
+    if (orig->target == GL_TEXTURE_1D_ARRAY)
+        return l->data + layer * l->pitch;
+
+    if (orig->target == GL_TEXTURE_2D_ARRAY || orig->target == GL_TEXTURE_CUBE_MAP_ARRAY)
+        return l->data + layer * l->pitch * (l->height ? l->height : 1);
+
+    return l->data;
+}
+
 static bool compressedTexSubLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data)
 {
     const MGLFormatDesc *desc;
@@ -3292,6 +3511,34 @@ static bool compressedTexSubLevel(GLMContext ctx, Texture *tex, GLuint face, GLi
 
     // the incoming format has to be the one the level was built with
     ERROR_CHECK_RETURN_VALUE(format == tex->internalformat, GL_INVALID_OPERATION, false);
+
+    // a view writes each of its layers into the original's
+    if (tex->view_of)
+    {
+        Texture *orig = tex->view_of, shim = *orig;
+        bool arrayed = tex->target == GL_TEXTURE_2D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY;
+        GLsizei n = arrayed ? (depth > 0 ? depth : 1) : 1;
+        size_t slice_bytes = (size_t)imageSize / (size_t)n;
+
+        shim.internalformat = tex->internalformat;
+
+        for (GLsizei z = 0; z < n; z++)
+        {
+            GLuint layer = tex->view_min_layer +
+                           (arrayed ? (GLuint)(zoffset + z) : tex->target == GL_TEXTURE_CUBE_MAP ? face : 0);
+            GLuint oface = orig->target == GL_TEXTURE_CUBE_MAP ? layer : 0;
+            GLint oz = orig->target == GL_TEXTURE_2D_ARRAY || orig->target == GL_TEXTURE_CUBE_MAP_ARRAY
+                     ? (GLint)layer : zoffset;
+
+            if (!compressedTexSubLevel(ctx, &shim, oface, level + (GLint)tex->view_min_level, xoffset, yoffset,
+                                       oz, width, height, arrayed ? 1 : depth, format, (GLsizei)slice_bytes,
+                                       (const GLubyte *)data + (size_t)z * slice_bytes))
+                return false;
+        }
+
+        orig->dirty_bits |= DIRTY_TEXTURE_DATA;
+        return true;
+    }
 
     ERROR_CHECK_RETURN_VALUE(width >= 0 && height >= 0 && depth >= 0, GL_INVALID_VALUE, false);
     ERROR_CHECK_RETURN_VALUE(xoffset >= 0 && yoffset >= 0 && zoffset >= 0, GL_INVALID_VALUE, false);
@@ -3938,7 +4185,7 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLint fa
 
         ERROR_CHECK_RETURN_VALUE(plain, GL_OUT_OF_MEMORY, false);
 
-        ok = mglDecompressRGTC((const void *)lvl->data, tex->internalformat,
+        ok = mglDecompressRGTC((const void *)levelData(tex, 0, level), tex->internalformat,
                                width, height, plain, plain_pitch) == GL_TRUE;
 
         if (ok)
@@ -4131,9 +4378,9 @@ static void getCompressedTexImage(GLMContext ctx, Texture *tex, GLint level, GLs
     if (pbo)
         ERROR_CHECK_RETURN(pbo_offset + image_size <= (uintptr_t)pbo->size, GL_INVALID_OPERATION);
 
-    ERROR_CHECK_RETURN(lvl->data, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(levelData(tex, 0, level), GL_INVALID_OPERATION);
 
-    memcpy(pixels, (const void *)lvl->data, image_size);
+    memcpy(pixels, (const void *)levelData(tex, 0, level), image_size);
 }
 
 void mglGetCompressedTexImage(GLMContext ctx, GLenum target, GLint level, void *img)
@@ -4189,6 +4436,8 @@ void mglGetCompressedTextureSubImage(GLMContext ctx, GLuint texture, GLint level
     ERROR_CHECK_RETURN(mglFormatImageSize(tex->internalformat, width, height ? height : 1, depth ? depth : 1)
                        <= (size_t)bufSize, GL_INVALID_OPERATION);
 
+    ERROR_CHECK_RETURN(levelData(tex, 0, level), GL_INVALID_OPERATION);
+
     size_t src_pitch = lvl->pitch;
     size_t dst_pitch = mglFormatBytesPerRow(tex->internalformat, width);
     size_t block_rows = ((size_t)(height > 0 ? height : 1) + desc->block_h - 1) / desc->block_h;
@@ -4196,7 +4445,7 @@ void mglGetCompressedTextureSubImage(GLMContext ctx, GLuint texture, GLint level
 
     for (size_t z = 0; z < (size_t)(depth > 0 ? depth : 1); z++)
     {
-        const GLubyte *src = (const GLubyte *)lvl->data
+        const GLubyte *src = (const GLubyte *)levelData(tex, 0, level)
                            + ((size_t)zoffset + z) * slice_pitch
                            + ((size_t)yoffset / desc->block_h) * src_pitch
                            + ((size_t)xoffset / desc->block_w) * desc->bytes_per_block;
@@ -4208,29 +4457,254 @@ void mglGetCompressedTextureSubImage(GLMContext ctx, GLuint texture, GLint level
     }
 }
 
+// GL 4.6 table 8.22: the formats in one class may view each other's storage.
+// A format in no class may only view itself.
+static int viewClass(GLenum f)
+{
+    switch (f)
+    {
+        case GL_RGBA32F: case GL_RGBA32UI: case GL_RGBA32I:
+            return 1;
+
+        case GL_RGB32F: case GL_RGB32UI: case GL_RGB32I:
+            return 2;
+
+        case GL_RGBA16F: case GL_RG32F: case GL_RGBA16UI: case GL_RG32UI:
+        case GL_RGBA16I: case GL_RG32I: case GL_RGBA16: case GL_RGBA16_SNORM:
+            return 3;
+
+        case GL_RGB16: case GL_RGB16_SNORM: case GL_RGB16F: case GL_RGB16UI: case GL_RGB16I:
+            return 4;
+
+        case GL_RG16F: case GL_R11F_G11F_B10F: case GL_R32F: case GL_RGB10_A2UI:
+        case GL_RGBA8UI: case GL_RG16UI: case GL_R32UI: case GL_RGBA8I: case GL_RG16I:
+        case GL_R32I: case GL_RGB10_A2: case GL_RGBA8: case GL_RG16: case GL_RGBA8_SNORM:
+        case GL_RG16_SNORM: case GL_SRGB8_ALPHA8: case GL_RGB9_E5:
+            return 5;
+
+        case GL_RGB8: case GL_RGB8_SNORM: case GL_SRGB8: case GL_RGB8UI: case GL_RGB8I:
+            return 6;
+
+        case GL_R16F: case GL_RG8UI: case GL_R16UI: case GL_RG8I: case GL_R16I:
+        case GL_RG8: case GL_R16: case GL_RG8_SNORM: case GL_R16_SNORM:
+            return 7;
+
+        case GL_R8UI: case GL_R8I: case GL_R8: case GL_R8_SNORM:
+            return 8;
+
+        case GL_COMPRESSED_RED_RGTC1: case GL_COMPRESSED_SIGNED_RED_RGTC1:
+            return 9;
+
+        case GL_COMPRESSED_RG_RGTC2: case GL_COMPRESSED_SIGNED_RG_RGTC2:
+            return 10;
+
+        case GL_COMPRESSED_RGBA_BPTC_UNORM: case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+            return 11;
+
+        case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT: case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+            return 12;
+    }
+
+    return 0;
+}
+
+// GL 4.6 table 8.21: what an original of one target may be viewed as
+static bool viewTargetAllowed(GLenum orig, GLenum view)
+{
+    switch (orig)
+    {
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_1D_ARRAY:
+            return view == GL_TEXTURE_1D || view == GL_TEXTURE_1D_ARRAY;
+
+        case GL_TEXTURE_2D:
+            return view == GL_TEXTURE_2D || view == GL_TEXTURE_2D_ARRAY;
+
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            return view == GL_TEXTURE_2D || view == GL_TEXTURE_2D_ARRAY ||
+                   view == GL_TEXTURE_CUBE_MAP || view == GL_TEXTURE_CUBE_MAP_ARRAY;
+
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_RECTANGLE:
+            return view == orig;
+
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return view == GL_TEXTURE_2D_MULTISAMPLE || view == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    }
+
+    return false;
+}
+
+// How many layers a texture has as GL counts them: a cube map's faces, and
+// every face of every cube in a cube array
+static GLuint textureLayers(const Texture *tex)
+{
+    if (tex->view_of)
+        return tex->view_num_layers;
+
+    switch (tex->target)
+    {
+        case GL_TEXTURE_1D_ARRAY:             return tex->height;
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:       return tex->depth;
+        case GL_TEXTURE_CUBE_MAP:             return 6;
+    }
+
+    return 1;
+}
+
+// The state glGetTexParameter reports about the texture object itself rather
+// than its sampling
+bool mglTextureObjectParam(const Texture *tex, GLenum pname, GLint *out)
+{
+    bool immutable = tex->immutable_storage != 0;
+
+    switch (pname)
+    {
+        case GL_TEXTURE_IMMUTABLE_FORMAT:
+            *out = immutable ? GL_TRUE : GL_FALSE;
+            return true;
+
+        // a view keeps its original's count, not its own
+        case GL_TEXTURE_IMMUTABLE_LEVELS:
+            *out = !immutable ? 0 : tex->view_of ? (GLint)tex->view_of->mipmap_levels
+                                                 : (GLint)tex->mipmap_levels;
+            return true;
+
+        case GL_TEXTURE_VIEW_MIN_LEVEL:
+            *out = (GLint)tex->view_min_level;
+            return true;
+
+        case GL_TEXTURE_VIEW_NUM_LEVELS:
+            *out = immutable ? (GLint)tex->mipmap_levels : 0;
+            return true;
+
+        case GL_TEXTURE_VIEW_MIN_LAYER:
+            *out = (GLint)tex->view_min_layer;
+            return true;
+
+        case GL_TEXTURE_VIEW_NUM_LAYERS:
+            *out = immutable ? (GLint)textureLayers(tex) : 0;
+            return true;
+
+        // MGL matches image formats by texel size
+        case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE:
+            *out = GL_IMAGE_FORMAT_COMPATIBILITY_BY_SIZE;
+            return true;
+    }
+
+    return false;
+}
+
 void mglTextureView(GLMContext ctx, GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat, GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers)
 {
-    Texture *view, *orig;
+    Texture *view, *orig, *root;
+    GLuint orig_levels, orig_layers, root_level;
+    TextureLevel *base;
 
-    ERROR_CHECK_RETURN(textureIndexFromTarget(ctx, target) != _MAX_TEXTURE_TYPES, GL_INVALID_ENUM);
+    ERROR_CHECK_RETURN(texture != 0, GL_INVALID_VALUE);
+
+    // a name glGenTextures handed out and nothing has bound yet
+    ERROR_CHECK_RETURN(texture < STATE(texture_table).current_name &&
+                       !isFreeName(&STATE(texture_table), texture) &&
+                       findTexture(ctx, texture) == NULL, GL_INVALID_OPERATION);
 
     orig = findTexture(ctx, origtexture);
-
-    ERROR_CHECK_RETURN(orig, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(orig && origtexture != 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(orig->immutable_storage, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(viewTargetAllowed(orig->target, target), GL_INVALID_OPERATION);
 
+    ERROR_CHECK_RETURN(internalformat == orig->internalformat ||
+                       (viewClass(internalformat) && viewClass(internalformat) == viewClass(orig->internalformat)),
+                       GL_INVALID_OPERATION);
+
+    orig_levels = orig->mipmap_levels;
+    orig_layers = textureLayers(orig);
+
+    ERROR_CHECK_RETURN(minlevel < orig_levels && minlayer < orig_layers, GL_INVALID_VALUE);
+
+    switch (target)
+    {
+        case GL_TEXTURE_CUBE_MAP:
+            ERROR_CHECK_RETURN(numlayers == 6, GL_INVALID_VALUE);
+            break;
+
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            ERROR_CHECK_RETURN(numlayers % 6 == 0, GL_INVALID_VALUE);
+            break;
+
+        case GL_TEXTURE_1D: case GL_TEXTURE_2D: case GL_TEXTURE_3D:
+        case GL_TEXTURE_RECTANGLE: case GL_TEXTURE_2D_MULTISAMPLE:
+            ERROR_CHECK_RETURN(numlayers == 1, GL_INVALID_VALUE);
+            break;
+    }
+
+    root = orig->view_of ? orig->view_of : orig;
+    root_level = minlevel + orig->view_min_level;
+    base = &root->faces[0].levels[root_level];
+
+    // a cube's faces have to be square
+    if (target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_CUBE_MAP_ARRAY)
+        ERROR_CHECK_RETURN(base->width == base->height, GL_INVALID_OPERATION);
+
+    // past the end of the original the view simply stops
+    numlevels = MIN(numlevels, orig_levels - minlevel);
+    numlayers = MIN(numlayers, orig_layers - minlayer);
     ERROR_CHECK_RETURN(numlevels > 0 && numlayers > 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(minlevel + numlevels <= orig->mipmap_levels, GL_INVALID_VALUE);
 
-    view = findTexture(ctx, texture);
+    view = getTexture(ctx, target, texture);
+    ERROR_CHECK_RETURN(view, GL_OUT_OF_MEMORY);
 
-    // the view name must be fresh: generated, never given storage
-    ERROR_CHECK_RETURN(view == NULL || view->num_levels == 0, GL_INVALID_OPERATION);
+    view->view_of = root;
+    view->view_min_level = root_level;
+    view->view_min_layer = minlayer + orig->view_min_layer;
+    view->view_num_layers = numlayers;
+    view->internalformat = internalformat;
+    view->samples = root->samples;
+    view->is_array = target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_2D_ARRAY ||
+                     target == GL_TEXTURE_CUBE_MAP_ARRAY || target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    view->mipmap_levels = numlevels;
+    view->num_levels = numlevels;
+    view->mipmapped = numlevels > 1;
+    view->immutable_storage = BUFFER_IMMUTABLE_STORAGE_FLAG;
+    view->access = root->access;
 
-    // Metal can alias one texture's storage under another format, but nothing
-    // in MGL's renderer plumbs a view through yet, so the new name stays empty
-    MGL_ERR("MGL Warning: glTextureView: texture %u will not alias %u -- MGL does not create views\n",
-            texture, origtexture);
+    // the levels say how big each one is; the pixels stay with the original
+    for (int face = 0; face < _CUBE_MAP_MAX_FACE; face++)
+    {
+        view->faces[face].levels = (TextureLevel *)calloc(numlevels, sizeof(TextureLevel));
+        ERROR_CHECK_RETURN(view->faces[face].levels, GL_OUT_OF_MEMORY);
+
+        for (GLuint l = 0; l < numlevels; l++)
+        {
+            const TextureLevel *src = &root->faces[0].levels[root_level + l];
+            TextureLevel *dst = &view->faces[face].levels[l];
+
+            dst->width = src->width;
+            dst->height = target == GL_TEXTURE_1D_ARRAY ? numlayers :
+                          (target == GL_TEXTURE_1D ? 1 : src->height);
+            dst->depth = target == GL_TEXTURE_3D ? src->depth : (view->is_array && target != GL_TEXTURE_1D_ARRAY ? numlayers : 1);
+            dst->pitch = src->pitch;
+            dst->mtl_format = src->mtl_format;
+            dst->complete = true;
+        }
+    }
+
+    view->width = view->faces[0].levels[0].width;
+    view->height = view->faces[0].levels[0].height;
+    view->depth = view->faces[0].levels[0].depth;
+    view->complete = true;
+
+    // the original has to be made so Metal can view it in another format
+    root->format_view = GL_TRUE;
+    root->view_count++;
+
+    view->dirty_bits |= DIRTY_TEXTURE_LEVEL;
+    STATE(dirty_bits) |= DIRTY_TEX;
 }
 
 // TextureBuffer moved to texture_buffer.c
@@ -4556,6 +5030,16 @@ void mglGetTextureParameterfv(GLMContext ctx, GLuint texture, GLenum pname, GLfl
     if (swizzleRGBA(&tex->params, pname, NULL, params))
         return;
 
+    {
+        GLint v;
+
+        if (mglTextureObjectParam(tex, pname, &v))
+        {
+            *params = (GLfloat)v;
+            return;
+        }
+    }
+
     if (texParamValue(&tex->params, pname, NULL, params) == false)
     {
         MGL_ERR("MGL Error: glGetTextureParameterfv: unknown pname 0x%x\n", pname);
@@ -4577,6 +5061,9 @@ void mglGetTextureParameteriv(GLMContext ctx, GLuint texture, GLenum pname, GLin
     ERROR_CHECK_RETURN(tex->target != GL_TEXTURE_BUFFER, GL_INVALID_OPERATION);
 
     if (swizzleRGBA(&tex->params, pname, params, NULL))
+        return;
+
+    if (mglTextureObjectParam(tex, pname, params))
         return;
 
     if (texParamValue(&tex->params, pname, params, NULL) == false)

@@ -585,3 +585,87 @@ GPU_TEST(image_store, fragment_atomics_through_a_cast)
     glDeleteVertexArrays(1, &vao);
     mgl_target_destroy(&t);
 }
+
+// An empty image unit reports GL's defaults, a unit past GL_MAX_IMAGE_UNITS
+// is refused, an image uniform reports an image type, and the texture says
+// its formats match by size. Each of these read back wrong.
+GPU_TEST(image_store, unit_state_and_types_follow_the_spec)
+{
+    static const char *CS =
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(r32i, binding = 0) uniform iimage2D ii;\n"
+        "layout(rgba8, binding = 1) uniform image1D fi;\n"
+        "void main() { imageStore(ii, ivec2(0), ivec4(1)); imageStore(fi, 0, vec4(1)); }\n";
+    GLint v = 0, max = 0, size = 0;
+    GLenum type = 0;
+    GLuint tex, prog;
+    char log[2048] = { 0 }, name[32];
+
+    glGetIntegeri_v(GL_IMAGE_BINDING_ACCESS, 3, &v);
+    CHECK_EQ_INT(v, GL_READ_ONLY);
+    glGetIntegeri_v(GL_IMAGE_BINDING_FORMAT, 3, &v);
+    CHECK_EQ_INT(v, GL_R8);
+
+    glGetIntegerv(GL_MAX_IMAGE_UNITS, &max);
+    glBindImageTexture((GLuint)max, 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 1, 1);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_IMAGE_FORMAT_COMPATIBILITY_TYPE, &v);
+    CHECK_EQ_INT(v, GL_IMAGE_FORMAT_COMPATIBILITY_BY_SIZE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    prog = mgl_build_compute_program(CS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (prog)
+    {
+        GLint n = 0;
+
+        glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &n);
+        for (GLint i = 0; i < n; i++)
+        {
+            glGetActiveUniform(prog, (GLuint)i, sizeof name, NULL, &size, &type, name);
+            if (!strcmp(name, "ii"))
+                CHECK_EQ_INT((GLint)type, GL_INT_IMAGE_2D);
+            if (!strcmp(name, "fi"))
+                CHECK_EQ_INT((GLint)type, GL_IMAGE_1D);
+        }
+        glDeleteProgram(prog);
+    }
+
+    glDeleteTextures(1, &tex);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// A stage that declares more image uniforms than its limit does not link;
+// each array element counts. Only Metal's own refusal stopped some stages,
+// and a stage whose limit is 0 linked one anyway.
+GPU_TEST(image_store, too_many_image_uniforms_fails_the_link)
+{
+    static const char *VS =
+        "#version 430 core\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    char fs[512];
+    char log[2048] = { 0 };
+    GLint max = 0;
+    GLuint prog;
+
+    glGetIntegerv(GL_MAX_FRAGMENT_IMAGE_UNIFORMS, &max);
+
+    snprintf(fs, sizeof fs,
+             "#version 430 core\n"
+             "layout(r32i) uniform iimage2D imgs[%d];\n"
+             "out vec4 o;\n"
+             "void main() { int s = 0; for (int i = 0; i < %d; i++) s += imageLoad(imgs[i], ivec2(0)).x; o = vec4(s); }\n",
+             max + 1, max + 1);
+
+    prog = mgl_build_program(VS, fs, log, sizeof log);
+    CHECK_MSG(prog == 0, "linked with %d image uniforms in a stage allowed %d", max + 1, max);
+    if (prog)
+        glDeleteProgram(prog);
+    mgl_drain_errors();
+}

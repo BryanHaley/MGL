@@ -558,3 +558,95 @@ GPU_TEST(geometry_shader, loops_fans_and_strips_hand_over_their_vertices_in_orde
     glDeleteProgram(lines);
     glDeleteProgram(tris);
 }
+
+// A linked geometry stage's layout reads back through glGetProgramiv, and a
+// program without one refuses those queries. They read 0 either way.
+GPU_TEST(geometry_shader, program_reports_its_layout)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "void main() { gl_Position = vec4(0.0); }\n";
+    static const char *GS =
+        "#version 460 core\n"
+        "layout(lines, invocations = 3) in;\n"
+        "layout(triangle_strip, max_vertices = 7) out;\n"
+        "void main() { gl_Position = gl_in[0].gl_Position; EmitVertex(); }\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    GLuint prog, plain, s[3];
+    GLint v = -1, ok = 0;
+    char log[2048] = { 0 };
+
+    prog = glCreateProgram();
+    s[0] = glCreateShader(GL_VERTEX_SHADER);
+    s[1] = glCreateShader(GL_GEOMETRY_SHADER);
+    s[2] = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(s[0], 1, &VS, NULL);
+    glShaderSource(s[1], 1, &GS, NULL);
+    glShaderSource(s[2], 1, &FS, NULL);
+    for (int i = 0; i < 3; i++)
+    {
+        glCompileShader(s[i]);
+        glAttachShader(prog, s[i]);
+    }
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "link: %s", log);
+
+    glGetProgramiv(prog, GL_GEOMETRY_VERTICES_OUT, &v);
+    CHECK_EQ_INT(v, 7);
+    glGetProgramiv(prog, GL_GEOMETRY_INPUT_TYPE, &v);
+    CHECK_EQ_INT(v, GL_LINES);
+    glGetProgramiv(prog, GL_GEOMETRY_OUTPUT_TYPE, &v);
+    CHECK_EQ_INT(v, GL_TRIANGLE_STRIP);
+    glGetProgramiv(prog, GL_GEOMETRY_SHADER_INVOCATIONS, &v);
+    CHECK_EQ_INT(v, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    plain = mgl_build_program(VS, FS, log, sizeof log);
+    glGetProgramiv(plain, GL_GEOMETRY_VERTICES_OUT, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    for (int i = 0; i < 3; i++)
+        glDeleteShader(s[i]);
+    glDeleteProgram(prog);
+    glDeleteProgram(plain);
+}
+
+// A program pipeline with a geometry stage and no vertex stage is an error to
+// draw with. The draw was quietly skipped.
+GPU_TEST(geometry_shader, pipeline_without_a_vertex_stage_is_an_error)
+{
+    static const char *GS =
+        "#version 460 core\n"
+        "layout(points) in;\n"
+        "layout(points, max_vertices = 1) out;\n"
+        "void main() { gl_Position = vec4(0.0); EmitVertex(); }\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    GLuint gs, fs, pipe, vao;
+
+    gs = glCreateShaderProgramv(GL_GEOMETRY_SHADER, 1, &GS);
+    fs = glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &FS);
+    glGenProgramPipelines(1, &pipe);
+    glUseProgramStages(pipe, GL_GEOMETRY_SHADER_BIT, gs);
+    glUseProgramStages(pipe, GL_FRAGMENT_SHADER_BIT, fs);
+    glBindProgramPipeline(pipe);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDrawArrays(GL_POINTS, 0, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glBindProgramPipeline(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgramPipelines(1, &pipe);
+    glDeleteProgram(gs);
+    glDeleteProgram(fs);
+}

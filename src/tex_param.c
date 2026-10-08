@@ -953,7 +953,14 @@ void mglGetTexParameterfv(GLMContext ctx, GLenum target, GLenum pname, GLfloat *
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
     if (tex)
-        getTexParamfv(ctx, &tex->params, pname, params);
+    {
+        GLint v;
+
+        if (mglTextureObjectParam(tex, pname, &v))
+            *params = (GLfloat)v;
+        else
+            getTexParamfv(ctx, &tex->params, pname, params);
+    }
 }
 
 void mglGetTexParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint *params)
@@ -964,7 +971,7 @@ void mglGetTexParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint *pa
 
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
 
-    if (tex)
+    if (tex && !mglTextureObjectParam(tex, pname, params))
         getTexParamiv(ctx, &tex->params, pname, params);
 }
 

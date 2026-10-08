@@ -718,3 +718,97 @@ GPU_TEST(texture_compressed, rgtc_upload_honours_swap_bytes)
 
     glDeleteTextures(1, &tex);
 }
+
+/* ASTC is advertised, since Apple GPUs decode it themselves. One constant-
+   colour block ("void extent") of magenta has to sample as magenta. */
+GPU_TEST(texture_compressed, astc_decodes_when_sampled)
+{
+    static const unsigned char magenta[16] = {
+        0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+    };
+    MGLTestTarget target;
+    GLuint t = 0, prog = 0, vao = 0, vbo = 0;
+    unsigned char *px = NULL, rgba[4] = { 0 };
+    char log[512] = { 0 };
+    int listed = 0;
+    GLint n = 0;
+
+    glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+    for (GLint i = 0; i < n; i++)
+        if (!strcmp((const char *)glGetStringi(GL_EXTENSIONS, (GLuint)i), "GL_KHR_texture_compression_astc_ldr"))
+            listed = 1;
+    CHECK(listed);
+
+    if (!mgl_target_create(&target, 16, 16, GL_RGBA8, 0))
+        SKIP("could not create a render target");
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, 0x93B0 /* GL_COMPRESSED_RGBA_ASTC_4x4_KHR */,
+                           4, 4, 0, sizeof(magenta), magenta);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    prog = mgl_build_program(kQuadVS, kSampleFS, log, sizeof(log));
+    CHECK_MSG(prog != 0, "sampler program did not build: %s", log);
+
+    vao = mgl_fullscreen_quad(&vbo);
+
+    mgl_target_bind(&target);
+    glViewport(0, 0, target.width, target.height);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&target);
+    if (px)
+    {
+        mgl_pixel_at(px, &target, 8, 8, rgba);
+        free(px);
+    }
+    CHECK_MSG(rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 255, "sampled %d,%d,%d", rgba[0], rgba[1], rgba[2]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteTextures(1, &t);
+    mgl_target_destroy(&target);
+}
+
+/* Plain pixels given to glTexSubImage2D on an RGTC texture are compressed on
+   the way in, as glTexImage2D already did; it was refused instead. */
+GPU_TEST(texture_compressed, rgtc_sub_image_compresses_plain_pixels)
+{
+    GLubyte red[8 * 8], back[8 * 8];
+    GLuint t = 0;
+
+    for (int i = 0; i < 8 * 8; i++)
+        red[i] = (GLubyte)(i < 32 ? 255 : 0);
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_COMPRESSED_RED_RGTC1, 8, 8);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 8, 8, GL_RED, GL_UNSIGNED_BYTE, red);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    memset(back, 7, sizeof back);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, back);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(back[0], 255);
+    CHECK_EQ_INT(back[63], 0);
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glDeleteTextures(1, &t);
+}

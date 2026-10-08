@@ -574,30 +574,76 @@ bool addShadersToProgram(GLMContext ctx, Program *pptr, glslang_program_t *glsl_
     return true;
 }
 // Sampler and image types, by dimension, arrayed-ness, depth and sample type.
+// The GL type of a sampler or image uniform: its shape, whether it is an
+// image, and whether it reads floats, signed or unsigned integers
 static GLenum glSamplerTypeFromSpirv(spvc_compiler compiler, spvc_type type)
 {
-    (void)compiler;
+    enum { S_1D, S_1DA, S_2D, S_2DA, S_MS, S_MSA, S_3D, S_CUBE, S_CUBEA, S_RECT, S_BUF, S_COUNT };
+    // [image][float, int, uint][shape]
+    static const GLenum table[2][3][S_COUNT] = {
+        {
+            { GL_SAMPLER_1D, GL_SAMPLER_1D_ARRAY, GL_SAMPLER_2D, GL_SAMPLER_2D_ARRAY,
+              GL_SAMPLER_2D_MULTISAMPLE, GL_SAMPLER_2D_MULTISAMPLE_ARRAY, GL_SAMPLER_3D,
+              GL_SAMPLER_CUBE, GL_SAMPLER_CUBE_MAP_ARRAY, GL_SAMPLER_2D_RECT, GL_SAMPLER_BUFFER },
+            { GL_INT_SAMPLER_1D, GL_INT_SAMPLER_1D_ARRAY, GL_INT_SAMPLER_2D, GL_INT_SAMPLER_2D_ARRAY,
+              GL_INT_SAMPLER_2D_MULTISAMPLE, GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY, GL_INT_SAMPLER_3D,
+              GL_INT_SAMPLER_CUBE, GL_INT_SAMPLER_CUBE_MAP_ARRAY, GL_INT_SAMPLER_2D_RECT, GL_INT_SAMPLER_BUFFER },
+            { GL_UNSIGNED_INT_SAMPLER_1D, GL_UNSIGNED_INT_SAMPLER_1D_ARRAY, GL_UNSIGNED_INT_SAMPLER_2D,
+              GL_UNSIGNED_INT_SAMPLER_2D_ARRAY, GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE,
+              GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY, GL_UNSIGNED_INT_SAMPLER_3D,
+              GL_UNSIGNED_INT_SAMPLER_CUBE, GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY,
+              GL_UNSIGNED_INT_SAMPLER_2D_RECT, GL_UNSIGNED_INT_SAMPLER_BUFFER },
+        },
+        {
+            { GL_IMAGE_1D, GL_IMAGE_1D_ARRAY, GL_IMAGE_2D, GL_IMAGE_2D_ARRAY,
+              GL_IMAGE_2D_MULTISAMPLE, GL_IMAGE_2D_MULTISAMPLE_ARRAY, GL_IMAGE_3D,
+              GL_IMAGE_CUBE, GL_IMAGE_CUBE_MAP_ARRAY, GL_IMAGE_2D_RECT, GL_IMAGE_BUFFER },
+            { GL_INT_IMAGE_1D, GL_INT_IMAGE_1D_ARRAY, GL_INT_IMAGE_2D, GL_INT_IMAGE_2D_ARRAY,
+              GL_INT_IMAGE_2D_MULTISAMPLE, GL_INT_IMAGE_2D_MULTISAMPLE_ARRAY, GL_INT_IMAGE_3D,
+              GL_INT_IMAGE_CUBE, GL_INT_IMAGE_CUBE_MAP_ARRAY, GL_INT_IMAGE_2D_RECT, GL_INT_IMAGE_BUFFER },
+            { GL_UNSIGNED_INT_IMAGE_1D, GL_UNSIGNED_INT_IMAGE_1D_ARRAY, GL_UNSIGNED_INT_IMAGE_2D,
+              GL_UNSIGNED_INT_IMAGE_2D_ARRAY, GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE,
+              GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY, GL_UNSIGNED_INT_IMAGE_3D,
+              GL_UNSIGNED_INT_IMAGE_CUBE, GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY,
+              GL_UNSIGNED_INT_IMAGE_2D_RECT, GL_UNSIGNED_INT_IMAGE_BUFFER },
+        },
+    };
 
     SpvDim dim = spvc_type_get_image_dimension(type);
     spvc_bool arrayed = spvc_type_get_image_arrayed(type);
     spvc_bool ms = spvc_type_get_image_multisampled(type);
     spvc_bool depth = spvc_type_get_image_is_depth(type);
+    spvc_bool image = spvc_type_get_image_is_storage(type);
+    spvc_type sampled = spvc_compiler_get_type_handle(compiler, spvc_type_get_image_sampled_type(type));
+    spvc_basetype base = sampled ? spvc_type_get_basetype(sampled) : SPVC_BASETYPE_FP32;
+    int kind = base == SPVC_BASETYPE_INT32 ? 1 : base == SPVC_BASETYPE_UINT32 ? 2 : 0;
+    int shape;
+
+    // only a float sampler has a shadow form
+    if (depth && !image && kind == 0)
+    {
+        switch (dim)
+        {
+            case SpvDim1D:   return arrayed ? GL_SAMPLER_1D_ARRAY_SHADOW : GL_SAMPLER_1D_SHADOW;
+            case SpvDim2D:   if (!ms) return arrayed ? GL_SAMPLER_2D_ARRAY_SHADOW : GL_SAMPLER_2D_SHADOW; break;
+            case SpvDimCube: return arrayed ? GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW : GL_SAMPLER_CUBE_SHADOW;
+            case SpvDimRect: return GL_SAMPLER_2D_RECT_SHADOW;
+            default: break;
+        }
+    }
 
     switch (dim)
     {
-        case SpvDim1D:     return arrayed ? GL_SAMPLER_1D_ARRAY : GL_SAMPLER_1D;
-        case SpvDim2D:
-            if (ms)        return arrayed ? GL_SAMPLER_2D_MULTISAMPLE_ARRAY : GL_SAMPLER_2D_MULTISAMPLE;
-            if (depth)     return arrayed ? GL_SAMPLER_2D_ARRAY_SHADOW : GL_SAMPLER_2D_SHADOW;
-            return arrayed ? GL_SAMPLER_2D_ARRAY : GL_SAMPLER_2D;
-        case SpvDim3D:     return GL_SAMPLER_3D;
-        case SpvDimCube:
-            if (depth)     return arrayed ? GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW : GL_SAMPLER_CUBE_SHADOW;
-            return arrayed ? GL_SAMPLER_CUBE_MAP_ARRAY : GL_SAMPLER_CUBE;
-        case SpvDimRect:   return depth ? GL_SAMPLER_2D_RECT_SHADOW : GL_SAMPLER_2D_RECT;
-        case SpvDimBuffer: return GL_SAMPLER_BUFFER;
+        case SpvDim1D:     shape = arrayed ? S_1DA : S_1D; break;
+        case SpvDim2D:     shape = ms ? (arrayed ? S_MSA : S_MS) : (arrayed ? S_2DA : S_2D); break;
+        case SpvDim3D:     shape = S_3D; break;
+        case SpvDimCube:   shape = arrayed ? S_CUBEA : S_CUBE; break;
+        case SpvDimRect:   shape = S_RECT; break;
+        case SpvDimBuffer: shape = S_BUF; break;
         default:           return GL_NONE;
     }
+
+    return table[image ? 1 : 0][kind][shape];
 }
 
 // The cube type GL declared, for an image SPIRV-Cross declared as a 2D array
@@ -2443,6 +2489,33 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
             rlist->list[i].gl_type = glTypeFromSpirv(compiler_msl, rlist->list[i].type_id,
                                                      &rlist->list[i].array_size);
 
+            // a plain array of arrays takes a location for every element,
+            // numbered with the last subscript changing fastest
+            rlist->list[i].dim_count = 0;
+
+            if (res_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT)
+            {
+                spvc_type at = spvc_compiler_get_type_handle(compiler_msl, rlist->list[i].type_id);
+                unsigned nd = at ? spvc_type_get_num_array_dimensions(at) : 0;
+
+                if (nd > 1 && nd <= 4)
+                {
+                    GLint total = 1;
+
+                    // SPIRV-Cross keeps the innermost size first
+                    for (unsigned d = 0; d < nd; d++)
+                    {
+                        unsigned n = spvc_type_get_array_dimension(at, d);
+
+                        rlist->list[i].dims[nd - 1 - d] = n ? (GLint)n : 1;
+                        total *= n ? (GLint)n : 1;
+                    }
+
+                    rlist->list[i].dim_count = (GLint)nd;
+                    rlist->list[i].array_size = total;
+                }
+            }
+
             // layout(binding = N) on an array gives its elements N, N+1, ...
             if ((res_type == SPVC_RESOURCE_TYPE_SAMPLED_IMAGE ||
                  res_type == SPVC_RESOURCE_TYPE_STORAGE_IMAGE) && rlist->list[i].array_size > 1)
@@ -2700,11 +2773,14 @@ static const char *uniformLocationProblem(Program *ptr)
                 SpirvResource *a = &list->list[i];
                 GLuint an = a->array_size > 1 ? (GLuint)a->array_size : 1;
 
+                // implicit ones too: with no room left the linker numbered
+                // them off the end
+                if (a->name && a->location != MGL_NO_LOCATION && a->location + an > MAX_UNIFORM_LOCATIONS &&
+                    !mglIsDriverUniform(a->name) && !strstr(a->name, MGL_SUBROUTINE_SUFFIX))
+                    return "link failed: the uniforms need more than GL_MAX_UNIFORM_LOCATIONS locations";
+
                 if (!a->explicit_location || a->name == NULL)
                     continue;
-
-                if (a->location + an > MAX_UNIFORM_LOCATIONS)
-                    return "link failed: a uniform location is past GL_MAX_UNIFORM_LOCATIONS";
 
                 for (int k2 = 0; k2 < kinds; k2++)
                     for (int st2 = _VERTEX_SHADER; st2 < _MAX_SHADER_TYPES; st2++)
@@ -2730,6 +2806,45 @@ static const char *uniformLocationProblem(Program *ptr)
                     }
             }
         }
+
+    return NULL;
+}
+
+// Each stage may use only so many image uniforms, an array counting every
+// element, and the program as a whole only so many more
+static const char *imageUniformProblem(GLMContext ctx, Program *ptr)
+{
+    GLint limits[_MAX_SHADER_TYPES] = { 0 };
+    GLint total = 0;
+
+    limits[_VERTEX_SHADER] = STATE_VAR(max_vertex_image_uniforms);
+    limits[_TESS_CONTROL_SHADER] = STATE_VAR(max_tess_control_image_uniforms);
+    limits[_TESS_EVALUATION_SHADER] = STATE_VAR(max_tess_evaluation_image_uniforms);
+    limits[_GEOMETRY_SHADER] = STATE_VAR(max_geometry_image_uniforms);
+    limits[_FRAGMENT_SHADER] = STATE_VAR(max_fragment_image_uniforms);
+    limits[_COMPUTE_SHADER] = STATE_VAR(max_compute_image_uniforms);
+
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_IMAGE];
+        GLint used = 0;
+
+        // the geometry stage's generated pass-through files under compute
+        if (stage == _COMPUTE_SHADER && ptr->shader_slots[_COMPUTE_SHADER] == NULL)
+            continue;
+
+        for (GLuint i = 0; i < list->count; i++)
+            used += list->list[i].array_size > 1 ? list->list[i].array_size : 1;
+
+        if (used > limits[stage])
+            return "link failed: a stage uses more image uniforms than its GL_MAX_*_IMAGE_UNIFORMS";
+
+        if (stage != _COMPUTE_SHADER)
+            total += used;
+    }
+
+    if (total > STATE_VAR(max_combined_image_uniforms))
+        return "link failed: more image uniforms than GL_MAX_COMBINED_IMAGE_UNIFORMS";
 
     return NULL;
 }
@@ -2777,6 +2892,41 @@ static void assignUniformLocations(Program *ptr)
                     used[l] = true;
             }
         }
+
+    // The members of a struct given layout(location) follow on from it, one
+    // location per element, in the order they are declared
+    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &ptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+
+        for (GLuint o = 0; o < list->count; o++)
+        {
+            SpirvResource *owner = &list->list[o];
+            GLuint at;
+
+            if (owner->offset >= 0 || !owner->explicit_location || owner->location == MGL_NO_LOCATION)
+                continue;
+
+            at = owner->location;
+
+            for (GLuint i = 0; i < list->count; i++)
+            {
+                SpirvResource *leaf = &list->list[i];
+                GLuint n = leaf->array_size > 1 ? (GLuint)leaf->array_size : 1;
+
+                if (leaf->offset < 0 || leaf->_id != owner->_id || leaf->location != MGL_NO_LOCATION)
+                    continue;
+
+                leaf->location = at;
+                leaf->explicit_location = GL_TRUE;
+
+                for (GLuint l = at; l < at + n && l < MAX_UNIFORM_LOCATIONS; l++)
+                    used[l] = true;
+
+                at += n;
+            }
+        }
+    }
 
     // a location declared in one stage holds for the same uniform in every stage
     for (int k = 0; k < kinds; k++)
@@ -3972,6 +4122,19 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         }
     }
 
+    // varyings to record need a stage that writes vertices to record
+    if (pptr->xfb_varying_count > 0 && !pptr->shader_slots[_VERTEX_SHADER] &&
+        !pptr->shader_slots[_TESS_EVALUATION_SHADER] && !pptr->shader_slots[_GEOMETRY_SHADER])
+    {
+        pptr->link_status = GL_FALSE;
+        pptr->validate_status = GL_FALSE;
+        free(pptr->log);
+        pptr->log = strdup("link failed: transform feedback varyings were given, but no vertex, "
+                           "tessellation evaluation or geometry shader writes them");
+
+        return;
+    }
+
     // GL 4.6 section 7.3: a program with one tessellation stage and not the
     // other does not link. Both together are the tessellation pipeline.
     memset(&pptr->tess, 0, sizeof(pptr->tess));
@@ -4130,6 +4293,14 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
             if (pptr->log == NULL)
                 pptr->log = strdup(uniformLocationProblem(pptr));
         }
+
+        if (imageUniformProblem(ctx, pptr))
+        {
+            pptr->link_status = GL_FALSE;
+
+            if (pptr->log == NULL)
+                pptr->log = strdup(imageUniformProblem(ctx, pptr));
+        }
         pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
         pptr->indexed_draw_loc = mglFindUniformByName(pptr, MGL_INDEXED_DRAW_NAME);
         pptr->sample_mask_off_loc = mglFindSampleMaskOffLocation(pptr);
@@ -4253,6 +4424,13 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         pptr->link_status = GL_FALSE;
         free(pptr->log);
         pptr->log = strdup(uniformLocationProblem(pptr));
+    }
+
+    if (pptr->link_status == GL_TRUE && imageUniformProblem(ctx, pptr))
+    {
+        pptr->link_status = GL_FALSE;
+        free(pptr->log);
+        pptr->log = strdup(imageUniformProblem(ctx, pptr));
     }
 
     resolveTransformCaptureUniforms(pptr);
@@ -4698,6 +4876,19 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
 
         case GL_TESS_GEN_POINT_MODE:
             *params = pptr->tess.gl_points ? GL_TRUE : GL_FALSE;
+            break;
+
+        // the geometry stage's layout, which only a program linked with one has
+        case GL_GEOMETRY_VERTICES_OUT:
+        case GL_GEOMETRY_INPUT_TYPE:
+        case GL_GEOMETRY_OUTPUT_TYPE:
+        case GL_GEOMETRY_SHADER_INVOCATIONS:
+            ERROR_CHECK_RETURN(pptr->link_status == GL_TRUE && pptr->shader_slots[_GEOMETRY_SHADER], GL_INVALID_OPERATION);
+
+            *params = pname == GL_GEOMETRY_VERTICES_OUT ? pptr->geom.max_vertices :
+                      pname == GL_GEOMETRY_INPUT_TYPE ? (GLint)pptr->geom.in_primitive :
+                      pname == GL_GEOMETRY_OUTPUT_TYPE ? (GLint)pptr->geom.out_primitive :
+                      (pptr->geom.invocations > 0 ? pptr->geom.invocations : 1);
             break;
 
         default:
@@ -6054,6 +6245,24 @@ void mglGetProgramResourceiv(GLMContext ctx, GLuint program, GLenum programInter
 GLint mglGetAttribLocation(GLMContext ctx, GLuint program, const GLchar *name);
 GLint mglGetFragDataLocation(GLMContext ctx, GLuint program, const GLchar *name);
 
+// Whether the linker kept this uniform: only an active uniform has a
+// location to give. An element's name counts as its array's.
+bool mglUniformIsActive(Program *p, const char *name)
+{
+    char base[256];
+    GLint element = -1;
+
+    // nothing was reflected, so there is nothing to tell active from not
+    if (piqCount(p, GL_UNIFORM) == 0)
+        return true;
+
+    if (piqFind(p, GL_UNIFORM, name) >= 0)
+        return true;
+
+    return splitElement(name, base, sizeof(base), &element) && element >= 0 &&
+           piqFind(p, GL_UNIFORM, base) >= 0;
+}
+
 GLint programResourceLocation(GLMContext ctx, GLuint program, GLenum programInterface, const GLchar *name)
 {
     Program *p = piqProgram(ctx, program);
@@ -6419,9 +6628,12 @@ void mglShaderStorageBlockBinding(GLMContext ctx, GLuint program, GLuint storage
 {
     Program *pptr = findProgram(ctx, program);
 
+    // a shader's name is a real object, just the wrong kind
+    ERROR_CHECK_RETURN(pptr || !isShader(ctx, program), GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(pptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(storageBlockIndex < (GLuint)pptr->resources.count[MGL_RES_STORAGE_BLOCK], GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(storageBlockBinding < MAX_SHADER_STORAGE_BUFFER_BINDINGS, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(storageBlockBinding < STATE_VAR(max_shader_storage_buffer_bindings) &&
+                       storageBlockBinding < MAX_SHADER_STORAGE_BUFFER_BINDINGS, GL_INVALID_VALUE);
 
     MglResource *blk = &pptr->resources.list[MGL_RES_STORAGE_BLOCK][storageBlockIndex];
     char base[256];

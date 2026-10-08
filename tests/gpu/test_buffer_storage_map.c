@@ -415,13 +415,14 @@ GPU_TEST(buffer_storage_map, bind_buffers_base_rejects_bad_buffer_name)
 GPU_TEST(buffer_storage_map, bind_buffers_range_sets_indexed_bindings)
 {
     GLuint b = 0;
-    GLintptr offsets[1] = { 8 };
+    // a range starts on GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, which is 256
+    GLintptr offsets[1] = { 256 };
     GLsizeiptr sizes[1] = { 32 };
     GLint got_buf = -1;
 
     glGenBuffers(1, &b);
     glBindBuffer(GL_UNIFORM_BUFFER, b);
-    glBufferData(GL_UNIFORM_BUFFER, 128, NULL, GL_STATIC_DRAW);
+    glBufferData(GL_UNIFORM_BUFFER, 512, NULL, GL_STATIC_DRAW);
     glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
     glBindBuffersRange(GL_UNIFORM_BUFFER, 0, 1, &b, offsets, sizes);

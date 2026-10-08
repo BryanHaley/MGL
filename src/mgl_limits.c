@@ -85,7 +85,7 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_vertex_texture_image_units, 16);
     at_least(&v->max_vertex_image_uniforms, 8);
     at_least(&v->max_vertex_atomic_counters, 8);
-    at_least(&v->max_vertex_atomic_counter_buffers, 1);
+    at_least(&v->max_vertex_atomic_counter_buffers, 8);
     at_least(&v->max_vertex_streams, 4);
 
     at_least(&v->max_fragment_uniform_components, 1024);
@@ -95,7 +95,7 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_texture_image_units, 16);
     at_least(&v->max_fragment_image_uniforms, 8);
     at_least(&v->max_fragment_atomic_counters, 8);
-    at_least(&v->max_fragment_atomic_counter_buffers, 1);
+    at_least(&v->max_fragment_atomic_counter_buffers, 8);
     at_least(&v->max_draw_buffers, 8);
     at_least(&v->max_dual_source_draw_buffers, 1);
 
@@ -110,7 +110,7 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_geometry_varying_components, 64);
     at_least(&v->max_geometry_image_uniforms, 8);
     at_least(&v->max_geometry_atomic_counters, 8);
-    at_least(&v->max_geometry_atomic_counter_buffers, 1);
+    at_least(&v->max_geometry_atomic_counter_buffers, 8);
 
     at_least(&v->max_patch_vertices, 32);
     at_least(&v->max_tess_gen_level, 64);
@@ -123,14 +123,16 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_tess_control_uniform_components, 1024);
     at_least(&v->max_tess_control_uniform_blocks, 14);
     at_least(&v->max_tess_control_atomic_counters, 8);
-    at_least(&v->max_tess_control_atomic_counter_buffers, 1);
+    at_least(&v->max_tess_control_atomic_counter_buffers, 8);
     at_least(&v->max_tess_evaluation_input_components, 128);
     at_least(&v->max_tess_evaluation_output_components, 128);
     at_least(&v->max_tess_evaluation_texture_image_units, 16);
     at_least(&v->max_tess_evaluation_uniform_components, 1024);
     at_least(&v->max_tess_evaluation_uniform_blocks, 14);
     at_least(&v->max_tess_evaluation_atomic_counters, 8);
-    at_least(&v->max_tess_evaluation_atomic_counter_buffers, 1);
+    // images bind in this stage the same way as in the others
+    at_least(&v->max_tess_evaluation_image_uniforms, 8);
+    at_least(&v->max_tess_evaluation_atomic_counter_buffers, 8);
 
     at_least(&v->max_compute_uniform_components, 1024);
     at_least(&v->max_compute_uniform_blocks, 14);
@@ -144,8 +146,9 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_combined_texture_image_units, 80);
     at_least(&v->max_combined_uniform_blocks, 70);
     at_least(&v->max_combined_atomic_counters, 8);
-    at_least(&v->max_combined_atomic_counter_buffers, 1);
-    at_least(&v->max_combined_image_uniforms, 8);
+    at_least(&v->max_combined_atomic_counter_buffers, 8);
+    // every graphics stage may use its own 8
+    at_least(&v->max_combined_image_uniforms, 40);
     at_least(&v->max_combined_image_units_and_fragment_outputs, 8);
     at_least(&v->max_combined_shader_output_resources, 16);
 

@@ -206,22 +206,18 @@ void mglCreateSamplers(GLMContext ctx, GLsizei n, GLuint *samplers)
 void mglBindSamplers(GLMContext ctx, GLuint first, GLsizei count, const GLuint *samplers)
 {
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN((GLuint64)first + (GLuint64)count <= TEXTURE_UNITS, GL_INVALID_OPERATION);
-
-    // every name has to be good before anything is bound
-    if (samplers)
-    {
-        for (GLsizei i = 0; i < count; i++)
-        {
-            if (samplers[i] && !isSampler(ctx, samplers[i]))
-            {
-                ERROR_RETURN(GL_INVALID_OPERATION);
-            }
-        }
-    }
+    ERROR_CHECK_RETURN((GLuint64)first + (GLuint64)count <= (GLuint64)STATE_VAR(max_combined_texture_image_units),
+                       GL_INVALID_OPERATION);
 
     for (GLsizei i = 0; i < count; i++)
     {
+        // a bad name is an error for its own unit only; the rest still bind
+        if (samplers && samplers[i] && !isSampler(ctx, samplers[i]))
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            continue;
+        }
+
         // a null array unbinds the whole span
         ctx->state.texture_samplers[first + i] = samplers && samplers[i]
                                                ? findSampler(ctx, samplers[i])

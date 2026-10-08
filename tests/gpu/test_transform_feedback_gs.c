@@ -450,3 +450,71 @@ GPU_TEST(transform_feedback_gs, geometry_varyings_interleave_tightly)
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
 }
+
+/* ---------- the geometry stage's output is what the queries count ---------- */
+
+// Two points in, each turned into three points out. GL_PRIMITIVES_GENERATED
+// counts the six the geometry stage produced, the same as the feedback count.
+// It counted the two that went in.
+GPU_TEST(transform_feedback_gs, primitives_generated_counts_geometry_output)
+{
+    static const GLfloat pts[4] = { 0.0f, 0.0f, 0.5f, 0.5f };
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *gs =
+        "#version 460 core\n"
+        "layout(points) in;\n"
+        "layout(points, max_vertices = 3) out;\n"
+        "out float k;\n"
+        "void main() {\n"
+        "    for (int i = 0; i < 3; i++) { gl_Position = gl_in[0].gl_Position; k = float(i); EmitVertex(); }\n"
+        "}\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const char *varyings[] = { "k" };
+    GLuint prog, vao, vbo, xfb, buf, q[2];
+    GLuint generated = 0, written = 0;
+    MGLTestTarget t;
+    char log[2048];
+
+    prog = linkRecording(vs, gs, fs, varyings, 1, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not link: %s", log);
+    if (!prog || !mgl_target_create(&t, 4, 4, GL_RGBA8, 0))
+        return;
+
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+    vao = pointsVAO(pts, sizeof pts, &vbo);
+    glGenTransformFeedbacks(1, &xfb);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb);
+    buf = recordingBuffer(xfb, 0, 256);
+
+    glGenQueries(2, q);
+    glBeginQuery(GL_PRIMITIVES_GENERATED, q[0]);
+    glBeginQuery(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, q[1]);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, 2);
+    glEndTransformFeedback();
+    glEndQuery(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN);
+    glEndQuery(GL_PRIMITIVES_GENERATED);
+
+    glGetQueryObjectuiv(q[0], GL_QUERY_RESULT, &generated);
+    glGetQueryObjectuiv(q[1], GL_QUERY_RESULT, &written);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT((GLint)written, 6);
+    CHECK_EQ_INT((GLint)generated, 6);
+
+    glUseProgram(0);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+    glDeleteQueries(2, q);
+    glDeleteBuffers(1, &buf);
+    glDeleteTransformFeedbacks(1, &xfb);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

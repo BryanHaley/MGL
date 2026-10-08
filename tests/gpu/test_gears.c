@@ -396,7 +396,8 @@ GPU_TEST(gears, multiple_uniforms_reach_the_right_stage)
     GLint col = glGetUniformLocation(prog, "u_color");
 
     CHECK_MSG(mvp >= 0, "u_mvp not found");
-    CHECK_MSG(mv  >= 0, "u_modelview not found");
+    // declared but never read, so not active: GL gives it no location
+    CHECK_MSG(mv == -1, "u_modelview is unused and should have no location");
     CHECK_MSG(nm  >= 0, "u_normal_matrix not found");
     CHECK_MSG(col >= 0, "u_color not found");
 

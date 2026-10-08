@@ -378,6 +378,12 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
     NSMutableDictionary<NSString *, id<MTLRenderPipelineState>> *_clearPipelines;
     id<MTLDepthStencilState>   _clearDepthState;
     GLbitfield                 _pendingScissorClear;
+    // what that drawn clear writes: each colour attachment's own value, and
+    // which of them it writes at all
+    float                      _scissorClearColors[MAX_COLOR_ATTACHMENTS][4];
+    uint32_t                   _scissorClearColorMask;
+    float                      _scissorClearDepth;
+    uint32_t                   _scissorClearStencil;
 
     // fans, loops, adjacency: modes Metal has no type for, expanded to indexed draws
     PrimitiveExpander         *_primitiveExpander;
@@ -3652,7 +3658,7 @@ static GLenum targetForSampler(GLenum type)
             ImageUnit *iu = &STATE(image_units[binding]);
             id<MTLTexture> texture = nil;
 
-            if (iu->tex && (iu->tex->mtl_data || [self bindMTLTexture: iu->tex]))
+            if (iu->tex && ((iu->tex->mtl_data && !iu->tex->view_of) || [self bindMTLTexture: iu->tex]))
                 texture = [self imageTexture: iu cubeAsArray: res->cube_as_array atomic: res->atomic];
 
             if (texture == nil)
@@ -4371,6 +4377,79 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     return usage;
 }
 
+// The Metal type a GL target is stored as
+static MTLTextureType viewTextureType(GLenum target)
+{
+    switch (target)
+    {
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D_ARRAY:             return MTLTextureType2DArray;
+        case GL_TEXTURE_CUBE_MAP:             return MTLTextureTypeCube;
+        case GL_TEXTURE_CUBE_MAP_ARRAY:       return MTLTextureTypeCubeArray;
+        case GL_TEXTURE_3D:                   return MTLTextureType3D;
+        case GL_TEXTURE_2D_MULTISAMPLE:       return MTLTextureType2DMultisample;
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: return MTLTextureType2DMultisampleArray;
+        default:                              return MTLTextureType2D;
+    }
+}
+
+// A glTextureView texture is a Metal view of the original's texture, made
+// again whenever the original's is.
+- (bool) refreshTextureView: (Texture *) tex
+{
+    Texture *orig = tex->view_of;
+
+    if (![self bindMTLTexture: orig] || orig->mtl_data == NULL)
+        return false;
+
+    if (tex->mtl_data && tex->mtl_view_src == orig->mtl_data)
+        return true;
+
+    id<MTLTexture> src = (__bridge id<MTLTexture>)orig->mtl_data;
+    MTLPixelFormat fmt = mtlPixelFormatForGLTex(tex);
+
+    // another format needs the original made for it
+    if (fmt != src.pixelFormat && !(src.usage & MTLTextureUsagePixelFormatView))
+    {
+        src = [self remakeForFormatViews: orig atomic: (MTLPixelFormat)orig->atomic_storage];
+
+        if (src == nil)
+            return false;
+    }
+
+    MTLTextureType type = viewTextureType(tex->target);
+
+    // Metal keeps a multisample texture's own type whatever GL called it
+    if (src.sampleCount > 1)
+        type = type == MTLTextureType2DArray || type == MTLTextureType2DMultisampleArray
+             ? MTLTextureType2DMultisampleArray : MTLTextureType2DMultisample;
+
+    id<MTLTexture> view = [src newTextureViewWithPixelFormat: fmt
+                                                 textureType: type
+                                                      levels: NSMakeRange(tex->view_min_level, tex->mipmap_levels)
+                                                      slices: NSMakeRange(tex->view_min_layer, tex->view_num_layers)];
+
+    if (view == nil)
+    {
+        MGL_NSERR(@"MGL: no Metal view for texture view %u of %u", tex->name, orig->name);
+        return false;
+    }
+
+    if (tex->mtl_data)
+        CFBridgingRelease(tex->mtl_data);
+    if (tex->mtl_view_src)
+        CFBridgingRelease(tex->mtl_view_src);
+    if (tex->mtl_sample_view)
+        CFBridgingRelease(tex->mtl_sample_view);
+
+    tex->mtl_data = (void *)CFBridgingRetain(view);
+    tex->mtl_view_src = (void *)CFBridgingRetain(src);
+    tex->mtl_sample_view = NULL;
+    tex->mtl_sample_base = NULL;
+
+    return true;
+}
+
 - (bool)bindMTLTexture:(Texture *)tex
 {
     // A texture with no storage is an ordinary thing to find bound to a unit
@@ -4378,6 +4457,26 @@ static MTLTextureUsage accessUsage(Texture *tex, MTLPixelFormat pixelFormat)
     // draw buried the real messages -- one sweep logged this 425,472 times.
     if (tex->width == 0 || tex->height == 0)
         return false;
+
+    if (tex->view_of)
+    {
+        bool sampler_changed = (tex->dirty_bits & (DIRTY_TEXTURE_PARAM | DIRTY_TEXTURE_ACCESS)) != 0;
+
+        if (![self refreshTextureView: tex])
+            return false;
+
+        if (sampler_changed && tex->params.mtl_data)
+        {
+            CFBridgingRelease(tex->params.mtl_data);
+            tex->params.mtl_data = NULL;
+        }
+
+        if (tex->params.mtl_data == NULL)
+            tex->params.mtl_data = (void *)CFBridgingRetain([self createMTLSamplerForTexParam:&tex->params target:tex->target]);
+
+        tex->dirty_bits = 0;
+        return true;
+    }
 
     if (tex->target == GL_TEXTURE_BUFFER && tex->mtl_data)
     {
@@ -5513,9 +5612,36 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
 
         if (scissored_clear)
         {
+            bool all_color = (ctx->state.clear_bitmask & GL_COLOR_BUFFER_BIT) != 0;
+
+            // glClearBuffer* names one draw buffer and its own value;
+            // glClear means every one of them, in the glClearColor colour
+            _scissorClearColorMask = 0;
+
             for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
-                if (_renderPassDescriptor.colorAttachments[i].texture)
-                    _renderPassDescriptor.colorAttachments[i].loadAction = MTLLoadActionLoad;
+            {
+                FBOAttachment *a = (clear_fbo && i < STATE(max_color_attachments)) ? drawSlot(clear_fbo, i) : NULL;
+
+                if (_renderPassDescriptor.colorAttachments[i].texture == nil)
+                    continue;
+
+                _renderPassDescriptor.colorAttachments[i].loadAction = MTLLoadActionLoad;
+
+                if (a && (a->clear_bitmask & GL_COLOR_BUFFER_BIT))
+                    memcpy(_scissorClearColors[i], a->clear_color, sizeof(_scissorClearColors[i]));
+                else if (all_color)
+                    for (int c = 0; c < 4; c++)
+                        _scissorClearColors[i][c] = STATE(color_clear_value[c]);
+                else
+                    continue;
+
+                _scissorClearColorMask |= 1u << i;
+            }
+
+            _scissorClearDepth = (ctx->state.clear_bitmask & GL_DEPTH_BUFFER_BIT) || !clear_fbo
+                               ? STATE_VAR(depth_clear_value) : clear_fbo->depth.clear_color[0];
+            _scissorClearStencil = (ctx->state.clear_bitmask & GL_STENCIL_BUFFER_BIT) || !clear_fbo
+                                 ? (uint32_t)STATE_VAR(stencil_clear_value) : (uint32_t)clear_fbo->stencil.clear_color[0];
 
             ctx->state.clear_bitmask = 0;
 
@@ -5697,7 +5823,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
     return _currentCommandBuffer;
 }
 
-typedef struct { float color[4]; float depth; float pad[3]; } MGLClearIn;
+typedef struct { float color[MAX_COLOR_ATTACHMENTS][4]; float depth; float pad[3]; } MGLClearIn;
 
 // True when the scissor box does not cover the whole render target, which is the
 // only case a load action cannot express.
@@ -5773,7 +5899,7 @@ static char clearColorKind(MTLPixelFormat f)
 
         [key appendFormat: @"_%d:%lu:%lu", i, (unsigned long)t.pixelFormat, (unsigned long)masks[i]];
         [out appendFormat: @"    %s c%d [[color(%d)]];\n", type, i, i];
-        [body appendFormat: @"    o.c%d = %s(c.color);\n", i, type];
+        [body appendFormat: @"    o.c%d = %s(c.color[%d]);\n", i, type, i];
         samples = t.sampleCount;
     }
 
@@ -5794,7 +5920,7 @@ static char clearColorKind(MTLPixelFormat f)
     NSString *src = [NSString stringWithFormat:
         @"#include <metal_stdlib>\n"
          "using namespace metal;\n"
-         "struct ClearIn { float4 color; float depth; };\n"
+         "struct ClearIn { float4 color[8]; float depth; };\n"
          "struct VOut { float4 pos [[position]]; %@ };\n"
          "vertex VOut mgl_clear_vs(uint vid [[vertex_id]], uint iid [[instance_id]], constant ClearIn &c [[buffer(0)]])\n"
          "{\n"
@@ -5877,7 +6003,7 @@ static char clearColorKind(MTLPixelFormat f)
     {
         masks[i] = MTLColorWriteMaskNone;
 
-        if (!(mask & GL_COLOR_BUFFER_BIT))
+        if (!(mask & GL_COLOR_BUFFER_BIT) || !(_scissorClearColorMask & (1u << i)))
             continue;
 
         if (!ctx->state.caps.use_color_mask[i])
@@ -5899,11 +6025,8 @@ static char clearColorKind(MTLPixelFormat f)
 
     MGLClearIn in;
 
-    in.color[0] = ctx->state.color_clear_value[0];
-    in.color[1] = ctx->state.color_clear_value[1];
-    in.color[2] = ctx->state.color_clear_value[2];
-    in.color[3] = ctx->state.color_clear_value[3];
-    in.depth    = ctx->state.var.depth_clear_value;
+    memcpy(in.color, _scissorClearColors, sizeof in.color);
+    in.depth = _scissorClearDepth;
 
     MTLDepthStencilDescriptor *dsd = [[MTLDepthStencilDescriptor alloc] init];
 
@@ -5927,7 +6050,7 @@ static char clearColorKind(MTLPixelFormat f)
 
     [_currentRenderEncoder setRenderPipelineState: ps];
     [_currentRenderEncoder setDepthStencilState: [_device newDepthStencilStateWithDescriptor: dsd]];
-    [_currentRenderEncoder setStencilReferenceValue: (uint32_t)ctx->state.var.stencil_clear_value];
+    [_currentRenderEncoder setStencilReferenceValue: _scissorClearStencil];
     [_currentRenderEncoder setCullMode: MTLCullModeNone];
     {
         // as many viewports as there are scissor boxes, all the whole target
@@ -6524,8 +6647,9 @@ static GLuint drawPrimitiveCount(GLenum mode, GLsizei count)
             if (q == NULL)
                 continue;
 
+            // the geometry capture counts what that stage emitted while recording
             if (q->target == GL_PRIMITIVES_GENERATED)
-                q->result += cpu_tess ? 0 : prims;
+                q->result += (cpu_tess || (gs && recording && program->xfb.gather_words > 0)) ? 0 : prims;
             else if (recording && !gs &&
                      (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN ||
                       q->target == GL_TRANSFORM_FEEDBACK_OVERFLOW))
@@ -7043,7 +7167,9 @@ static const char *mgl_gs_capture_msl =
         {
             Query *q = ctx->state.active_query[t][i];
 
-            if (q && q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN)
+            // what the geometry stage emitted, which is also what it generated
+            if (q && (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN ||
+                      q->target == GL_PRIMITIVES_GENERATED))
                 q->result += total / per;
         }
 }
@@ -7495,7 +7621,7 @@ static const char *mgl_gs_capture_msl =
         return true;
 
     [enc setComputePipelineState: _gsComputePipeline];
-    [self bindTessBuffers: &ctx->state.geometry_buffer_map_list toComputeEncoder: enc];
+    [self bindTessBuffers: &ctx->state.geometry_buffer_map_list stage: _GEOMETRY_SHADER toComputeEncoder: enc];
     [self bindTexturesForStage: _GEOMETRY_SHADER toCompute: enc];
     [enc setBuffer: in_buf offset: 0 atIndex: gi->gs_in_slot];
     [enc setBuffer: out_buf offset: 0 atIndex: gi->gs_out_slot];
@@ -7814,15 +7940,33 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
 
 // The vertex kernel wants what the vertex stage would have had: its uniform
 // buffers and the vertex attribute buffers behind [[stage_in]].
-- (void) bindTessBuffers: (BufferMapList *) list toComputeEncoder: (id<MTLComputeCommandEncoder>) enc
+// The stages Metal runs as compute or as a capture pass get what the vertex
+// and fragment binders give theirs: the table .length() reads, and plain
+// uniforms laid out the way Metal reads them.
+- (void) bindTessBuffers: (BufferMapList *) list stage: (int) stage toComputeEncoder: (id<MTLComputeCommandEncoder>) enc
 {
+    uint32_t sizes[31];
+
+    if (bufferSizesFor(ctx->state.program, stage, list, sizes))
+        [enc setBytes: sizes length: sizeof sizes atIndex: MGL_BUFFER_SIZES_MSL_SLOT];
+
     for (int i = 0; i < list->count; i++)
     {
         BufferMap *map = &list->buffers[i];
         Buffer *ptr = map->buf;
+        GLubyte laid[4096];
+        size_t laid_len;
 
         if (ptr == NULL)
             continue;
+
+        laid_len = metalUniformLayout(map, ptr, laid, sizeof laid);
+
+        if (laid_len)
+        {
+            [enc setBytes: laid length: laid_len atIndex: map->buffer_base_index];
+            continue;
+        }
 
         if (ptr->data.mtl_data == NULL)
             [self bindMTLBuffer: ptr];
@@ -7846,7 +7990,7 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
            length: MGL_CONSTANT_ATTRIB_STRIDE
           atIndex: MGL_CONSTANT_ATTRIB_BUFFER_INDEX];
 
-    [self bindTessBuffers: &ctx->state.vertex_buffer_map_list toComputeEncoder: enc];
+    [self bindTessBuffers: &ctx->state.vertex_buffer_map_list stage: _VERTEX_SHADER toComputeEncoder: enc];
 }
 
 // glDrawElements into a tessellating program: the vertex kernel fetches its
@@ -8002,14 +8146,28 @@ static const char *mgl_isoline_levels_msl =
 - (void) bindTessBuffersToRenderEncoder
 {
     BufferMapList *list = &ctx->state.tess_eval_buffer_map_list;
+    uint32_t sizes[31];
+
+    if (bufferSizesFor(ctx->state.program, _TESS_EVALUATION_SHADER, list, sizes))
+        [_currentRenderEncoder setVertexBytes: sizes length: sizeof sizes atIndex: MGL_BUFFER_SIZES_MSL_SLOT];
 
     for (int i = 0; i < list->count; i++)
     {
         BufferMap *map = &list->buffers[i];
         Buffer *ptr = map->buf;
+        GLubyte laid[4096];
+        size_t laid_len;
 
         if (ptr == NULL)
             continue;
+
+        laid_len = metalUniformLayout(map, ptr, laid, sizeof laid);
+
+        if (laid_len)
+        {
+            [_currentRenderEncoder setVertexBytes: laid length: laid_len atIndex: map->buffer_base_index];
+            continue;
+        }
 
         if (ptr->data.mtl_data == NULL)
             [self bindMTLBuffer: ptr];
@@ -8215,7 +8373,7 @@ static const char *mgl_isoline_levels_msl =
             return false;
 
         [enc setComputePipelineState: _tessControlPipeline];
-            [self bindTessBuffers: &ctx->state.tess_control_buffer_map_list toComputeEncoder: enc];
+            [self bindTessBuffers: &ctx->state.tess_control_buffer_map_list stage: _TESS_CONTROL_SHADER toComputeEncoder: enc];
             [self bindTexturesForStage: _TESS_CONTROL_SHADER toCompute: enc];
         [enc setBuffer: vtx_out offset: 0 atIndex: MGL_TESS_VERTEX_OUT_INDEX];
         [enc setBuffer: ctl_out offset: 0 atIndex: MGL_TESS_CONTROL_OUT_INDEX];
@@ -9851,6 +10009,12 @@ void mtlDispatchCompute(GLMContext glm_ctx, GLuint num_groups_x, GLuint num_grou
 // which is what creating a render encoder or committing already does.
 -(void)mtlMemoryBarrier:(GLMContext)glm_ctx barriers:(GLbitfield)barriers
 {
+    // Draws in one render pass need not see each other's writes: a texture
+    // rendered to, or an image or buffer a shader wrote, reaches memory when
+    // the pass ends. So the pass ends here and the next draw starts another.
+    if (_currentRenderEncoder && barriers)
+        [self endRenderEncoding];
+
     if (!_currentComputeEncoder)
         return;
 
@@ -11254,6 +11418,97 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
 }
 
 
+#pragma mark C interface to mtlUpdateTexRegion
+
+// Copies a region of a level's own pixels into the Metal texture already
+// made for it, after the work already queued. Making the texture again from
+// the CPU copy instead threw away whatever the GPU had drawn into it.
+// Returns false when the whole texture has to be made again after all.
+-(bool) mtlUpdateTexRegion:(Texture *)tex face:(GLuint)face level:(GLuint)level
+                         x:(size_t)x y:(size_t)y z:(size_t)z w:(size_t)w h:(size_t)h d:(size_t)d
+{
+    if (tex->mtl_data == NULL || tex->view_of || tex->samples > 1 ||
+        (tex->dirty_bits & (DIRTY_TEXTURE_LEVEL | DIRTY_TEXTURE_DATA)) ||
+        mglFormatIsCompressed(tex->internalformat) ||
+        (mglFormatCaps(tex->internalformat) & MGL_FMT_CAP_DS_ATT) ||
+        tex->faces[face].levels == NULL || w == 0 || h == 0)
+        return false;
+
+    TextureLevel *lvl = &tex->faces[face].levels[level];
+    id<MTLTexture> texture = (__bridge id<MTLTexture>)tex->mtl_data;
+
+    if (lvl->data == 0 || lvl->pitch == 0 || lvl->width == 0 || level >= texture.mipmapLevelCount)
+        return false;
+
+    size_t px = lvl->pitch / lvl->width;
+    size_t image = lvl->pitch * (lvl->height ? lvl->height : 1);
+    size_t row = w * px;
+    size_t aligned = (row + 255) & ~(size_t)255;
+    bool is3d = tex->target == GL_TEXTURE_3D;
+    bool rows_are_layers = tex->target == GL_TEXTURE_1D_ARRAY;
+    bool slices_are_layers = tex->target == GL_TEXTURE_2D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY;
+    size_t layers = rows_are_layers ? h : slices_are_layers ? (d ? d : 1) : 1;
+    size_t rows = rows_are_layers ? 1 : h;
+    size_t depth = is3d ? (d ? d : 1) : 1;
+
+    if (px == 0 || lvl->pitch != px * lvl->width)
+        return false;
+
+    id<MTLBuffer> staging = [_device newBufferWithLength: aligned * rows * depth * layers
+                                                 options: MTLResourceStorageModeShared];
+
+    if (staging == nil)
+        return false;
+
+    uint8_t *dst = (uint8_t *)staging.contents;
+    const uint8_t *base = (const uint8_t *)lvl->data;
+
+    for (size_t l = 0; l < layers; l++)
+        for (size_t s = 0; s < depth; s++)
+            for (size_t r = 0; r < rows; r++)
+            {
+                size_t src_y = rows_are_layers ? y + l : y + r;
+                size_t src_z = slices_are_layers ? z + l : z + s;
+
+                memcpy(dst + ((l * depth + s) * rows + r) * aligned,
+                       base + src_z * image + src_y * lvl->pitch + x * px, row);
+            }
+
+    id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
+
+    if (blit == nil)
+        return false;
+
+    for (size_t l = 0; l < layers; l++)
+    {
+        NSUInteger slice = rows_are_layers ? y + l : slices_are_layers ? z + l :
+                           tex->target == GL_TEXTURE_CUBE_MAP ? face : 0;
+
+        [blit copyFromBuffer: staging
+                sourceOffset: l * depth * rows * aligned
+           sourceBytesPerRow: aligned
+         sourceBytesPerImage: aligned * rows
+                  sourceSize: MTLSizeMake(w, rows, depth)
+                   toTexture: texture
+            destinationSlice: slice
+            destinationLevel: level
+           destinationOrigin: MTLOriginMake(x, rows_are_layers ? 0 : y, is3d ? z : 0)];
+    }
+
+    [blit endEncoding];
+
+    return true;
+}
+
+bool mtlUpdateTexRegion(GLMContext glm_ctx, Texture *tex, GLuint face, GLuint level,
+                        size_t x, size_t y, size_t z, size_t w, size_t h, size_t d)
+{
+    @autoreleasepool {
+        return [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlUpdateTexRegion: tex face: face level: level
+                                                                         x: x y: y z: z w: w h: h d: d];
+    }
+}
+
 #pragma mark C interface to mtlTexSubImage
 
 -(void)mtlTexSubImage:(GLMContext)glm_ctx tex:(Texture *)tex buf:(Buffer *)buf src_offset:(size_t)src_offset src_pitch:(size_t)src_pitch src_image_size:(size_t)src_image_size src_size:(size_t)src_size slice:(GLuint)slice level:(GLuint)level width:(size_t)width height:(size_t)height depth:(size_t)depth xoffset:(size_t)xoffset yoffset:(size_t)yoffset zoffset:(size_t)zoffset
@@ -12570,6 +12825,7 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
     
     glm_ctx->mtl_funcs.mtlGenerateMipmaps = mtlGenerateMipmaps;
     glm_ctx->mtl_funcs.mtlTexSubImage = mtlTexSubImage;
+    glm_ctx->mtl_funcs.mtlUpdateTexRegion = mtlUpdateTexRegion;
 
     glm_ctx->mtl_funcs.mtlDrawArrays = mtlDrawArrays;
     glm_ctx->mtl_funcs.mtlDrawElements = mtlDrawElements;

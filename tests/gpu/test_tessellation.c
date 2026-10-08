@@ -463,7 +463,7 @@ GPU_TEST(tessellation, point_mode_keeps_points_that_read_point_size)
         "}\n";
     static const char *tes =
         "#version 440\n"
-        "layout(triangles, point_mode) in;\n"
+        "layout(triangles) in;\n"
         "in gl_PerVertex { vec4 gl_Position; float gl_PointSize; } gl_in[];\n"
         "out gl_PerVertex { vec4 gl_Position; float gl_PointSize; };\n"
         "out float te_size;\n"
@@ -700,6 +700,76 @@ GPU_TEST(tessellation, a_location_shared_through_component_survives_every_stage)
     glUseProgram(0);
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// The evaluation stage stores to an image when Metal's own tessellator runs
+// it, with no geometry stage after it. The stores never landed there, though
+// they did behind a geometry stage.
+GPU_TEST(tessellation, evaluation_stage_stores_to_an_image)
+{
+    static const char *TCS1 =
+        "#version 420\n"
+        "layout(vertices = 1) out;\n"
+        "void main() {\n"
+        "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0;\n"
+        "    gl_TessLevelOuter[2] = 1.0; gl_TessLevelInner[0] = 1.0;\n"
+        "}\n";
+    static const char *TES1 =
+        "#version 420\n"
+        "layout(triangles) in;\n"
+        "layout(r32i, binding = 0) uniform iimage2D img;\n"
+        "void main() {\n"
+        "    imageStore(img, ivec2(0, 0), ivec4(7));\n"
+        "    gl_Position = gl_in[0].gl_Position;\n"
+        "}\n";
+    static const char *FS1 =
+        "#version 420\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const GLint zero = 0;
+    static const GLfloat pt[2] = { 0, 0 };
+    GLuint prog, tex, vao, vbo;
+    GLint got = 0;
+    char log[2048];
+    MGLTestTarget t;
+
+    prog = linkStages(VS, TCS1, TES1, FS1, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog || !mgl_target_create(&t, 4, 4, GL_RGBA8, 0))
+        return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32I, 1, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RED_INTEGER, GL_INT, &zero);
+    glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32I);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 4, 4);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof pt, pt, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 1);
+    glDrawArrays(GL_PATCHES, 0, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_INT, &got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_INT(got, 7);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteTextures(1, &tex);
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
 }

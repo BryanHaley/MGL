@@ -269,12 +269,20 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     STATE(var.stencil_back_ref) = 0;
     STATE(var.stencil_back_writemask) = 0xFFFFFFFF;
 
+    // an empty image unit reads back as read-only, GL_R8
+    for (int i = 0; i < TEXTURE_UNITS; i++)
+    {
+        STATE(image_units[i].access) = GL_READ_ONLY;
+        STATE(image_units[i].internalformat) = GL_R8;
+    }
+
     // plain uniforms are indexed by location, so report what we can actually hold
     STATE(var.max_uniform_locations) = MAX_UNIFORM_LOCATIONS;
 
-    // left at zero these rejected every texture unit past the first
+    // left at zero these rejected every texture unit past the first. A stage
+    // reads at most 16, since Metal binds no more than 16 samplers to one
     STATE(var.max_combined_texture_image_units) = TEXTURE_UNITS;
-    STATE(var.max_texture_image_units) = TEXTURE_UNITS;
+    STATE(var.max_texture_image_units) = 16;
     STATE(var.max_texture_size) = 16384;
 
     STATE(var.max_compute_work_group_invocations) = 1024;

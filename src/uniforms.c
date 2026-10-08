@@ -52,6 +52,36 @@ static bool mglUniformBaseNameIs(const char *stored, const char *base)
 
 
 
+// The element "[i][j]..." names in an array of arrays, counted with the last
+// subscript fastest; -1 when the text is not subscripts or one is out of range
+GLint mglArrayOfArraysElement(const char *subs, const GLint *dims, GLint dim_count)
+{
+    GLint flat = 0;
+    GLint d = 0;
+
+    while (*subs == '[' && d < dim_count)
+    {
+        char *end;
+        long v = strtol(subs + 1, &end, 10);
+
+        if (end == subs + 1 || *end != ']' || v < 0 || v >= dims[d])
+            return -1;
+
+        flat = flat * dims[d] + (GLint)v;
+        subs = end + 1;
+        d++;
+    }
+
+    if (*subs != 0)
+        return -1;
+
+    // subscripts left off name the first element of what is left
+    for (; d < dim_count; d++)
+        flat *= dims[d];
+
+    return flat;
+}
+
 GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
 {
     if (isProgram(ctx, program) == GL_FALSE)
@@ -74,6 +104,7 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
 
         return -1;
     }
+
 
     {
         // "u[3]" names the fourth element of an array uniform, whose location
@@ -105,6 +136,24 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
                 if (r->gl_type == 0 || r->name == NULL || r->location == MGL_NO_LOCATION ||
                     mglIsDriverUniform(r->name))
                     continue;
+
+                // a uniform given layout(location) stays in the SPIR-V even
+                // when nothing reads it, but it is not active and has none
+                if (r->explicit_location && !mglUniformIsActive(ptr, name))
+                    continue;
+
+                // "u[1][2]" in an array of arrays: every subscript counts,
+                // and any left off are 0
+                if (r->dim_count > 1)
+                {
+                    size_t rl = strlen(r->name);
+                    GLint flat = (GLint)mglArrayOfArraysElement(name + rl, r->dims, r->dim_count);
+
+                    if (!strncmp(name, r->name, rl) && flat >= 0)
+                        return (GLint)r->location + flat;
+
+                    continue;
+                }
 
                 if (!strcmp(r->name, name))
                     return (GLint)r->location;

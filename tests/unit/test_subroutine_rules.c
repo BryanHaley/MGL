@@ -416,3 +416,60 @@ TEST(subroutine_rules, a_size_on_the_type_matches)
                        "subroutine uniform st u;\n"
                        "void main() { float q[2]; float r = u(q); }\n") == NULL);
 }
+
+// layout(location) on a subroutine uniform array stays with the uniform
+TEST(subroutine_rules, a_located_uniform_array_is_rewritten)
+{
+    char *out = rewriteOk("#version 430 core\n"
+                          "uniform float zero;\n"
+                          "subroutine vec4 st0(float param);\n"
+                          "subroutine(st0) vec4 sf0(float param) { return zero + vec4(1.0); }\n"
+                          "subroutine(st0) vec4 sf1(float param) { return zero + vec4(2.0); }\n"
+                          "layout(location = 1) subroutine uniform st0 u0[2];\n"
+                          "out vec4 o;\n"
+                          "void main() { o = u0[0](zero) + u0[1](zero); }\n");
+
+    CHECK(out != NULL);
+
+    if (out)
+    {
+        // the declaration ends once; a second ';' at global scope is a GLSL 4.30 error
+        CHECK_MSG(strstr(out, ";;") == NULL && strstr(out, "\n;") == NULL, "stray semicolon:\n%s", out);
+        CHECK_MSG(strstr(out, "uniform int u0" MGL_SUBROUTINE_SUFFIX "[2];") != NULL, "declaration:\n%s", out);
+        free(out);
+    }
+}
+
+// layout(location) on a subroutine uniform is recorded, and layout(index) on
+// its functions
+TEST(subroutine_rules, location_and_index_are_kept)
+{
+    static SubroutineInfo info;
+    char *out;
+
+    mglFreeSubroutineInfo(&info);
+    out = mglRewriteSubroutines("#version 430 core\n"
+                                "uniform float zero;\n"
+                                "subroutine vec4 st0(float param);\n"
+                                "layout(index = 1) subroutine(st0) vec4 sf0(float param) { return vec4(5.0); }\n"
+                                "layout(index = 2) subroutine(st0) vec4 sf1(float param) { return vec4(9.0); }\n"
+                                "layout(location = 3) subroutine uniform st0 u0;\n"
+                                "out vec4 o;\n"
+                                "void main() { o = u0(zero); }\n", &info);
+
+    CHECK_MSG(info.error == NULL, "refused: %s", info.error ? info.error : "");
+    CHECK(out != NULL);
+    CHECK_EQ_INT((GLint)info.uniform_count, 1);
+
+    if (info.uniform_count == 1 && info.uniform_location)
+        CHECK_EQ_INT(info.uniform_location[0], 3);
+
+    if (info.fn_index && info.fn_count == 2)
+    {
+        CHECK_EQ_INT((GLint)info.fn_index[0], 1);
+        CHECK_EQ_INT((GLint)info.fn_index[1], 2);
+    }
+
+    free(out);
+    mglFreeSubroutineInfo(&info);
+}

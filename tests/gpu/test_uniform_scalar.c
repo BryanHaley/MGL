@@ -34,9 +34,10 @@ static const char *VS_SIMPLE =
     "  + vec4(u_f1) + vec4(u_f2,0,0) + vec4(u_f3,0)\n"
     "  + vec4(u_i1) + vec4(u_i2,0,0) + vec4(u_i3,0)\n"
     "  + vec4(u_u1) + vec4(u_u2,0,0) + vec4(u_u3,0)\n"
-    // the double uniforms are declared but never referenced: MSL has no
-    // double type, so using one here makes the whole shader fail to compile
-    "  + u_f4 + vec4(u_i4) + vec4(u_u4); }\n";
+    // the doubles are read too, or they would not be active and would have
+    // no location to round-trip through
+    "  + u_f4 + vec4(u_i4) + vec4(u_u4)\n"
+    "  + vec4(float(u_d1)) + vec4(vec2(u_d2), 0, 0) + vec4(vec3(u_d3), 0) + vec4(u_d4); }\n";
 
 static const char *FS_SIMPLE =
     "#version 460 core\n"

@@ -709,44 +709,43 @@ static bool checkIndexedTarget(GLenum target)
     return false;
 }
 
-// Each indexed target has its own binding space with its own ceiling.
-GLuint maxBindingsForIndexedTarget(GLenum target)
+// Each indexed target has its own binding space with its own ceiling: the
+// one glGetIntegerv reports, within the room MGL's tables have.
+GLuint maxBindingsForIndexedTarget(GLMContext ctx, GLenum target)
 {
+    GLint reported = 0;
+    GLuint room = 0;
+
     switch(target)
     {
-        case GL_UNIFORM_BUFFER:           return MAX_UNIFORM_BUFFER_BINDINGS;
-        case GL_SHADER_STORAGE_BUFFER:    return MAX_SHADER_STORAGE_BUFFER_BINDINGS;
-        case GL_ATOMIC_COUNTER_BUFFER:    return MAX_ATOMIC_COUNTER_BUFFER_BINDINGS;
-        case GL_TRANSFORM_FEEDBACK_BUFFER:return MAX_TRANSFORM_FEEDBACK_BUFFERS;
+        case GL_UNIFORM_BUFFER:
+            reported = STATE_VAR(max_uniform_buffer_bindings); room = MAX_UNIFORM_BUFFER_BINDINGS; break;
+        case GL_SHADER_STORAGE_BUFFER:
+            reported = STATE_VAR(max_shader_storage_buffer_bindings); room = MAX_SHADER_STORAGE_BUFFER_BINDINGS; break;
+        case GL_ATOMIC_COUNTER_BUFFER:
+            reported = STATE_VAR(max_atomic_counter_buffer_bindings); room = MAX_ATOMIC_COUNTER_BUFFER_BINDINGS; break;
+        case GL_TRANSFORM_FEEDBACK_BUFFER:
+            reported = STATE_VAR(max_transform_feedback_buffers); room = MAX_TRANSFORM_FEEDBACK_BUFFERS; break;
     }
 
-    return 0;
+    return reported > 0 && (GLuint)reported < room ? (GLuint)reported : room;
 }
 
-// glBindBuffersBase / glBindBuffersRange reject a bad name with
-// GL_INVALID_OPERATION, and check the whole array before binding anything.
-static bool checkBindBuffersNames(GLMContext ctx, GLsizei count, const GLuint *buffers)
+static bool checkBindBuffersSpan(GLMContext ctx, GLenum target, GLuint first, GLsizei count)
 {
-    if (!buffers)
-        return true;
-
-    for (GLsizei i = 0; i < count; i++)
-    {
-        if (buffers[i] && !isBuffer(ctx, buffers[i]))
-            return false;
-    }
-
-    return true;
-}
-
-static bool checkBindBuffersSpan(GLenum target, GLuint first, GLsizei count)
-{
-    GLuint max = maxBindingsForIndexedTarget(target);
+    GLuint max = maxBindingsForIndexedTarget(ctx, target);
 
     if (first > max)
         return false;
 
     return (GLuint)count <= max - first;
+}
+
+// GL will not let a feedback buffer change under a recording that is running
+static bool feedbackBusy(GLMContext ctx, GLenum target)
+{
+    return target == GL_TRANSFORM_FEEDBACK_BUFFER && ctx->state.transform_feedback &&
+           ctx->state.transform_feedback->active;
 }
 
 void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffer)
@@ -756,7 +755,8 @@ void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffe
 
     ERROR_CHECK_RETURN(checkIndexedTarget(target), GL_INVALID_ENUM);
 
-    ERROR_CHECK_RETURN(index < maxBindingsForIndexedTarget(target), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(index < maxBindingsForIndexedTarget(ctx, target), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(!feedbackBusy(ctx, target), GL_INVALID_OPERATION);
 
     buffer_index = bufferIndexFromTarget(ctx, target);
 
@@ -773,6 +773,7 @@ void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffe
         ctx->state.buffer_base[buffer_index].buffers[index].offset = 0;
         ctx->state.buffer_base[buffer_index].buffers[index].size = ptr->size;
         ctx->state.buffer_base[buffer_index].buffers[index].buf = ptr;
+        ctx->state.buffer_base[buffer_index].buffers[index].whole = GL_TRUE;
 
         ptr->target = target;
     }
@@ -795,11 +796,17 @@ void mglBindBuffersBase(GLMContext ctx, GLenum target, GLuint first, GLsizei cou
 {
     ERROR_CHECK_RETURN(checkIndexedTarget(target), GL_INVALID_ENUM);
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(checkBindBuffersSpan(target, first, count), GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(checkBindBuffersNames(ctx, count, buffers), GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(checkBindBuffersSpan(ctx, target, first, count), GL_INVALID_OPERATION);
 
     for (GLsizei i = 0; i < count; i++)
     {
+        // a bad name is an error for its own binding only; the rest still bind
+        if (buffers && buffers[i] && !isBuffer(ctx, buffers[i]))
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+            continue;
+        }
+
         // a null array unbinds the whole span
         mglBindBufferBase(ctx, target, first + i, buffers ? buffers[i] : 0);
     }
@@ -812,7 +819,8 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
 
     ERROR_CHECK_RETURN(checkIndexedTarget(target), GL_INVALID_ENUM);
 
-    ERROR_CHECK_RETURN(index < maxBindingsForIndexedTarget(target), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(index < maxBindingsForIndexedTarget(ctx, target), GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(!feedbackBusy(ctx, target), GL_INVALID_OPERATION);
 
     buffer_index = bufferIndexFromTarget(ctx, target);
 
@@ -837,6 +845,24 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
+    // each target has its own alignment for where a range may start
+    {
+        GLint align = 1;
+
+        switch (target)
+        {
+            case GL_UNIFORM_BUFFER:        align = STATE_VAR(uniform_buffer_offset_alignment); break;
+            case GL_SHADER_STORAGE_BUFFER: align = STATE_VAR(shader_storage_buffer_offset_alignment); break;
+            case GL_ATOMIC_COUNTER_BUFFER: align = 4; break;
+            case GL_TRANSFORM_FEEDBACK_BUFFER:
+                ERROR_CHECK_RETURN((size % 4) == 0, GL_INVALID_VALUE);
+                align = 4;
+                break;
+        }
+
+        ERROR_CHECK_RETURN(align <= 1 || (offset % align) == 0, GL_INVALID_VALUE);
+    }
+
     ptr = getBuffer(ctx, target, buffer);
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
@@ -855,6 +881,7 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
     ctx->state.buffer_base[buffer_index].buffers[index].offset = offset;
     ctx->state.buffer_base[buffer_index].buffers[index].size = size;
     ctx->state.buffer_base[buffer_index].buffers[index].buf = ptr;
+    ctx->state.buffer_base[buffer_index].buffers[index].whole = GL_FALSE;
 
     ptr->target = target;
 
@@ -1677,8 +1704,7 @@ void mglBindBuffersRange(GLMContext ctx, GLenum target, GLuint first, GLsizei co
 {
     ERROR_CHECK_RETURN(checkIndexedTarget(target), GL_INVALID_ENUM);
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(checkBindBuffersSpan(target, first, count), GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(checkBindBuffersNames(ctx, count, buffers), GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(checkBindBuffersSpan(ctx, target, first, count), GL_INVALID_OPERATION);
 
     for (GLsizei i = 0; i < count; i++)
     {
@@ -1686,6 +1712,13 @@ void mglBindBuffersRange(GLMContext ctx, GLenum target, GLuint first, GLsizei co
         if (!buffers)
         {
             mglBindBufferRange(ctx, target, first + i, 0, 0, 0);
+            continue;
+        }
+
+        // a bad name is an error for its own binding only; the rest still bind
+        if (buffers[i] && !isBuffer(ctx, buffers[i]))
+        {
+            ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
             continue;
         }
 

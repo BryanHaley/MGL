@@ -511,3 +511,30 @@ GPU_TEST(layered_rendering, scissored_clear_reaches_every_layer_and_buffer)
     glDeleteTextures(1, &tex);
     glDeleteTextures(1, &rgba);
 }
+
+// An attachment made with glFramebufferTexture on an array is layered, and
+// says so; one layer of it is not. The query always said no.
+GPU_TEST(layered_rendering, attachment_reports_layered)
+{
+    GLuint tex, fb;
+    GLint v = -1;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, 4, 4, 2);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+
+    glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0);
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_LAYERED, &v);
+    CHECK_EQ_INT(v, GL_TRUE);
+
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0, 1);
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_LAYERED, &v);
+    CHECK_EQ_INT(v, GL_FALSE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}

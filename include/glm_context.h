@@ -234,6 +234,9 @@ typedef struct BufferBaseTarget_t {
     GLsizeiptr  offset;
     GLsizeiptr  size;
     Buffer      *buf;
+    // bound by glBindBufferBase: the whole buffer, which GL reports as
+    // start 0 and size 0
+    GLboolean   whole;
 } BufferBaseTarget;
 
 // Vertex buffer binding slots -- glBindVertexBuffer and friends. GL asks for 16.
@@ -369,6 +372,19 @@ typedef struct Texture_t {
     // a buffer texture is a view of one MTLBuffer; which one, so a buffer given
     // new storage gets a new view instead of reading the freed one
     void    *mtl_buffer_src;
+
+    // glTextureView: the texture whose storage this one shares (never itself
+    // a view), and the part of it this one sees
+    struct Texture_t *view_of;
+    GLuint  view_min_level;
+    GLuint  view_min_layer;
+    GLuint  view_num_layers;
+    // the original's Metal texture this view was made from, held so it
+    // cannot be freed and its address reused while the view still points at it
+    void    *mtl_view_src;
+    // on an original: how many views share it, and whether its name is gone
+    GLuint  view_count;
+    GLboolean deleted;
 } Texture;
 
 typedef struct TextureUnit_t {
@@ -797,7 +813,10 @@ typedef struct SpirvResource_t {
     GLuint  msl_index;      // the [[buffer(n)]] / [[texture(n)]] slot SPIRV-Cross gave it
     GLuint  msl_sampler_index;  // the [[sampler(n)]] slot, for a combined sampler
     GLenum  gl_type;        // GL_FLOAT_VEC4 and friends, recorded at link time
-    GLint   array_size;     // 1 unless the uniform is an array
+    GLint   array_size;     // 1 unless the uniform is an array; every element of an array of arrays
+    // an array of arrays' sizes, outermost first, when it has more than one
+    GLint   dims[4];
+    GLint   dim_count;
     // GL picks the texture unit from the sampler uniform's value, not from the
     // binding baked into the SPIR-V. glUniform1i writes here.
     GLint   tex_unit;
@@ -1199,8 +1218,12 @@ GLsizei mglDrawFramebufferSamples(GLMContext ctx);
 
 TransformFeedback *getTransformFeedback(GLMContext ctx, GLuint name);
 
+bool mglTextureObjectParam(const Texture *tex, GLenum pname, GLint *out);
+void mglResetImageUnit(GLMContext ctx, GLuint unit);
 GLint mglFindNumSamplesLocation(Program *pptr);
 GLint mglFindUniformByName(Program *pptr, const char *name);
+bool mglUniformIsActive(Program *p, const char *name);
+GLint mglArrayOfArraysElement(const char *subs, const GLint *dims, GLint dim_count);
 void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples);
 void mglWriteIndexedDraw(GLMContext ctx, Program *pptr, GLint indexed);
 GLint mglFindSampleMaskOffLocation(Program *pptr);
@@ -1415,6 +1438,7 @@ struct GLMMetalFuncs {
     void (*mtlAllowFormatViews)(GLMContext glm_ctx, Texture *tex);
 
     void (*mtlGenerateMipmaps)(GLMContext glm_ctx, Texture *tex);
+    bool (*mtlUpdateTexRegion)(GLMContext glm_ctx, Texture *tex, GLuint face, GLuint level, size_t x, size_t y, size_t z, size_t w, size_t h, size_t d);
     void (*mtlTexSubImage)(GLMContext glm_ctx, Texture *tex, Buffer *buf, size_t src_offset, size_t src_pitch, size_t src_image_size, size_t src_size, GLuint slice, GLuint level, size_t width, size_t height, size_t depth, size_t xoffset, size_t yoffset, size_t zoffset);
     void (*mtlCopyTexSubImage)(GLMContext glm_ctx, Texture *tex, GLint level, GLint xoffset, GLint yoffset, GLint slice, GLint x, GLint y, GLsizei width, GLsizei height);
     void (*mtlCopyImageSubData)(GLMContext glm_ctx, Texture *srcTex, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, Texture *dstTex, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei width, GLsizei height, GLsizei depth);

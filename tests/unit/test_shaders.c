@@ -134,3 +134,19 @@ GPU_TEST(shader_query, compiling_a_spirv_shader_is_refused)
 
     glDeleteShader(shader);
 }
+
+GLint mglArrayOfArraysElement(const char *subs, const GLint *dims, GLint dim_count);
+
+// An array of arrays numbers its elements with the last subscript fastest,
+// and subscripts left off are 0
+TEST(shaders, array_of_arrays_element_numbering)
+{
+    static const GLint dims[2] = { 2, 3 };
+
+    CHECK_EQ_INT(mglArrayOfArraysElement("[1][2]", dims, 2), 5);
+    CHECK_EQ_INT(mglArrayOfArraysElement("[1]", dims, 2), 3);
+    CHECK_EQ_INT(mglArrayOfArraysElement("", dims, 2), 0);
+    CHECK_EQ_INT(mglArrayOfArraysElement("[2][0]", dims, 2), -1);
+    CHECK_EQ_INT(mglArrayOfArraysElement("[0][3]", dims, 2), -1);
+    CHECK_EQ_INT(mglArrayOfArraysElement("[0].x", dims, 2), -1);
+}

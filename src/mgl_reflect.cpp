@@ -797,6 +797,74 @@ extern "C" bool mglVaryingLocationsFit(void *shader, int max_in, int max_out, ch
     return true;
 }
 
+// glslang checks sampler and atomic counter bindings against the limits but
+// not those of uniform blocks, storage blocks or images; GL wants a binding
+// past the end refused at compile time, counting every element of an array.
+extern "C" bool mglBindingsFit(void *shader, int max_ubo, int max_ssbo, int max_image, char *msg, size_t n)
+{
+    if (shader == nullptr || ((CShaderHandle *)shader)->shader == nullptr)
+        return true;
+
+    const glslang::TIntermediate *interm = ((CShaderHandle *)shader)->shader->getIntermediate();
+
+    if (interm == nullptr || interm->getTreeRoot() == nullptr)
+        return true;
+
+    glslang::TIntermAggregate *root = interm->getTreeRoot()->getAsAggregate();
+
+    if (root == nullptr)
+        return true;
+
+    for (TIntermNode *n0 : root->getSequence())
+    {
+        glslang::TIntermAggregate *a = n0->getAsAggregate();
+
+        if (a == nullptr || a->getOp() != glslang::EOpLinkerObjects)
+            continue;
+
+        for (TIntermNode *node : a->getSequence())
+        {
+            glslang::TIntermSymbol *sym = node->getAsSymbolNode();
+
+            if (sym == nullptr)
+                continue;
+
+            const glslang::TType &t = sym->getType();
+            const glslang::TQualifier &q = t.getQualifier();
+            int max = 0, extent = 1;
+            const char *what;
+
+            if (!q.hasBinding())
+                continue;
+
+            if (t.getBasicType() == glslang::EbtBlock && q.storage == glslang::EvqUniform)
+                max = max_ubo, what = "uniform block";
+            else if (t.getBasicType() == glslang::EbtBlock && q.storage == glslang::EvqBuffer)
+                max = max_ssbo, what = "storage block";
+            else if (t.getBasicType() == glslang::EbtSampler && t.getSampler().isImage())
+                max = max_image, what = "image";
+            else
+                continue;
+
+            if (max <= 0)
+                continue;
+
+            if (t.isArray() && t.getArraySizes()->getCumulativeSize() > 0)
+                extent = t.getArraySizes()->getCumulativeSize();
+
+            if ((long long)q.layoutBinding + extent > max)
+            {
+                snprintf(msg, n, "%s %s: binding %d with %d element%s is past the limit of %d",
+                         what, sym->getName().c_str(), (int)q.layoutBinding, extent,
+                         extent == 1 ? "" : "s", max);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 // Relaxed parsing throws away a uniform's initializer, so the stage is parsed
 // again under plain GL rules just to read those constant values back.
 static bool hasUniformInitializer(const char *src)

@@ -103,6 +103,7 @@ int mglXfbLayout(void *shader, MglXfbItem *items, int max_items, GLint *stride_b
 // False, with a message, when an input or output's layout(location) runs past
 // the stage's limit. The limits are in locations; 0 skips that direction.
 bool mglVaryingLocationsFit(void *shader, int max_in, int max_out, char *msg, size_t msg_size);
+bool mglBindingsFit(void *shader, int max_ubo, int max_ssbo, int max_image, char *msg, size_t msg_size);
 
 // One uniform the shader gives a starting value, split down to single
 // vectors or matrices so each can be set by name.

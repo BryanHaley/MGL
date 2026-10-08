@@ -240,11 +240,12 @@ void mglGetSynciv(GLMContext ctx, GLsync sync, GLenum pname, GLsizei count, GLsi
     }
 }
 
+// Rendering before this is visible to texture fetches after it, which in
+// Metal means a new render pass
 void mglTextureBarrier(GLMContext ctx)
 {
-    // CRITICAL FIX: Handle unimplemented function gracefully instead of crashing
-    MGL_ERR("MGL WARNING: mglTextureBarrier is not yet implemented in MGL\n");
-    // No-op implementation - this is optional functionality
+    if (ctx->mtl_funcs.mtlMemoryBarrier)
+        ctx->mtl_funcs.mtlMemoryBarrier(ctx, GL_FRAMEBUFFER_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
 }
 
 #define MGL_ALL_MEMORY_BARRIERS \
