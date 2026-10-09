@@ -191,6 +191,18 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
             if (res == NULL || res->name == NULL || res->location == MGL_NO_LOCATION)
                 continue;
 
+            // an array of arrays of samplers: every subscript counts
+            if (res->dim_count > 1)
+            {
+                size_t rl = strlen(res->name);
+                GLint flat = (GLint)mglArrayOfArraysElement(name + rl, res->dims, res->dim_count);
+
+                if (!strncmp(name, res->name, rl) && flat >= 0)
+                    return (GLint)res->location + flat;
+
+                continue;
+            }
+
             if (!strcmp(res->name, name))
                 return (GLint)res->location;
 

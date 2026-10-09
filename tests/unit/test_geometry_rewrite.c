@@ -61,3 +61,35 @@ TEST(geometry_rewrite, an_out_parameter_is_not_a_stage_output)
 
     mglFreeGeometryInfo(&gi);
 }
+
+// A location given by a constant keeps its value in the pass-through, and
+// what has no location takes the first one left. The constant read as 0.
+TEST(geometry_rewrite, a_constant_location_is_kept)
+{
+    static const char *GS =
+        "#version 460\n"
+        "layout(points) in;\n"
+        "layout(points, max_vertices = 1) out;\n"
+        "const uint last_output_location = 31u;\n"
+        "flat out uint result;\n"
+        "layout(location = 0) flat out vec4 first;\n"
+        "layout(location = last_output_location) flat out vec4 last;\n"
+        "void main() {\n"
+        "    result = 1u; first = vec4(0); last = vec4(1);\n"
+        "    gl_Position = vec4(0.0);\n"
+        "    EmitVertex();\n"
+        "}\n";
+    GeometryInfo gi;
+
+    CHECK(mglRewriteGeometryShader(GS, &gi));
+
+    if (gi.passthrough_src)
+    {
+        CHECK_MSG(strstr(gi.passthrough_src, "layout(location = 31) flat out vec4 last") != NULL,
+                  "the constant location was lost:\n%s", gi.passthrough_src);
+        CHECK_MSG(strstr(gi.passthrough_src, "layout(location = 1) flat out uint result") != NULL,
+                  "the unplaced output did not take the first free location:\n%s", gi.passthrough_src);
+    }
+
+    mglFreeGeometryInfo(&gi);
+}

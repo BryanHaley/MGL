@@ -433,6 +433,80 @@ static bool blockPlacesMembers(const char *layout, const char *after)
     return false;
 }
 
+// A uniform or buffer block that is shared by default -- it names neither
+// std140 nor std430, and no "layout(std430) buffer;" before it does -- cannot
+// place its members with offset or align. glslang gives such a block std430
+// and takes them, so it is caught here.
+static bool sharedBlockPlacesMembers(const char *src)
+{
+    bool std_default[2] = { false, false };   // uniform, buffer
+    const char *p = src;
+
+    while (*p)
+    {
+        const char *storage_word = NULL;
+        int which = -1;
+
+        if (isWord(p, src, "uniform")) { which = 0; storage_word = p; }
+        else if (isWord(p, src, "buffer")) { which = 1; storage_word = p; }
+
+        if (which < 0)
+        {
+            p++;
+            continue;
+        }
+
+        // the layout(...) in front of it, if any, up to the previous statement
+        const char *stmt = storage_word;
+        bool has_std = false;
+
+        while (stmt > src && stmt[-1] != ';' && stmt[-1] != '}' && stmt[-1] != '{')
+            stmt--;
+
+        for (const char *q = stmt; q < storage_word; q++)
+            if (isWord(q, src, "std140") || isWord(q, src, "std430"))
+                has_std = true;
+
+        const char *after = storage_word + (which ? 6 : 7);
+        const char *q = after;
+
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
+            q++;
+
+        // "layout(std430) buffer;" sets the default for what follows
+        if (*q == ';')
+        {
+            if (has_std)
+                std_default[which] = true;
+
+            p = q;
+            continue;
+        }
+
+        if (!has_std && !std_default[which] && stmt < storage_word &&
+            strstr(stmt, "layout") && strstr(stmt, "layout") < storage_word)
+        {
+            // a layout that names packed or shared is handled elsewhere
+            bool named = false;
+
+            for (const char *r = stmt; r < storage_word; r++)
+                if (isWord(r, src, "shared") || isWord(r, src, "packed"))
+                    named = true;
+
+            if (!named && blockPlacesMembers(stmt, after))
+                return true;
+        }
+        else if (!has_std && !std_default[which] && blockPlacesMembers(after, after))
+        {
+            return true;
+        }
+
+        p = after;
+    }
+
+    return false;
+}
+
 // SPIR-V has no notion of the shared or packed block layouts, so glslang
 // refuses them outright. They are legal GLSL, and an app using them is meant
 // to ask the API where each member sits -- which MGL answers -- so treat them
@@ -1490,6 +1564,8 @@ static const char *ppStrictError(const char *src)
 
 void mglCompileShader(GLMContext ctx, GLuint shader)
 {
+
+
     Shader *ptr;
     glslang_input_t glsl_input;
     glslang_shader_t *glsl_shader;
@@ -1554,6 +1630,16 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
     free(normal);
     const char *front = raised ? raised : ended;
+
+    if (sharedBlockPlacesMembers(front))
+    {
+        free(ptr->log);
+        ptr->log = strdup("ERROR: offset and align need a std140 or std430 block; this one is shared\n");
+        free(raised);
+        free(ended);
+        ctx->error_suppress--;
+        return;
+    }
 
     // glslang will not take the subroutine keyword when it targets SPIR-V, so
     // the source is rewritten into plain GLSL before it ever sees it.

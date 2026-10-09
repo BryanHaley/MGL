@@ -853,6 +853,7 @@ static GLint explicitUniformLayout(const char *src, const char *name, const char
 
 // A declaration's layout(key = N), in any of the number forms GLSL allows, or
 // -1. storage is the word the declaration has to carry: uniform, in or out.
+// -2 when the value is an expression rather than a number.
 static GLint explicitLayout(const char *src, const char *name, const char *key, const char *storage)
 {
     size_t slen = strlen(storage);
@@ -886,7 +887,9 @@ static GLint explicitLayout(const char *src, const char *name, const char *key, 
             if (!strncmp(q, storage, slen) && (q == stmt || !isalnum((unsigned char)q[-1])) &&
                 !isalnum((unsigned char)q[slen]) && q[slen] != '_')
                 has_uniform = true;
-            if (!strncmp(q, key, klen) && !isalnum((unsigned char)q[klen]) && q[klen] != '_')
+            // the key itself, not the end of a name like vertex_index_location
+            if (!strncmp(q, key, klen) && !isalnum((unsigned char)q[klen]) && q[klen] != '_' &&
+                (q == stmt || (!isalnum((unsigned char)q[-1]) && q[-1] != '_')))
             {
                 has_location = true;
                 loc = q;
@@ -905,6 +908,9 @@ static GLint explicitLayout(const char *src, const char *name, const char *key, 
                 while (q < p && (*q == ' ' || *q == '\t')) q++;
                 if (q < p && isdigit((unsigned char)*q))
                     return (GLint)strtol(q, NULL, 0);
+
+                // a constant expression the compiler has already worked out
+                return -2;
             }
         }
 
@@ -1894,8 +1900,10 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
     // Tessellation. Metal has the tessellator but reaches it differently: the
     // vertex and control stages run as compute and hand their results to the
-    // evaluation stage, which becomes the vertex function of the draw.
-    if (ptr->tess.active)
+    // evaluation stage, which becomes the vertex function of the draw. A
+    // control shader only ever runs that way, even linked on its own into a
+    // separable program.
+    if (ptr->tess.active || stage == _TESS_CONTROL_SHADER)
     {
         // Every buffer between these stages is read as a plain struct, so a
         // location shared through component= needs no packing on either side.
@@ -2490,10 +2498,13 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
                                                      &rlist->list[i].array_size);
 
             // a plain array of arrays takes a location for every element,
-            // numbered with the last subscript changing fastest
+            // numbered with the last subscript changing fastest -- and so does
+            // one of samplers or images, which Metal is handed flat in the
+            // same order
             rlist->list[i].dim_count = 0;
 
-            if (res_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT)
+            if (res_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT || res_type == SPVC_RESOURCE_TYPE_SAMPLED_IMAGE ||
+                res_type == SPVC_RESOURCE_TYPE_SEPARATE_IMAGE || res_type == SPVC_RESOURCE_TYPE_STORAGE_IMAGE)
             {
                 spvc_type at = spvc_compiler_get_type_handle(compiler_msl, rlist->list[i].type_id);
                 unsigned nd = at ? spvc_type_get_num_array_dimensions(at) : 0;
@@ -2702,6 +2713,10 @@ static void assignPipeLocations(Program *ptr, spvc_compiler compiler, int stage)
 
         slots[i] = n ? n : 1;
         want[i] = explicitLayout(sh->src, list[i].name, "location", inputs ? "in" : "out");
+
+        // glslang worked the expression out into the SPIR-V
+        if (want[i] == -2)
+            want[i] = (GLint)spvc_compiler_get_decoration(compiler, list[i].id, SpvDecorationLocation);
 
         if (want[i] < 0)
         {
@@ -4254,6 +4269,8 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     // on its own; the pipeline links the stages together when it draws.
     if (pptr->geom_shader && pptr->separable && pptr->shader_slots[_VERTEX_SHADER] == NULL)
     {
+        // the strides its xfb qualifiers give are still the program's to report
+        noteShaderCapture(pptr);
         assignUniformLocations(pptr);
         pptr->validate_status = pptr->link_status;
         reflectProgram(ctx, pptr);
@@ -5552,6 +5569,13 @@ static GLint glTypeComponents(GLenum type)
         case GL_DOUBLE_VEC2: return 4;
         case GL_DOUBLE_VEC3: return 6;
         case GL_DOUBLE_VEC4: return 8;
+        // a double takes two of the 4-byte units these count
+        case GL_DOUBLE_MAT2: return 8;
+        case GL_DOUBLE_MAT3: return 18;
+        case GL_DOUBLE_MAT4: return 32;
+        case GL_DOUBLE_MAT2x3: case GL_DOUBLE_MAT3x2: return 12;
+        case GL_DOUBLE_MAT2x4: case GL_DOUBLE_MAT4x2: return 16;
+        case GL_DOUBLE_MAT3x4: case GL_DOUBLE_MAT4x3: return 24;
     }
 
     return 1;
@@ -5703,6 +5727,23 @@ static bool piqItem(Program *p, GLenum iface, GLint index, PiqItem *it)
                 if (var.res.offset + size > end)
                     end = var.res.offset + size;
             }
+        }
+
+        // gl_SkipComponents after a buffer's last varying report no offset of
+        // their own, but the room they take is still the buffer's
+        if (!xfbFromShader(p) && p->xfb_buffer_mode != GL_SEPARATE_ATTRIBS)
+        {
+            GLint seg = 0, trailing = 0, skip;
+
+            for (GLint v = 0; v < p->xfb_varying_count; v++)
+            {
+                if (!strcmp(p->xfb_varyings[v], "gl_NextBuffer"))
+                    seg++;
+                else if (seg == index)
+                    trailing = xfbSpecial(p->xfb_varyings[v], &skip) ? trailing + 4 * skip : 0;
+            }
+
+            end += trailing;
         }
 
         it->xfb_stride = xfbFromShader(p) && number < MGL_XFB_MAX_BUFFERS

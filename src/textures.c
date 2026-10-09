@@ -526,6 +526,35 @@ static bool framebufferHolds(GLMContext ctx, const Texture *tex)
     return false;
 }
 
+// GL detaches a deleted texture from the framebuffers bound now, as though
+// each attachment point had been given texture 0; others keep it.
+static void detachTexture(Framebuffer *fbo, const Texture *tex)
+{
+    FBOAttachment *points[MAX_COLOR_ATTACHMENTS + 2];
+    int count = 0;
+
+    for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+        points[count++] = &fbo->color_attachments[i];
+
+    points[count++] = &fbo->depth;
+    points[count++] = &fbo->stencil;
+
+    for (int i = 0; i < count; i++)
+    {
+        FBOAttachment *a = points[i];
+
+        if (attachmentHolds(a, tex))
+        {
+            a->buf.tex = NULL;
+            a->textarget = 0;
+            a->texture = 0;
+            a->dirty_bits |= DIRTY_FBO_BINDING;
+        }
+    }
+
+    fbo->dirty_bits |= DIRTY_FBO_BINDING;
+}
+
 static void retireTexture(GLMContext ctx, Texture *tex);
 
 // everything a texture object owns, and the object
@@ -647,6 +676,12 @@ void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
             deleteHashElement(&STATE(texture_table), name);
             mglForgetObjectLabel(ctx, GL_TEXTURE, name, NULL);
             mglForgetBufferTexture(name);
+
+            if (STATE(framebuffer))
+                detachTexture(STATE(framebuffer), tex);
+
+            if (STATE(readbuffer) && STATE(readbuffer) != STATE(framebuffer))
+                detachTexture(STATE(readbuffer), tex);
 
             // a framebuffer still holding it keeps the emptied struct until
             // it lets go

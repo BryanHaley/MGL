@@ -327,3 +327,56 @@ GPU_TEST(prog_introspect, program_resource_location)
 
     glDeleteProgram(p);
 }
+
+// A separable program reports the locations its inputs asked for, a
+// constant expression included. A vertex input at location "last" came back
+// as 1, the first free one.
+GPU_TEST(program_introspect, separable_inputs_keep_their_locations)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec4 a;\n"
+        "const int last = 15;\n"
+        "layout(location = last, component = 0) in vec4 b;\n"
+        "in vec4 c;\n"
+        "out gl_PerVertex { vec4 gl_Position; };\n"
+        "void main() { gl_Position = a + b + c; }\n";
+    GLuint prog = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &vs);
+    GLint ok = 0, loc = -1;
+
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+
+    loc = glGetProgramResourceLocation(prog, GL_PROGRAM_INPUT, "b");
+    CHECK_EQ_INT(loc, 15);
+    loc = glGetAttribLocation(prog, "b");
+    CHECK_EQ_INT(loc, 15);
+
+    // and through the index the name gives
+    {
+        GLuint index = glGetProgramResourceIndex(prog, GL_PROGRAM_INPUT, "b");
+
+        glGetProgramResourceiv(prog, GL_PROGRAM_INPUT, index, 1, (GLenum[]){ GL_LOCATION }, 1, NULL, &loc);
+        CHECK_EQ_INT(loc, 15);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(prog);
+
+    // integer inputs whose locations come from uint constants
+    {
+        static const char *vs2 =
+            "#version 460 core\n"
+            "const uint vertex_index_location = 2;\n"
+            "const uint instance_index_location = 5;\n"
+            "layout (location = vertex_index_location) in uint vertex_index;\n"
+            "layout (location = instance_index_location) in uint instance_index;\n"
+            "out gl_PerVertex { vec4 gl_Position; };\n"
+            "void main() { gl_Position = vec4(float(vertex_index + instance_index)); }\n";
+
+        prog = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &vs2);
+        CHECK_EQ_INT(glGetProgramResourceLocation(prog, GL_PROGRAM_INPUT, "vertex_index"), 2);
+        CHECK_EQ_INT(glGetProgramResourceLocation(prog, GL_PROGRAM_INPUT, "instance_index"), 5);
+        glDeleteProgram(prog);
+    }
+}

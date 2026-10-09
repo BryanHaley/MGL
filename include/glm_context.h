@@ -649,6 +649,7 @@ typedef struct GeometryInfo_t {
     char   out_gl_names[32][96];
     char   out_types[32][32];
     GLint  out_offsets[32];
+    GLint  out_arrays[32];          // elements, 0 when not an array
 } GeometryInfo;
 
 // Transform feedback behind a geometry stage copies words straight out of the

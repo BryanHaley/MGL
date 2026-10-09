@@ -7,6 +7,7 @@
  * createMTLTextureFromGLTexture returned NULL before Metal ever saw them.
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -278,4 +279,81 @@ GPU_TEST(texture_array, copy_image_stays_on_its_level)
 
     glDeleteTextures(1, &src);
     glDeleteTextures(1, &dst);
+}
+
+// An array of arrays of samplers, each element on its own unit, read by a
+// dynamic index. Metal takes only one level of texture array, so SPIRV-Cross
+// refused to build the shader.
+GPU_TEST(texture_array, an_array_of_arrays_of_samplers)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 pos;\n"
+        "void main() { gl_Position = vec4(pos, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "uniform sampler2D x[2][2];\n"
+        "uniform int i, j;\n"
+        "out vec4 o;\n"
+        "void main() { o = texture(x[i][j], vec2(0.5)); }\n";
+    static const GLubyte colors[4][4] = { { 255, 0, 0, 255 }, { 0, 255, 0, 255 },
+                                          { 0, 0, 255, 255 }, { 255, 255, 0, 255 } };
+    char log[2048] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log), tex[4], vbo, vao;
+    MGLTestTarget t;
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    if (!prog)
+        return;
+
+    // the target takes a texture of its own, so it is made first
+    vao = mgl_fullscreen_quad(&vbo);
+    mgl_target_create(&t, 4, 4, GL_RGBA8, 0);
+    mgl_target_bind(&t);
+    glViewport(0, 0, 4, 4);
+
+    glGenTextures(4, tex);
+    for (int k = 0; k < 4; k++)
+    {
+        glActiveTexture(GL_TEXTURE0 + k);
+        glBindTexture(GL_TEXTURE_2D, tex[k]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, colors[k]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    }
+    glActiveTexture(GL_TEXTURE0);
+
+    glUseProgram(prog);
+    for (int k = 0; k < 4; k++)
+    {
+        char name[16];
+
+        snprintf(name, sizeof name, "x[%d][%d]", k / 2, k % 2);
+        CHECK_MSG(glGetUniformLocation(prog, name) >= 0, "%s has no location", name);
+        glUniform1i(glGetUniformLocation(prog, name), 3 - k);
+    }
+
+    for (int k = 0; k < 4; k++)
+    {
+        unsigned char *px, c[4] = { 0 };
+
+        glUniform1i(glGetUniformLocation(prog, "i"), k / 2);
+        glUniform1i(glGetUniformLocation(prog, "j"), k % 2);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        px = mgl_read_rgba8(&t);
+        if (px)
+        {
+            mgl_pixel_at(px, &t, 2, 2, c);
+            free(px);
+        }
+        // each element was pointed at the unit counted from the other end
+        CHECK_MSG(!memcmp(c, colors[3 - k], 4), "x[%d][%d] read %u %u %u %u", k / 2, k % 2, c[0], c[1], c[2], c[3]);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteTextures(4, tex);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
 }

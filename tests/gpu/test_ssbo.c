@@ -309,3 +309,34 @@ GPU_TEST(ssbo, binding_queries_and_errors_follow_the_spec)
     glDeleteBuffers(1, &buf);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 }
+
+// offset and align need a std140 or std430 block. One with no layout is
+// shared, so the shader must not compile; with std430 it does.
+GPU_TEST(ssbo, a_shared_block_cannot_place_members)
+{
+    static const char *shared_cs =
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(binding = 0) buffer B { layout(offset = 16) vec4 b; layout(align = 64) vec4 a; } blk;\n"
+        "void main() { blk.a = blk.b; }\n";
+    static const char *std430_cs =
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(std430, binding = 0) buffer B { layout(offset = 16) vec4 b; layout(align = 64) vec4 a; } blk;\n"
+        "void main() { blk.a = blk.b; }\n";
+    GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
+    GLint ok = 1;
+
+    glShaderSource(sh, 1, &shared_cs, NULL);
+    glCompileShader(sh);
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_FALSE);
+
+    glShaderSource(sh, 1, &std430_cs, NULL);
+    glCompileShader(sh);
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_TRUE);
+
+    glDeleteShader(sh);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}

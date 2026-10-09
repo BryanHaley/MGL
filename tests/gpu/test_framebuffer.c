@@ -760,3 +760,72 @@ GPU_TEST(framebuffer_status, deleting_an_attached_renderbuffer_leaves_no_danglin
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDeleteFramebuffers(1, &fbo);
 }
+
+// A texture deleted while attached to the bound framebuffer leaves it, as GL
+// says, and the next pass has nothing stale to set up. The pass raised
+// GL_INVALID_FRAMEBUFFER_OPERATION, and the next glGetError reported it.
+GPU_TEST(framebuffer, deleting_an_attached_texture_detaches_it)
+{
+    GLuint fbo, tex, status_tex;
+    GLint name = -1;
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32UI, 16, 16);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glClearBufferuiv(GL_COLOR, 0, (const GLuint[]){ 1, 0, 0, 0 });
+    glFinish();
+
+    glDeleteTextures(1, &tex);
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+    CHECK_EQ_INT(name, 0);
+
+    // anything that sets up a pass now
+    glGenTextures(1, &status_tex);
+    glFinish();
+    glDeleteFramebuffers(1, &fbo);
+    glFinish();
+    glDeleteTextures(1, &status_tex);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// A blit naming colour between framebuffers with no colour image leaves the
+// colour bit out and still copies depth, GL 4.6 18.3.1. It raised
+// GL_INVALID_FRAMEBUFFER_OPERATION and copied nothing.
+GPU_TEST(framebuffer, a_blit_without_colour_images_ignores_the_colour_bit)
+{
+    GLuint fbo[2], rbo[2];
+    GLfloat depth = -1.0f;
+
+    glGenFramebuffers(2, fbo);
+    glGenRenderbuffers(2, rbo);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glBindRenderbuffer(GL_RENDERBUFFER, rbo[i]);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 8, 8);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[i]);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo[i]);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+        glClearDepth(i == 0 ? 0.25 : 1.0);
+        glClear(GL_DEPTH_BUFFER_BIT);
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[1]);
+    glBlitFramebuffer(0, 0, 8, 8, 0, 0, 8, 8, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[1]);
+    glReadPixels(4, 4, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+    CHECK_MSG(depth > 0.24f && depth < 0.26f, "depth read %g, want 0.25", depth);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glClearDepth(1.0);
+    glDeleteFramebuffers(2, fbo);
+    glDeleteRenderbuffers(2, rbo);
+}

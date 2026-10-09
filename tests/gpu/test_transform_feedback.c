@@ -9,6 +9,7 @@
 
 #include "mgl_test.h"
 #include "harness.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -769,4 +770,200 @@ GPU_TEST(transform_feedback, api_rules_follow_the_spec)
     glDeleteShader(vs);
     glDeleteShader(fs);
     glDeleteBuffers(1, &buf);
+}
+
+// Doubles copied from a std140 block into a varying the shader records with
+// xfb_offset. kind 0 is one dmat2, kind 1 an array of three.
+static void doubleCaptureRound(int kind, double *got, int n)
+{
+    static const char *vs_one =
+        "#version 460 core\n"
+        "layout(location = 0, xfb_offset = 0) flat out dmat2 goku;\n"
+        "layout(std140, binding = 0) uniform Goku { dmat2 uni_goku; };\n"
+        "void main() { goku = uni_goku; gl_Position = vec4(0, 0, 0, 1); gl_PointSize = 1.0; }\n";
+    static const char *vs_three =
+        "#version 460 core\n"
+        "layout(location = 0, xfb_offset = 0) flat out dmat2 goku[3];\n"
+        "layout(std140, binding = 0) uniform Goku { dmat2 uni_goku[3]; };\n"
+        "void main() { goku = uni_goku; gl_Position = vec4(0, 0, 0, 1); gl_PointSize = 1.0; }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1); }\n";
+    char log[2048] = "";
+    GLuint prog = linkRecording(kind ? vs_three : vs_one, fs, NULL, 0, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    double block[12];
+    GLuint ubo, xfb, vao;
+    MGLTestTarget t;
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog)
+        return;
+
+    // std140 puts each dvec2 column on its own 16 bytes, so the block is
+    // already packed; values the emulation cannot round
+    for (int i = 0; i < 12; i++)
+        block[i] = (i + 1) * 0.25;
+
+    glGenBuffers(1, &ubo);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof block, block, GL_STATIC_DRAW);
+    xfb = recordingBuffer(0, (GLsizeiptr)(n * sizeof(double)));
+
+    mgl_target_create(&t, 4, 4, GL_RGBA8, 0);
+    mgl_target_bind(&t);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, 2);
+    glEndTransformFeedback();
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, xfb);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, (GLsizeiptr)(n * sizeof(double)), got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &ubo);
+    glDeleteBuffers(1, &xfb);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// An array of double matrices out of a uniform block did not build, and
+// recorded wrong.
+GPU_TEST(transform_feedback, double_matrices_from_a_block_are_recorded)
+{
+    double got[12];
+
+    for (int kind = 0; kind < 2; kind++)
+    {
+        int n = kind ? 12 : 4;
+
+        memset(got, 0, sizeof got);
+        doubleCaptureRound(kind, got, n);
+
+        for (int i = 0; i < n; i++)
+            if (got[i] != (i + 1) * 0.25)
+            {
+                CHECK_MSG(0, "%s: double %d recorded %g, want %g", kind ? "dmat2[3]" : "dmat2", i, got[i],
+                          (i + 1) * 0.25);
+                break;
+            }
+    }
+}
+
+// What the program interface reports for each recorded varying and buffer:
+// offset, type, buffer index and the buffer's stride. b0_v0, b0_v1 and b0_v3
+// sit at 0, 1 and 3 floats in buffer 0, b1_v1 at 1 float in buffer 1, and
+// both buffers are four floats long.
+static void checkFourFloatLayout(GLuint prog, const char *what)
+{
+    static const char *names[4] = { "b0_v0", "b0_v1", "b0_v3", "b1_v1" };
+    static const GLint want_buf[4] = { 0, 0, 0, 1 }, want_off[4] = { 0, 4, 12, 4 };
+    static const GLenum props[3] = { GL_OFFSET, GL_TYPE, GL_TRANSFORM_FEEDBACK_BUFFER_INDEX };
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLuint index = glGetProgramResourceIndex(prog, GL_TRANSFORM_FEEDBACK_VARYING, names[i]);
+        GLint v[3] = { -1, -1, -1 }, stride = -1;
+
+        glGetProgramResourceiv(prog, GL_TRANSFORM_FEEDBACK_VARYING, index, 3, props, 3, NULL, v);
+        glGetProgramResourceiv(prog, GL_TRANSFORM_FEEDBACK_BUFFER, (GLuint)v[2], 1,
+                               (GLenum[]){ GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE }, 1, NULL, &stride);
+
+        CHECK_MSG(index != GL_INVALID_INDEX && v[0] == want_off[i] && v[1] == GL_FLOAT && v[2] == want_buf[i] &&
+                  stride == 16, "%s: %s is at %d, type 0x%x, buffer %d of stride %d", what, names[i], v[0], v[1],
+                  v[2], stride);
+    }
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+static GLuint separableProgram(GLenum stage, const char *src, const char *const *varyings, GLsizei count)
+{
+    GLuint prog = glCreateProgram(), sh = glCreateShader(stage);
+    GLint ok = 0;
+
+    glShaderSource(sh, 1, &src, NULL);
+    glCompileShader(sh);
+    glAttachShader(prog, sh);
+    glProgramParameteri(prog, GL_PROGRAM_SEPARABLE, GL_TRUE);
+
+    if (varyings)
+        glTransformFeedbackVaryings(prog, count, varyings, GL_INTERLEAVED_ATTRIBS);
+
+    glLinkProgram(prog);
+    glDeleteShader(sh);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+
+    return ok ? prog : 0;
+}
+
+// The layout either way: varyings and gl_SkipComponents through the API, or
+// xfb qualifiers in a geometry or evaluation shader of its own.
+GPU_TEST(transform_feedback, interface_reports_the_recorded_layout)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "out float b0_v1; out float b1_v1; out float b0_v3; out float b0_v0;\n"
+        "void main() { b0_v1 = 0.0; b1_v1 = 1.0; b0_v3 = 0.0; b0_v0 = 1.0; gl_Position = vec4(0); }\n";
+    static const char *const api[] = {
+        "b0_v0", "b0_v1", "gl_SkipComponents1", "b0_v3", "gl_NextBuffer",
+        "gl_SkipComponents1", "b1_v1", "gl_SkipComponents2",
+    };
+    static const char *decl =
+        "layout (xfb_buffer = 1, xfb_stride = 16) out;\n"
+        "layout (xfb_buffer = 0, xfb_offset = 4) out float b0_v1;\n"
+        "layout (xfb_buffer = 1, xfb_offset = 4) out float b1_v1;\n"
+        "layout (xfb_buffer = 0, xfb_offset = 12) out float b0_v3;\n"
+        "layout (xfb_buffer = 0, xfb_offset = 0) out float b0_v0;\n";
+    char gs[1024], tes[1024];
+    GLuint prog;
+
+    prog = separableProgram(GL_VERTEX_SHADER, vs, api, 8);
+    CHECK(prog != 0);
+    if (prog)
+        checkFourFloatLayout(prog, "the API");
+    glDeleteProgram(prog);
+
+    snprintf(gs, sizeof gs,
+             "#version 460 core\nlayout(points) in;\nlayout(points, max_vertices = 1) out;\n%s"
+             "out gl_PerVertex { vec4 gl_Position; };\n"
+             "void main() { b0_v1 = 0.0; b1_v1 = 1.0; b0_v3 = 0.0; b0_v0 = 1.0; gl_Position = vec4(0); EmitVertex(); }\n",
+             decl);
+    prog = separableProgram(GL_GEOMETRY_SHADER, gs, NULL, 0);
+    CHECK(prog != 0);
+    if (prog)
+        checkFourFloatLayout(prog, "a geometry shader");
+    glDeleteProgram(prog);
+
+    // a dmat2 takes 32 bytes, so the varying after it starts there
+    {
+        static const char *dvs =
+            "#version 460 core\n"
+            "out dmat2 a; out float b;\n"
+            "void main() { a = dmat2(1.0); b = 1.0; gl_Position = vec4(0); }\n";
+        static const char *const both[] = { "a", "b" };
+        GLint off = -1;
+
+        prog = separableProgram(GL_VERTEX_SHADER, dvs, both, 2);
+        CHECK(prog != 0);
+        if (prog)
+        {
+            glGetProgramResourceiv(prog, GL_TRANSFORM_FEEDBACK_VARYING, 1, 1, (GLenum[]){ GL_OFFSET }, 1, NULL, &off);
+            CHECK_EQ_INT(off, 32);
+        }
+        glDeleteProgram(prog);
+    }
+
+    snprintf(tes, sizeof tes,
+             "#version 460 core\nlayout(isolines, point_mode) in;\n%s"
+             "void main() { b0_v1 = 0.0; b1_v1 = 1.0; b0_v3 = 0.0; b0_v0 = 1.0; }\n",
+             decl);
+    prog = separableProgram(GL_TESS_EVALUATION_SHADER, tes, NULL, 0);
+    CHECK(prog != 0);
+    if (prog)
+        checkFourFloatLayout(prog, "an evaluation shader");
+    glDeleteProgram(prog);
 }

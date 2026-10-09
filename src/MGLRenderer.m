@@ -370,6 +370,7 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
     GLuint        _visibilityNextSlot;
     GLuint        _visibilityHolders;   // queries holding slots not yet read
     id<MTLBuffer> _tessLevelsUsed;      // the factors the last tessellated draw read
+    NSUInteger    _stageBaseInstance;   // a base instance the stages MGL runs fetch from
 
     // glMemoryBarrier: the encoder that wrote signals one of these, and every
     // encoder opened after it waits. An encoder never signals the one it
@@ -3928,14 +3929,16 @@ static FBOAttachment *drawSlot(Framebuffer *fbo, int k);
             readtexid = [self blitImage: getFBOAttachment(ctx, readfbo, read_from) plane: &readplane];
         }
 
-        if (readtexid == nil)
+        // A framebuffer object with no colour image to read leaves the colour
+        // bit out of the blit, GL 4.6 18.3.1; depth and stencil still go
+        if (readtexid == nil && readfbo == NULL)
         {
             ctx->error_func(ctx, __FUNCTION__, GL_INVALID_FRAMEBUFFER_OPERATION);
             return;
         }
 
         // GL blits out of a multisampled framebuffer by resolving
-        if (readtexid.sampleCount > 1)
+        if (readtexid && readtexid.sampleCount > 1)
         {
             readtexid = [self resolveMultisample: readtexid];
 
@@ -3947,7 +3950,7 @@ static FBOAttachment *drawSlot(Framebuffer *fbo, int k);
         }
 
         // every draw buffer receives the same copy
-        for (int k = 0; k < (drawfbo ? MAX_COLOR_ATTACHMENTS : 1); k++)
+        for (int k = 0; readtexid && k < (drawfbo ? MAX_COLOR_ATTACHMENTS : 1); k++)
         {
             id<MTLTexture> drawtexid = nil;
             NSUInteger drawplane = 0;
@@ -7048,6 +7051,7 @@ static const char *mgl_gs_capture_msl =
     "    for (uint v = 0; v < n; v++) {\n"
     "        uint src = (s * cfg.y + v) * cfg.x;\n"
     "        uint dst = before[s] + v;\n"
+    "        if (dst >= cfg.w) return;\n"
     "        for (uint e = 0; e < cfg.z; e++) {\n"
     "            uint buf = table[e * 3 + 1];\n"
     "            uint at = dst * dst_stride[buf] + table[e * 3 + 2];\n"
@@ -7165,8 +7169,9 @@ static const char *mgl_gs_capture_msl =
     for (int b = 0; b < 4 && b < ci->buffer_count; b++)
     {
         BufferBaseTarget *slot = &ctx->state.buffer_base[_TRANSFORM_FEEDBACK_BUFFER].buffers[b];
-        Buffer *buf = xfb->buffers[b].buf ? xfb->buffers[b].buf : slot->buf;
-        GLintptr offset = xfb->buffers[b].buf ? xfb->buffers[b].offset : slot->offset;
+        BufferBaseTarget *bound = xfb->buffers[b].buf ? &xfb->buffers[b] : slot;
+        Buffer *buf = bound->buf;
+        GLintptr offset = bound->offset;
 
         if (buf == NULL || ci->stride_bytes[b] <= 0)
             continue;
@@ -7180,7 +7185,17 @@ static const char *mgl_gs_capture_msl =
         targets[b] = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
         offsets[b] = (NSUInteger)offset + xfb->vertices_recorded * (NSUInteger)ci->stride_bytes[b];
         stride_bytes[b] = (uint32_t)((ci->stride_bytes[b] + 3) / 4);
-        room[b] = offsets[b] < targets[b].length ? (uint32_t)((targets[b].length - offsets[b]) / 4) : 0;
+        // the room is the GL buffer's, or the bound range's -- the Metal
+        // buffer behind it can be longer
+        {
+            NSUInteger end = (NSUInteger)buf->size;
+
+            if (!bound->whole && bound->size > 0 && (NSUInteger)(bound->offset + bound->size) < end)
+                end = (NSUInteger)(bound->offset + bound->size);
+
+            end = MIN(end, targets[b].length);
+            room[b] = offsets[b] < end ? (uint32_t)((end - offsets[b]) / 4) : 0;
+        }
     }
 
     id<MTLComputeCommandEncoder> enc = [self liveComputeEncoder];
@@ -7196,7 +7211,19 @@ static const char *mgl_gs_capture_msl =
     [enc setBytes: count_cfg length: sizeof(count_cfg) atIndex: 2];
     [enc dispatchThreads: MTLSizeMake(1, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
 
-    uint32_t gather_cfg[4] = { count_cfg[0], count_cfg[1], (uint32_t)ci->gather_words, 0 };
+    // GL records a primitive whole or not at all, and stops at the first one
+    // a buffer has no room left for
+    GLuint per = gi->out_primitive == GL_POINTS ? 1 : gi->out_primitive == GL_LINE_STRIP ? 2 : 3;
+    uint32_t fits = UINT32_MAX;
+
+    for (int b = 0; b < 4; b++)
+        if (targets[b] && stride_bytes[b])
+            fits = MIN(fits, room[b] / stride_bytes[b]);
+
+    if (fits != UINT32_MAX)
+        fits -= fits % per;
+
+    uint32_t gather_cfg[4] = { count_cfg[0], count_cfg[1], (uint32_t)ci->gather_words, fits };
 
     [enc setComputePipelineState: _gsGatherPipeline];
     [enc setBuffer: out_buf offset: 0 atIndex: 0];
@@ -7218,20 +7245,21 @@ static const char *mgl_gs_capture_msl =
 
     uint32_t total = ((uint32_t *)before.contents)[slots];
 
-    xfb->vertices_recorded += total;
+    uint32_t written = MIN(total, fits);
 
-    // a strip was already split into separate primitives when it was recorded
-    GLuint per = gi->out_primitive == GL_POINTS ? 1 : gi->out_primitive == GL_LINE_STRIP ? 2 : 3;
+    xfb->vertices_recorded += written;
 
     for (int t = 0; t < _MAX_QUERY_TARGETS; t++)
         for (int i = 0; i < MAX_QUERY_STREAMS; i++)
         {
             Query *q = ctx->state.active_query[t][i];
 
-            // what the geometry stage emitted, which is also what it generated
-            if (q && (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN ||
-                      q->target == GL_PRIMITIVES_GENERATED))
+            // what the geometry stage emitted is what it generated; what
+            // fitted is what was written
+            if (q && q->target == GL_PRIMITIVES_GENERATED)
                 q->result += total / per;
+            else if (q && q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN)
+                q->result += written / per;
         }
 }
 
@@ -8475,7 +8503,7 @@ static const char *mgl_isoline_levels_msl =
 
     // [[stage_in]] on a kernel fetches nothing until it is told which slice of
     // the vertex buffers to read, which is where the first vertex comes in.
-    [enc setStageInRegion: MTLRegionMake2D((NSUInteger)(first > 0 ? first : 0), 0,
+    [enc setStageInRegion: MTLRegionMake2D((NSUInteger)(first > 0 ? first : 0), _stageBaseInstance,
                                            (NSUInteger)count, (NSUInteger)instances)];
 
     [enc dispatchThreads: MTLSizeMake((NSUInteger)count, (NSUInteger)instances, 1)
@@ -12611,10 +12639,13 @@ void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const
 #pragma mark C interface to mtlDrawArraysInstancedBaseInstance
 -(void) mtlDrawArraysInstancedBaseInstance: (GLMContext) glm_ctx mode:(GLenum) mode first: (GLint) first count: (GLsizei) count instancecount:(GLsizei) instancecount baseinstance:(GLuint) baseinstance
 {
-    // those stages take no base instance yet
+    // the stages MGL runs itself fetch per-instance attributes from the base
+    // instance on
     if (drawRunsStages(ctx))
     {
+        _stageBaseInstance = baseinstance;
         [self mtlDrawArraysInstanced: glm_ctx mode: mode first: first count: count instancecount: instancecount];
+        _stageBaseInstance = 0;
         return;
     }
 
@@ -12652,8 +12683,10 @@ void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint f
 {
     if (drawRunsStages(ctx))
     {
+        _stageBaseInstance = baseinstance;
         [self mtlDrawElementsInstanced: glm_ctx mode: mode count: count type: type indices: indices
                          instancecount: instancecount];
+        _stageBaseInstance = 0;
         return;
     }
 
@@ -12710,8 +12743,10 @@ void mtlDrawElementsInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLsiz
 {
     if (drawRunsStages(ctx))
     {
+        _stageBaseInstance = baseinstance;
         [self mtlDrawElementsInstancedBaseVertex: glm_ctx mode: mode count: count type: type indices: indices
                                    instancecount: instancecount basevertex: basevertex];
+        _stageBaseInstance = 0;
         return;
     }
 

@@ -98,8 +98,43 @@ static size_t matchBracket(const char *s, size_t i)
     return i;
 }
 
-// the value of "name = N" inside a layout list, or -1 when it is not there
-static int layoutValue(const char *inner, const char *name)
+// The value of "const int NAME = N;" (or uint, with a u) in the source, or -1.
+static int constValue(const char *src, const char *name)
+{
+    size_t n = strlen(name);
+
+    for (const char *p = strstr(src, "const"); p; p = strstr(p + 5, "const"))
+    {
+        size_t i = skipSpace(src, (size_t)(p - src) + 5);
+        char word[64];
+
+        if (p != src && identChar(p[-1]))
+            continue;
+
+        i = skipSpace(src, readIdent(src, i, word, sizeof(word)));
+
+        if (strcmp(word, "int") && strcmp(word, "uint"))
+            continue;
+
+        if (strncmp(src + i, name, n) || identChar(src[i + n]))
+            continue;
+
+        i = skipSpace(src, i + n);
+
+        if (src[i] != '=')
+            continue;
+
+        i = skipSpace(src, i + 1);
+
+        return isdigit((unsigned char)src[i]) ? (int)strtol(src + i, NULL, 0) : -1;
+    }
+
+    return -1;
+}
+
+// the value of "name = N" inside a layout list, or of "name = CONSTANT" when
+// the shader declares that constant
+static int layoutValue(const char *src, const char *inner, const char *name)
 {
     const char *at = strstr(inner, name);
 
@@ -108,7 +143,19 @@ static int layoutValue(const char *inner, const char *name)
 
     const char *eq = strchr(at, '=');
 
-    return eq ? atoi(eq + 1) : -1;
+    if (eq == NULL)
+        return -1;
+
+    size_t v = skipSpace(eq, 1);
+
+    if (isdigit((unsigned char)eq[v]))
+        return atoi(eq + v);
+
+    char ident[64];
+
+    readIdent(eq, v, ident, sizeof(ident));
+
+    return ident[0] ? constValue(src, ident) : -1;
 }
 
 // Eats one "layout(...)" at i, keeping the location and component it names --
@@ -141,10 +188,10 @@ static size_t readLayoutGroup(const char *s, size_t i, int *loc, int *comp)
 
     int v;
 
-    if (loc && (v = layoutValue(inner, "location")) >= 0)
+    if (loc && (v = layoutValue(s, inner, "location")) >= 0)
         *loc = v;
 
-    if (comp && (v = layoutValue(inner, "component")) >= 0)
+    if (comp && (v = layoutValue(s, inner, "component")) >= 0)
         *comp = v;
 
     return skipSpace(s, j);
@@ -211,6 +258,7 @@ typedef struct {
     char name[64];
     char qualifier[32];   // flat / noperspective, kept for the pass-through
     int  array;           // elements, or 0 when this is not an array
+    int  inner;           // a second dimension's size: an input's own array
     char builtin[64];     // the gl_ name this stands in for, empty otherwise
     // an interface block member travels flattened, and these put it back
     char block[64];       // the block's name, empty when this is a plain varying
@@ -305,6 +353,8 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
 
     memset(v, 0, sizeof(*v));
 
+    int dims = 0;
+
     // walk the words up to the semicolon, remembering the last two
     while (s[i] && s[i] != ';' && s[i] != '{' && s[i] != '(')
     {
@@ -328,9 +378,12 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
             if (s[i] == '[')
             {
                 size_t n = skipSpace(s, i + 1);
+                int size = isdigit((unsigned char)s[n]) ? atoi(s + n) : 0;
 
-                if (isdigit((unsigned char)s[n]))
-                    v->array = atoi(s + n);
+                if (dims++ == 0)
+                    v->array = size;
+                else
+                    v->inner = size;
 
                 i = matchBracket(s, i);
                 continue;
@@ -587,10 +640,11 @@ static size_t readBlockDecl(const char *s, size_t i, bool want_out,
     if (s[j] == '[')
         j = skipSpace(s, matchBracket(s, j));
 
-    // An anonymous block's members are named bare in the body, which this
-    // rewrite has no way to tell apart from anything else -- leave it alone
-    // rather than get it wrong.
-    if (s[j] != ';' || inst[0] == 0)
+    // An anonymous block's members are named bare in the body, the way plain
+    // outputs are, so on the way out they are taken as plain outputs that
+    // remember their block. On the way in they would need an array to read
+    // through, which only a named block has.
+    if (s[j] != ';' || (inst[0] == 0 && !want_out))
         return 0;
 
     int added = 0;
@@ -610,7 +664,8 @@ static size_t readBlockDecl(const char *s, size_t i, bool want_out,
         snprintf(v.block, sizeof(v.block), "%s", block);
         snprintf(v.instance, sizeof(v.instance), "%s", inst);
         snprintf(v.member, sizeof(v.member), "%s", v.name);
-        snprintf(v.name, sizeof(v.name), "%s_%s", inst, v.member);
+        if (inst[0])
+            snprintf(v.name, sizeof(v.name), "%s_%s", inst, v.member);
         v.loc = loc;
 
         out[(*count)++] = v;
@@ -926,9 +981,10 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
             if (is_varying && end && sc->in_count < MAX_GS_VARYINGS)
             {
                 // an input varying is declared as an array over the input
-                // vertices, and the struct this becomes holds one vertex
+                // vertices, and the struct this becomes holds one vertex --
+                // which is an array itself when there is a second size
                 if (v.builtin[0] == 0)
-                    v.array = 0;
+                    v.array = v.inner;
 
                 sc->in[sc->in_count++] = v;
 
@@ -1048,7 +1104,7 @@ static int gsLocationSpan(const GsScan *sc, int i)
     int n = 0;
 
     for (int k = 0; k < sc->out_count; k++)
-        if (!strcmp(sc->out[k].instance, sc->out[i].instance))
+        if (!strcmp(sc->out[k].instance, sc->out[i].instance) && !strcmp(sc->out[k].block, sc->out[i].block))
             n += locationsFor(sc->out[k].type) *
                  (sc->out[k].array ? sc->out[k].array : 1);
 
@@ -1540,8 +1596,11 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
                          sc.out[i].builtin[0] ? sc.out[i].builtin : sc.out[i].name);
             snprintf(gi->out_types[i], sizeof(gi->out_types[i]), "%s", sc.out[i].type);
             gi->out_offsets[i] = offset;
+            gi->out_arrays[i] = sc.out[i].builtin[0] ? 0 : sc.out[i].array;
             gi->out_count = i + 1;
-            offset += size;
+
+            // an array's elements each take the element's own alignment
+            offset += sc.out[i].array ? roundUp(size, align) * sc.out[i].array : size;
         }
     }
 
@@ -1691,6 +1750,62 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     if (!bufAdd(&pass, line))
         goto done;
 
+    // A varying that asked for a location keeps it -- the fragment stage may
+    // have asked for the same one, and matching is by location wherever both
+    // sides state it. Everything else, blocks included, is packed into what is
+    // left over in the order it was declared, which is the order the fragment
+    // stage's own locations are handed out in.
+    int at_loc[MAX_GS_VARYINGS];
+    {
+        bool used[MGL_GS_MAX_LOCATIONS] = { false };
+
+        for (int i = 0; i < sc.out_count; i++)
+        {
+            if (sc.out[i].loc < 0 || sc.out[i].builtin[0])
+                continue;
+
+            int n = gsLocationSpan(&sc, i);
+
+            for (int k = 0; k < n; k++)
+                if (sc.out[i].loc + k < MGL_GS_MAX_LOCATIONS)
+                    used[sc.out[i].loc + k] = true;
+        }
+
+        for (int i = 0; i < sc.out_count; i++)
+        {
+            at_loc[i] = sc.out[i].loc;
+
+            if (sc.out[i].builtin[0] || at_loc[i] >= 0)
+                continue;
+
+            // a block's members share the location its first member got
+            if (sc.out[i].block[0])
+            {
+                int first = i;
+
+                for (int k = 0; k < i; k++)
+                    if (!strcmp(sc.out[k].instance, sc.out[i].instance) &&
+                        !strcmp(sc.out[k].block, sc.out[i].block)) { first = k; break; }
+
+                if (first != i)
+                {
+                    at_loc[i] = at_loc[first];
+                    continue;
+                }
+            }
+
+            int span = gsLocationSpan(&sc, i);
+
+            at_loc[i] = gsFirstFree(used, span);
+
+            if (at_loc[i] < 0)
+                goto done;
+
+            for (int k = 0; k < span; k++)
+                used[at_loc[i] + k] = true;
+        }
+    }
+
     // The fragment stage declares the same block and links against it by name,
     // so the pass-through has to declare it too rather than a pile of flat
     // varyings. One pass per block, in the order the members were found.
@@ -1702,23 +1817,20 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
         bool already = false;
 
         for (int k = 0; k < i; k++)
-            if (!strcmp(sc.out[k].instance, sc.out[i].instance)) { already = true; break; }
+            if (!strcmp(sc.out[k].instance, sc.out[i].instance) &&
+                !strcmp(sc.out[k].block, sc.out[i].block)) { already = true; break; }
 
         if (already)
             continue;
 
-        if (sc.out[i].loc >= 0)
-            snprintf(line, sizeof(line), "layout(location = %d) out %s {\n",
-                     sc.out[i].loc, sc.out[i].block);
-        else
-            snprintf(line, sizeof(line), "out %s {\n", sc.out[i].block);
+        snprintf(line, sizeof(line), "layout(location = %d) out %s {\n", at_loc[i], sc.out[i].block);
 
         if (!bufAdd(&pass, line))
             goto done;
 
         for (int k = i; k < sc.out_count; k++)
         {
-            if (strcmp(sc.out[k].instance, sc.out[i].instance))
+            if (strcmp(sc.out[k].instance, sc.out[i].instance) || strcmp(sc.out[k].block, sc.out[i].block))
                 continue;
 
             if (sc.out[k].array)
@@ -1739,24 +1851,7 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
             goto done;
     }
 
-    // A varying that asked for a location keeps it -- the fragment stage may
-    // have asked for the same one, and matching is by location wherever both
-    // sides state it. Everything else is packed into what is left over.
     {
-        bool used[MGL_GS_MAX_LOCATIONS] = { false };
-
-        for (int i = 0; i < sc.out_count; i++)
-        {
-            if (sc.out[i].loc < 0 || sc.out[i].builtin[0])
-                continue;
-
-            int n = gsLocationSpan(&sc, i);
-
-            for (int k = 0; k < n; k++)
-                if (sc.out[i].loc + k < MGL_GS_MAX_LOCATIONS)
-                    used[sc.out[i].loc + k] = true;
-        }
-
         for (int i = 0; i < sc.out_count; i++)
         {
             if (sc.out[i].block[0])
@@ -1773,20 +1868,7 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
                 continue;
             }
 
-            int span = gsLocationSpan(&sc, i);
-            int at = sc.out[i].loc;
-
-            if (at < 0)
-            {
-                at = gsFirstFree(used, span);
-
-                if (at < 0)
-                    goto done;
-
-                for (int k = 0; k < span; k++)
-                    used[at + k] = true;
-            }
-
+            int at = at_loc[i];
             char where[48];
 
             if (sc.out[i].comp > 0)
@@ -1828,7 +1910,11 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
         if (sc.out[i].block[0])
         {
-            snprintf(qual, sizeof(qual), "%s.%s", sc.out[i].instance, sc.out[i].member);
+            // an anonymous block's member is named bare
+            if (sc.out[i].instance[0])
+                snprintf(qual, sizeof(qual), "%s.%s", sc.out[i].instance, sc.out[i].member);
+            else
+                snprintf(qual, sizeof(qual), "%s", sc.out[i].member);
             dst = qual;
         }
         else
@@ -2489,6 +2575,20 @@ done:
 
 // Where component c of a value of this type sits, counting from the value.
 // A std430 matrix is its columns, each padded like a vector of its rows.
+// Scalars in one value of this type, a matrix counting every one.
+static int typeComponents(const char *type)
+{
+    const char *t = type[0] == 'd' || type[0] == 'i' || type[0] == 'u' || type[0] == 'b' ? type + 1 : type;
+
+    if (!strncmp(t, "mat", 3) && t[3])
+        return (t[3] - '0') * (t[4] == 'x' ? t[5] - '0' : t[3] - '0');
+
+    if (!strncmp(t, "vec", 3) && t[3])
+        return t[3] - '0';
+
+    return 1;
+}
+
 static bool componentOffset(const char *type, int c, int *bytes)
 {
     int cols = 0, rows = 0;
@@ -2508,8 +2608,19 @@ static bool componentOffset(const char *type, int c, int *bytes)
     }
 
     // A double in the struct is uint2 (8 bytes), so two words per component.
-    // The kind 'd' case in the caller writes both words.
-    if (!strncmp(type, "double", 6) || !strncmp(type, "dvec", 4) || !strncmp(type, "dmat", 4))
+    // The kind 'd' case in the caller writes both words. A double matrix's
+    // columns are padded the way std430 pads a dvec of that size: a dvec3
+    // column takes 32 bytes.
+    if (!strncmp(type, "dmat", 4) && type[4])
+    {
+        int rows = type[5] == 'x' ? type[6] - '0' : type[4] - '0';
+        int col_stride = rows == 2 ? 16 : 32;
+
+        *bytes = (c / rows) * col_stride + (c % rows) * 8;
+        return true;
+    }
+
+    if (!strncmp(type, "double", 6) || !strncmp(type, "dvec", 4))
     {
         *bytes = c * 8;
         return true;
@@ -2549,15 +2660,58 @@ int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
             snprintf(type, sizeof(type), "float");
         }
 
+        // a block member comes named by its instance, "vegeta.trunk", which
+        // the rewrite flattened to "vegeta_trunk"
+        char flat[64];
+
+        snprintf(flat, sizeof(flat), "%s", base);
+        for (char *d = strchr(flat, '.'); d; d = strchr(d, '.'))
+            *d = '_';
+
+        int elems = 0;
+
         for (int o = 0; o < gi->out_count && offset < 0; o++)
-            if (!strcmp(gi->out_names[o], base) || !strcmp(gi->out_gl_names[o], base))
+            if (!strcmp(gi->out_names[o], base) || !strcmp(gi->out_gl_names[o], base) ||
+                !strcmp(gi->out_names[o], flat))
             {
                 offset = gi->out_offsets[o];
+                elems = gi->out_arrays[o];
                 snprintf(type, sizeof(type), "%s", gi->out_types[o]);
             }
 
         if (offset < 0)
             return -1;
+
+        // An element of an array output, "goku[1]", starts that many element
+        // strides in; the whole array, "goku", runs element after element.
+        if (elems > 0)
+        {
+            int align = 4;
+            int stride = roundUp(std430Size(type, &align), align);
+            int per = typeComponents(type);
+            int start = element >= 0 ? element : 0;
+
+            for (int c = 0; c < it->components; c++)
+            {
+                int e = start + c / per, at;
+
+                if (!componentOffset(type, c % per, &at))
+                    return -1;
+
+                for (int half = 0; half < (it->kind == 'd' ? 2 : 1); half++)
+                {
+                    if (words >= max_words)
+                        return -1;
+
+                    table[words * 3] = (GLuint)(offset + e * stride + at + half * 4);
+                    table[words * 3 + 1] = (GLuint)it->buffer;
+                    table[words * 3 + 2] = (GLuint)(it->offset / 4 + (it->kind == 'd' ? 2 * c + half : c));
+                    words++;
+                }
+            }
+
+            continue;
+        }
 
         if (it->kind == 'd')
         {
@@ -2881,11 +3035,60 @@ done:
 // A geometry shader that passes each point, or each line segment, straight
 // through, so isolines with no geometry shader of their own can use the same
 // path.
+// An output block the evaluation stage declares: "out Name { members } inst;"
+typedef struct {
+    char name[64];
+    char inst[64];
+    char body[1024];
+} PassBlock;
+
+// The members of a block body, one name each, arrays named without their size.
+static int blockMembers(const char *body, char names[][64], int max)
+{
+    int n = 0;
+    const char *p = body;
+
+    while (*p && n < max)
+    {
+        const char *end = strchr(p, ';');
+        const char *stop;
+        size_t len;
+
+        if (end == NULL)
+            break;
+
+        stop = end;
+
+        // "x[2]" is named x
+        for (const char *q = p; q < end; q++)
+            if (*q == '[') { stop = q; break; }
+
+        while (stop > p && isspace((unsigned char)stop[-1]))
+            stop--;
+
+        len = 0;
+        while (stop - len > p && identChar(stop[-(long)len - 1]))
+            len++;
+
+        if (len > 0 && len < 64)
+        {
+            memcpy(names[n], stop - len, len);
+            names[n][len] = 0;
+            n++;
+        }
+
+        p = end + 1;
+    }
+
+    return n;
+}
+
 char *mglPassThroughGeometry(const char *tes_src, int input)
 {
     Buf out = {0};
     GsVarying outs[MAX_GS_VARYINGS];
-    int count = 0, nesting = 0;
+    PassBlock blocks[8];
+    int count = 0, nesting = 0, block_count = 0;
     char line[256];
 
     for (size_t i = 0; tes_src[i]; i++)
@@ -2914,6 +3117,42 @@ char *mglPassThroughGeometry(const char *tes_src, int input)
         // only file scope declares outputs
         if ((i && identChar(tes_src[i - 1])) || !identChar(tes_src[i]) || nesting > 0)
             continue;
+
+        // "out Name { ... } inst;" is a block, passed on whole
+        if (wordAt(tes_src, i, "out") && block_count < 8)
+        {
+            PassBlock *b = &blocks[block_count];
+            size_t j = readIdent(tes_src, skipSpace(tes_src, i + 3), b->name, sizeof(b->name));
+
+            j = skipSpace(tes_src, j);
+
+            // gl_PerVertex is the built-ins redeclared, which travel on their own
+            if (b->name[0] && tes_src[j] == '{' && strcmp(b->name, "gl_PerVertex"))
+            {
+                size_t close = j + 1;
+
+                while (tes_src[close] && tes_src[close] != '}')
+                    close++;
+
+                if (tes_src[close] == '}' && close - j - 1 < sizeof(b->body))
+                {
+                    snprintf(b->body, sizeof(b->body), "%.*s", (int)(close - j - 1), tes_src + j + 1);
+                    readIdent(tes_src, skipSpace(tes_src, close + 1), b->inst, sizeof(b->inst));
+
+                    // a block with no instance name puts its members at file scope
+                    if (!b->inst[0])
+                        snprintf(b->inst, sizeof(b->inst), "%s", "");
+
+                    block_count++;
+
+                    while (tes_src[close] && tes_src[close] != ';')
+                        close++;
+
+                    i = close;
+                    continue;
+                }
+            }
+        }
 
         if (readVarying(tes_src, i, true, &v, &is_varying) && is_varying && count < MAX_GS_VARYINGS)
         {
@@ -2970,6 +3209,10 @@ char *mglPassThroughGeometry(const char *tes_src, int input)
         if (outs[i].builtin[0])
             snprintf(line, sizeof(line), "out float %s[%d];\n", outs[i].builtin,
                      outs[i].array ? outs[i].array : MAX_CLIP_DISTANCES);
+        else if (outs[i].array)
+            snprintf(line, sizeof(line), "%s%sin %s %s[][%d];\n%s%sout %s %s[%d];\n",
+                     outs[i].qualifier, outs[i].qualifier[0] ? " " : "", outs[i].type, outs[i].name, outs[i].array,
+                     outs[i].qualifier, outs[i].qualifier[0] ? " " : "", outs[i].type, outs[i].name, outs[i].array);
         else
             snprintf(line, sizeof(line), "%s%sin %s %s[];\n%s%sout %s %s;\n",
                      outs[i].qualifier, outs[i].qualifier[0] ? " " : "", outs[i].type, outs[i].name,
@@ -2979,11 +3222,43 @@ char *mglPassThroughGeometry(const char *tes_src, int input)
             goto fail;
     }
 
+    // a block comes in as an array under a name of its own and goes out as
+    // the evaluation stage declared it
+    for (int b = 0; b < block_count; b++)
+    {
+        Buf decl = {0};
+        bool ok = bufAdd(&decl, "in ") && bufAdd(&decl, blocks[b].name) && bufAdd(&decl, " {") &&
+                  bufAdd(&decl, blocks[b].body) && bufAdd(&decl, "} mglIn_") && bufAdd(&decl, blocks[b].name) &&
+                  bufAdd(&decl, "[];\nout ") && bufAdd(&decl, blocks[b].name) && bufAdd(&decl, " {") &&
+                  bufAdd(&decl, blocks[b].body) && bufAdd(&decl, "} ") && bufAdd(&decl, blocks[b].inst) &&
+                  bufAdd(&decl, ";\n") && bufAdd(&out, decl.s);
+
+        free(decl.s);
+
+        if (!ok)
+            goto fail;
+    }
+
     if (!bufAdd(&out, "void main()\n{\n"))
         goto fail;
 
     for (int v = 0; v <= input; v++)
     {
+        for (int b = 0; b < block_count; b++)
+        {
+            char names[32][64];
+            int n = blockMembers(blocks[b].body, names, 32);
+
+            for (int m = 0; m < n; m++)
+            {
+                snprintf(line, sizeof(line), "  %s%s%s = mglIn_%s[%d].%s;\n", blocks[b].inst,
+                         blocks[b].inst[0] ? "." : "", names[m], blocks[b].name, v, names[m]);
+
+                if (!bufAdd(&out, line))
+                    goto fail;
+            }
+        }
+
         snprintf(line, sizeof(line), "  gl_Position = gl_in[%d].gl_Position;\n", v);
 
         if (!bufAdd(&out, line))
