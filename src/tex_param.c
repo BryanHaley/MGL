@@ -630,12 +630,57 @@ static bool vectorPname(GLenum pname)
     return pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA;
 }
 
+// Targets that carry texture parameters: not a cube face, a proxy or a buffer.
+bool mglTexParamTarget(GLenum target)
+{
+    switch (target)
+    {
+        case GL_TEXTURE_1D: case GL_TEXTURE_2D: case GL_TEXTURE_3D:
+        case GL_TEXTURE_1D_ARRAY: case GL_TEXTURE_2D_ARRAY: case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_CUBE_MAP: case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE: case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Values no texture takes, whatever its target
+static GLenum paramValueError(GLenum pname, GLint v)
+{
+    switch (pname)
+    {
+        case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T: case GL_TEXTURE_WRAP_R:
+            switch (v)
+            {
+                case GL_REPEAT: case GL_CLAMP_TO_EDGE: case GL_CLAMP_TO_BORDER:
+                case GL_MIRRORED_REPEAT: case GL_MIRROR_CLAMP_TO_EDGE: case GL_CLAMP:
+                    return GL_NO_ERROR;
+                default:
+                    return GL_INVALID_ENUM;
+            }
+
+        case GL_TEXTURE_BASE_LEVEL:
+        case GL_TEXTURE_MAX_LEVEL:
+            return v < 0 ? GL_INVALID_VALUE : GL_NO_ERROR;
+
+        case GL_TEXTURE_MAX_ANISOTROPY:
+            return v < 1 ? GL_INVALID_VALUE : GL_NO_ERROR;
+    }
+
+    return GL_NO_ERROR;
+}
+
 // What the texture's own target rules out for the DSA setters: a multisample
 // texture takes no sampler state, and a rectangle has no mip chain and does
 // not repeat
 static GLenum dsaParamError(Texture *tex, GLenum pname, GLint v)
 {
     bool ms = tex->target == GL_TEXTURE_2D_MULTISAMPLE || tex->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    GLenum err = paramValueError(pname, v);
+
+    if (err)
+        return err;
 
     switch (pname)
     {
@@ -670,13 +715,31 @@ static GLenum dsaParamError(Texture *tex, GLenum pname, GLint v)
     return GL_NO_ERROR;
 }
 
+// The target-based setters say INVALID_ENUM where the DSA ones say
+// INVALID_OPERATION for sampler state on a multisample texture
+static GLenum targetParamError(Texture *tex, GLenum pname, GLint v)
+{
+    GLenum err = dsaParamError(tex, pname, v);
+    bool ms = tex->target == GL_TEXTURE_2D_MULTISAMPLE || tex->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+
+    if (err == GL_INVALID_OPERATION && ms && pname != GL_TEXTURE_BASE_LEVEL)
+        err = GL_INVALID_ENUM;
+
+    return err;
+}
+
 void mglTexParameterf(GLMContext ctx, GLenum target, GLenum pname, GLfloat param)
 {
     Texture *tex;
 
+    ERROR_CHECK_RETURN(mglTexParamTarget(target), GL_INVALID_ENUM);
+
     tex = getTex(ctx, 0, target);
 
     ERROR_CHECK_RETURN(!vectorPname(pname), GL_INVALID_ENUM);
+
+    if (tex && targetParamError(tex, pname, (GLint)param))
+        ERROR_RETURN(targetParamError(tex, pname, (GLint)param));
 
     if (tex)
         setTexParamfv(ctx, tex, pname, &param);
@@ -686,9 +749,14 @@ void mglTexParameterfv(GLMContext ctx, GLenum target, GLenum pname, const GLfloa
 {
     Texture *tex;
 
+    ERROR_CHECK_RETURN(mglTexParamTarget(target), GL_INVALID_ENUM);
+
     tex = getTex(ctx, 0, target);
 
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (tex && targetParamError(tex, pname, (GLint)params[0]))
+        ERROR_RETURN(targetParamError(tex, pname, (GLint)params[0]));
 
     if (tex)
         setTexParamfv(ctx, tex, pname, params);
@@ -698,9 +766,14 @@ void mglTexParameteri(GLMContext ctx, GLenum target, GLenum pname, GLint param)
 {
     Texture *tex;
 
+    ERROR_CHECK_RETURN(mglTexParamTarget(target), GL_INVALID_ENUM);
+
     tex = getTex(ctx, 0, target);
 
     ERROR_CHECK_RETURN(!vectorPname(pname), GL_INVALID_ENUM);
+
+    if (tex && targetParamError(tex, pname, param))
+        ERROR_RETURN(targetParamError(tex, pname, param));
 
     if (tex)
         setTexParamiv(ctx, tex, pname, &param);
@@ -710,9 +783,14 @@ void mglTexParameteriv(GLMContext ctx, GLenum target, GLenum pname, const GLint 
 {
     Texture *tex;
 
+    ERROR_CHECK_RETURN(mglTexParamTarget(target), GL_INVALID_ENUM);
+
     tex = getTex(ctx, 0, target);
 
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (tex && targetParamError(tex, pname, params[0]))
+        ERROR_RETURN(targetParamError(tex, pname, params[0]));
 
     if (tex)
         setTexParamiv(ctx, tex, pname, params);
@@ -722,9 +800,14 @@ void mglTexParameterIiv(GLMContext ctx, GLenum target, GLenum pname, const GLint
 {
     Texture *tex;
 
+    ERROR_CHECK_RETURN(mglTexParamTarget(target), GL_INVALID_ENUM);
+
     tex = getTex(ctx, 0, target);
 
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (tex && targetParamError(tex, pname, params[0]))
+        ERROR_RETURN(targetParamError(tex, pname, params[0]));
 
     if (!tex)
         return;
@@ -746,9 +829,14 @@ void mglTexParameterIuiv(GLMContext ctx, GLenum target, GLenum pname, const GLui
 {
     Texture *tex;
 
+    ERROR_CHECK_RETURN(mglTexParamTarget(target), GL_INVALID_ENUM);
+
     tex = getTex(ctx, 0, target);
 
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
+
+    if (tex && targetParamError(tex, pname, (GLint)params[0]))
+        ERROR_RETURN(targetParamError(tex, pname, (GLint)params[0]));
 
     if (!tex)
         return;
@@ -948,6 +1036,8 @@ void mglGetTexParameterfv(GLMContext ctx, GLenum target, GLenum pname, GLfloat *
 {
     Texture *tex;
 
+    ERROR_CHECK_RETURN(mglTexParamTarget(target), GL_INVALID_ENUM);
+
     tex = getTex(ctx, 0, target);
 
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
@@ -967,6 +1057,8 @@ void mglGetTexParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint *pa
 {
     Texture *tex;
 
+    ERROR_CHECK_RETURN(mglTexParamTarget(target), GL_INVALID_ENUM);
+
     tex = getTex(ctx, 0, target);
 
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
@@ -981,6 +1073,18 @@ static bool getTexLevelParameter(GLMContext ctx, Texture *tex, GLint level, GLen
 
     ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, false);
     ERROR_CHECK_RETURN_VALUE(level >= 0, GL_INVALID_VALUE, false);
+
+    // a buffer texture's one level is the range it views
+    if (tex->target == GL_TEXTURE_BUFFER)
+    {
+        ERROR_CHECK_RETURN_VALUE(level == 0, GL_INVALID_VALUE, false);
+
+        if (mglBufferTextureLevelParam(ctx, tex, pname, out))
+            return true;
+
+        ERROR_RETURN_VALUE(GL_INVALID_ENUM, false);
+    }
+
     ERROR_CHECK_RETURN_VALUE((GLuint)level < tex->num_levels, GL_INVALID_VALUE, false);
 
     lvl = &tex->faces[0].levels[level];
@@ -1011,6 +1115,7 @@ static bool getTexLevelParameter(GLMContext ctx, Texture *tex, GLint level, GLen
 
         case GL_TEXTURE_BUFFER_OFFSET:
         case GL_TEXTURE_BUFFER_SIZE:
+        case GL_TEXTURE_BUFFER_DATA_STORE_BINDING:
             *out = 0;
             return true;
 
@@ -1026,6 +1131,8 @@ static bool getTexLevelParameter(GLMContext ctx, Texture *tex, GLint level, GLen
             *out = bitcountForInternalFormat(tex->internalformat, GL_DEPTH_COMPONENT); return true;
         case GL_TEXTURE_STENCIL_SIZE:
             *out = bitcountForInternalFormat(tex->internalformat, GL_STENCIL_INDEX); return true;
+        case GL_TEXTURE_SHARED_SIZE:
+            *out = tex->internalformat == GL_RGB9_E5 ? 5 : 0; return true;
 
         // a channel the format does not have answers GL_NONE
         case GL_TEXTURE_RED_TYPE:

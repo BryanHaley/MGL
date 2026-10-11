@@ -8,7 +8,10 @@
 #include "mgl_test.h"
 #include "harness.h"
 
-/* A vertex shader with one uniform per type family the test exercises. */
+/* A uniform of every size the setters fit: float, int, uint and double
+   scalars and vectors, and float and double matrices. MGL gives each uniform
+   its own Metal buffer and a stage has 31, so the doubles live in the
+   fragment shader. All are read, or they would have no location. */
 static const char *VS_UNI =
     "#version 460 core\n"
     "layout(location = 0) in vec2 pos;\n"
@@ -24,89 +27,124 @@ static const char *VS_UNI =
     "layout(location = 9) uniform mat4x2 u_m42;\n"
     "layout(location =10) uniform mat3x4 u_m34;\n"
     "layout(location =11) uniform mat4x3 u_m43;\n"
+    "layout(location =12) uniform float u_f1;\n"
+    "layout(location =13) uniform vec2  u_f2;\n"
+    "layout(location =14) uniform vec3  u_f3;\n"
+    "layout(location =15) uniform int   u_i1;\n"
+    "layout(location =16) uniform ivec2 u_i2;\n"
+    "layout(location =17) uniform ivec3 u_i3;\n"
+    "layout(location =18) uniform uint  u_ui1;\n"
+    "layout(location =19) uniform uvec2 u_ui2;\n"
+    "layout(location =20) uniform uvec3 u_ui3;\n"
     "void main() {\n"
-    "    gl_Position = vec4(pos, 0.0, 1.0);\n"
+    "    gl_Position = vec4(pos, 0.0, 1.0)\n"
+    "      + u_f4 + vec4(u_i4) + vec4(u_ui4)\n"
+    "      + u_m4[0] + vec4(u_m3[0], 0) + vec4(u_m2[0], 0, 0)\n"
+    "      + vec4(u_m23[0], 0) + vec4(u_m32[0], 0, 0) + u_m24[0]\n"
+    "      + vec4(u_m42[0], 0, 0) + u_m34[0] + vec4(u_m43[0], 0)\n"
+    "      + vec4(u_f1) + vec4(u_f2, 0, 0) + vec4(u_f3, 0)\n"
+    "      + vec4(u_i1) + vec4(u_i2, 0, 0) + vec4(u_i3, 0)\n"
+    "      + vec4(u_ui1) + vec4(u_ui2, 0, 0) + vec4(u_ui3, 0);\n"
     "}\n";
 
-static const char *FS_BLANK =
+static const char *FS_DOUBLES =
     "#version 460 core\n"
+    "layout(location =21) uniform double u_d1;\n"
+    "layout(location =22) uniform dvec2  u_d2;\n"
+    "layout(location =23) uniform dvec3  u_d3;\n"
+    "layout(location =24) uniform dvec4  u_d4;\n"
+    "layout(location =25) uniform dmat4  u_dm4;\n"
+    "layout(location =26) uniform dmat3  u_dm3;\n"
+    "layout(location =27) uniform dmat2  u_dm2;\n"
+    "layout(location =28) uniform dmat2x3 u_dm23;\n"
+    "layout(location =29) uniform dmat3x2 u_dm32;\n"
+    "layout(location =30) uniform dmat2x4 u_dm24;\n"
+    "layout(location =31) uniform dmat4x2 u_dm42;\n"
+    "layout(location =32) uniform dmat3x4 u_dm34;\n"
+    "layout(location =33) uniform dmat4x3 u_dm43;\n"
     "layout(location = 0) out vec4 frag;\n"
-    "void main() { frag = vec4(0.0); }\n";
+    "void main() {\n"
+    "    frag = vec4(float(u_d1)) + vec4(vec2(u_d2), 0, 0) + vec4(vec3(u_d3), 0) + vec4(u_d4)\n"
+    "      + vec4(u_dm4[0]) + vec4(vec3(u_dm3[0]), 0) + vec4(vec2(u_dm2[0]), 0, 0)\n"
+    "      + vec4(vec3(u_dm23[0]), 0) + vec4(vec2(u_dm32[0]), 0, 0) + vec4(u_dm24[0])\n"
+    "      + vec4(vec2(u_dm42[0]), 0, 0) + vec4(u_dm34[0]) + vec4(vec3(u_dm43[0]), 0);\n"
+    "}\n";
 
 /* ---------- float scalar / vector forms (1f, 2f, 3f, 4f, 1fv, 2fv, 3fv, 4fv) ---------- */
 
 GPU_TEST(program_uniform, float_vector_roundtrip)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
-    GLint loc;
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
+    GLint loc[4];
     GLfloat got[4] = {0};
 
     CHECK_MSG(p != 0, "link: %s", err);
     if (!p) return;
 
-    loc = glGetUniformLocation(p, "u_f4");
-    CHECK(loc >= 0);
-    if (loc < 0) { glDeleteProgram(p); return; }
+    // the 1-, 2-, 3- and 4-wide uniforms, so every setter has one it fits
+    loc[0] = glGetUniformLocation(p, "u_f1");
+    loc[1] = glGetUniformLocation(p, "u_f2");
+    loc[2] = glGetUniformLocation(p, "u_f3");
+    loc[3] = glGetUniformLocation(p, "u_f4");
+    CHECK(loc[0] >= 0 && loc[1] >= 0 && loc[2] >= 0 && loc[3] >= 0);
+    if (loc[0] < 0 || loc[1] < 0 || loc[2] < 0 || loc[3] < 0) { glDeleteProgram(p); return; }
 
     /* 1f */
-    glProgramUniform1f(p, loc, 1.25f);
+    glProgramUniform1f(p, loc[0], 1.25f);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformfv(p, loc, got);
+    glGetUniformfv(p, loc[0], got);
     CHECK_NEAR(got[0], 1.25f, 1e-5f);
-    CHECK_NEAR(got[1], 0.0f, 1e-5f);
-    CHECK_NEAR(got[2], 0.0f, 1e-5f);
-    CHECK_NEAR(got[3], 0.0f, 1e-5f);
 
     /* 2f */
-    glProgramUniform2f(p, loc, 2.0f, 3.0f);
+    glProgramUniform2f(p, loc[1], 2.0f, 3.0f);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformfv(p, loc, got);
+    glGetUniformfv(p, loc[1], got);
     CHECK_NEAR(got[0], 2.0f, 1e-5f);
     CHECK_NEAR(got[1], 3.0f, 1e-5f);
 
     /* 3f */
-    glProgramUniform3f(p, loc, 4.0f, 5.0f, 6.0f);
+    glProgramUniform3f(p, loc[2], 4.0f, 5.0f, 6.0f);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformfv(p, loc, got);
+    glGetUniformfv(p, loc[2], got);
     CHECK_NEAR(got[0], 4.0f, 1e-5f);
     CHECK_NEAR(got[1], 5.0f, 1e-5f);
     CHECK_NEAR(got[2], 6.0f, 1e-5f);
 
     /* 4f */
-    glProgramUniform4f(p, loc, 7.0f, 8.0f, 9.0f, 10.0f);
+    glProgramUniform4f(p, loc[3], 7.0f, 8.0f, 9.0f, 10.0f);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformfv(p, loc, got);
+    glGetUniformfv(p, loc[3], got);
     CHECK_NEAR(got[0], 7.0f, 1e-5f);
     CHECK_NEAR(got[1], 8.0f, 1e-5f);
     CHECK_NEAR(got[2], 9.0f, 1e-5f);
     CHECK_NEAR(got[3], 10.0f, 1e-5f);
 
     /* 1fv */
-    glProgramUniform1fv(p, loc, 1, (const GLfloat[]){ 11.0f });
+    glProgramUniform1fv(p, loc[0], 1, (const GLfloat[]){ 11.0f });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformfv(p, loc, got);
+    glGetUniformfv(p, loc[0], got);
     CHECK_NEAR(got[0], 11.0f, 1e-5f);
 
     /* 2fv */
-    glProgramUniform2fv(p, loc, 1, (const GLfloat[]){ 12.0f, 13.0f });
+    glProgramUniform2fv(p, loc[1], 1, (const GLfloat[]){ 12.0f, 13.0f });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformfv(p, loc, got);
+    glGetUniformfv(p, loc[1], got);
     CHECK_NEAR(got[0], 12.0f, 1e-5f);
     CHECK_NEAR(got[1], 13.0f, 1e-5f);
 
     /* 3fv */
-    glProgramUniform3fv(p, loc, 1, (const GLfloat[]){ 14.0f, 15.0f, 16.0f });
+    glProgramUniform3fv(p, loc[2], 1, (const GLfloat[]){ 14.0f, 15.0f, 16.0f });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformfv(p, loc, got);
+    glGetUniformfv(p, loc[2], got);
     CHECK_NEAR(got[0], 14.0f, 1e-5f);
     CHECK_NEAR(got[1], 15.0f, 1e-5f);
     CHECK_NEAR(got[2], 16.0f, 1e-5f);
 
     /* 4fv */
-    glProgramUniform4fv(p, loc, 1, (const GLfloat[]){ 17.0f, 18.0f, 19.0f, 20.0f });
+    glProgramUniform4fv(p, loc[3], 1, (const GLfloat[]){ 17.0f, 18.0f, 19.0f, 20.0f });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformfv(p, loc, got);
+    glGetUniformfv(p, loc[3], got);
     CHECK_NEAR(got[0], 17.0f, 1e-5f);
     CHECK_NEAR(got[1], 18.0f, 1e-5f);
     CHECK_NEAR(got[2], 19.0f, 1e-5f);
@@ -120,75 +158,75 @@ GPU_TEST(program_uniform, float_vector_roundtrip)
 GPU_TEST(program_uniform, int_vector_roundtrip)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
-    GLint loc;
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
+    GLint loc[4];
     GLint got[4] = {0};
 
     CHECK_MSG(p != 0, "link: %s", err);
     if (!p) return;
 
-    loc = glGetUniformLocation(p, "u_i4");
-    CHECK(loc >= 0);
-    if (loc < 0) { glDeleteProgram(p); return; }
+    loc[0] = glGetUniformLocation(p, "u_i1");
+    loc[1] = glGetUniformLocation(p, "u_i2");
+    loc[2] = glGetUniformLocation(p, "u_i3");
+    loc[3] = glGetUniformLocation(p, "u_i4");
+    CHECK(loc[0] >= 0 && loc[1] >= 0 && loc[2] >= 0 && loc[3] >= 0);
+    if (loc[0] < 0 || loc[1] < 0 || loc[2] < 0 || loc[3] < 0) { glDeleteProgram(p); return; }
 
     /* 1i */
-    glProgramUniform1i(p, loc, 10);
+    glProgramUniform1i(p, loc[0], 10);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformiv(p, loc, got);
+    glGetUniformiv(p, loc[0], got);
     CHECK_EQ_INT(got[0], 10);
-    CHECK_EQ_INT(got[1], 0);
-    CHECK_EQ_INT(got[2], 0);
-    CHECK_EQ_INT(got[3], 0);
 
     /* 2i */
-    glProgramUniform2i(p, loc, 20, 30);
+    glProgramUniform2i(p, loc[1], 20, 30);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformiv(p, loc, got);
+    glGetUniformiv(p, loc[1], got);
     CHECK_EQ_INT(got[0], 20);
     CHECK_EQ_INT(got[1], 30);
 
     /* 3i */
-    glProgramUniform3i(p, loc, 40, 50, 60);
+    glProgramUniform3i(p, loc[2], 40, 50, 60);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformiv(p, loc, got);
+    glGetUniformiv(p, loc[2], got);
     CHECK_EQ_INT(got[0], 40);
     CHECK_EQ_INT(got[1], 50);
     CHECK_EQ_INT(got[2], 60);
 
     /* 4i */
-    glProgramUniform4i(p, loc, 70, 80, 90, 100);
+    glProgramUniform4i(p, loc[3], 70, 80, 90, 100);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformiv(p, loc, got);
+    glGetUniformiv(p, loc[3], got);
     CHECK_EQ_INT(got[0], 70);
     CHECK_EQ_INT(got[1], 80);
     CHECK_EQ_INT(got[2], 90);
     CHECK_EQ_INT(got[3], 100);
 
     /* 1iv */
-    glProgramUniform1iv(p, loc, 1, (const GLint[]){ 110 });
+    glProgramUniform1iv(p, loc[0], 1, (const GLint[]){ 110 });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformiv(p, loc, got);
+    glGetUniformiv(p, loc[0], got);
     CHECK_EQ_INT(got[0], 110);
 
     /* 2iv */
-    glProgramUniform2iv(p, loc, 1, (const GLint[]){ 120, 130 });
+    glProgramUniform2iv(p, loc[1], 1, (const GLint[]){ 120, 130 });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformiv(p, loc, got);
+    glGetUniformiv(p, loc[1], got);
     CHECK_EQ_INT(got[0], 120);
     CHECK_EQ_INT(got[1], 130);
 
     /* 3iv */
-    glProgramUniform3iv(p, loc, 1, (const GLint[]){ 140, 150, 160 });
+    glProgramUniform3iv(p, loc[2], 1, (const GLint[]){ 140, 150, 160 });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformiv(p, loc, got);
+    glGetUniformiv(p, loc[2], got);
     CHECK_EQ_INT(got[0], 140);
     CHECK_EQ_INT(got[1], 150);
     CHECK_EQ_INT(got[2], 160);
 
     /* 4iv */
-    glProgramUniform4iv(p, loc, 1, (const GLint[]){ 170, 180, 190, 200 });
+    glProgramUniform4iv(p, loc[3], 1, (const GLint[]){ 170, 180, 190, 200 });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformiv(p, loc, got);
+    glGetUniformiv(p, loc[3], got);
     CHECK_EQ_INT(got[0], 170);
     CHECK_EQ_INT(got[1], 180);
     CHECK_EQ_INT(got[2], 190);
@@ -202,73 +240,75 @@ GPU_TEST(program_uniform, int_vector_roundtrip)
 GPU_TEST(program_uniform, uint_vector_roundtrip)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
-    GLint loc;
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
+    GLint loc[4];
     GLuint got[4] = {0};
 
     CHECK_MSG(p != 0, "link: %s", err);
     if (!p) return;
 
-    loc = glGetUniformLocation(p, "u_ui4");
-    CHECK(loc >= 0);
-    if (loc < 0) { glDeleteProgram(p); return; }
+    loc[0] = glGetUniformLocation(p, "u_ui1");
+    loc[1] = glGetUniformLocation(p, "u_ui2");
+    loc[2] = glGetUniformLocation(p, "u_ui3");
+    loc[3] = glGetUniformLocation(p, "u_ui4");
+    CHECK(loc[0] >= 0 && loc[1] >= 0 && loc[2] >= 0 && loc[3] >= 0);
+    if (loc[0] < 0 || loc[1] < 0 || loc[2] < 0 || loc[3] < 0) { glDeleteProgram(p); return; }
 
     /* 1ui */
-    glProgramUniform1ui(p, loc, 100u);
+    glProgramUniform1ui(p, loc[0], 100u);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformuiv(p, loc, got);
+    glGetUniformuiv(p, loc[0], got);
     CHECK_EQ_UINT(got[0], 100u);
-    CHECK_EQ_UINT(got[1], 0u);
 
     /* 2ui */
-    glProgramUniform2ui(p, loc, 200u, 300u);
+    glProgramUniform2ui(p, loc[1], 200u, 300u);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformuiv(p, loc, got);
+    glGetUniformuiv(p, loc[1], got);
     CHECK_EQ_UINT(got[0], 200u);
     CHECK_EQ_UINT(got[1], 300u);
 
     /* 3ui */
-    glProgramUniform3ui(p, loc, 400u, 500u, 600u);
+    glProgramUniform3ui(p, loc[2], 400u, 500u, 600u);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformuiv(p, loc, got);
+    glGetUniformuiv(p, loc[2], got);
     CHECK_EQ_UINT(got[0], 400u);
     CHECK_EQ_UINT(got[1], 500u);
     CHECK_EQ_UINT(got[2], 600u);
 
     /* 4ui */
-    glProgramUniform4ui(p, loc, 700u, 800u, 900u, 1000u);
+    glProgramUniform4ui(p, loc[3], 700u, 800u, 900u, 1000u);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformuiv(p, loc, got);
+    glGetUniformuiv(p, loc[3], got);
     CHECK_EQ_UINT(got[0], 700u);
     CHECK_EQ_UINT(got[1], 800u);
     CHECK_EQ_UINT(got[2], 900u);
     CHECK_EQ_UINT(got[3], 1000u);
 
     /* 1uiv */
-    glProgramUniform1uiv(p, loc, 1, (const GLuint[]){ 1100u });
+    glProgramUniform1uiv(p, loc[0], 1, (const GLuint[]){ 1100u });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformuiv(p, loc, got);
+    glGetUniformuiv(p, loc[0], got);
     CHECK_EQ_UINT(got[0], 1100u);
 
     /* 2uiv */
-    glProgramUniform2uiv(p, loc, 1, (const GLuint[]){ 1200u, 1300u });
+    glProgramUniform2uiv(p, loc[1], 1, (const GLuint[]){ 1200u, 1300u });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformuiv(p, loc, got);
+    glGetUniformuiv(p, loc[1], got);
     CHECK_EQ_UINT(got[0], 1200u);
     CHECK_EQ_UINT(got[1], 1300u);
 
     /* 3uiv */
-    glProgramUniform3uiv(p, loc, 1, (const GLuint[]){ 1400u, 1500u, 1600u });
+    glProgramUniform3uiv(p, loc[2], 1, (const GLuint[]){ 1400u, 1500u, 1600u });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformuiv(p, loc, got);
+    glGetUniformuiv(p, loc[2], got);
     CHECK_EQ_UINT(got[0], 1400u);
     CHECK_EQ_UINT(got[1], 1500u);
     CHECK_EQ_UINT(got[2], 1600u);
 
     /* 4uiv */
-    glProgramUniform4uiv(p, loc, 1, (const GLuint[]){ 1700u, 1800u, 1900u, 2000u });
+    glProgramUniform4uiv(p, loc[3], 1, (const GLuint[]){ 1700u, 1800u, 1900u, 2000u });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformuiv(p, loc, got);
+    glGetUniformuiv(p, loc[3], got);
     CHECK_EQ_UINT(got[0], 1700u);
     CHECK_EQ_UINT(got[1], 1800u);
     CHECK_EQ_UINT(got[2], 1900u);
@@ -282,73 +322,75 @@ GPU_TEST(program_uniform, uint_vector_roundtrip)
 GPU_TEST(program_uniform, double_vector_roundtrip)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
-    GLint loc;
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
+    GLint loc[4];
     GLdouble got[4] = {0};
 
     CHECK_MSG(p != 0, "link: %s", err);
     if (!p) return;
 
-    loc = glGetUniformLocation(p, "u_f4");
-    CHECK(loc >= 0);
-    if (loc < 0) { glDeleteProgram(p); return; }
+    loc[0] = glGetUniformLocation(p, "u_d1");
+    loc[1] = glGetUniformLocation(p, "u_d2");
+    loc[2] = glGetUniformLocation(p, "u_d3");
+    loc[3] = glGetUniformLocation(p, "u_d4");
+    CHECK(loc[0] >= 0 && loc[1] >= 0 && loc[2] >= 0 && loc[3] >= 0);
+    if (loc[0] < 0 || loc[1] < 0 || loc[2] < 0 || loc[3] < 0) { glDeleteProgram(p); return; }
 
     /* 1d */
-    glProgramUniform1d(p, loc, 1.5);
+    glProgramUniform1d(p, loc[0], 1.5);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformdv(p, loc, got);
+    glGetUniformdv(p, loc[0], got);
     CHECK_NEAR(got[0], 1.5, 1e-5);
-    CHECK_NEAR(got[1], 0.0, 1e-5);
 
     /* 2d */
-    glProgramUniform2d(p, loc, 2.5, 3.5);
+    glProgramUniform2d(p, loc[1], 2.5, 3.5);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformdv(p, loc, got);
+    glGetUniformdv(p, loc[1], got);
     CHECK_NEAR(got[0], 2.5, 1e-5);
     CHECK_NEAR(got[1], 3.5, 1e-5);
 
     /* 3d */
-    glProgramUniform3d(p, loc, 4.5, 5.5, 6.5);
+    glProgramUniform3d(p, loc[2], 4.5, 5.5, 6.5);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformdv(p, loc, got);
+    glGetUniformdv(p, loc[2], got);
     CHECK_NEAR(got[0], 4.5, 1e-5);
     CHECK_NEAR(got[1], 5.5, 1e-5);
     CHECK_NEAR(got[2], 6.5, 1e-5);
 
     /* 4d */
-    glProgramUniform4d(p, loc, 7.5, 8.5, 9.5, 10.5);
+    glProgramUniform4d(p, loc[3], 7.5, 8.5, 9.5, 10.5);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformdv(p, loc, got);
+    glGetUniformdv(p, loc[3], got);
     CHECK_NEAR(got[0], 7.5, 1e-5);
     CHECK_NEAR(got[1], 8.5, 1e-5);
     CHECK_NEAR(got[2], 9.5, 1e-5);
     CHECK_NEAR(got[3], 10.5, 1e-5);
 
     /* 1dv */
-    glProgramUniform1dv(p, loc, 1, (const GLdouble[]){ 11.5 });
+    glProgramUniform1dv(p, loc[0], 1, (const GLdouble[]){ 11.5 });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformdv(p, loc, got);
+    glGetUniformdv(p, loc[0], got);
     CHECK_NEAR(got[0], 11.5, 1e-5);
 
     /* 2dv */
-    glProgramUniform2dv(p, loc, 1, (const GLdouble[]){ 12.5, 13.5 });
+    glProgramUniform2dv(p, loc[1], 1, (const GLdouble[]){ 12.5, 13.5 });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformdv(p, loc, got);
+    glGetUniformdv(p, loc[1], got);
     CHECK_NEAR(got[0], 12.5, 1e-5);
     CHECK_NEAR(got[1], 13.5, 1e-5);
 
     /* 3dv */
-    glProgramUniform3dv(p, loc, 1, (const GLdouble[]){ 14.5, 15.5, 16.5 });
+    glProgramUniform3dv(p, loc[2], 1, (const GLdouble[]){ 14.5, 15.5, 16.5 });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformdv(p, loc, got);
+    glGetUniformdv(p, loc[2], got);
     CHECK_NEAR(got[0], 14.5, 1e-5);
     CHECK_NEAR(got[1], 15.5, 1e-5);
     CHECK_NEAR(got[2], 16.5, 1e-5);
 
     /* 4dv */
-    glProgramUniform4dv(p, loc, 1, (const GLdouble[]){ 17.5, 18.5, 19.5, 20.5 });
+    glProgramUniform4dv(p, loc[3], 1, (const GLdouble[]){ 17.5, 18.5, 19.5, 20.5 });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformdv(p, loc, got);
+    glGetUniformdv(p, loc[3], got);
     CHECK_NEAR(got[0], 17.5, 1e-5);
     CHECK_NEAR(got[1], 18.5, 1e-5);
     CHECK_NEAR(got[2], 19.5, 1e-5);
@@ -362,7 +404,7 @@ GPU_TEST(program_uniform, double_vector_roundtrip)
 GPU_TEST(program_uniform, matrix_float_roundtrip)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
     GLint loc;
     GLfloat got[16] = {0};
     const GLfloat vals[16] = {
@@ -377,6 +419,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 
     /* mat2 (2x2 = 4 floats) */
     loc = glGetUniformLocation(p, "u_m2");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix2fv(p, loc, 1, GL_FALSE, vals);
@@ -390,6 +433,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 
     /* mat3 (3x3 = 9 floats) */
     loc = glGetUniformLocation(p, "u_m3");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix3fv(p, loc, 1, GL_FALSE, vals);
@@ -401,6 +445,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 
     /* mat4 (4x4 = 16 floats) */
     loc = glGetUniformLocation(p, "u_m4");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix4fv(p, loc, 1, GL_FALSE, vals);
@@ -413,6 +458,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 
     /* mat2x3 (2 cols, 3 rows = 6 floats) */
     loc = glGetUniformLocation(p, "u_m23");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix2x3fv(p, loc, 1, GL_FALSE, vals);
@@ -424,6 +470,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 
     /* mat3x2 (3 cols, 2 rows = 6 floats) */
     loc = glGetUniformLocation(p, "u_m32");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix3x2fv(p, loc, 1, GL_FALSE, vals);
@@ -435,6 +482,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 
     /* mat2x4 (2 cols, 4 rows = 8 floats) */
     loc = glGetUniformLocation(p, "u_m24");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix2x4fv(p, loc, 1, GL_FALSE, vals);
@@ -446,6 +494,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 
     /* mat4x2 (4 cols, 2 rows = 8 floats) */
     loc = glGetUniformLocation(p, "u_m42");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix4x2fv(p, loc, 1, GL_FALSE, vals);
@@ -457,6 +506,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 
     /* mat3x4 (3 cols, 4 rows = 12 floats) */
     loc = glGetUniformLocation(p, "u_m34");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix3x4fv(p, loc, 1, GL_FALSE, vals);
@@ -468,6 +518,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 
     /* mat4x3 (4 cols, 3 rows = 12 floats) */
     loc = glGetUniformLocation(p, "u_m43");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix4x3fv(p, loc, 1, GL_FALSE, vals);
@@ -485,7 +536,7 @@ GPU_TEST(program_uniform, matrix_float_roundtrip)
 GPU_TEST(program_uniform, matrix_double_roundtrip)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
     GLint loc;
     GLdouble got[16] = {0};
     const GLdouble vals[16] = {
@@ -498,8 +549,9 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
     CHECK_MSG(p != 0, "link: %s", err);
     if (!p) return;
 
-    /* mat2 */
-    loc = glGetUniformLocation(p, "u_m2");
+    /* dmat2 */
+    loc = glGetUniformLocation(p, "u_dm2");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix2dv(p, loc, 1, GL_FALSE, vals);
@@ -509,8 +561,9 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
         CHECK_NEAR(got[3], 4.0, 1e-5);
     }
 
-    /* mat3 */
-    loc = glGetUniformLocation(p, "u_m3");
+    /* dmat3 */
+    loc = glGetUniformLocation(p, "u_dm3");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix3dv(p, loc, 1, GL_FALSE, vals);
@@ -520,8 +573,9 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
         CHECK_NEAR(got[8], 9.0, 1e-5);
     }
 
-    /* mat4 */
-    loc = glGetUniformLocation(p, "u_m4");
+    /* dmat4 */
+    loc = glGetUniformLocation(p, "u_dm4");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix4dv(p, loc, 1, GL_FALSE, vals);
@@ -531,8 +585,9 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
         CHECK_NEAR(got[15], 16.0, 1e-5);
     }
 
-    /* mat2x3 */
-    loc = glGetUniformLocation(p, "u_m23");
+    /* dmat2x3 */
+    loc = glGetUniformLocation(p, "u_dm23");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix2x3dv(p, loc, 1, GL_FALSE, vals);
@@ -542,8 +597,9 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
         CHECK_NEAR(got[5], 6.0, 1e-5);
     }
 
-    /* mat3x2 */
-    loc = glGetUniformLocation(p, "u_m32");
+    /* dmat3x2 */
+    loc = glGetUniformLocation(p, "u_dm32");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix3x2dv(p, loc, 1, GL_FALSE, vals);
@@ -553,8 +609,9 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
         CHECK_NEAR(got[5], 6.0, 1e-5);
     }
 
-    /* mat2x4 */
-    loc = glGetUniformLocation(p, "u_m24");
+    /* dmat2x4 */
+    loc = glGetUniformLocation(p, "u_dm24");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix2x4dv(p, loc, 1, GL_FALSE, vals);
@@ -564,8 +621,9 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
         CHECK_NEAR(got[7], 8.0, 1e-5);
     }
 
-    /* mat4x2 */
-    loc = glGetUniformLocation(p, "u_m42");
+    /* dmat4x2 */
+    loc = glGetUniformLocation(p, "u_dm42");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix4x2dv(p, loc, 1, GL_FALSE, vals);
@@ -575,8 +633,9 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
         CHECK_NEAR(got[7], 8.0, 1e-5);
     }
 
-    /* mat3x4 */
-    loc = glGetUniformLocation(p, "u_m34");
+    /* dmat3x4 */
+    loc = glGetUniformLocation(p, "u_dm34");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix3x4dv(p, loc, 1, GL_FALSE, vals);
@@ -586,8 +645,9 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
         CHECK_NEAR(got[11], 12.0, 1e-5);
     }
 
-    /* mat4x3 */
-    loc = glGetUniformLocation(p, "u_m43");
+    /* dmat4x3 */
+    loc = glGetUniformLocation(p, "u_dm43");
+    CHECK(loc >= 0);
     if (loc >= 0)
     {
         glProgramUniformMatrix4x3dv(p, loc, 1, GL_FALSE, vals);
@@ -605,7 +665,7 @@ GPU_TEST(program_uniform, matrix_double_roundtrip)
 GPU_TEST(program_uniform, matrix_transpose)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
     GLint loc;
     GLfloat got[16] = {0};
 
@@ -686,35 +746,32 @@ GPU_TEST(program_uniform, rejects_bad_program)
 GPU_TEST(program_uniform, rejects_negative_count)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
-    GLint loc;
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
 
     CHECK_MSG(p != 0, "link: %s", err);
     if (!p) return;
 
-    loc = glGetUniformLocation(p, "u_f4");
-    if (loc < 0) { glDeleteProgram(p); return; }
-
-    /* The spec says count < 0 generates GL_INVALID_VALUE. */
-    glProgramUniform1fv(p, loc, -1, (const GLfloat[]){0});
+    /* The spec says count < 0 generates GL_INVALID_VALUE. Each setter goes
+       to a uniform it fits, so the count is the only thing wrong. */
+    glProgramUniform1fv(p, glGetUniformLocation(p, "u_f1"), -1, (const GLfloat[]){0});
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniform2fv(p, loc, -1, (const GLfloat[]){0});
+    glProgramUniform2fv(p, glGetUniformLocation(p, "u_f2"), -1, (const GLfloat[]){0});
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniform1iv(p, loc, -1, (const GLint[]){0});
+    glProgramUniform1iv(p, glGetUniformLocation(p, "u_i1"), -1, (const GLint[]){0});
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniform1uiv(p, loc, -1, (const GLuint[]){0});
+    glProgramUniform1uiv(p, glGetUniformLocation(p, "u_ui1"), -1, (const GLuint[]){0});
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniform1dv(p, loc, -1, (const GLdouble[]){0});
+    glProgramUniform1dv(p, glGetUniformLocation(p, "u_d1"), -1, (const GLdouble[]){0});
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniformMatrix4fv(p, loc, -1, GL_FALSE, (const GLfloat[]){0});
+    glProgramUniformMatrix4fv(p, glGetUniformLocation(p, "u_m4"), -1, GL_FALSE, (const GLfloat[]){0});
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniformMatrix4dv(p, loc, -1, GL_FALSE, (const GLdouble[]){0});
+    glProgramUniformMatrix4dv(p, glGetUniformLocation(p, "u_dm4"), -1, GL_FALSE, (const GLdouble[]){0});
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glDeleteProgram(p);
@@ -723,32 +780,28 @@ GPU_TEST(program_uniform, rejects_negative_count)
 GPU_TEST(program_uniform, rejects_null_value)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
-    GLint loc;
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
 
     CHECK_MSG(p != 0, "link: %s", err);
     if (!p) return;
 
-    loc = glGetUniformLocation(p, "u_f4");
-    if (loc < 0) { glDeleteProgram(p); return; }
-
     /* The v-forms check value != NULL and generate GL_INVALID_VALUE. */
-    glProgramUniform1fv(p, loc, 1, NULL);
+    glProgramUniform1fv(p, glGetUniformLocation(p, "u_f1"), 1, NULL);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniform1iv(p, loc, 1, NULL);
+    glProgramUniform1iv(p, glGetUniformLocation(p, "u_i1"), 1, NULL);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniform1uiv(p, loc, 1, NULL);
+    glProgramUniform1uiv(p, glGetUniformLocation(p, "u_ui1"), 1, NULL);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniform1dv(p, loc, 1, NULL);
+    glProgramUniform1dv(p, glGetUniformLocation(p, "u_d1"), 1, NULL);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniformMatrix4fv(p, loc, 1, GL_FALSE, NULL);
+    glProgramUniformMatrix4fv(p, glGetUniformLocation(p, "u_m4"), 1, GL_FALSE, NULL);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glProgramUniformMatrix4dv(p, loc, 1, GL_FALSE, NULL);
+    glProgramUniformMatrix4dv(p, glGetUniformLocation(p, "u_dm4"), 1, GL_FALSE, NULL);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glDeleteProgram(p);
@@ -774,7 +827,7 @@ GPU_TEST(program_uniform, rejects_unlinked_program)
 GPU_TEST(program_uniform, location_minus_one_is_silent)
 {
     char err[1024] = {0};
-    GLuint p = mgl_build_program(VS_UNI, FS_BLANK, err, sizeof err);
+    GLuint p = mgl_build_program(VS_UNI, FS_DOUBLES, err, sizeof err);
 
     CHECK_MSG(p != 0, "link: %s", err);
     if (!p) return;

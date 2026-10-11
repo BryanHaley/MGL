@@ -950,7 +950,7 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
     {
         tex = findTexture(ctx, texture);
 
-        ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(tex, GL_INVALID_VALUE);
 
         // a buffer texture is not an image a framebuffer can hold
         ERROR_CHECK_RETURN(tex->target != GL_TEXTURE_BUFFER, GL_INVALID_OPERATION);
@@ -1183,6 +1183,9 @@ void mglFramebufferTextureLayer(GLMContext ctx, GLenum target, GLenum attachment
 {
     // the layer has to fit the kind of texture it names
     Texture *t = texture ? findTexture(ctx, texture) : NULL;
+
+    // here a name that is not a texture is the wrong object, not a bad value
+    ERROR_CHECK_RETURN(texture == 0 || t, GL_INVALID_OPERATION);
 
     if (t)
     {

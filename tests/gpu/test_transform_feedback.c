@@ -967,3 +967,455 @@ GPU_TEST(transform_feedback, interface_reports_the_recorded_layout)
         checkFourFloatLayout(prog, "an evaluation shader");
     glDeleteProgram(prog);
 }
+
+// Indexed strips, loops and fans are recorded as separate primitives in the
+// order GL assembles them. A loop and a fan used to record only the vertices
+// once each, in index order.
+GPU_TEST(transform_feedback, indexed_strips_loops_and_fans_are_recorded_whole)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "out float id;\n"
+        "void main() { id = float(gl_VertexID); gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const char *varyings[] = { "id" };
+    static const struct {
+        GLenum mode, record;
+        GLuint idx[4];
+        int n;
+        float want[8];
+    } cases[] = {
+        { GL_LINE_STRIP,     GL_LINES,     {0, 1, 3, 2}, 6, {0, 1, 1, 3, 3, 2} },
+        { GL_LINE_LOOP,      GL_LINES,     {0, 1, 3, 2}, 8, {0, 1, 1, 3, 3, 2, 2, 0} },
+        { GL_TRIANGLE_STRIP, GL_TRIANGLES, {0, 1, 2, 3}, 6, {0, 1, 2, 2, 1, 3} },
+        { GL_TRIANGLE_FAN,   GL_TRIANGLES, {2, 0, 1, 3}, 6, {2, 0, 1, 2, 1, 3} },
+    };
+    char log[1024] = "";
+    GLuint prog = linkRecording(vs, fs, varyings, 1, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    GLuint vao, buf;
+
+    CHECK_MSG(prog != 0, "program did not link: %s", log);
+    if (!prog)
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glEnable(GL_RASTERIZER_DISCARD);
+    buf = recordingBuffer(0, 64);
+
+    for (int c = 0; c < 4; c++)
+    {
+        float got[8] = {0};
+
+        glBeginTransformFeedback(cases[c].record);
+        glDrawElements(cases[c].mode, 4, GL_UNSIGNED_INT, cases[c].idx);
+        glEndTransformFeedback();
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+        glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, cases[c].n * sizeof(float), got);
+
+        for (int i = 0; i < cases[c].n; i++)
+            CHECK_MSG(got[i] == cases[c].want[i], "mode 0x%x vertex %d recorded %g, want %g",
+                      cases[c].mode, i, got[i], cases[c].want[i]);
+    }
+
+    glDisable(GL_RASTERIZER_DISCARD);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &buf);
+    glDeleteVertexArrays(1, &vao);
+}
+
+// With the raster off a program that has a fragment shader draws nothing, and
+// what it records still arrives. It used to draw regardless.
+GPU_TEST(transform_feedback, rasterizing_off_draws_nothing_but_still_records)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "out float id;\n"
+        "void main() {\n"
+        "    id = float(gl_VertexID) + 1.0;\n"
+        "    vec2 p[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));\n"
+        "    gl_Position = vec4(p[gl_VertexID], 0.0, 1.0);\n"
+        "}\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const char *varyings[] = { "id" };
+    char log[1024] = "";
+    GLuint prog = linkRecording(vs, fs, varyings, 1, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    MGLTestTarget t;
+    GLuint vao, buf;
+    GLubyte px[4] = {0};
+    float got[3] = {0};
+
+    CHECK_MSG(prog != 0, "program did not link: %s", log);
+    if (!prog || !mgl_target_create(&t, 4, 4, GL_RGBA8, 0))
+        return;
+
+    // what was linked counts, not what is still attached
+    {
+        GLuint sh[4];
+        GLsizei n = 0;
+
+        glGetAttachedShaders(prog, 4, &n, sh);
+
+        for (GLsizei i = 0; i < n; i++)
+            glDetachShader(prog, sh[i]);
+    }
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 4, 4);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    buf = recordingBuffer(0, 64);
+
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_TRIANGLES);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_MSG(px[0] == 0 && px[3] == 0, "the raster was off, yet the target reads %u %u %u %u",
+              px[0], px[1], px[2], px[3]);
+
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+    CHECK_MSG(got[0] == 1 && got[1] == 2 && got[2] == 3, "recorded %g %g %g, want 1 2 3", got[0], got[1], got[2]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &buf);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&t);
+}
+
+// The indexed feedback buffer bindings belong to the feedback object. Each of
+// two objects resumed later records on into its own buffer, not into
+// whichever was bound last.
+GPU_TEST(transform_feedback, each_object_keeps_its_own_buffers)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "uniform float tag;\n"
+        "out float id;\n"
+        "void main() { id = tag; gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const char *varyings[] = { "id" };
+    char log[1024] = "";
+    GLuint prog = linkRecording(vs, fs, varyings, 1, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    GLuint xfb[2], bo[2], vao;
+
+    CHECK_MSG(prog != 0, "program did not link: %s", log);
+    if (!prog)
+        return;
+
+    glGenTransformFeedbacks(2, xfb);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glEnable(GL_RASTERIZER_DISCARD);
+
+    for (int j = 0; j < 2; j++)
+    {
+        glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb[j]);
+        bo[j] = recordingBuffer(0, 64);
+        glUniform1f(glGetUniformLocation(prog, "tag"), (float)(j + 1));
+        glBeginTransformFeedback(GL_POINTS);
+        glDrawArrays(GL_POINTS, 0, 1);
+        glPauseTransformFeedback();
+    }
+
+    for (int j = 0; j < 2; j++)
+    {
+        glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb[j]);
+        glUniform1f(glGetUniformLocation(prog, "tag"), (float)(j + 1));
+        glResumeTransformFeedback();
+        glDrawArrays(GL_POINTS, 0, 1);
+        glEndTransformFeedback();
+    }
+
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    for (int j = 0; j < 2; j++)
+    {
+        float got[2] = {0};
+        GLint bound = -1;
+
+        glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb[j]);
+        glGetIntegeri_v(GL_TRANSFORM_FEEDBACK_BUFFER_BINDING, 0, &bound);
+        CHECK_EQ_INT(bound, (GLint)bo[j]);
+
+        glBindBuffer(GL_ARRAY_BUFFER, bo[j]);
+        glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof got, got);
+        CHECK_MSG(got[0] == j + 1 && got[1] == j + 1, "object %d recorded %g %g, want %d twice",
+                  j, got[0], got[1], j + 1);
+    }
+
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(2, bo);
+    glDeleteTransformFeedbacks(2, xfb);
+    glDeleteVertexArrays(1, &vao);
+}
+
+// Drawing from what was just recorded, recording again into the other buffer:
+// each draw reads the last one's output as its vertices. With nothing read
+// back between draws, the reads used to run ahead of the writes.
+GPU_TEST(transform_feedback, a_feedback_loop_sees_each_capture)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec4 position;\n"
+        "void main() { gl_Position = position * 2.0; }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const char *varyings[] = { "gl_Position" };
+    static const float init[4] = { 1, 2, 3, 4 };
+    char log[1024] = "";
+    GLuint prog = linkRecording(vs, fs, varyings, 1, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    GLuint xfb, bo[2], vao[2];
+    float got[4] = {0};
+    int src = 0;
+
+    CHECK_MSG(prog != 0, "program did not link: %s", log);
+    if (!prog)
+        return;
+
+    glUseProgram(prog);
+    glGenTransformFeedbacks(1, &xfb);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb);
+    glGenBuffers(2, bo);
+    glBindBuffer(GL_ARRAY_BUFFER, bo[0]);
+    glBufferData(GL_ARRAY_BUFFER, 16, init, GL_DYNAMIC_COPY);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, bo[1]);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 16, NULL, GL_DYNAMIC_COPY);
+    glGenVertexArrays(2, vao);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glBindVertexArray(vao[i]);
+        glBindBuffer(GL_ARRAY_BUFFER, bo[i]);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, NULL);
+        glEnableVertexAttribArray(0);
+    }
+
+    glBindVertexArray(vao[0]);
+    glEnable(GL_RASTERIZER_DISCARD);
+
+    for (int d = 0; d < 3; d++)
+    {
+        if (d)
+        {
+            glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, bo[src]);
+            src = 1 - src;
+            glBindVertexArray(vao[src]);
+        }
+
+        glBeginTransformFeedback(GL_POINTS);
+
+        if (d == 0)
+            glDrawArrays(GL_POINTS, 0, 1);
+        else
+            glDrawTransformFeedback(GL_POINTS, xfb);
+
+        glEndTransformFeedback();
+    }
+
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+    CHECK_MSG(got[0] == 8 && got[1] == 16 && got[2] == 24 && got[3] == 32,
+              "after three passes the buffer holds %g %g %g %g, want 8 16 24 32", got[0], got[1], got[2], got[3]);
+
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(2, bo);
+    glDeleteVertexArrays(2, vao);
+    glDeleteTransformFeedbacks(1, &xfb);
+}
+
+// An array of doubles read as floats, sharing its binding with a float
+// attribute, and doubles read as doubles from fewer components than the
+// shader declares. Metal has neither format; the first used to fail the draw.
+GPU_TEST(transform_feedback, double_arrays_feed_float_and_double_inputs)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec4 f;\n"
+        "layout(location = 1) in vec4 g;\n"
+        "layout(location = 2) in dvec4 d;\n"
+        "out vec4 of;\n"
+        "out vec4 og;\n"
+        "out vec4 od;\n"
+        "void main() { of = f; og = g; od = vec4(d); }\n";
+    static const char *varyings[] = { "of", "og", "od" };
+    // per vertex: 4 doubles, 4 floats, then 2 more doubles
+    struct { GLdouble d[4]; GLfloat f[4]; GLdouble e[2]; } data[2] = {
+        { { 1, 2, 3, 4 }, { 5, 6, 7, 8 }, { 20, 21 } },
+        { { 9, 10, 11, 12 }, { 13, 14, 15, 16 }, { 22, 23 } },
+    };
+    char log[1024] = "";
+    GLuint prog = glCreateProgram(), v = compileOne(GL_VERTEX_SHADER, vs);
+    GLuint vao, vbo, buf;
+    GLint ok = 0;
+    float got[24] = {0};
+
+    glAttachShader(prog, v);
+    glTransformFeedbackVaryings(prog, 3, varyings, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "program did not link: %s", log);
+    if (!ok)
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof data, data, GL_STATIC_DRAW);
+    glVertexAttribFormat(0, 4, GL_DOUBLE, GL_FALSE, 0);
+    glVertexAttribFormat(1, 4, GL_FLOAT, GL_FALSE, 32);
+    glVertexAttribLFormat(2, 2, GL_DOUBLE, 48);
+
+    for (GLuint a = 0; a < 3; a++)
+    {
+        glVertexAttribBinding(a, 0);
+        glEnableVertexAttribArray(a);
+    }
+
+    glBindVertexBuffer(0, vbo, 0, sizeof data[0]);
+
+    glUseProgram(prog);
+    buf = recordingBuffer(0, sizeof got);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, 2);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+
+    static const float want[24] = { 1, 2, 3, 4,  5, 6, 7, 8,  20, 21, 0, 1,
+                                    9, 10, 11, 12,  13, 14, 15, 16,  22, 23, 0, 1 };
+
+    for (int i = 0; i < 24; i++)
+        CHECK_MSG(got[i] == want[i], "value %d recorded %g, want %g", i, got[i], want[i]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteShader(v);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &buf);
+    glDeleteVertexArrays(1, &vao);
+}
+
+// Formats Metal has no vertex format for, read as floats: 32-bit integers,
+// normalised or not, the packed ten-bit format unnormalised, and bytes in
+// BGRA order. The draw used to fail or read the raw bits.
+GPU_TEST(transform_feedback, vertex_formats_metal_lacks_are_converted)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec4 a;\n"
+        "layout(location = 1) in vec4 b;\n"
+        "layout(location = 2) in vec4 c;\n"
+        "layout(location = 3) in vec4 d;\n"
+        "out vec4 oa;\n"
+        "out vec4 ob;\n"
+        "out vec4 oc;\n"
+        "out vec4 od;\n"
+        "void main() { oa = a; ob = b; oc = c; od = d; }\n";
+    static const char *varyings[] = { "oa", "ob", "oc", "od" };
+    struct {
+        GLint i[4];
+        GLuint u[4];
+        GLuint packed;
+        GLubyte bgra[4];
+    } data = {
+        { -3, 5, 7, -9 },
+        { 0, 0xffffffffu, 0, 0xffffffffu },
+        1u | (2u << 10) | (3u << 20) | (1u << 30),
+        { 0, 0, 255, 255 },
+    };
+    char log[1024] = "";
+    GLuint prog = glCreateProgram(), v = compileOne(GL_VERTEX_SHADER, vs);
+    GLuint vao, vbo, buf;
+    GLint ok = 0;
+    float got[16] = {0};
+
+    glAttachShader(prog, v);
+    glTransformFeedbackVaryings(prog, 4, varyings, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "program did not link: %s", log);
+    if (!ok)
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof data, &data, GL_STATIC_DRAW);
+    glVertexAttribFormat(0, 4, GL_INT, GL_FALSE, 0);
+    glVertexAttribFormat(1, 4, GL_UNSIGNED_INT, GL_TRUE, 16);
+    glVertexAttribFormat(2, 4, GL_UNSIGNED_INT_2_10_10_10_REV, GL_FALSE, 32);
+    glVertexAttribFormat(3, GL_BGRA, GL_UNSIGNED_BYTE, GL_TRUE, 36);
+
+    for (GLuint a = 0; a < 4; a++)
+    {
+        glVertexAttribBinding(a, 0);
+        glEnableVertexAttribArray(a);
+    }
+
+    glBindVertexBuffer(0, vbo, 0, sizeof data);
+
+    glUseProgram(prog);
+    buf = recordingBuffer(0, sizeof got);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+
+    static const float want[16] = { -3, 5, 7, -9,  0, 1, 0, 1,  1, 2, 3, 1,  1, 0, 0, 1 };
+
+    for (int i = 0; i < 16; i++)
+        CHECK_MSG(got[i] == want[i], "value %d recorded %g, want %g", i, got[i], want[i]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteShader(v);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &buf);
+    glDeleteVertexArrays(1, &vao);
+}

@@ -795,3 +795,20 @@ GPU_TEST(texture_storage, sub_image_keeps_what_was_drawn)
     glDeleteFramebuffers(1, &fb);
     glDeleteTextures(1, &tex);
 }
+
+// A mip chain given an unsized format at every level is one format. Level 0
+// stored GL_RGB as GL_RGB8, so every later level looked different and was
+// refused.
+GPU_TEST(texture_storage, unsized_levels_build_one_chain)
+{
+    GLuint tex;
+    GLubyte px[16 * 16 * 3] = { 0 };
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    for (GLint l = 0, s = 16; s > 0; l++, s >>= 1)
+        glTexImage2D(GL_TEXTURE_2D, l, GL_RGB, s, s, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteTextures(1, &tex);
+}

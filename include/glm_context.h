@@ -261,7 +261,10 @@ typedef struct BufferBase_t {
 
 // plain uniforms are stored by their layout location, which GL lets run well
 // past the number of buffer binding points
-#define MAX_UNIFORM_LOCATIONS   1024
+// what GL_MAX_UNIFORM_LOCATIONS reports; the table holds more, and MGL's
+// own uniforms live past it so they never take one the application can use
+#define MGL_GL_UNIFORM_LOCATIONS 1024
+#define MAX_UNIFORM_LOCATIONS   (MGL_GL_UNIFORM_LOCATIONS + 128)
 typedef struct UniformConstants_t {
     BufferBaseTarget    buffers[MAX_UNIFORM_LOCATIONS];
     // 4 for float/int uniforms, 8 for double ones. Without this a readback
@@ -354,6 +357,8 @@ typedef struct Texture_t {
 
     // base level params
     GLenum internalformat;
+    // asked for as GL_COMPRESSED_RGBA and the like, though stored plain
+    GLboolean generic_compressed;
     GLuint width;
     GLuint height;
     GLuint depth;
@@ -386,6 +391,11 @@ typedef struct Texture_t {
     GLuint  view_count;
     GLboolean deleted;
 } Texture;
+
+// GL 4.6 section 8.17; textures.c
+bool mglTextureSamplingComplete(Texture *tex, const TextureParameter *sampler);
+bool mglTexParamTarget(GLenum target);
+bool mglImageUnitValid(Texture *tex, GLuint level);
 
 typedef struct TextureUnit_t {
     Texture *textures[_MAX_TEXTURE_TYPES];
@@ -604,6 +614,8 @@ typedef struct CaptureInfo_t {
     // where the rewrite's own uniforms and buffers ended up
     GLint   on_loc, base_loc, count_loc;
     GLint   buffer_slot[MGL_XFB_MAX_BUFFERS];
+    // behind a geometry stage, the vertex stream each buffer records
+    GLint   buffer_stream[MGL_XFB_MAX_BUFFERS];
 } CaptureInfo;
 
 bool mglBuildTransformCapture(const char *src, void *shader, char *const *varyings, GLsizei count,
@@ -650,12 +662,15 @@ typedef struct GeometryInfo_t {
     char   out_types[32][32];
     GLint  out_offsets[32];
     GLint  out_arrays[32];          // elements, 0 when not an array
+    GLint  out_streams[32];         // the vertex stream each one goes to
 } GeometryInfo;
 
 // Transform feedback behind a geometry stage copies words straight out of the
 // emitted vertices: three numbers per word, where from, which buffer, where to.
 int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
                      GLuint *table, int max_words);
+// the vertex stream the output a captured item names goes to
+int mglGsItemStream(const GeometryInfo *gi, const MglXfbItem *item);
 
 // Names MGL generates for its own use, which GL must not see and the buffer
 // mapping must not try to find a GL object for.
@@ -699,6 +714,7 @@ typedef struct SubroutineInfo_t {
     GLuint   fn_count;
     char   **uniform_names;      // every subroutine uniform in this stage
     GLuint  *uniform_array_size;
+    char   **uniform_dims;       // each one's array dimensions as written, "[2][3]"
     GLuint  *uniform_compatible; // how many functions each one accepts
     GLuint  *uniform_type;       // which subroutine type each uniform has
     GLint   *uniform_location;   // layout(location), -1 when none was given
@@ -709,6 +725,9 @@ typedef struct SubroutineInfo_t {
 } SubroutineInfo;
 
 char *mglRewriteSubroutines(const char *src, SubroutineInfo *info);
+// opaque_structs.c: samplers held in uniform structs become uniforms of their own
+char *mglFlattenOpaqueStructs(const char *src);
+bool mglOpaqueStructUniformName(const char *gl_name, char *out, size_t size);
 void  mglForgetBufferTexture(GLuint texture);
 void  mglForgetObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr);
 void  mglForgetContextLabels(GLMContext ctx);
@@ -716,6 +735,7 @@ void  mtlReleaseRetained(void *obj);
 void  mglSweepRetiredTextures(GLMContext ctx);
 void  mglSweepRetiredRenderbuffers(GLMContext ctx);
 void  mglFreeTextureObject(GLMContext ctx, Texture *tex);
+bool  mglBufferTextureLevelParam(GLMContext ctx, const Texture *tex, GLenum pname, GLint *out);
 bool  mglBufferTextureSource(GLMContext ctx, const Texture *tex, Buffer **buf,
                              GLintptr *offset, GLsizeiptr *size);
 bool  mglSubroutineCompatible(const SubroutineInfo *info, GLuint uniform, GLuint fn);
@@ -816,6 +836,8 @@ typedef struct SpirvResource_t {
     GLuint  location;
     GLboolean explicit_location;    // layout(location) gave it
     GLuint  msl_index;      // the [[buffer(n)]] / [[texture(n)]] slot SPIRV-Cross gave it
+    // SPIRV-Cross gave it none, so msl_index is only its binding, a guess
+    GLboolean msl_guess;
     GLuint  msl_sampler_index;  // the [[sampler(n)]] slot, for a combined sampler
     GLenum  gl_type;        // GL_FLOAT_VEC4 and friends, recorded at link time
     GLint   array_size;     // 1 unless the uniform is an array; every element of an array of arrays
@@ -842,6 +864,8 @@ typedef struct SpirvResource_t {
     // the shader does atomics on this image, which Metal allows only on the
     // texture itself, never through a view of another format
     GLboolean atomic;
+    // an atomic counter uniform: the index of the buffer it lives in
+    GLint   atomic_buffer;
 } SpirvResource;
 
 static inline GLint mglResourceUnit(const SpirvResource *res, GLint element)
@@ -870,6 +894,9 @@ typedef struct BufferMap_t {
     // a stride that still has to cover the attribute
     GLuint      layout_stride;
     GLubyte     constant_step;
+    // the attribute is in a format Metal cannot read, so the slot is fed a
+    // float4 copy of it, 16 bytes an element
+    GLubyte     converted;
     // which GL buffer kind this slot came from. A shader can write a storage
     // buffer, so it must be a real MTLBuffer; a uniform can go through setBytes.
     GLubyte     gl_buffer_type;
@@ -890,6 +917,8 @@ typedef struct Program_t {
     GLboolean delete_status;
     Shader *shader_slots[_MAX_SHADER_TYPES];
     glslang_program_t *linked_glsl_program;
+    // a link has succeeded at least once, so there is something to run
+    GLboolean executable;
     Spirv spirv[_MAX_SHADER_TYPES];
     // indexed by the SPIRV-Cross resource enum, whose highest value has grown
     // over time; sized to cover it rather than to MGL's own shorter list
@@ -898,6 +927,8 @@ typedef struct Program_t {
     // the uniforms declared inside uniform blocks, which GL lists as active
     // uniforms in their own right
     SpirvResourceList block_uniforms[_MAX_SHADER_TYPES];
+    // atomic counters, which SPIR-V folds into one buffer per binding
+    SpirvResourceList atomic_uniforms;
     struct {
         unsigned x, y, z;
     } local_workgroup_size;
@@ -950,6 +981,10 @@ typedef struct Program_t {
     // so depth and stencil are drawn when the raster is on
     Spirv vs_raster;
     GLboolean building_vs_raster;
+    // and the opposite: one returning nothing, for drawing with the raster
+    // off when there is a fragment shader, made the first time it is needed
+    Spirv vs_noraster;
+    GLboolean building_vs_noraster;
     // GL's view of the program's resources, for the interface queries
     MglResourceTable resources;
     // glBindAttribLocation and glBindFragDataLocation(Indexed), applied at link
@@ -1070,6 +1105,10 @@ typedef struct TransformFeedback_t {
     GLuint vertices_recorded;
     // what the last finished capture came to, which is what a replay draws
     GLuint vertices_captured;
+    // the same for the geometry stage's other vertex streams; stream zero is
+    // the two above
+    GLuint stream_recorded[4];
+    GLuint stream_captured[4];
     GLboolean ever_ended;
     // glGen only reserves the name; the object itself starts existing when
     // something binds it, or when glCreate makes it outright
@@ -1202,10 +1241,10 @@ static inline bool mglIsDriverUniform(const char *name)
         !strcmp(name, MGL_INDEXED_DRAW_NAME))
         return true;
 
-#ifdef MGL_COMPAT_PROFILE
-    if (!strcmp(name, MGL_ALPHA_FUNC_NAME) || !strcmp(name, MGL_ALPHA_REF_NAME))
+    // the alpha test and the geometry rewrite add their own, in any profile
+    if (!strcmp(name, MGL_ALPHA_FUNC_NAME) || !strcmp(name, MGL_ALPHA_REF_NAME) ||
+        !strncmp(name, "mglGs", 5))
         return true;
-#endif
 
     return false;
 }
@@ -1518,6 +1557,9 @@ typedef struct GLMContextRec_t {
     // A shader that will not compile is reported through COMPILE_STATUS and
     // the info log, not as a GL error. Raised while a compile or link runs.
     GLuint      error_suppress;
+    // which glUniform* call is writing, so the type can be checked; zero for
+    // the driver's own writes
+    GLuint      uniform_setter;
 
     PixelFormat pixel_format;
     PixelFormat depth_format;

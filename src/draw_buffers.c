@@ -379,6 +379,27 @@ bool validate_program(GLMContext ctx, GLenum mode)
         !mode_feeds_gs(prog->geom.in_primitive, mode))
         return false;
 
+    // feedback that is recording takes only the kind of primitive it began
+    // with, as the last stage before the rasteriser makes them
+    TransformFeedback *xfb = ctx->state.transform_feedback;
+
+    if (xfb && xfb->active && !xfb->paused)
+    {
+        GLenum made = mode;
+
+        if (mglProgramHasGeometry(prog))
+            made = prog->geom.out_primitive;
+        else if (prog->tess.active)
+            made = prog->tess.gl_points ? GL_POINTS : prog->tess.gl_domain == 2 ? GL_LINES : GL_TRIANGLES;
+
+        GLenum kind = (made == GL_POINTS) ? GL_POINTS :
+                      (made == GL_LINES || made == GL_LINE_STRIP || made == GL_LINE_LOOP ||
+                       made == GL_LINES_ADJACENCY || made == GL_LINE_STRIP_ADJACENCY) ? GL_LINES : GL_TRIANGLES;
+
+        if (kind != xfb->primitive_mode)
+            return false;
+    }
+
     return true;
 }
 

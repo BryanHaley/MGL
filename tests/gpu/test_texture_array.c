@@ -357,3 +357,69 @@ GPU_TEST(texture_array, an_array_of_arrays_of_samplers)
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
 }
+
+// A sampler held in a uniform struct, set through its GL name. Metal cannot
+// keep a texture in a constant struct; the shader would not compile.
+GPU_TEST(texture_array, a_sampler_inside_a_uniform_struct)
+{
+    static const char *vs =
+        "#version 330\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 330\n"
+        "struct T { sampler2D tex; float scale; };\n"
+        "struct S { float a; T t; };\n"
+        "uniform S s[2];\n"
+        "out vec4 o;\n"
+        "void main() { o = texture(s[1].t.tex, vec2(0.5)) * s[1].t.scale + vec4(s[0].a); }\n";
+    static const GLfloat quad[] = { -1, -1, 3, -1, -1, 3 };
+    static const GLubyte texel[2][4] = { { 0, 0, 255, 255 }, { 255, 0, 0, 255 } };
+    char log[2048] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log);
+    GLuint tex[2], vao, vbo;
+    MGLTestTarget t;
+    GLubyte px[4] = {0};
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    if (!prog || !mgl_target_create(&t, 4, 4, GL_RGBA8, 0))
+        return;
+
+    glGenTextures(2, tex);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texel[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    }
+
+    glActiveTexture(GL_TEXTURE0);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "s[0].t.tex"), 0);
+    glUniform1i(glGetUniformLocation(prog, "s[1].t.tex"), 1);
+    glUniform1f(glGetUniformLocation(prog, "s[1].t.scale"), 1.0f);
+    glUniform1f(glGetUniformLocation(prog, "s[0].a"), 0.0f);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 4, 4);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_MSG(px[0] == 255 && px[2] == 0, "read %u %u %u, want the red texture from unit 1", px[0], px[1], px[2]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteTextures(2, tex);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+}

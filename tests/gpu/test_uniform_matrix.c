@@ -8,7 +8,8 @@
 #include "mgl_test.h"
 #include "harness.h"
 
-/* A vertex shader with every matrix type at known, non-overlapping locations.
+/* A vertex shader with every float and double matrix type at known,
+   non-overlapping locations. Each one is read, or it would have no location.
    The fragment shader is a pass-through so the program links. */
 static const char *VS_MATS =
     "#version 460 core\n"
@@ -22,7 +23,22 @@ static const char *VS_MATS =
     "layout(location = 15) uniform mat4x2 u_m42;\n"
     "layout(location = 17) uniform mat3x4 u_m34;\n"
     "layout(location = 20) uniform mat4x3 u_m43;\n"
-    "void main() { gl_Position = vec4(pos, 0.0, 1.0); }\n";
+    "layout(location = 30) uniform dmat4 u_dm4;\n"
+    "layout(location = 34) uniform dmat3 u_dm3;\n"
+    "layout(location = 37) uniform dmat2 u_dm2;\n"
+    "layout(location = 39) uniform dmat2x3 u_dm23;\n"
+    "layout(location = 41) uniform dmat3x2 u_dm32;\n"
+    "layout(location = 43) uniform dmat2x4 u_dm24;\n"
+    "layout(location = 45) uniform dmat4x2 u_dm42;\n"
+    "layout(location = 47) uniform dmat3x4 u_dm34;\n"
+    "layout(location = 50) uniform dmat4x3 u_dm43;\n"
+    "void main() { gl_Position = vec4(pos, 0.0, 1.0)\n"
+    "  + u_m4[0] + vec4(u_m3[0], 0) + vec4(u_m2[0], 0, 0)\n"
+    "  + vec4(u_m23[0], 0) + vec4(u_m32[0], 0, 0) + u_m24[0]\n"
+    "  + vec4(u_m42[0], 0, 0) + u_m34[0] + vec4(u_m43[0], 0)\n"
+    "  + vec4(u_dm4[0]) + vec4(vec3(u_dm3[0]), 0) + vec4(vec2(u_dm2[0]), 0, 0)\n"
+    "  + vec4(vec3(u_dm23[0]), 0) + vec4(vec2(u_dm32[0]), 0, 0) + vec4(u_dm24[0])\n"
+    "  + vec4(vec2(u_dm42[0]), 0, 0) + vec4(u_dm34[0]) + vec4(vec3(u_dm43[0]), 0); }\n";
 
 static const char *FS_PASSTHRU =
     "#version 460 core\n"
@@ -215,37 +231,37 @@ GPU_TEST(uniform_matrix, dv_square)
 
     glUseProgram(p);
 
-    /* mat2dv — 4 doubles at location 7 */
+    /* mat2dv — 4 doubles at location 37 */
     {
         GLdouble in[4] = { 1.5, 2.5, 3.5, 4.5 };
         GLdouble out[4] = { 0 };
-        glUniformMatrix2dv(7, 1, GL_FALSE, in);
+        glUniformMatrix2dv(37, 1, GL_FALSE, in);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        glGetUniformdv(p, 7, out);
+        glGetUniformdv(p, 37, out);
         CHECK_NEAR(out[0], 1.5, 1e-12);
         CHECK_NEAR(out[3], 4.5, 1e-12);
     }
 
-    /* mat3dv — 9 doubles at location 4 */
+    /* mat3dv — 9 doubles at location 34 */
     {
         GLdouble in[9];
         GLdouble out[9] = { 0 };
         for (int i = 0; i < 9; i++) in[i] = (double)(i + 10);
-        glUniformMatrix3dv(4, 1, GL_FALSE, in);
+        glUniformMatrix3dv(34, 1, GL_FALSE, in);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        glGetUniformdv(p, 4, out);
+        glGetUniformdv(p, 34, out);
         CHECK_NEAR(out[0], 10.0, 1e-12);
         CHECK_NEAR(out[8], 18.0, 1e-12);
     }
 
-    /* mat4dv — 16 doubles at location 0 */
+    /* mat4dv — 16 doubles at location 30 */
     {
         GLdouble in[16];
         GLdouble out[16] = { 0 };
         for (int i = 0; i < 16; i++) in[i] = (double)(i * 3);
-        glUniformMatrix4dv(0, 1, GL_FALSE, in);
+        glUniformMatrix4dv(30, 1, GL_FALSE, in);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        glGetUniformdv(p, 0, out);
+        glGetUniformdv(p, 30, out);
         CHECK_NEAR(out[0],  0.0, 1e-12);
         CHECK_NEAR(out[5],  15.0, 1e-12);
         CHECK_NEAR(out[15], 45.0, 1e-12);
@@ -267,9 +283,9 @@ GPU_TEST(uniform_matrix, dv_nonsquare)
     {
         GLdouble in[6] = { 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
         GLdouble out[6] = { 0 };
-        glUniformMatrix2x3dv(9, 1, GL_FALSE, in);
+        glUniformMatrix2x3dv(39, 1, GL_FALSE, in);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        glGetUniformdv(p, 9, out);
+        glGetUniformdv(p, 39, out);
         CHECK_NEAR(out[0], 1.0, 1e-12);
         CHECK_NEAR(out[5], 6.0, 1e-12);
     }
@@ -278,9 +294,9 @@ GPU_TEST(uniform_matrix, dv_nonsquare)
     {
         GLdouble in[6] = { 10.0, 20.0, 30.0, 40.0, 50.0, 60.0 };
         GLdouble out[6] = { 0 };
-        glUniformMatrix3x2dv(11, 1, GL_FALSE, in);
+        glUniformMatrix3x2dv(41, 1, GL_FALSE, in);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        glGetUniformdv(p, 11, out);
+        glGetUniformdv(p, 41, out);
         CHECK_NEAR(out[0], 10.0, 1e-12);
         CHECK_NEAR(out[5], 60.0, 1e-12);
     }
@@ -289,9 +305,9 @@ GPU_TEST(uniform_matrix, dv_nonsquare)
     {
         GLdouble in[8] = { 1,2,3,4,5,6,7,8 };
         GLdouble out[8] = { 0 };
-        glUniformMatrix2x4dv(13, 1, GL_FALSE, in);
+        glUniformMatrix2x4dv(43, 1, GL_FALSE, in);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        glGetUniformdv(p, 13, out);
+        glGetUniformdv(p, 43, out);
         CHECK_NEAR(out[0], 1.0, 1e-12);
         CHECK_NEAR(out[7], 8.0, 1e-12);
     }
@@ -300,9 +316,9 @@ GPU_TEST(uniform_matrix, dv_nonsquare)
     {
         GLdouble in[8] = { 0,1,2,3,4,5,6,7 };
         GLdouble out[8] = { 0 };
-        glUniformMatrix4x2dv(15, 1, GL_FALSE, in);
+        glUniformMatrix4x2dv(45, 1, GL_FALSE, in);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        glGetUniformdv(p, 15, out);
+        glGetUniformdv(p, 45, out);
         CHECK_NEAR(out[0], 0.0, 1e-12);
         CHECK_NEAR(out[7], 7.0, 1e-12);
     }
@@ -312,9 +328,9 @@ GPU_TEST(uniform_matrix, dv_nonsquare)
         GLdouble in[12];
         GLdouble out[12] = { 0 };
         for (int i = 0; i < 12; i++) in[i] = (double)i;
-        glUniformMatrix3x4dv(17, 1, GL_FALSE, in);
+        glUniformMatrix3x4dv(47, 1, GL_FALSE, in);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        glGetUniformdv(p, 17, out);
+        glGetUniformdv(p, 47, out);
         CHECK_NEAR(out[0],  0.0, 1e-12);
         CHECK_NEAR(out[11], 11.0, 1e-12);
     }
@@ -324,9 +340,9 @@ GPU_TEST(uniform_matrix, dv_nonsquare)
         GLdouble in[12];
         GLdouble out[12] = { 0 };
         for (int i = 0; i < 12; i++) in[i] = (double)(i * 2);
-        glUniformMatrix4x3dv(20, 1, GL_FALSE, in);
+        glUniformMatrix4x3dv(50, 1, GL_FALSE, in);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        glGetUniformdv(p, 20, out);
+        glGetUniformdv(p, 50, out);
         CHECK_NEAR(out[0],  0.0, 1e-12);
         CHECK_NEAR(out[11], 22.0, 1e-12);
     }
@@ -346,9 +362,9 @@ GPU_TEST(uniform_matrix, dv_transpose)
     GLdouble in[4] = { 1.0, 2.0, 3.0, 4.0 };
     GLdouble out[4] = { 0 };
 
-    glUniformMatrix2dv(7, 1, GL_TRUE, in);
+    glUniformMatrix2dv(37, 1, GL_TRUE, in);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-    glGetUniformdv(p, 7, out);
+    glGetUniformdv(p, 37, out);
     CHECK_NEAR(out[0], 1.0, 1e-12);
     CHECK_NEAR(out[1], 3.0, 1e-12);
     CHECK_NEAR(out[2], 2.0, 1e-12);
@@ -363,19 +379,18 @@ GPU_TEST(uniform_matrix, errors)
 {
     GLuint p = build_mat_program();
     GLfloat val[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+    GLdouble dval[4] = { 1.0, 0.0, 0.0, 1.0 };
 
     if (!p) return;
+
+    glUseProgram(p);
 
     /* count < 0 → GL_INVALID_VALUE */
     glUniformMatrix2fv(7, -1, GL_FALSE, val);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    /* no active program → GL_INVALID_OPERATION */
-    glUseProgram(0);
-    glUniformMatrix2fv(7, 1, GL_FALSE, val);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
-
-    glUseProgram(p);
+    glUniformMatrix2dv(37, -1, GL_FALSE, dval);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     /* location = -1 is silently ignored */
     glUniformMatrix4fv(-1, 1, GL_FALSE, val);
@@ -385,18 +400,25 @@ GPU_TEST(uniform_matrix, errors)
     glUniformMatrix4fv(9999, 1, GL_FALSE, val);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
-    glDeleteProgram(p);
+    glUniformMatrix2dv(9999, 1, GL_FALSE, dval);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
-    /* same errors on a dv form */
-    GLdouble dval[4] = { 1.0, 0.0, 0.0, 1.0 };
-    glUniformMatrix2dv(7, -1, GL_FALSE, dval);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
-
+    /* a double setter on a float matrix, and the other way round */
     glUniformMatrix2dv(7, 1, GL_FALSE, dval);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
-    glUniformMatrix2dv(9999, 1, GL_FALSE, dval);
+    glUniformMatrix2fv(37, 1, GL_FALSE, val);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    /* no active program → GL_INVALID_OPERATION */
+    glUseProgram(0);
+    glUniformMatrix2fv(7, 1, GL_FALSE, val);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glUniformMatrix2dv(37, 1, GL_FALSE, dval);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glDeleteProgram(p);
 }
 
 // Metal reads each column of a three-row matrix, and each vec3 of an array,

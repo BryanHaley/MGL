@@ -712,7 +712,7 @@ GPU_TEST(xfb, draw_validates_then_reports_unsupported)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glDrawTransformFeedback(GL_TRIANGLES, 999123);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     // a well formed call still cannot run
     glDrawTransformFeedback(GL_TRIANGLES, t);

@@ -221,3 +221,23 @@ GPU_TEST(clear_texture, errors)
     glDeleteTextures(1, &depth);
     glDeleteTextures(1, &tex);
 }
+
+// GL_COMPRESSED_RGBA lets the driver pick the storage, but it is still a
+// compressed format to clear. The clear went through.
+GPU_TEST(clear_texture, a_generic_compressed_texture_is_refused)
+{
+    GLuint tex = 0;
+    unsigned short pixels[4 * 4 * 4] = { 0 };
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_SHORT, pixels);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glClearTexImage(tex, 0, GL_RGBA, GL_UNSIGNED_SHORT, NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glClearTexSubImage(tex, 0, 0, 0, 0, 4, 4, 1, GL_RGBA, GL_FLOAT, NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glDeleteTextures(1, &tex);
+}

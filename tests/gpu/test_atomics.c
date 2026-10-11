@@ -280,3 +280,206 @@ GPU_TEST(atomics, counters_on_two_bindings_hand_out_unique_numbers)
     glDeleteBuffers(2, counters);
     glDeleteProgram(prog);
 }
+
+// Counters are active uniforms of their own, each tied to its buffer, and the
+// program counts the buffers.
+GPU_TEST(atomics, counters_are_listed_as_uniforms)
+{
+    static const char *vs = "#version 420 core\nvoid main() { gl_Position = vec4(0.0); }\n";
+    static const char *fs =
+        "#version 420 core\n"
+        "layout(location = 0) out vec4 o;\n"
+        "layout(binding = 0, offset = 4) uniform atomic_uint a;\n"
+        "layout(binding = 0) uniform atomic_uint b[2];\n"
+        "void main() { o = vec4(float(atomicCounterIncrement(a) + atomicCounterIncrement(b[1]))); }\n";
+    char log[1024] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log);
+    GLint n = -1, buffers = -1;
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+
+    glGetProgramiv(prog, GL_ACTIVE_ATOMIC_COUNTER_BUFFERS, &buffers);
+    CHECK_EQ_INT(buffers, 1);
+    glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &n);
+    CHECK_EQ_INT(n, 2);
+
+    const GLchar *names[2] = { "a", "b[0]" };
+    GLuint idx[2] = { GL_INVALID_INDEX, GL_INVALID_INDEX };
+
+    glGetUniformIndices(prog, 2, names, idx);
+    CHECK(idx[0] != GL_INVALID_INDEX && idx[1] != GL_INVALID_INDEX);
+
+    GLint type[2] = {0}, offset[2] = {-1, -1}, stride[2] = {-1, -1}, buffer[2] = {-1, -1};
+
+    glGetActiveUniformsiv(prog, 2, idx, GL_UNIFORM_TYPE, type);
+    glGetActiveUniformsiv(prog, 2, idx, GL_UNIFORM_OFFSET, offset);
+    glGetActiveUniformsiv(prog, 2, idx, GL_UNIFORM_ARRAY_STRIDE, stride);
+    glGetActiveUniformsiv(prog, 2, idx, GL_UNIFORM_ATOMIC_COUNTER_BUFFER_INDEX, buffer);
+    CHECK_EQ_INT(type[0], GL_UNSIGNED_INT_ATOMIC_COUNTER);
+    CHECK_EQ_INT(offset[0], 4);
+    CHECK_EQ_INT(offset[1], 8);
+    CHECK_EQ_INT(stride[1], 4);
+    CHECK_EQ_INT(buffer[0], 0);
+    CHECK_EQ_INT(buffer[1], 0);
+    CHECK_EQ_UINT(glGetError(), GL_NO_ERROR);
+
+    glDeleteProgram(prog);
+}
+
+// GL_BUFFER_ACCESS follows the mapping: read-write when unmapped, write-only
+// for a range mapped for writing.
+GPU_TEST(atomics, buffer_access_follows_the_mapping)
+{
+    GLuint buf;
+    GLint access = 0, flags = -1;
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, buf);
+    glBufferData(GL_ATOMIC_COUNTER_BUFFER, 64, NULL, GL_DYNAMIC_DRAW);
+    glGetBufferParameteriv(GL_ATOMIC_COUNTER_BUFFER, GL_BUFFER_ACCESS, &access);
+    CHECK_EQ_INT(access, GL_READ_WRITE);
+
+    glMapBufferRange(GL_ATOMIC_COUNTER_BUFFER, 0, 16, GL_MAP_WRITE_BIT);
+    glGetBufferParameteriv(GL_ATOMIC_COUNTER_BUFFER, GL_BUFFER_ACCESS, &access);
+    CHECK_EQ_INT(access, GL_WRITE_ONLY);
+    glUnmapBuffer(GL_ATOMIC_COUNTER_BUFFER);
+
+    glMapBuffer(GL_ATOMIC_COUNTER_BUFFER, GL_READ_ONLY);
+    glGetBufferParameteriv(GL_ATOMIC_COUNTER_BUFFER, GL_BUFFER_ACCESS_FLAGS, &flags);
+    CHECK_EQ_INT(flags, GL_MAP_READ_BIT);
+    glUnmapBuffer(GL_ATOMIC_COUNTER_BUFFER);
+
+    glGetBufferParameteriv(GL_ATOMIC_COUNTER_BUFFER, GL_BUFFER_ACCESS, &access);
+    CHECK_EQ_INT(access, GL_READ_WRITE);
+
+    glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+    glDeleteBuffers(1, &buf);
+}
+
+// A counter placed past the largest buffer GL allows does not compile.
+GPU_TEST(atomics, an_offset_past_the_buffer_limit_does_not_compile)
+{
+    GLint max = 0, ok = 1;
+    char src[512];
+
+    glGetIntegerv(GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE, &max);
+    snprintf(src, sizeof src,
+             "#version 420 core\n"
+             "layout(location = 0) out uvec4 o;\n"
+             "layout(binding = 0, offset = %d) uniform atomic_uint c;\n"
+             "void main() { o = uvec4(atomicCounterIncrement(c)); }\n", max);
+
+    const char *p = src;
+    GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+
+    glShaderSource(sh, 1, &p, NULL);
+    glCompileShader(sh);
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_FALSE);
+    glDeleteShader(sh);
+}
+
+// An evaluation stage with no control stage, recorded by feedback, counts
+// once per vertex. Metal can run a shared vertex twice.
+GPU_TEST(atomics, an_evaluation_stage_counts_each_vertex_once)
+{
+    static const char *vs = "#version 420 core\nvoid main() { gl_Position = vec4(0.0); }\n";
+    static const char *tes =
+        "#version 420 core\n"
+        "layout(triangles, equal_spacing, ccw) in;\n"
+        "out uint got;\n"
+        "layout(binding = 0) uniform atomic_uint c;\n"
+        "void main() { got = atomicCounterIncrement(c); }\n";
+    static const char *varyings[] = { "got" };
+    GLuint prog = glCreateProgram(), v, e, counter, xfb, vao;
+    GLuint start = 100, seen[3] = {0}, final = 0;
+    GLint ok = 0;
+
+    v = glCreateShader(GL_VERTEX_SHADER);
+    e = glCreateShader(GL_TESS_EVALUATION_SHADER);
+    glShaderSource(v, 1, &vs, NULL);
+    glShaderSource(e, 1, &tes, NULL);
+    glCompileShader(v);
+    glCompileShader(e);
+    glAttachShader(prog, v);
+    glAttachShader(prog, e);
+    glTransformFeedbackVaryings(prog, 1, varyings, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+
+    glGenBuffers(1, &counter);
+    glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, counter);
+    glBufferData(GL_ATOMIC_COUNTER_BUFFER, 4, &start, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, 0, counter);
+
+    glGenBuffers(1, &xfb);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, xfb);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 64, NULL, GL_STREAM_COPY);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, xfb);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glBeginTransformFeedback(GL_TRIANGLES);
+    glDrawArrays(GL_PATCHES, 0, 3);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof seen, seen);
+    glGetBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, 4, &final);
+    CHECK_EQ_UINT(final, 103);
+    CHECK_MSG(seen[0] + seen[1] + seen[2] == 100 + 101 + 102,
+              "recorded %u %u %u, want 100 101 102 in some order", seen[0], seen[1], seen[2]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteShader(v);
+    glDeleteShader(e);
+    glDeleteBuffers(1, &counter);
+    glDeleteBuffers(1, &xfb);
+    glDeleteVertexArrays(1, &vao);
+}
+
+static GLint fragmentCompiles(const char *decl)
+{
+    char src[1024];
+    const char *p = src;
+    GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+    GLint ok = 0;
+
+    snprintf(src, sizeof src,
+             "#version 460\n%s\nlayout(location = 0) out uvec4 o;\n"
+             "void main() { o = uvec4(atomicCounter(a)); }\n", decl);
+    glShaderSource(sh, 1, &p, NULL);
+    glCompileShader(sh);
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    glDeleteShader(sh);
+
+    return ok;
+}
+
+// The atomic counter layout examples of GLSL 4.60 section 4.4.6.3.
+GPU_TEST(atomics, counter_layouts_follow_the_rules)
+{
+    // a counter needs a binding, even with a default offset for one
+    CHECK_EQ_INT(fragmentCompiles("layout(binding = 2, offset = 4) uniform atomic_uint;\n"
+                                  "layout(offset = 8) uniform atomic_uint a;"), GL_FALSE);
+    CHECK_EQ_INT(fragmentCompiles("layout(offset = 4) uniform atomic_uint a;"), GL_FALSE);
+
+    // two in one place, and one between places
+    CHECK_EQ_INT(fragmentCompiles("layout(binding = 1, offset = 0) uniform atomic_uint a;\n"
+                                  "layout(binding = 1, offset = 0) uniform atomic_uint b;"), GL_FALSE);
+    CHECK_EQ_INT(fragmentCompiles("layout(binding = 1, offset = 2) uniform atomic_uint a;"), GL_FALSE);
+    CHECK_EQ_INT(fragmentCompiles("layout(binding = 1, offset = 0) uniform atomic_uint b[2];\n"
+                                  "layout(binding = 1, offset = 4) uniform atomic_uint a;"), GL_FALSE);
+
+    // and what is fine
+    CHECK_EQ_INT(fragmentCompiles("layout(binding = 1, offset = 0) uniform atomic_uint a;\n"
+                                  "layout(binding = 2, offset = 0) uniform atomic_uint b;"), GL_TRUE);
+    CHECK_EQ_INT(fragmentCompiles("layout(binding = 2, offset = 4) uniform atomic_uint;\n"
+                                  "layout(binding = 2) uniform atomic_uint a;\n"
+                                  "layout(binding = 2) uniform atomic_uint b;"), GL_TRUE);
+}

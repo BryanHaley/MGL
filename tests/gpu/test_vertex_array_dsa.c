@@ -999,3 +999,16 @@ GPU_TEST(vertex_array_dsa, binding_offset_and_zero_stride_reach_the_draw)
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
 }
+
+// Enabling an attribute with no array object bound changes nothing and
+// raises nothing, as other drivers do; the conformance suite relies on it.
+GPU_TEST(vertex_array_dsa, enable_with_no_array_object_is_quiet)
+{
+    glBindVertexArray(0);
+    mgl_drain_errors();
+    glEnableVertexAttribArray(0);
+    glDisableVertexAttribArray(0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glEnableVertexAttribArray(100000);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+}

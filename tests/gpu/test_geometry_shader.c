@@ -224,6 +224,14 @@ GPU_TEST(geometry_shader, triangle_passthrough_covers_the_target)
     green = countWhere(&t, 0, 60, 200, 255);
     CHECK_MSG(green == 64 * 64, "passthrough covered %d of 4096 pixels", green);
 
+    // with the raster off nothing reaches the target
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glDisable(GL_RASTERIZER_DISCARD);
+    green = countWhere(&t, 0, 60, 200, 255);
+    CHECK_MSG(green == 0, "with the raster off %d pixels were drawn", green);
+
     glUseProgram(0);
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(1, &vbo);
@@ -575,7 +583,7 @@ GPU_TEST(geometry_shader, program_reports_its_layout)
         "#version 460 core\n"
         "out vec4 o;\n"
         "void main() { o = vec4(1.0); }\n";
-    GLuint prog, plain, s[3];
+    GLuint prog, plain, sep, s[3];
     GLint v = -1, ok = 0;
     char log[2048] = { 0 };
 
@@ -610,10 +618,22 @@ GPU_TEST(geometry_shader, program_reports_its_layout)
     glGetProgramiv(plain, GL_GEOMETRY_VERTICES_OUT, &v);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
+    // the layout outlives the shader once it is detached, and a
+    // single-stage separable program has one too
+    glDetachShader(prog, s[1]);
+    glGetProgramiv(prog, GL_GEOMETRY_VERTICES_OUT, &v);
+    CHECK_EQ_INT(v, 7);
+    sep = glCreateShaderProgramv(GL_GEOMETRY_SHADER, 1, &GS);
+    v = -1;
+    glGetProgramiv(sep, GL_GEOMETRY_VERTICES_OUT, &v);
+    CHECK_EQ_INT(v, 7);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
     for (int i = 0; i < 3; i++)
         glDeleteShader(s[i]);
     glDeleteProgram(prog);
     glDeleteProgram(plain);
+    glDeleteProgram(sep);
 }
 
 // A program pipeline with a geometry stage and no vertex stage is an error to
@@ -649,4 +669,41 @@ GPU_TEST(geometry_shader, pipeline_without_a_vertex_stage_is_an_error)
     glDeleteProgramPipelines(1, &pipe);
     glDeleteProgram(gs);
     glDeleteProgram(fs);
+}
+
+// A geometry stage may use every one of the GL_MAX_UNIFORM_LOCATIONS
+// locations. The link counted one too many and refused it.
+GPU_TEST(geometry_shader, uniforms_fill_every_location)
+{
+    static const char *VS =
+        "#version 440\nvoid main() { gl_Position = vec4(gl_VertexID, 0, 0, 1); }\n";
+    static const char *GS =
+        "#version 440\nlayout(points) in;\nlayout(points, max_vertices = 1) out;\n"
+        "uniform ivec4 uni_array[1024];\nflat out uint s;\n"
+        "void main() { s = 0u; for (uint i = 0u; i < 1024u; i++) s += uint(uni_array[i].x);\n"
+        "  gl_Position = gl_in[0].gl_Position; EmitVertex(); }\n";
+    static const char *FS =
+        "#version 440\nflat in uint s;\nout vec4 o;\nvoid main() { o = vec4(float(s)); }\n";
+    const char *src[3] = { VS, GS, FS };
+    GLenum kinds[3] = { GL_VERTEX_SHADER, GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER };
+    GLuint prog = glCreateProgram(), s[3];
+    GLint ok = 0;
+    char log[2048] = { 0 };
+
+    for (int i = 0; i < 3; i++)
+    {
+        s[i] = glCreateShader(kinds[i]);
+        glShaderSource(s[i], 1, &src[i], NULL);
+        glCompileShader(s[i]);
+        glAttachShader(prog, s[i]);
+    }
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "link: %s", log);
+    CHECK_EQ_INT(glGetUniformLocation(prog, "uni_array[1023]"), glGetUniformLocation(prog, "uni_array") + 1023);
+
+    for (int i = 0; i < 3; i++)
+        glDeleteShader(s[i]);
+    glDeleteProgram(prog);
 }

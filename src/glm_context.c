@@ -277,7 +277,7 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     }
 
     // plain uniforms are indexed by location, so report what we can actually hold
-    STATE(var.max_uniform_locations) = MAX_UNIFORM_LOCATIONS;
+    STATE(var.max_uniform_locations) = MGL_GL_UNIFORM_LOCATIONS;
 
     // left at zero these rejected every texture unit past the first. A stage
     // reads at most 16, since Metal binds no more than 16 samplers to one

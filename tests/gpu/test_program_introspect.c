@@ -380,3 +380,22 @@ GPU_TEST(program_introspect, separable_inputs_keep_their_locations)
         glDeleteProgram(prog);
     }
 }
+
+// An element of a fragment output array has the array's index. Asking for
+// "a[0]" read -1.
+GPU_TEST(program_introspect, an_output_element_has_its_array_index)
+{
+    static const char *VS = "#version 460\nvoid main() { gl_Position = vec4(0); }\n";
+    static const char *FS = "#version 460\nlayout(location = 0) out vec4 a[2];\nvoid main() { a[0] = vec4(1); a[1] = vec4(0); }\n";
+    char log[4096] = { 0 };
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    CHECK_EQ_INT(glGetProgramResourceLocationIndex(prog, GL_PROGRAM_OUTPUT, "a[0]"), 0);
+    CHECK_EQ_INT(glGetProgramResourceLocationIndex(prog, GL_PROGRAM_OUTPUT, "a[1]"), 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(prog);
+}

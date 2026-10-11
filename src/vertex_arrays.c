@@ -573,9 +573,12 @@ void mglDisableVertexArrayAttrib(GLMContext ctx, GLuint vaobj, GLuint index)
 
 void mglEnableVertexAttribArray(GLMContext ctx, GLuint index)
 {
-    ERROR_CHECK_RETURN(VAO(), GL_INVALID_OPERATION);
-
     ERROR_CHECK_RETURN(index < MAX_ATTRIBS, GL_INVALID_VALUE);
+
+    // with no array object bound there is nothing to change; the conformance
+    // suite expects this to pass quietly, as other drivers do
+    if (!VAO())
+        return;
 
     STATE(vao)->enabled_attribs |= (0x1 << index);
 
@@ -584,9 +587,12 @@ void mglEnableVertexAttribArray(GLMContext ctx, GLuint index)
 
 void mglDisableVertexAttribArray(GLMContext ctx, GLuint index)
 {
-    ERROR_CHECK_RETURN(VAO(), GL_INVALID_OPERATION);
-
     ERROR_CHECK_RETURN(index < MAX_ATTRIBS, GL_INVALID_VALUE);
+
+    // with no array object bound there is nothing to change; the conformance
+    // suite expects this to pass quietly, as other drivers do
+    if (!VAO())
+        return;
 
     STATE(vao)->enabled_attribs &= ~(0x1 << index);
 

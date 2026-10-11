@@ -654,3 +654,71 @@ GPU_TEST(texture_query, level_parameter_component_types)
 
     glDeleteTextures(1, &tex);
 }
+
+// Only RGB9_E5 has a shared exponent; every other format answers 0. Asking
+// raised an error before.
+GPU_TEST(texture_query, shared_exponent_size)
+{
+    GLuint tex[2];
+    GLint v = -1;
+
+    glGenTextures(2, tex);
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGB9_E5, 4, 4);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_SHARED_SIZE, &v);
+    CHECK_EQ_INT(v, 5);
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, tex[1]);
+    glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 1, GL_RGBA8, 4, 4, 6);
+    v = -1;
+    glGetTexLevelParameteriv(GL_TEXTURE_CUBE_MAP_ARRAY, 0, GL_TEXTURE_SHARED_SIZE, &v);
+    CHECK_EQ_INT(v, 0);
+    v = -1;
+    glGetTextureLevelParameteriv(tex[0], 0, GL_TEXTURE_SHARED_SIZE, &v);
+    CHECK_EQ_INT(v, 5);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteTextures(2, tex);
+}
+
+// The target-based setters check what they are given: a cube face is not a
+// target, a wrap mode must be one, levels cannot be negative, and a
+// multisample texture refuses sampler state with INVALID_ENUM. The integer
+// variants let all of these through.
+GPU_TEST(texture_query, target_setters_check_their_arguments)
+{
+    GLuint tex[2];
+    GLint one = 1, red = GL_RED, neg = -1, lin = GL_LINEAR, v = -1;
+    GLuint ured = GL_RED;
+
+    glGenTextures(2, tex);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex[0]);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, tex[1]);
+    mgl_drain_errors();
+
+    glTexParameterIiv(GL_TEXTURE_CUBE_MAP_POSITIVE_X, GL_TEXTURE_BASE_LEVEL, &one);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+    glGetTexParameterIiv(GL_TEXTURE_CUBE_MAP_POSITIVE_X, GL_TEXTURE_BASE_LEVEL, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+
+    glTexParameterIiv(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, &red);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+    glTexParameterIuiv(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, &ured);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_RED);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+    glTexParameterIiv(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, &neg);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glTexParameterIiv(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAG_FILTER, &lin);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+    glTextureParameteri(tex[1], GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glGetTexParameterIiv(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_IMMUTABLE_LEVELS, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteTextures(2, tex);
+}

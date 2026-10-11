@@ -538,3 +538,23 @@ GPU_TEST(layered_rendering, attachment_reports_layered)
     glDeleteFramebuffers(1, &fb);
     glDeleteTextures(1, &tex);
 }
+
+// A name that is not a texture is a bad value, not a bad operation.
+GPU_TEST(layered_rendering, an_unknown_texture_name_is_a_bad_value)
+{
+    GLuint fb;
+
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 4321, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    // the layer call reports it as the wrong object, as the suite expects
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 4321, 0, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glNamedFramebufferTextureLayer(fb, GL_COLOR_ATTACHMENT0, 4321, 0, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+}

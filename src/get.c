@@ -620,7 +620,6 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x84F6: RET_TYPE_VAR(type, texture_binding_rectangle); break; // GL_TEXTURE_BINDING_RECTANGLE
         case 0x84F8: RET_TYPE_VAR(type, max_rectangle_texture_size); break; // GL_MAX_RECTANGLE_TEXTURE_SIZE
         case 0x8F9E: RET_TYPE_VAR(type, primitive_restart_index); break; // GL_PRIMITIVE_RESTART_INDEX
-        case 0x8A28: RET_TYPE_VAR(type, uniform_buffer_binding); break; // GL_UNIFORM_BUFFER_BINDING
         case 0x8A29: RET_TYPE_VAR(type, uniform_buffer_start); break; // GL_UNIFORM_BUFFER_START
         case 0x8A2A: RET_TYPE_VAR(type, uniform_buffer_size); break; // GL_UNIFORM_BUFFER_SIZE
         case 0x8A2B: RET_TYPE_VAR(type, max_vertex_uniform_blocks); break; // GL_MAX_VERTEX_UNIFORM_BLOCKS
@@ -715,7 +714,8 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x9316: RET_TYPE_VAR(type, max_framebuffer_height); break; // GL_MAX_FRAMEBUFFER_HEIGHT
         case 0x9317: RET_TYPE_VAR(type, max_framebuffer_layers); break; // GL_MAX_FRAMEBUFFER_LAYERS
         case 0x9318: RET_TYPE_VAR(type, max_framebuffer_samples); break; // GL_MAX_FRAMEBUFFER_SAMPLES
-        case 0x90D3: RET_TYPE_VAR(type, shader_storage_buffer_binding); break; // GL_SHADER_STORAGE_BUFFER_BINDING
+        case 0x90D3: RET_BOUND_BUFFER(_SHADER_STORAGE_BUFFER); break; // GL_SHADER_STORAGE_BUFFER_BINDING
+        case 0x8A28: RET_BOUND_BUFFER(_UNIFORM_BUFFER); break; // GL_UNIFORM_BUFFER_BINDING
         case 0x90D4: RET_TYPE_VAR(type, shader_storage_buffer_start); break; // GL_SHADER_STORAGE_BUFFER_START
         case 0x90D5: RET_TYPE_VAR(type, shader_storage_buffer_size); break; // GL_SHADER_STORAGE_BUFFER_SIZE
         case 0x90D6: RET_TYPE_VAR(type, max_vertex_shader_storage_blocks); break; // GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS
@@ -843,6 +843,9 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         }
 
         case 0x8C37: RET_TYPE_VAR(type, min_sample_shading); break; // GL_MIN_SAMPLE_SHADING_VALUE
+        case 0x8E1B: RET_TYPE_VAR(type, polygon_offset_clamp); break; // GL_POLYGON_OFFSET_CLAMP
+        case 0x84FF: RET_TYPE_CONST(type, 16); break; // GL_MAX_TEXTURE_MAX_ANISOTROPY, Metal's limit
+        case 0x9554: RET_TYPE_CONST(type, 0); break; // GL_NUM_SPIR_V_EXTENSIONS
 
         default:
         {
@@ -1045,6 +1048,10 @@ const GLubyte *mglGetStringi(GLMContext ctx, GLenum name, GLuint index)
         case GL_SHADING_LANGUAGE_VERSION:
             ERROR_CHECK_RETURN_VALUE(index == 0, GL_INVALID_VALUE, NULL);
             return (const GLubyte *)"4.60";
+
+        // no SPIR-V extensions, so every index is out of range
+        case GL_SPIR_V_EXTENSIONS:
+            ERROR_RETURN_VALUE(GL_INVALID_VALUE, NULL);
 
         default:
             ERROR_RETURN_VALUE(GL_INVALID_ENUM, NULL);

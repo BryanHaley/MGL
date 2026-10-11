@@ -85,7 +85,6 @@ GPU_TEST(uniform_scalar, float_vector_round_trip)
 {
     char err[1024] = { 0 };
     GLuint p = mgl_build_program(VS_SIMPLE, FS_SIMPLE, err, sizeof err);
-    GLint loc;
     const GLfloat vals[4] = { 0.1f, 0.2f, 0.3f, 0.4f };
     GLfloat f[4] = { 0 };
 
@@ -93,23 +92,28 @@ GPU_TEST(uniform_scalar, float_vector_round_trip)
     if (!p) return;
 
     glUseProgram(p);
-    loc = glGetUniformLocation(p, "u_f4");
 
-    glUniform1fv(loc, 1, vals);
-    glGetUniformfv(p, loc, f);
+    // each width goes to the uniform of that width
+    glUniform1fv(glGetUniformLocation(p, "u_f1"), 1, vals);
+    glGetUniformfv(p, glGetUniformLocation(p, "u_f1"), f);
     CHECK_NEAR(f[0], 0.1f, 1e-6f);
-    CHECK_NEAR(f[1], 0.0f, 1e-6f);
 
-    glUniform2fv(loc, 1, vals);
-    glGetUniformfv(p, loc, f);
+    glUniform2fv(glGetUniformLocation(p, "u_f2"), 1, vals);
+    glGetUniformfv(p, glGetUniformLocation(p, "u_f2"), f);
     CHECK_NEAR(f[0], 0.1f, 1e-6f);
     CHECK_NEAR(f[1], 0.2f, 1e-6f);
 
-    glUniform3fv(loc, 1, vals);
-    glGetUniformfv(p, loc, f);
+    glUniform3fv(glGetUniformLocation(p, "u_f3"), 1, vals);
+    glGetUniformfv(p, glGetUniformLocation(p, "u_f3"), f);
     CHECK_NEAR(f[0], 0.1f, 1e-6f);
     CHECK_NEAR(f[1], 0.2f, 1e-6f);
     CHECK_NEAR(f[2], 0.3f, 1e-6f);
+
+    glUniform4fv(glGetUniformLocation(p, "u_f4"), 1, vals);
+    glGetUniformfv(p, glGetUniformLocation(p, "u_f4"), f);
+    CHECK_NEAR(f[0], 0.1f, 1e-6f);
+    CHECK_NEAR(f[3], 0.4f, 1e-6f);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     glUseProgram(0);
     glDeleteProgram(p);
@@ -156,7 +160,6 @@ GPU_TEST(uniform_scalar, int_vector_round_trip)
 {
     char err[1024] = { 0 };
     GLuint p = mgl_build_program(VS_SIMPLE, FS_SIMPLE, err, sizeof err);
-    GLint loc;
     const GLint vals[4] = { 100, 200, 300, 400 };
     GLint iv[4] = { 0 };
 
@@ -164,30 +167,29 @@ GPU_TEST(uniform_scalar, int_vector_round_trip)
     if (!p) return;
 
     glUseProgram(p);
-    loc = glGetUniformLocation(p, "u_i4");
 
-    glUniform1iv(loc, 1, vals);
-    glGetUniformiv(p, loc, iv);
+    glUniform1iv(glGetUniformLocation(p, "u_i1"), 1, vals);
+    glGetUniformiv(p, glGetUniformLocation(p, "u_i1"), iv);
     CHECK_EQ_INT(iv[0], 100);
-    CHECK_EQ_INT(iv[1], 0);
 
-    glUniform2iv(loc, 1, vals);
-    glGetUniformiv(p, loc, iv);
+    glUniform2iv(glGetUniformLocation(p, "u_i2"), 1, vals);
+    glGetUniformiv(p, glGetUniformLocation(p, "u_i2"), iv);
     CHECK_EQ_INT(iv[0], 100);
     CHECK_EQ_INT(iv[1], 200);
 
-    glUniform3iv(loc, 1, vals);
-    glGetUniformiv(p, loc, iv);
+    glUniform3iv(glGetUniformLocation(p, "u_i3"), 1, vals);
+    glGetUniformiv(p, glGetUniformLocation(p, "u_i3"), iv);
     CHECK_EQ_INT(iv[0], 100);
     CHECK_EQ_INT(iv[1], 200);
     CHECK_EQ_INT(iv[2], 300);
 
-    glUniform4iv(loc, 1, vals);
-    glGetUniformiv(p, loc, iv);
+    glUniform4iv(glGetUniformLocation(p, "u_i4"), 1, vals);
+    glGetUniformiv(p, glGetUniformLocation(p, "u_i4"), iv);
     CHECK_EQ_INT(iv[0], 100);
     CHECK_EQ_INT(iv[1], 200);
     CHECK_EQ_INT(iv[2], 300);
     CHECK_EQ_INT(iv[3], 400);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     glUseProgram(0);
     glDeleteProgram(p);
@@ -234,7 +236,6 @@ GPU_TEST(uniform_scalar, uint_vector_round_trip)
 {
     char err[1024] = { 0 };
     GLuint p = mgl_build_program(VS_SIMPLE, FS_SIMPLE, err, sizeof err);
-    GLint loc;
     const GLuint vals[4] = { 10u, 20u, 30u, 40u };
     GLuint uv[4] = { 0 };
 
@@ -242,30 +243,29 @@ GPU_TEST(uniform_scalar, uint_vector_round_trip)
     if (!p) return;
 
     glUseProgram(p);
-    loc = glGetUniformLocation(p, "u_u4");
 
-    glUniform1uiv(loc, 1, vals);
-    glGetUniformuiv(p, loc, uv);
+    glUniform1uiv(glGetUniformLocation(p, "u_u1"), 1, vals);
+    glGetUniformuiv(p, glGetUniformLocation(p, "u_u1"), uv);
     CHECK_EQ_UINT(uv[0], 10u);
-    CHECK_EQ_UINT(uv[1], 0u);
 
-    glUniform2uiv(loc, 1, vals);
-    glGetUniformuiv(p, loc, uv);
+    glUniform2uiv(glGetUniformLocation(p, "u_u2"), 1, vals);
+    glGetUniformuiv(p, glGetUniformLocation(p, "u_u2"), uv);
     CHECK_EQ_UINT(uv[0], 10u);
     CHECK_EQ_UINT(uv[1], 20u);
 
-    glUniform3uiv(loc, 1, vals);
-    glGetUniformuiv(p, loc, uv);
+    glUniform3uiv(glGetUniformLocation(p, "u_u3"), 1, vals);
+    glGetUniformuiv(p, glGetUniformLocation(p, "u_u3"), uv);
     CHECK_EQ_UINT(uv[0], 10u);
     CHECK_EQ_UINT(uv[1], 20u);
     CHECK_EQ_UINT(uv[2], 30u);
 
-    glUniform4uiv(loc, 1, vals);
-    glGetUniformuiv(p, loc, uv);
+    glUniform4uiv(glGetUniformLocation(p, "u_u4"), 1, vals);
+    glGetUniformuiv(p, glGetUniformLocation(p, "u_u4"), uv);
     CHECK_EQ_UINT(uv[0], 10u);
     CHECK_EQ_UINT(uv[1], 20u);
     CHECK_EQ_UINT(uv[2], 30u);
     CHECK_EQ_UINT(uv[3], 40u);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     glUseProgram(0);
     glDeleteProgram(p);
@@ -337,11 +337,105 @@ GPU_TEST(uniform_scalar, size_mismatch_is_rejected)
     glDeleteProgram(p);
 }
 
+// GL 4.6 7.6.1: a setter must fit the uniform's type and size, or it is
+// refused and nothing is written. Bool takes f, i or ui; samplers and images
+// take only 1i.
+GPU_TEST(uniform_scalar, mismatched_setters_are_refused)
+{
+    static const char *FS =
+        "#version 460 core\n"
+        "uniform vec4 u_v4;\n"
+        "uniform float u_f;\n"
+        "uniform bool u_b;\n"
+        "uniform mat2 u_m2;\n"
+        "uniform sampler2D u_tex;\n"
+        "layout(binding = 0, rgba8) readonly uniform image2D u_img;\n"
+        "layout(location = 0) out vec4 frag;\n"
+        "void main() {\n"
+        "    frag = u_v4 + vec4(u_f) + vec4(u_b ? 1.0 : 0.0) + vec4(u_m2[0], u_m2[1])\n"
+        "         + texture(u_tex, vec2(0.5)) + imageLoad(u_img, ivec2(0));\n"
+        "}\n";
+    static const GLdouble dm2[4] = { 9, 9, 9, 9 };
+    static const GLfloat m2[4] = { 1, 2, 3, 4 };
+    char err[1024] = { 0 };
+    GLuint p = mgl_build_program(VS_SIMPLE, FS, err, sizeof err);
+    GLint lv4, lf, lb, lm2, ltex, limg, units = 0, iv[4] = { 0 };
+    GLuint uv = 0;
+    GLfloat f[4] = { 0 };
+
+    CHECK_MSG(p != 0, "link: %s", err);
+    if (!p) return;
+
+    glUseProgram(p);
+    lv4  = glGetUniformLocation(p, "u_v4");
+    lf   = glGetUniformLocation(p, "u_f");
+    lb   = glGetUniformLocation(p, "u_b");
+    lm2  = glGetUniformLocation(p, "u_m2");
+    ltex = glGetUniformLocation(p, "u_tex");
+    limg = glGetUniformLocation(p, "u_img");
+    CHECK(lv4 >= 0 && lf >= 0 && lb >= 0 && lm2 >= 0 && ltex >= 0 && limg >= 0);
+    (void)mgl_drain_errors();
+
+    // too few components for a vec4: refused, and the vec4 keeps its value
+    glUniform4f(lv4, 1, 2, 3, 4);
+    glUniform1f(lv4, 7);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glGetUniformfv(p, lv4, f);
+    CHECK_NEAR(f[0], 1.0f, 1e-6f);
+    CHECK_NEAR(f[3], 4.0f, 1e-6f);
+
+    // an int setter on a float
+    glUniform1f(lf, 0.5f);
+    glUniform1i(lf, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glGetUniformfv(p, lf, f);
+    CHECK_NEAR(f[0], 0.5f, 1e-6f);
+
+    // a sampler takes 1i and nothing else
+    glUniform1i(ltex, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glUniform1ui(ltex, 5u);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glGetUniformiv(p, ltex, iv);
+    CHECK_EQ_INT(iv[0], 3);
+
+    // bool takes all three; any non-zero is true
+    glUniform1f(lb, 2.5f);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glGetUniformiv(p, lb, iv);
+    CHECK_EQ_INT(iv[0], 1);
+
+    glUniform1i(lb, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glGetUniformiv(p, lb, iv);
+    CHECK_EQ_INT(iv[0], 0);
+
+    glUniform1ui(lb, 7u);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glGetUniformuiv(p, lb, &uv);
+    CHECK_EQ_UINT(uv, 1u);
+
+    // a double matrix setter on a float matrix
+    glUniformMatrix2fv(lm2, 1, GL_FALSE, m2);
+    glUniformMatrix2dv(lm2, 1, GL_FALSE, dm2);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glGetUniformfv(p, lm2, f);
+    CHECK_NEAR(f[0], 1.0f, 1e-6f);
+    CHECK_NEAR(f[3], 4.0f, 1e-6f);
+
+    // an image unit past the last one
+    glGetIntegerv(GL_MAX_IMAGE_UNITS, &units);
+    glUniform1i(limg, units);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glUseProgram(0);
+    glDeleteProgram(p);
+}
+
 GPU_TEST(uniform_scalar, double_vector_round_trip)
 {
     char err[1024] = { 0 };
     GLuint p = mgl_build_program(VS_SIMPLE, FS_SIMPLE, err, sizeof err);
-    GLint loc;
     const GLdouble vals[4] = { 1.5, 2.5, 3.5, 4.5 };
     GLdouble d[4] = { 0 };
 
@@ -349,30 +443,29 @@ GPU_TEST(uniform_scalar, double_vector_round_trip)
     if (!p) return;
 
     glUseProgram(p);
-    loc = glGetUniformLocation(p, "u_d4");
 
-    glUniform1dv(loc, 1, vals);
-    glGetUniformdv(p, loc, d);
+    glUniform1dv(glGetUniformLocation(p, "u_d1"), 1, vals);
+    glGetUniformdv(p, glGetUniformLocation(p, "u_d1"), d);
     CHECK_NEAR(d[0], 1.5, 1e-10);
-    CHECK_NEAR(d[1], 0.0, 1e-10);
 
-    glUniform2dv(loc, 1, vals);
-    glGetUniformdv(p, loc, d);
+    glUniform2dv(glGetUniformLocation(p, "u_d2"), 1, vals);
+    glGetUniformdv(p, glGetUniformLocation(p, "u_d2"), d);
     CHECK_NEAR(d[0], 1.5, 1e-10);
     CHECK_NEAR(d[1], 2.5, 1e-10);
 
-    glUniform3dv(loc, 1, vals);
-    glGetUniformdv(p, loc, d);
+    glUniform3dv(glGetUniformLocation(p, "u_d3"), 1, vals);
+    glGetUniformdv(p, glGetUniformLocation(p, "u_d3"), d);
     CHECK_NEAR(d[0], 1.5, 1e-10);
     CHECK_NEAR(d[1], 2.5, 1e-10);
     CHECK_NEAR(d[2], 3.5, 1e-10);
 
-    glUniform4dv(loc, 1, vals);
-    glGetUniformdv(p, loc, d);
+    glUniform4dv(glGetUniformLocation(p, "u_d4"), 1, vals);
+    glGetUniformdv(p, glGetUniformLocation(p, "u_d4"), d);
     CHECK_NEAR(d[0], 1.5, 1e-10);
     CHECK_NEAR(d[1], 2.5, 1e-10);
     CHECK_NEAR(d[2], 3.5, 1e-10);
     CHECK_NEAR(d[3], 4.5, 1e-10);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     glUseProgram(0);
     glDeleteProgram(p);
@@ -479,7 +572,6 @@ GPU_TEST(uniform_scalar, negative_count_errors)
 {
     char err[1024] = { 0 };
     GLuint p = mgl_build_program(VS_SIMPLE, FS_SIMPLE, err, sizeof err);
-    GLint loc;
     GLfloat f[4] = { 1, 2, 3, 4 };
     GLint i[4] = { 1, 2, 3, 4 };
     GLuint ui[4] = { 1, 2, 3, 4 };
@@ -489,42 +581,42 @@ GPU_TEST(uniform_scalar, negative_count_errors)
     if (!p) return;
 
     glUseProgram(p);
-    loc = glGetUniformLocation(p, "u_f4");
 
-    glUniform1fv(loc, -1, f);
+    // each setter goes to a uniform it fits, so only the count is wrong
+    glUniform1fv(glGetUniformLocation(p, "u_f1"), -1, f);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform2fv(loc, -1, f);
+    glUniform2fv(glGetUniformLocation(p, "u_f2"), -1, f);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform3fv(loc, -1, f);
+    glUniform3fv(glGetUniformLocation(p, "u_f3"), -1, f);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform4iv(loc, -1, i);
+    glUniform4iv(glGetUniformLocation(p, "u_i4"), -1, i);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform1uiv(loc, -1, ui);
+    glUniform1uiv(glGetUniformLocation(p, "u_u1"), -1, ui);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform2uiv(loc, -1, ui);
+    glUniform2uiv(glGetUniformLocation(p, "u_u2"), -1, ui);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform3uiv(loc, -1, ui);
+    glUniform3uiv(glGetUniformLocation(p, "u_u3"), -1, ui);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform4uiv(loc, -1, ui);
+    glUniform4uiv(glGetUniformLocation(p, "u_u4"), -1, ui);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform1dv(loc, -1, d);
+    glUniform1dv(glGetUniformLocation(p, "u_d1"), -1, d);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform2dv(loc, -1, d);
+    glUniform2dv(glGetUniformLocation(p, "u_d2"), -1, d);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform3dv(loc, -1, d);
+    glUniform3dv(glGetUniformLocation(p, "u_d3"), -1, d);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
-    glUniform4dv(loc, -1, d);
+    glUniform4dv(glGetUniformLocation(p, "u_d4"), -1, d);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glUseProgram(0);

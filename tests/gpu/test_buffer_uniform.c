@@ -373,3 +373,107 @@ GPU_TEST(tex_param, bad_enum_errors_instead_of_aborting)
 
     glDeleteTextures(1, &tex);
 }
+
+// Draws a quad with this program and returns the red channel at the centre.
+static GLubyte drawRed(GLuint prog)
+{
+    static const GLfloat quad[] = { -1, -1, 3, -1, -1, 3 };
+    MGLTestTarget t;
+    GLuint vao, vbo;
+    GLubyte px[4] = {0};
+
+    if (!prog || !mgl_target_create(&t, 4, 4, GL_RGBA8, 0))
+        return 0;
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 4, 4);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+
+    return px[0];
+}
+
+static GLuint uniformBufferWith(GLuint binding, GLfloat value)
+{
+    GLfloat data[4] = { value, value, value, value };
+    GLuint b;
+
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_UNIFORM_BUFFER, b);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof data, data, GL_STATIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, binding, b);
+
+    return b;
+}
+
+// A block the fragment stage declares but never reads has no Metal slot, and
+// it took over the slot of a block that stage does read.
+GPU_TEST(buffer_uniform, a_block_a_stage_ignores_leaves_the_others_alone)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "layout(std140, binding = 0) uniform Used { float u; };\n"
+        "out float vu;\n"
+        "void main() { vu = u; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "layout(std140, binding = 5) uniform Mine { float m; };\n"
+        "layout(std140, binding = 0) uniform Used { float u; };\n"
+        "in float vu;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(m, 0.0, 0.0, 1.0); }\n";
+    char log[2048] = "";
+    GLuint a = uniformBufferWith(0, 0.0f), b = uniformBufferWith(5, 1.0f);
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log);
+    GLubyte red;
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    red = drawRed(prog);
+    CHECK_MSG(red == 255, "the fragment stage read %u from its own block, want 255", red);
+
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &a);
+    glDeleteBuffers(1, &b);
+}
+
+// An instance array of one block takes the binding glUniformBlockBinding
+// gives it, like any other block.
+GPU_TEST(buffer_uniform, an_instance_array_of_one_takes_its_binding)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "uniform Block { float v; } blk[1];\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(blk[0].v, 0.0, 0.0, 1.0); }\n";
+    char log[2048] = "";
+    GLuint a = uniformBufferWith(0, 0.0f), b = uniformBufferWith(6, 1.0f);
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log);
+    GLubyte red;
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    glUniformBlockBinding(prog, glGetUniformBlockIndex(prog, "Block[0]"), 6);
+    red = drawRed(prog);
+    CHECK_MSG(red == 255, "the block read %u, want 255 from binding 6", red);
+
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &a);
+    glDeleteBuffers(1, &b);
+}

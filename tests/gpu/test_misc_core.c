@@ -729,3 +729,145 @@ GPU_TEST(misc_core, cube_map_array_binding_reads_back)
     glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, 0);
     glDeleteTextures(1, &tex);
 }
+
+static GLint compiles(const char *src)
+{
+    GLuint sh = glCreateShader(GL_VERTEX_SHADER);
+    GLint ok = 0;
+
+    glShaderSource(sh, 1, &src, NULL);
+    glCompileShader(sh);
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    glDeleteShader(sh);
+
+    return ok;
+}
+
+// mix() on integers needs GLSL 4.50 or GL_EXT_shader_integer_mix; glslang
+// only warned about it.
+GPU_TEST(misc_core, integer_mix_needs_its_extension_before_450)
+{
+    CHECK_EQ_INT(compiles("#version 330\nvoid main() { ivec2 a = mix(ivec2(1), ivec2(2), bvec2(true)); "
+                          "gl_Position = vec4(a, 0, 1); }\n"), GL_FALSE);
+    CHECK_EQ_INT(compiles("#version 330\n#extension GL_EXT_shader_integer_mix : enable\n"
+                          "void main() { ivec2 a = mix(ivec2(1), ivec2(2), bvec2(true)); "
+                          "gl_Position = vec4(a, 0, 1); }\n"), GL_TRUE);
+    CHECK_EQ_INT(compiles("#version 450\nvoid main() { ivec2 a = mix(ivec2(1), ivec2(2), bvec2(true)); "
+                          "gl_Position = vec4(a, 0, 1); }\n"), GL_TRUE);
+}
+
+static GLint fragmentCompiles(const char *src)
+{
+    GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+    GLint ok = 0;
+
+    glShaderSource(sh, 1, &src, NULL);
+    glCompileShader(sh);
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    glDeleteShader(sh);
+
+    return ok;
+}
+
+// Keywords are not names. MGL's own rewrites hid two cases from glslang: a
+// subroutine type it drops, and "invariant", which it strips from inputs.
+GPU_TEST(misc_core, keywords_are_not_names)
+{
+    CHECK_EQ_INT(fragmentCompiles("#version 460\nsubroutine void uniform(inout vec4 a);\n"
+                                  "subroutine (uniform) void f(inout vec4 a) { a = vec4(1); }\n"
+                                  "void main() { }\n"), GL_FALSE);
+    CHECK_EQ_INT(fragmentCompiles("#version 460\nsubroutine void sampler2D(inout vec4 a);\n"
+                                  "void main() { }\n"), GL_FALSE);
+    CHECK_EQ_INT(fragmentCompiles("#version 460\nin vec4 invariant;\nvoid main() { }\n"), GL_FALSE);
+    CHECK_EQ_INT(fragmentCompiles("#version 460\nvoid test(in vec4 invariant) { }\nvoid main() { }\n"), GL_FALSE);
+
+    // still fine as what they are
+    CHECK_EQ_INT(fragmentCompiles("#version 460\ninvariant in vec4 v;\nout vec4 o;\nvoid main() { o = v; }\n"), GL_TRUE);
+    CHECK_EQ_INT(fragmentCompiles("#version 460\nsubroutine void samplerFn(inout vec4 a);\n"
+                                  "subroutine (samplerFn) void f(inout vec4 a) { a = vec4(1); }\n"
+                                  "subroutine uniform samplerFn s;\nout vec4 o;\n"
+                                  "void main() { vec4 a = vec4(0); s(a); o = a; }\n"), GL_TRUE);
+}
+
+// std430 is for buffer blocks, and imageSize arrived in GLSL 4.30. glslang
+// takes both when it writes SPIR-V, so they compiled.
+GPU_TEST(misc_core, std430_uniforms_and_early_image_size_do_not_compile)
+{
+    CHECK_EQ_INT(fragmentCompiles("#version 430 core\nlayout(std430) uniform UBO { int x; };\n"
+                                  "buffer SSBO { int y; };\nvoid main() { y = x; }\n"), GL_FALSE);
+    CHECK_EQ_INT(fragmentCompiles("#version 430 core\nlayout(std430) buffer SSBO { int y; };\n"
+                                  "void main() { y = 1; }\n"), GL_TRUE);
+    CHECK_EQ_INT(fragmentCompiles("#version 420 core\nlayout(location = 0) out vec4 c;\n"
+                                  "layout(binding = 0, rg16f) uniform image2D img;\n"
+                                  "void main() { c = vec4(imageSize(img), 0, 1); }\n"), GL_FALSE);
+    CHECK_EQ_INT(fragmentCompiles("#version 430 core\nlayout(location = 0) out vec4 c;\n"
+                                  "layout(binding = 0, rg16f) uniform image2D img;\n"
+                                  "void main() { c = vec4(imageSize(img), 0, 1); }\n"), GL_TRUE);
+}
+
+// Each stage needs a main. A vertex shader without one linked.
+GPU_TEST(misc_core, a_stage_without_main_does_not_link)
+{
+    static const char *VS = "#version 460\nvoid niam() { gl_Position = vec4(0); }\n";
+    static const char *FS = "#version 460\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    char log[1024] = { 0 };
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log);
+
+    CHECK_EQ_UINT(prog, 0);
+    if (prog)
+        glDeleteProgram(prog);
+
+    // nor does a separable program holding just that stage
+    static const char *NOMAIN_FS = "#version 310 es\nuniform highp vec4 u_color;\n"
+                                   "layout(location = 0) out mediump vec4 o_color;\n"
+                                   "void niaM(void) { o_color = u_color; }\n";
+    static const char *MAIN_FS = "#version 310 es\nuniform highp vec4 u_color;\n"
+                                 "layout(location = 0) out mediump vec4 o_color;\n"
+                                 "void main(void) { o_color = u_color; }\n";
+    GLuint sep = glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &MAIN_FS), fs = glCreateShader(GL_FRAGMENT_SHADER);
+    GLint ok = -1;
+
+    // the shader compiles once with a main, then again without one
+    glShaderSource(fs, 1, &MAIN_FS, NULL);
+    glCompileShader(fs);
+    glAttachShader(sep, fs);
+    glShaderSource(fs, 1, &NOMAIN_FS, NULL);
+    glCompileShader(fs);
+    glLinkProgram(sep);
+    glGetProgramiv(sep, GL_LINK_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_FALSE);
+
+    glDeleteShader(fs);
+    glDeleteProgram(sep);
+    mgl_drain_errors();
+}
+
+// A shader whose latest compile failed fails the link, whatever it compiled
+// to before.
+GPU_TEST(misc_core, a_failed_recompile_fails_the_link)
+{
+    static const char *GOOD = "#version 460\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    static const char *BAD = "#version 460\nout vec4 o;\nvoid main() { o = vec4(1) }\n";
+    static const char *VS = "#version 460\nvoid main() { gl_Position = vec4(0); }\n";
+    GLuint prog = glCreateProgram(), vs = glCreateShader(GL_VERTEX_SHADER), fs = glCreateShader(GL_FRAGMENT_SHADER);
+    GLint ok = -1;
+
+    glShaderSource(vs, 1, &VS, NULL);
+    glCompileShader(vs);
+    glShaderSource(fs, 1, &GOOD, NULL);
+    glCompileShader(fs);
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glShaderSource(fs, 1, &BAD, NULL);
+    glCompileShader(fs);
+    glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_FALSE);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_FALSE);
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    glDeleteProgram(prog);
+    mgl_drain_errors();
+}

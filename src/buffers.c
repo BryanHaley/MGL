@@ -617,8 +617,8 @@ void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
                 {
                     if (ctx->state.buffer_base[b].buffers[i].buf == ptr)
                     {
-                        ctx->state.buffer_base[b].buffers[i].buf = NULL;
-                        ctx->state.buffer_base[b].buffers[i].buffer = 0;
+                        // the range goes with the buffer: START and SIZE read 0
+                        bzero(&ctx->state.buffer_base[b].buffers[i], sizeof(BufferBaseTarget));
                     }
                 }
             }
@@ -664,6 +664,11 @@ void mglBindBuffer(GLMContext ctx, GLenum target, GLuint buffer)
 
     if (buffer)
     {
+        // core GL binds only names glGenBuffers handed out
+        ERROR_CHECK_RETURN(isBuffer(ctx, buffer) ||
+                           (buffer < STATE(buffer_table.current_name) && !isFreeName(&STATE(buffer_table), buffer)),
+                           GL_INVALID_OPERATION);
+
         ptr = getBuffer(ctx, target, buffer);
         ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
     }
@@ -748,6 +753,8 @@ static bool feedbackBusy(GLMContext ctx, GLenum target)
            ctx->state.transform_feedback->active;
 }
 
+static void keepInFeedbackObject(GLMContext ctx, GLenum target, GLuint index);
+
 void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffer)
 {
     Buffer  *ptr;
@@ -788,9 +795,21 @@ void mglBindBufferBase(GLMContext ctx, GLenum target, GLuint index, GLuint buffe
     if (STATE(buffers[buffer_index]) != ptr)
         STATE(buffers[buffer_index]) = ptr;
 
+    keepInFeedbackObject(ctx, target, index);
+
     ctx->state.dirty_bits |= (DIRTY_BUFFER | DIRTY_BUFFER_BASE_STATE);
 }
 
+
+// The indexed feedback bindings belong to the bound feedback object, so what
+// is bound there is kept in it too.
+static void keepInFeedbackObject(GLMContext ctx, GLenum target, GLuint index)
+{
+    TransformFeedback *t = ctx->state.transform_feedback;
+
+    if (target == GL_TRANSFORM_FEEDBACK_BUFFER && t && index < MAX_TF_BUFFERS)
+        t->buffers[index] = ctx->state.buffer_base[_TRANSFORM_FEEDBACK_BUFFER].buffers[index];
+}
 
 void mglBindBuffersBase(GLMContext ctx, GLenum target, GLuint first, GLsizei count, const GLuint *buffers)
 {
@@ -824,11 +843,18 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
 
     buffer_index = bufferIndexFromTarget(ctx, target);
 
-    // unbinding takes no notice of offset or size
+    // unbinding takes no notice of size, but the offset still has to sit on
+    // the target's alignment, as other drivers check it
     if (buffer == 0)
     {
+        GLint align = target == GL_UNIFORM_BUFFER ? STATE_VAR(uniform_buffer_offset_alignment) :
+                      target == GL_SHADER_STORAGE_BUFFER ? STATE_VAR(shader_storage_buffer_offset_alignment) : 1;
+
+        ERROR_CHECK_RETURN(align <= 1 || (offset % align) == 0, GL_INVALID_VALUE);
+
         bzero(&ctx->state.buffer_base[buffer_index].buffers[index], sizeof(BufferBaseTarget));
         STATE(buffers[buffer_index]) = NULL;
+        keepInFeedbackObject(ctx, target, index);
         ctx->state.dirty_bits |= (DIRTY_BUFFER | DIRTY_BUFFER_BASE_STATE);
         return;
     }
@@ -866,13 +892,9 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
     ptr = getBuffer(ctx, target, buffer);
     ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
-    // ERROR_CHECK_RETURN(ptr->data.buffer_data, GL_INVALID_VALUE);
-    if (!ptr->data.buffer_data) {
-         MGL_ERR("MGL Error: mglBindBufferRange: buffer_data is NULL\n");
-         ERROR_RETURN(GL_INVALID_VALUE);
-    }
-
-    if (!mgl_range_ok_size_t(offset, size, ptr->data.buffer_size)) {
+    // a buffer with no storage yet may be bound and filled afterwards, like
+    // BindBufferBase; one that has storage keeps the range inside it
+    if (ptr->data.buffer_data && !mgl_range_ok_size_t(offset, size, ptr->data.buffer_size)) {
         MGL_ERR("MGL Error: mglBindBufferRange: range overflow (offset=%ld size=%ld buffer_size=%ld)\n", offset, size, (long)ptr->data.buffer_size);
         ERROR_RETURN(GL_INVALID_VALUE);
     }
@@ -887,6 +909,8 @@ void mglBindBufferRange(GLMContext ctx, GLenum target, GLuint index, GLuint buff
 
     // like BindBufferBase, this also takes the generic binding
     STATE(buffers[buffer_index]) = ptr;
+
+    keepInFeedbackObject(ctx, target, index);
 
     ctx->state.dirty_bits |= (DIRTY_BUFFER | DIRTY_BUFFER_BASE_STATE);
 }
@@ -974,12 +998,8 @@ void mglBufferData(GLMContext ctx, GLenum target, GLsizeiptr size, const void *d
     index = bufferIndexFromTarget(ctx, target);
 
     ptr = STATE(buffers[index]);
-    if (ptr == NULL)
-    {
-        // Some apps call glBufferData without binding a buffer first
-        // ERROR_RETURN(GL_INVALID_OPERATION);
-        return;
-    }
+    // some apps call this with nothing bound; it still does nothing, but says so
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
 
     // buffer was created via buffer storage call for immutable storage
     if (ptr->immutable_storage)
@@ -1029,6 +1049,16 @@ void mglNamedBufferData(GLMContext ctx, GLuint buffer, GLsizeiptr size, const vo
     ptr->storage_flags = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_DYNAMIC_STORAGE_BIT;
 }
 
+// A write may not touch the part of a buffer that is mapped, unless the
+// mapping is persistent (GL 4.6 section 6.2.1)
+static bool writeHitsMapping(const Buffer *ptr, GLintptr offset, GLsizeiptr size)
+{
+    if (!ptr->mapped || (ptr->access & GL_MAP_PERSISTENT_BIT))
+        return false;
+
+    return offset < ptr->mapped_offset + ptr->mapped_length && ptr->mapped_offset < offset + size;
+}
+
 void mglBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr size, const void *data)
 {
     // Absolute first check - validate ctx before ANY access
@@ -1072,6 +1102,9 @@ void mglBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr
     
     ptr = ctx->state.buffers[index];
 
+    // nothing bound to the target
+    ERROR_CHECK_RETURN(ptr, GL_INVALID_OPERATION);
+
     // COMPREHENSIVE BUFFER SAFETY: Validate buffer pointer and get size safely (void function)
     GLsizeiptr buffer_size;
     MGL_GET_BUFFER_SIZE_SAFE_VOID(ptr, buffer_size, "mglBufferSubData");
@@ -1081,7 +1114,7 @@ void mglBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
-    if (ptr->mapped && !(ptr->access & GL_MAP_PERSISTENT_BIT))
+    if (writeHitsMapping(ptr, offset, size))
     {
         MGL_ERR("MGL Error: mglBufferSubData: buffer is mapped\n");
         ERROR_RETURN(GL_INVALID_OPERATION);
@@ -1148,7 +1181,7 @@ void mglNamedBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GLsiz
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
-    if (ptr->mapped && !(ptr->access & GL_MAP_PERSISTENT_BIT))
+    if (writeHitsMapping(ptr, offset, size))
     {
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
@@ -1404,6 +1437,17 @@ void mglClearNamedBufferSubData(GLMContext ctx, GLuint buffer, GLenum internalfo
 #pragma mark GL Buffer Map Functions
 static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsizeiptr length, GLbitfield access_flags);
 
+// GL_BUFFER_ACCESS: read-write when unmapped, otherwise what the mapping allows
+static GLint bufferAccess(Buffer *ptr)
+{
+    GLbitfield rw = ptr->access_flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT);
+
+    if (!ptr->mapped || rw == (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT))
+        return GL_READ_WRITE;
+
+    return rw == GL_MAP_READ_BIT ? GL_READ_ONLY : rw == GL_MAP_WRITE_BIT ? GL_WRITE_ONLY : GL_READ_WRITE;
+}
+
 /* A read of buffer contents has to see everything already submitted. The CPU
    copy is only current once the GPU is done writing it. */
 static void waitForGPUWrites(GLMContext ctx)
@@ -1445,7 +1489,8 @@ void *mglMapBuffer(GLMContext ctx, GLenum target, GLenum access)
 
     ptr->mapped = GL_TRUE;
     ptr->access = access;
-    ptr->access_flags = 0;
+    ptr->access_flags = access == GL_READ_ONLY ? GL_MAP_READ_BIT :
+                        access == GL_WRITE_ONLY ? GL_MAP_WRITE_BIT : GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;
     ptr->mapped_offset = 0;
     ptr->mapped_length = ptr->size;
 
@@ -1571,6 +1616,24 @@ static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsize
     if (ptr->mapped)
     {
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
+    }
+
+    // GL 4.6 section 6.3: the rules about which bits go together
+    ERROR_CHECK_RETURN_VALUE(length != 0, GL_INVALID_VALUE, NULL);
+    ERROR_CHECK_RETURN_VALUE(access_flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT), GL_INVALID_OPERATION, NULL);
+    ERROR_CHECK_RETURN_VALUE(!((access_flags & GL_MAP_READ_BIT) &&
+                               (access_flags & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT |
+                                                GL_MAP_UNSYNCHRONIZED_BIT))), GL_INVALID_OPERATION, NULL);
+    ERROR_CHECK_RETURN_VALUE(!((access_flags & GL_MAP_FLUSH_EXPLICIT_BIT) && !(access_flags & GL_MAP_WRITE_BIT)),
+                             GL_INVALID_OPERATION, NULL);
+
+    // storage made with glBufferStorage maps only the ways it was made for
+    if (ptr->immutable_storage)
+    {
+        GLbitfield need = access_flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT |
+                                          GL_MAP_COHERENT_BIT);
+
+        ERROR_CHECK_RETURN_VALUE((need & ~ptr->storage_flags) == 0, GL_INVALID_OPERATION, NULL);
     }
 
     ptr->access = 0;
@@ -1729,24 +1792,38 @@ void mglBindBuffersRange(GLMContext ctx, GLenum target, GLuint first, GLsizei co
 }
 
 #pragma mark GL Buffer Storage Functions
+// What both storage calls refuse, GL 4.6 section 6.2
+static GLenum storageError(Buffer *ptr, GLsizeiptr size, GLbitfield storage_flags)
+{
+    if (size <= 0)
+        return GL_INVALID_VALUE;
+
+    if (storage_flags & ~(GL_DYNAMIC_STORAGE_BIT | GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT |
+                          GL_MAP_COHERENT_BIT | GL_CLIENT_STORAGE_BIT))
+        return GL_INVALID_VALUE;
+
+    // persistent needs read or write, and coherent needs persistent
+    if ((storage_flags & GL_MAP_PERSISTENT_BIT) && !(storage_flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT)))
+        return GL_INVALID_VALUE;
+
+    if ((storage_flags & GL_MAP_COHERENT_BIT) && !(storage_flags & GL_MAP_PERSISTENT_BIT))
+        return GL_INVALID_VALUE;
+
+    // storage is set once
+    if (ptr->immutable_storage & BUFFER_IMMUTABLE_STORAGE_FLAG)
+        return GL_INVALID_OPERATION;
+
+    return GL_NO_ERROR;
+}
+
 void mglBufferStorage(GLMContext ctx, GLenum target, GLsizeiptr size, const void *data, GLbitfield storage_flags)
 {
     Buffer *ptr;
     GLuint index;
+    GLenum err;
 
     // GL_INVALID_ENUM is generated if target is not supported.
     ERROR_CHECK_RETURN(checkTarget(ctx, target), GL_INVALID_ENUM);
-
-    if (size < 0)
-    {
-        ERROR_RETURN(GL_INVALID_OPERATION);
-    }
-
-    if (storage_flags & ~(GL_DYNAMIC_STORAGE_BIT | GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT |
-                  GL_CLIENT_STORAGE_BIT))
-    {
-        ERROR_RETURN(GL_INVALID_VALUE);
-    }
 
     index = bufferIndexFromTarget(ctx, target);
 
@@ -1754,40 +1831,25 @@ void mglBufferStorage(GLMContext ctx, GLenum target, GLsizeiptr size, const void
 
     ERROR_CHECK_RETURN((ptr != NULL), GL_INVALID_OPERATION);
 
+    err = storageError(ptr, size, storage_flags);
+
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
+
     bufferStorage(ctx, ptr, target, index, size, data, storage_flags, 0);
 }
 
 void mglNamedBufferStorage(GLMContext ctx, GLuint buffer, GLsizeiptr size, const void *data, GLbitfield storage_flags)
 {
     Buffer *ptr;
+    GLenum err;
 
     ptr = findBuffer(ctx, buffer);
 
     ERROR_CHECK_RETURN((ptr != NULL), GL_INVALID_OPERATION);
 
-    if (size < 0)
-    {
-        ERROR_RETURN(GL_INVALID_VALUE);
-    }
+    err = storageError(ptr, size, storage_flags);
 
-    if (storage_flags & ~(GL_DYNAMIC_STORAGE_BIT | GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT |
-                  GL_CLIENT_STORAGE_BIT))
-    {
-        ERROR_RETURN(GL_INVALID_VALUE);
-    }
-
-    // GL 4.6 §6.2: MAP_PERSISTENT_BIT requires at least one of MAP_READ_BIT
-    // or MAP_WRITE_BIT; MAP_COHERENT_BIT requires MAP_PERSISTENT_BIT.
-    if ((storage_flags & GL_MAP_PERSISTENT_BIT) &&
-        !(storage_flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT)))
-    {
-        ERROR_RETURN(GL_INVALID_VALUE);
-    }
-    if ((storage_flags & GL_MAP_COHERENT_BIT) &&
-        !(storage_flags & GL_MAP_PERSISTENT_BIT))
-    {
-        ERROR_RETURN(GL_INVALID_VALUE);
-    }
+    ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
 
     bufferStorage(ctx, ptr, 0, 0, size, data, storage_flags, 0);
 }
@@ -1834,7 +1896,7 @@ void mglGetBufferParameteriv(GLMContext ctx, GLenum target, GLenum pname, GLint 
     switch(pname)
     {
         case GL_BUFFER_ACCESS:
-            *params = ptr->access;
+            *params = bufferAccess(ptr);
             break;
 
         case GL_BUFFER_ACCESS_FLAGS:
@@ -1988,7 +2050,7 @@ void mglGetNamedBufferParameteriv(GLMContext ctx, GLuint buffer, GLenum pname, G
     switch(pname)
     {
         case GL_BUFFER_ACCESS:
-            *params = ptr->access;
+            *params = bufferAccess(ptr);
             break;
 
         case GL_BUFFER_ACCESS_FLAGS:
@@ -2044,7 +2106,7 @@ void mglGetNamedBufferParameteri64v(GLMContext ctx, GLuint buffer, GLenum pname,
     switch(pname)
     {
         case GL_BUFFER_ACCESS:
-            *params = ptr->access;
+            *params = bufferAccess(ptr);
             break;
 
         case GL_BUFFER_ACCESS_FLAGS:

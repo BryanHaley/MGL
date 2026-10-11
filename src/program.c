@@ -247,6 +247,8 @@ static void freeResourceList(SpirvResourceList *l)
 
 void mglFreeProgram(GLMContext ctx, Program *ptr)
 {
+    freeResourceList(&ptr->atomic_uniforms);
+
     if (ptr->linked_glsl_program)
     {
         glslang_program_delete(ptr->linked_glsl_program);
@@ -334,9 +336,9 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
     mglFreeCullInfo(&ptr->cull);
 
     {
-        Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster };
+        Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster, &ptr->vs_noraster };
 
-        for (int c = 0; c < 3; c++)
+        for (int c = 0; c < 4; c++)
         {
             free(cull[c]->ir);
             free(cull[c]->msl_str);
@@ -410,6 +412,18 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
     free(ptr);
 }
 
+// The last user of a deleted program has let go: its name goes too.
+static void freeDeletedProgram(GLMContext ctx, Program *ptr)
+{
+    if (findProgram(ctx, ptr->name) == ptr)
+    {
+        deleteHashElement(&STATE(program_table), ptr->name);
+        mglForgetObjectLabel(ctx, GL_PROGRAM, ptr->name, NULL);
+    }
+
+    mglFreeProgram(ctx, ptr);
+}
+
 void mglDeleteProgram(GLMContext ctx, GLuint program)
 {
     Program *ptr;
@@ -425,15 +439,12 @@ void mglDeleteProgram(GLMContext ctx, GLuint program)
         return;
     }
 
-    deleteHashElement(&STATE(program_table), program);
-    mglForgetObjectLabel(ctx, GL_PROGRAM, program, NULL);
-    
+    // A program still in use is only flagged: its name stays valid, and
+    // glIsProgram says yes, until nothing uses it any more.
     ptr->delete_status = GL_TRUE;
-    
+
     if (ptr->refcount == 0)
-    {
-        mglFreeProgram(ctx, ptr);
-    }
+        freeDeletedProgram(ctx, ptr);
 }
 
 GLboolean mglIsProgram(GLMContext ctx, GLuint program)
@@ -557,6 +568,14 @@ bool addShadersToProgram(GLMContext ctx, Program *pptr, glslang_program_t *glsl_
         Shader *ptr;
 
         ptr = pptr->shader_slots[i];
+
+        // its last compile failed, so what it compiled to before does not count
+        if (ptr && ptr->log)
+        {
+            MGL_ERR("MGL Error: shader %d attached to program %d did not compile\n", ptr->name, pptr->name);
+
+            return false;
+        }
 
         if(ptr && ptr->compiled_glsl_shader)
         {
@@ -1755,7 +1774,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     // A program with no fragment stage can only be drawn with the raster off,
     // and Metal wants a vertex function that returns nothing for that.
     if (stage != _FRAGMENT_SHADER && stage != _COMPUTE_SHADER && ptr &&
-        ptr->shader_slots[_FRAGMENT_SHADER] == NULL && !ptr->building_vs_raster)
+        ((ptr->shader_slots[_FRAGMENT_SHADER] == NULL && !ptr->building_vs_raster) || ptr->building_vs_noraster))
     {
         if (spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION, SPVC_TRUE) != SPVC_SUCCESS) {
             MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_MSL_DISABLE_RASTERIZATION) failed\n");
@@ -2486,6 +2505,8 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
             else
                 rlist->list[i].msl_index = (idx == (unsigned)-1) ? rlist->list[i].binding : idx;
 
+            rlist->list[i].msl_guess = idx == (unsigned)-1;
+
             // a combined sampler's texture and sampler are numbered apart
             {
                 unsigned sidx = spvc_compiler_msl_get_automatic_resource_binding_secondary(compiler_msl,
@@ -2790,7 +2811,7 @@ static const char *uniformLocationProblem(Program *ptr)
 
                 // implicit ones too: with no room left the linker numbered
                 // them off the end
-                if (a->name && a->location != MGL_NO_LOCATION && a->location + an > MAX_UNIFORM_LOCATIONS &&
+                if (a->name && a->location != MGL_NO_LOCATION && a->location + an > MGL_GL_UNIFORM_LOCATIONS &&
                     !mglIsDriverUniform(a->name) && !strstr(a->name, MGL_SUBROUTINE_SUFFIX))
                     return "link failed: the uniforms need more than GL_MAX_UNIFORM_LOCATIONS locations";
 
@@ -2866,9 +2887,9 @@ static const char *imageUniformProblem(GLMContext ctx, Program *ptr)
 
 // The first run of n locations nobody has taken, so an explicit location at
 // the top of the range does not push every implicit one off the end.
-static GLuint freeLocations(const bool *used, GLuint n)
+static GLuint freeLocations(const bool *used, GLuint n, GLuint from)
 {
-    for (GLuint at = 0; at + n <= MAX_UNIFORM_LOCATIONS; at++)
+    for (GLuint at = from; at + n <= MAX_UNIFORM_LOCATIONS; at++)
     {
         GLuint k = 0;
 
@@ -3001,7 +3022,8 @@ static void assignUniformLocations(Program *ptr)
             if (!shared)
             {
                 GLuint n = list->list[i].array_size > 1 ? (GLuint)list->list[i].array_size : 1;
-                GLuint at = freeLocations(used, n);
+                bool mine = list->list[i].name && mglIsDriverUniform(list->list[i].name);
+                GLuint at = freeLocations(used, n, mine ? MGL_GL_UNIFORM_LOCATIONS : 0);
 
                 list->list[i].location = at;
 
@@ -3229,13 +3251,20 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
 
     if (!glslang_program_link(prog, GLSLANG_MSG_DEFAULT_BIT) || !mapProgramIO(prog, stage))
     {
-        MGL_ERR("MGL Error: generated shader would not link: %s\n",
-                glslang_program_get_info_log(prog));
+        // A stage that redeclares gl_PerVertex with fewer members will not
+        // link against the generated reader of gl_in. With no varyings to
+        // number, the generated stage stands on its own.
+        bool retry = companion != NULL;
+
+        if (!retry)
+            MGL_ERR("MGL Error: generated shader would not link: %s\n",
+                    glslang_program_get_info_log(prog));
+
         glslang_program_delete(prog);
         glslang_shader_delete(shader);
         glslang_shader_delete(companion);
 
-        return false;
+        return retry && buildGeneratedStageInto(ctx, pptr, gl_type, spirv_slot, dest, src, entry, 0, NULL);
     }
 
     glslang_program_SPIRV_generate(prog, stage);
@@ -3538,6 +3567,10 @@ static void linkGeometryCapture(Program *pptr)
 
     memcpy(pptr->xfb.gather, table, sizeof(GLuint) * 3 * (size_t)words);
     pptr->xfb.gather_words = words;
+
+    for (int i = 0; i < n; i++)
+        if (items[i].buffer >= 0 && items[i].buffer < MGL_XFB_MAX_BUFFERS)
+            pptr->xfb.buffer_stream[items[i].buffer] = mglGsItemStream(&pptr->geom, &items[i]);
     pptr->xfb.varying_count = n;
     pptr->xfb.from_shader = from_shader;
 
@@ -3927,6 +3960,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
         glslang_program_delete(pptr->linked_glsl_program);
 
     pptr->linked_glsl_program = glsl_program;
+    pptr->executable = GL_TRUE;
     pptr->dirty_bits |= DIRTY_PROGRAM;
 
     return true;
@@ -4053,6 +4087,38 @@ static void applyUniformInitializers(GLMContext ctx, Program *pptr)
     free(inits);
 }
 
+// The classic uniform queries list atomic counters after everything else.
+static void listAtomicUniforms(Program *pptr)
+{
+    MglResource *u = pptr->resources.list[MGL_RES_UNIFORM];
+    GLint n = 0;
+
+    freeResourceList(&pptr->atomic_uniforms);
+
+    for (GLint i = 0; i < pptr->resources.count[MGL_RES_UNIFORM]; i++)
+        n += u[i].type == GL_UNSIGNED_INT_ATOMIC_COUNTER;
+
+    if (n == 0 || (pptr->atomic_uniforms.list = calloc(n, sizeof(SpirvResource))) == NULL)
+        return;
+
+    for (GLint i = 0; i < pptr->resources.count[MGL_RES_UNIFORM]; i++)
+    {
+        if (u[i].type != GL_UNSIGNED_INT_ATOMIC_COUNTER)
+            continue;
+
+        SpirvResource *r = &pptr->atomic_uniforms.list[pptr->atomic_uniforms.count++];
+
+        r->name = strdup(u[i].name);
+        r->gl_type = GL_UNSIGNED_INT_ATOMIC_COUNTER;
+        r->array_size = u[i].array_size > 1 ? u[i].array_size : 1;
+        r->location = MGL_NO_LOCATION;
+        r->block_index = -1;
+        r->offset = u[i].offset;
+        r->array_stride = u[i].array_size > 1 ? 4 : 0;
+        r->atomic_buffer = u[i].atomic_buffer;
+    }
+}
+
 // What the program interface queries answer from, worked out once the link
 // has succeeded.
 static void reflectProgram(GLMContext ctx, Program *pptr)
@@ -4077,7 +4143,98 @@ static void reflectProgram(GLMContext ctx, Program *pptr)
     }
 
     mglReflectProgram(shaders, sources, _MAX_SHADER_TYPES, &pptr->resources);
+    listAtomicUniforms(pptr);
     applyUniformInitializers(ctx, pptr);
+}
+
+static bool xfbSpecial(const char *name, GLint *skip);
+static GLint glTypeComponents(GLenum type);
+
+// GL 4.6 section 11.1.2.1: every name given for feedback has to be something
+// the last stage before the rasteriser writes, and none may be given twice.
+// Only the name before any "." or "[" is looked for, to stay out of the way
+// of the members and elements the capture itself still checks.
+static const char *xfbVaryingsProblem(GLMContext ctx, Program *p)
+{
+    GLint total = 0;
+
+    for (GLsizei v = 0; v < p->xfb_varying_count; v++)
+    {
+        const char *name = p->xfb_varyings[v];
+        GLint skip;
+
+        if (name == NULL || xfbSpecial(name, &skip) || !strncmp(name, "gl_", 3))
+            continue;
+
+        for (GLsizei w = 0; w < v; w++)
+            if (p->xfb_varyings[w] && !strcmp(p->xfb_varyings[w], name))
+                return "link failed: a transform feedback varying is named twice";
+
+        size_t base = strcspn(name, ".[");
+        MglResource *found = NULL;
+
+        for (GLint r = 0; r < p->resources.count[MGL_RES_CAPTURE_SOURCE] && !found; r++)
+        {
+            MglResource *cand = &p->resources.list[MGL_RES_CAPTURE_SOURCE][r];
+
+            if (cand->name && !strncmp(cand->name, name, base) &&
+                (cand->name[base] == 0 || cand->name[base] == '.' || cand->name[base] == '['))
+                found = cand;
+        }
+
+        if (!found)
+            return "link failed: a transform feedback varying is not written by the stage that records";
+
+        // the whole variable when it is named whole, else one element of it
+        GLint comps = glTypeComponents(found->type);
+
+        if (!strcmp(found->name, name) && found->array_size > 1)
+            comps *= found->array_size;
+
+        if (p->xfb_buffer_mode == GL_SEPARATE_ATTRIBS &&
+            comps > STATE_VAR(max_transform_feedback_separate_components))
+            return "link failed: a transform feedback varying has more components than one buffer can take";
+
+        total += comps;
+    }
+
+    if (p->xfb_buffer_mode == GL_INTERLEAVED_ATTRIBS &&
+        total > STATE_VAR(max_transform_feedback_interleaved_components))
+        return "link failed: the transform feedback varyings have more components than can be recorded";
+
+    return NULL;
+}
+
+// The vertex stage again, returning nothing, so a draw with the raster off
+// can leave it off with a fragment shader in the program. Built on first use.
+bool mglBuildNoRasterVertex(GLMContext ctx, Program *pptr)
+{
+    Spirv *src = &pptr->spirv[_VERTEX_SHADER];
+    Spirv *v = &pptr->vs_noraster;
+
+    free(v->msl_str);
+    v->msl_str = NULL;
+
+    if (src->ir == NULL || src->size == 0)
+        return false;
+
+    free(v->ir);
+    free(v->entry_point);
+    memset(v, 0, sizeof(*v));
+
+    v->stage = src->stage;
+    v->size = src->size;
+    v->ir = (unsigned int *)malloc(v->size * sizeof(unsigned));
+
+    if (v->ir == NULL)
+        return false;
+
+    memcpy(v->ir, src->ir, v->size * sizeof(unsigned));
+    pptr->building_vs_noraster = GL_TRUE;
+    v->msl_str = parseSPIRVShaderToMetal(ctx, pptr, _VERTEX_SHADER, v, NULL);
+    pptr->building_vs_noraster = GL_FALSE;
+
+    return v->msl_str != NULL;
 }
 
 void mglLinkProgram(GLMContext ctx, GLuint program)
@@ -4094,6 +4251,10 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
         return;
     }
+
+    // the program feedback is recording with cannot be relinked under it
+    ERROR_CHECK_RETURN(!(pptr == ctx->state.program && ctx->state.transform_feedback &&
+                         ctx->state.transform_feedback->active), GL_INVALID_OPERATION);
 
     if (pptr->log)
     {
@@ -4137,9 +4298,11 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         }
     }
 
-    // varyings to record need a stage that writes vertices to record
+    // varyings to record need a stage that writes vertices to record; a
+    // separable control shader has none and simply records nothing
     if (pptr->xfb_varying_count > 0 && !pptr->shader_slots[_VERTEX_SHADER] &&
-        !pptr->shader_slots[_TESS_EVALUATION_SHADER] && !pptr->shader_slots[_GEOMETRY_SHADER])
+        !pptr->shader_slots[_TESS_EVALUATION_SHADER] && !pptr->shader_slots[_GEOMETRY_SHADER] &&
+        !pptr->separable)
     {
         pptr->link_status = GL_FALSE;
         pptr->validate_status = GL_FALSE;
@@ -4272,6 +4435,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         // the strides its xfb qualifiers give are still the program's to report
         noteShaderCapture(pptr);
         assignUniformLocations(pptr);
+        pptr->executable = pptr->executable || pptr->link_status == GL_TRUE;
         pptr->validate_status = pptr->link_status;
         reflectProgram(ctx, pptr);
         ctx->error_suppress--;
@@ -4344,6 +4508,9 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
                     pptr->log = strdup("link failed: Metal rejected the generated MSL");
             }
         }
+
+        if (pptr->link_status == GL_TRUE)
+            pptr->executable = GL_TRUE;
 
         pptr->validate_status = pptr->link_status;
         reflectProgram(ctx, pptr);
@@ -4434,6 +4601,12 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     if (pptr->link_status == GL_TRUE)
         linkCullProgram(ctx, pptr);
 
+    // made here, from the stage as recording left it, and not at draw time:
+    // building it again rereads the stage's resources
+    if (pptr->link_status == GL_TRUE && pptr->shader_slots[_FRAGMENT_SHADER] &&
+        pptr->shader_slots[_VERTEX_SHADER] && !pptr->tess.active && !pptr->geom_shader)
+        mglBuildNoRasterVertex(ctx, pptr);
+
     assignUniformLocations(pptr);
 
     if (pptr->link_status == GL_TRUE && uniformLocationProblem(pptr))
@@ -4479,8 +4652,18 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     if (pptr->link_status == GL_FALSE && pptr->log == NULL)
         pptr->log = strdup("link failed: no usable shader stage");
 
-    pptr->validate_status = pptr->link_status;
     reflectProgram(ctx, pptr);
+
+    if (pptr->link_status == GL_TRUE && xfbVaryingsProblem(ctx, pptr) &&
+        (pptr->shader_slots[_VERTEX_SHADER] || pptr->shader_slots[_TESS_EVALUATION_SHADER] ||
+         pptr->shader_slots[_GEOMETRY_SHADER]))
+    {
+        pptr->link_status = GL_FALSE;
+        free(pptr->log);
+        pptr->log = strdup(xfbVaryingsProblem(ctx, pptr));
+    }
+
+    pptr->validate_status = pptr->link_status;
 
     /* Only call mtlBindProgram if Metal functions are initialized */
     if (ctx->mtl_funcs.mtlBindProgram) {
@@ -4498,6 +4681,10 @@ void mglUseProgram(GLMContext ctx, GLuint program)
 {
     Program *pptr;
 
+    // the program cannot change under feedback that is recording
+    ERROR_CHECK_RETURN(!(ctx->state.transform_feedback && ctx->state.transform_feedback->active &&
+                         !ctx->state.transform_feedback->paused), GL_INVALID_OPERATION);
+
     if (program)
     {
         pptr = findProgram(ctx, program);
@@ -4512,7 +4699,7 @@ void mglUseProgram(GLMContext ctx, GLuint program)
             return;
         }
 
-        ERROR_CHECK_RETURN(pptr->linked_glsl_program, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(pptr->executable, GL_INVALID_OPERATION);
     }
     else
     {
@@ -4525,9 +4712,7 @@ void mglUseProgram(GLMContext ctx, GLuint program)
         {
             ctx->state.program->refcount--;
             if (ctx->state.program->refcount == 0 && ctx->state.program->delete_status)
-            {
-                mglFreeProgram(ctx, ctx->state.program);
-            }
+                freeDeletedProgram(ctx, ctx->state.program);
         }
 
         ctx->state.program = pptr;
@@ -4682,7 +4867,7 @@ GLint  mglGetAttribLocation(GLMContext ctx, GLuint program, const GLchar *name)
 	// this used to assert on the name and then dereference the pointer
 	ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, -1);
 
-	if (ptr->linked_glsl_program == NULL)
+	if (!ptr->executable)
 	{
 		ERROR_RETURN_VALUE(GL_INVALID_OPERATION, 0);
 
@@ -4782,7 +4967,8 @@ static int programUniformCount(Program *ptr)
            programResourceCount(ptr, SPVC_RESOURCE_TYPE_SAMPLED_IMAGE) +
            programResourceCount(ptr, SPVC_RESOURCE_TYPE_SEPARATE_IMAGE) +
            programResourceCount(ptr, SPVC_RESOURCE_TYPE_STORAGE_IMAGE) +
-           programResourceCount(ptr, SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS);
+           programResourceCount(ptr, SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS) +
+           (int)ptr->atomic_uniforms.count;
 }
 
 static int programLongestName(Program *ptr, int res_type)
@@ -4863,6 +5049,26 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
         case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
             *params = programLongestName(pptr, SPVC_RESOURCE_TYPE_UNIFORM_BUFFER);
             break;
+
+        case GL_ACTIVE_ATOMIC_COUNTER_BUFFERS:
+            *params = pptr->resources.count[MGL_RES_ATOMIC_BUFFER];
+            break;
+
+        case GL_TRANSFORM_FEEDBACK_VARYINGS:
+            *params = pptr->link_status == GL_TRUE ? pptr->xfb_varying_count : 0;
+            break;
+
+        case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH:
+            *params = 0;
+
+            for (GLsizei v = 0; pptr->link_status == GL_TRUE && v < pptr->xfb_varying_count; v++)
+                if (pptr->xfb_varyings[v] && (GLint)strlen(pptr->xfb_varyings[v]) + 1 > *params)
+                    *params = (GLint)strlen(pptr->xfb_varyings[v]) + 1;
+            break;
+
+        case GL_TRANSFORM_FEEDBACK_BUFFER_MODE:
+            *params = pptr->xfb_buffer_mode ? pptr->xfb_buffer_mode : GL_INTERLEAVED_ATTRIBS;
+            break;
         case GL_COMPUTE_WORK_GROUP_SIZE:
             // only a successfully linked program with a compute stage has one
             ERROR_CHECK_RETURN(pptr->link_status == GL_TRUE && pptr->stage_src[_COMPUTE_SHADER],
@@ -4900,13 +5106,26 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
         case GL_GEOMETRY_INPUT_TYPE:
         case GL_GEOMETRY_OUTPUT_TYPE:
         case GL_GEOMETRY_SHADER_INVOCATIONS:
-            ERROR_CHECK_RETURN(pptr->link_status == GL_TRUE && pptr->shader_slots[_GEOMETRY_SHADER], GL_INVALID_OPERATION);
+            ERROR_CHECK_RETURN(pptr->link_status == GL_TRUE && pptr->stage_src[_GEOMETRY_SHADER], GL_INVALID_OPERATION);
+        {
+            // a program with only this stage never built the geometry
+            // pipeline, so its layout is read from the source here
+            GeometryInfo scanned;
+            const GeometryInfo *gi = &pptr->geom;
 
-            *params = pname == GL_GEOMETRY_VERTICES_OUT ? pptr->geom.max_vertices :
-                      pname == GL_GEOMETRY_INPUT_TYPE ? (GLint)pptr->geom.in_primitive :
-                      pname == GL_GEOMETRY_OUTPUT_TYPE ? (GLint)pptr->geom.out_primitive :
-                      (pptr->geom.invocations > 0 ? pptr->geom.invocations : 1);
+            memset(&scanned, 0, sizeof(scanned));
+
+            if (gi->max_vertices == 0 && mglRewriteGeometryShader(pptr->stage_src[_GEOMETRY_SHADER], &scanned))
+                gi = &scanned;
+
+            *params = pname == GL_GEOMETRY_VERTICES_OUT ? gi->max_vertices :
+                      pname == GL_GEOMETRY_INPUT_TYPE ? (GLint)gi->in_primitive :
+                      pname == GL_GEOMETRY_OUTPUT_TYPE ? (GLint)gi->out_primitive :
+                      (gi->invocations > 0 ? gi->invocations : 1);
+
+            mglFreeGeometryInfo(&scanned);
             break;
+        }
 
         default:
             MGL_INFO("mglGetProgramiv: unhandled pname 0x%x\n", pname);
@@ -5027,7 +5246,7 @@ static void setPipelineStage(GLMContext ctx, ProgramPipeline *pp, int stage, Pro
     pp->stage_programs[stage] = p;
 
     if (old && --old->refcount == 0 && old->delete_status)
-        mglFreeProgram(ctx, old);
+        freeDeletedProgram(ctx, old);
 }
 
 // A program for a pipeline stage: zero, or a linked separable program. Raises
@@ -5218,20 +5437,48 @@ static int subroutineUniformAt(const SubroutineInfo *si, GLuint location, GLuint
 static GLint subroutineLocationOf(const SubroutineInfo *si, const char *name)
 {
     char base[256];
-    GLint element = 0;
     const char *open = strchr(name, '[');
 
     snprintf(base, sizeof(base), "%.*s", open ? (int)(open - name) : (int)strlen(name), name);
-
-    if (open)
-        element = atoi(open + 1);
 
     for (GLuint i = 0; i < si->uniform_count; i++)
     {
         if (si->uniform_names[i] == NULL || strcmp(si->uniform_names[i], base))
             continue;
 
-        if (element < 0 || (GLuint)element >= subroutineSize(si, i))
+        // u[i][j] counts along the declared dimensions, last one fastest
+        int dims[8], ndims = 0, idx[8] = { 0 }, nidx = 0;
+        const char *d = si->uniform_dims ? si->uniform_dims[i] : NULL;
+
+        for (; d && (d = strchr(d, '[')) && ndims < 8; d++)
+            dims[ndims++] = atoi(d + 1);
+
+        for (const char *q = open; q && (q = strchr(q, '[')); q++)
+        {
+            if (nidx == 8)
+                return -1;
+            idx[nidx++] = atoi(q + 1);
+        }
+
+        if (ndims == 0)
+        {
+            ndims = 1;
+            dims[0] = (int)subroutineSize(si, i);
+        }
+
+        if (nidx > ndims)
+            return -1;
+
+        GLint element = 0;
+
+        for (int k = 0; k < ndims; k++)
+        {
+            if (idx[k] < 0 || idx[k] >= dims[k])
+                return -1;
+            element = element * dims[k] + idx[k];
+        }
+
+        if ((GLuint)element >= subroutineSize(si, i))
             return -1;
 
         return subroutineBase(si, i) + element;
@@ -5344,6 +5591,7 @@ GLint mglGetSubroutineUniformLocation(GLMContext ctx, GLuint program, GLenum sha
     ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_VALUE, -1);
     ERROR_CHECK_RETURN_VALUE(name, GL_INVALID_VALUE, -1);
     ERROR_CHECK_RETURN_VALUE(validShaderType(shadertype), GL_INVALID_ENUM, -1);
+    ERROR_CHECK_RETURN_VALUE(pptr->link_status == GL_TRUE, GL_INVALID_OPERATION, -1);
 
     si = stageSubroutines(pptr, shadertype);
 
@@ -5362,6 +5610,9 @@ void mglGetUniformSubroutineuiv(GLMContext ctx, GLenum shadertype, GLint locatio
 
     si = stageSubroutines(pptr, shadertype);
     stage = glShaderTypeToGLMType(shadertype);
+
+    // a stage the program does not have
+    ERROR_CHECK_RETURN(pptr->stage_src[stage], GL_INVALID_OPERATION);
 
     ERROR_CHECK_RETURN(si && location >= 0 &&
                        (GLuint)location < subroutineLocationCount(si), GL_INVALID_VALUE);
@@ -5395,6 +5646,17 @@ void mglUniformSubroutinesuiv(GLMContext ctx, GLenum shadertype, GLsizei count, 
     for (GLsizei i = 0; i < count; i++)
         ERROR_CHECK_RETURN(mglSubroutineSlot(si, indices[i]) >= 0, GL_INVALID_VALUE);
 
+    // each function has to be one of the uniform's own subroutine type
+    for (GLsizei i = 0; i < count; i++)
+    {
+        GLuint element = 0;
+        int u = subroutineUniformAt(si, (GLuint)i, &element);
+
+        ERROR_CHECK_RETURN(u < 0 || !si->uniform_type || !si->fn_types ||
+                           mglSubroutineCompatible(si, (GLuint)u, (GLuint)mglSubroutineSlot(si, indices[i])),
+                           GL_INVALID_OPERATION);
+    }
+
     if (pptr->subroutine_values[stage] == NULL)
     {
         pptr->subroutine_values[stage] = (GLuint *)calloc(locations, sizeof(GLuint));
@@ -5422,6 +5684,7 @@ void mglUniformSubroutinesuiv(GLMContext ctx, GLenum shadertype, GLsizei count, 
         {
             GLint v = (GLint)indices[i];
 
+            ctx->uniform_setter = 0;
             programUniformWrite(ctx, pptr, loc + (GLint)element, &v, sizeof(GLint));
         }
     }
@@ -5612,6 +5875,8 @@ static bool splitElement(const char *name, char *base, size_t base_len, GLint *e
 
     return true;
 }
+
+GLint mglGetFragDataIndex(GLMContext ctx, GLuint program, const GLchar *name);
 
 static GLint piqCount(Program *p, GLenum iface)
 {
@@ -5850,6 +6115,32 @@ static bool piqItem(Program *p, GLenum iface, GLint index, PiqItem *it)
         }
 
         return true;
+    }
+}
+
+// glGetTransformFeedbackVarying's type and size, from the same reflection the
+// program interface queries use
+void mglXfbVaryingTypeSize(Program *p, GLuint index, GLenum *type, GLsizei *size)
+{
+    PiqItem it;
+    GLint skip = 0;
+
+    *type = GL_NONE;
+    *size = 1;
+
+    if (index >= (GLuint)p->xfb_varying_count)
+        return;
+
+    if (xfbSpecial(p->xfb_varyings[index], &skip))
+    {
+        *size = skip ? skip : 1;
+        return;
+    }
+
+    if (piqItem(p, GL_TRANSFORM_FEEDBACK_VARYING, (GLint)index, &it))
+    {
+        *type = it.res.type;
+        *size = it.res.array_size > 0 ? it.res.array_size : 1;
     }
 }
 
@@ -6255,7 +6546,8 @@ void mglGetProgramResourceiv(GLMContext ctx, GLuint program, GLenum programInter
                 // only a fragment output has a colour index
                 bool fragment = (it.res.stages >> _FRAGMENT_SHADER) & 1u;
 
-                v = (!fragment || !strncmp(it.name, "gl_", 3)) ? -1 : it.res.location_index;
+                // declared in the shader, or bound with glBindFragDataLocationIndexed
+                v = (!fragment || !strncmp(it.name, "gl_", 3)) ? -1 : mglGetFragDataIndex(ctx, program, it.name);
                 break;
             }
 
@@ -6323,6 +6615,10 @@ GLint programResourceLocation(GLMContext ctx, GLuint program, GLenum programInte
 
     if (!splitElement(name, base, sizeof(base), &element) || !strncmp(name, "gl_", 3))
         return -1;
+
+    // subroutine uniforms count every subscript along the declared sizes
+    if (stage)
+        return mglGetSubroutineUniformLocation(ctx, program, stage, name);
 
     // the whole name, or an element of an array named with [0]
     GLint idx = piqFind(p, programInterface, name);
@@ -6421,7 +6717,7 @@ GLint programResourceLocationIndex(GLMContext ctx, GLuint program, GLenum progra
     if (!((it.res.stages >> _FRAGMENT_SHADER) & 1u))
         return -1;
 
-    return it.res.location_index;
+    return mglGetFragDataIndex(ctx, program, name);
 }
 
 void mglGetProgramStageiv(GLMContext ctx, GLuint program, GLenum shadertype, GLenum pname, GLint *params)
@@ -6515,6 +6811,13 @@ GLint mglGetFragDataLocation(GLMContext ctx, GLuint program, const GLchar *name)
 GLint mglGetFragDataIndex(GLMContext ctx, GLuint program, const GLchar *name)
 {
     Program *ptr = findProgram(ctx, program);
+    char base[256];
+
+    // an element of an output array has the index the whole array has
+    snprintf(base, sizeof(base), "%s", name ? name : "");
+    if (strchr(base, '['))
+        *strchr(base, '[') = 0;
+    name = base;
 
     if (mglGetFragDataLocation(ctx, program, name) < 0)
         return -1;

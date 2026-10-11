@@ -7,6 +7,7 @@
 //
 
 #include <assert.h>
+#include <string.h>
 
 #include "mgl.h"
 #include "mgl_log.h"
@@ -130,6 +131,7 @@ void mglBeginTransformFeedback(GLMContext ctx, GLenum primitiveMode)
 
 	// capture starts at the front of the buffers again
 	STATE(transform_feedback)->vertices_recorded = 0;
+	memset(STATE(transform_feedback)->stream_recorded, 0, sizeof(STATE(transform_feedback)->stream_recorded));
 }
 
 
@@ -162,6 +164,12 @@ void mglBindTransformFeedback(GLMContext ctx, GLenum target, GLuint id)
         ptr->target = target;
         ptr->created = GL_TRUE;
         STATE(transform_feedback) = ptr;
+
+        // its indexed buffer bindings come with it
+        for (int i = 0; i < MAX_TF_BUFFERS; i++)
+            ctx->state.buffer_base[_TRANSFORM_FEEDBACK_BUFFER].buffers[i] = ptr->buffers[i];
+
+        ctx->state.dirty_bits |= DIRTY_BUFFER_BASE_STATE;
     }
 }
 
@@ -593,7 +601,14 @@ void mglEndTransformFeedback(GLMContext ctx)
 	// a replay draws what this capture came to, and the next Begin is about
 	// to reset the cursor
 	STATE(transform_feedback)->vertices_captured = STATE(transform_feedback)->vertices_recorded;
+	memcpy(STATE(transform_feedback)->stream_captured, STATE(transform_feedback)->stream_recorded,
+	       sizeof(STATE(transform_feedback)->stream_captured));
 	STATE(transform_feedback)->ever_ended = GL_TRUE;
+
+	// later draws read what was recorded, as vertices or anything else,
+	// without a glMemoryBarrier; Metal orders that only across passes
+	if (ctx->mtl_funcs.mtlMemoryBarrier)
+		ctx->mtl_funcs.mtlMemoryBarrier(ctx, GL_TRANSFORM_FEEDBACK_BARRIER_BIT);
 }
 
 
@@ -831,6 +846,9 @@ void mglPauseTransformFeedback(GLMContext ctx)
 	}
 
 	STATE(transform_feedback)->paused = GL_TRUE;
+
+	if (ctx->mtl_funcs.mtlMemoryBarrier)
+		ctx->mtl_funcs.mtlMemoryBarrier(ctx, GL_TRANSFORM_FEEDBACK_BARRIER_BIT);
 }
 
 

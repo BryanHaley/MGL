@@ -481,10 +481,10 @@ GPU_TEST(draw_variants, xfb_draw_validates_arguments)
 
     /* nonexistent transform feedback */
     glDrawTransformFeedbackStream(GL_TRIANGLES, 999123, 0);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     glDrawTransformFeedbackStreamInstanced(GL_TRIANGLES, 999123, 0, 1);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
     /* negative instancecount */
     glDrawTransformFeedbackStreamInstanced(GL_TRIANGLES, t, 0, -1);

@@ -90,6 +90,8 @@ GPU_TEST(buffer_storage_map, immutable_rejects_bad_flags)
     glDeleteBuffers(1, &b);
 }
 
+// A size that is not positive is a bad value, and storage is set only once.
+// A negative size raised INVALID_OPERATION; zero and a second call went through.
 GPU_TEST(buffer_storage_map, immutable_rejects_negative_size)
 {
     GLuint b = 0;
@@ -98,6 +100,15 @@ GPU_TEST(buffer_storage_map, immutable_rejects_negative_size)
     glBindBuffer(GL_ARRAY_BUFFER, b);
 
     glBufferStorage(GL_ARRAY_BUFFER, -1, NULL, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    glBufferStorage(GL_ARRAY_BUFFER, 0, NULL, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glBufferStorage(GL_ARRAY_BUFFER, 16, NULL, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glBufferStorage(GL_ARRAY_BUFFER, 16, NULL, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glNamedBufferStorage(b, 16, NULL, 0);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -547,4 +558,58 @@ GPU_TEST(buffer_storage_map, a_persistent_pointer_still_reads_after_a_gpu_copy)
     glUnmapNamedBuffer(dst);
     glDeleteBuffers(1, &src);
     glDeleteBuffers(1, &dst);
+}
+
+// With no buffer bound there is nothing to fill; that is an error, not silence.
+GPU_TEST(buffer_storage_map, buffer_data_with_nothing_bound_is_an_error)
+{
+    GLubyte data[4] = { 0 };
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBufferData(GL_ARRAY_BUFFER, sizeof data, data, GL_STATIC_DRAW);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+}
+
+// A plain mapping blocks writes only where it covers, and a persistent one
+// blocks none. Every write was refused while any mapping was open.
+GPU_TEST(buffer_storage_map, writes_beside_a_mapping_go_through)
+{
+    GLuint b = 0;
+    GLubyte data[16] = { 0 };
+
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_ARRAY_BUFFER, b);
+    glBufferStorage(GL_ARRAY_BUFFER, 64, NULL,
+                    GL_DYNAMIC_STORAGE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_READ_BIT | GL_MAP_WRITE_BIT);
+
+    glMapBufferRange(GL_ARRAY_BUFFER, 16, 16, GL_MAP_READ_BIT | GL_MAP_WRITE_BIT);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, 16, data);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glNamedBufferSubData(b, 32, 16, data);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glBufferSubData(GL_ARRAY_BUFFER, 8, 16, data);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+
+    glMapBufferRange(GL_ARRAY_BUFFER, 16, 16, GL_MAP_PERSISTENT_BIT | GL_MAP_READ_BIT | GL_MAP_WRITE_BIT);
+    glBufferSubData(GL_ARRAY_BUFFER, 8, 16, data);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDeleteBuffers(1, &b);
+}
+
+// Only names glGenBuffers handed out can be bound, and glBufferSubData with
+// nothing bound is an error. Both went through quietly.
+GPU_TEST(buffer_storage_map, only_generated_names_bind)
+{
+    GLubyte data[4] = { 0 };
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof data, data);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 987654);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 }

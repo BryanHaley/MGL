@@ -98,7 +98,7 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
     // this used to assert on the name and then dereference the pointer
     ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_OPERATION, -1);
 
-    if (ptr->linked_glsl_program == NULL)
+    if (!ptr->executable)
     {
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, 0);
 
@@ -211,6 +211,14 @@ GLint  mglGetUniformLocation(GLMContext ctx, GLuint program, const GLchar *name)
             if (element >= 0 && element < size && mglUniformBaseNameIs(res->name, base))
                 return (GLint)res->location + element;
         }
+    }
+
+    // a sampler a uniform struct held was moved out to a uniform of its own
+    {
+        char flat[256];
+
+        if (strncmp(name, "mglS_", 5) && mglOpaqueStructUniformName(name, flat, sizeof flat))
+            return mglGetUniformLocation(ctx, program, flat);
     }
 
     return -1;
@@ -331,7 +339,7 @@ static int uniformCount(Program *ptr)
     for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
         n += ptr->block_uniforms[stage].count;
 
-    return n + opaqueCount(ptr);
+    return n + opaqueCount(ptr) + (int)ptr->atomic_uniforms.count;
 }
 
 static SpirvResource *uniformAt(Program *ptr, GLuint index)
@@ -358,7 +366,12 @@ static SpirvResource *uniformAt(Program *ptr, GLuint index)
         seen += list->count;
     }
 
-    return opaqueAt(ptr, index - seen);
+    if (index - seen < (GLuint)opaqueCount(ptr))
+        return opaqueAt(ptr, index - seen);
+
+    seen += opaqueCount(ptr);
+
+    return index - seen < ptr->atomic_uniforms.count ? &ptr->atomic_uniforms.list[index - seen] : NULL;
 }
 
 // GL 4.6 section 7.3.1: an array uniform is named with "[0]" on the end, and
@@ -420,7 +433,13 @@ static int uniformIndexByName(Program *ptr, const char *name)
             if (res && uniformNameMatches(res->name, name))
                 return (int)(seen + i);
         }
+
+        seen += n;
     }
+
+    for (GLuint i = 0; i < ptr->atomic_uniforms.count; i++)
+        if (uniformNameMatches(ptr->atomic_uniforms.list[i].name, name))
+            return (int)(seen + i);
 
     return -1;
 }
@@ -552,6 +571,14 @@ static void copyName(const char *src, GLsizei bufSize, GLsizei *length, GLchar *
 
 static void getUniformTyped(GLMContext ctx, GLuint program, GLint location,
                             GLsizei bufSize, void *params, GLenum dst_type);
+GLboolean isShader(GLMContext ctx, GLuint shader);
+
+// a shader's name in place of a program's is the wrong kind of object
+#define GET_UNIFORM_PROGRAM(ptr) \
+    do { \
+        ERROR_CHECK_RETURN((ptr) || !isShader(ctx, program), GL_INVALID_OPERATION); \
+        ERROR_CHECK_RETURN((ptr), GL_INVALID_VALUE); \
+    } while (0)
 static SpirvResource *plainUniformByLocation(Program *ptr, GLint location, GLint *element);
 static GLsizei glTypeSizeBytes(GLenum type);
 static size_t storedElementSize(Program *pp, SpirvResource *res);
@@ -560,7 +587,7 @@ void mglGetUniformfv(GLMContext ctx, GLuint program, GLint location, GLfloat *pa
 {
     Program *ptr = findProgram(ctx, program);
 
-    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    GET_UNIFORM_PROGRAM(ptr);
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(location >= 0 && location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
 
@@ -582,7 +609,7 @@ void mglGetUniformiv(GLMContext ctx, GLuint program, GLint location, GLint *para
 {
     Program *ptr = findProgram(ctx, program);
 
-    ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
+    GET_UNIFORM_PROGRAM(ptr);
     ERROR_CHECK_RETURN(params, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(location >= 0 && location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
 
@@ -670,6 +697,10 @@ void mglGetActiveUniformsiv(GLMContext ctx, GLuint program, GLsizei uniformCount
                 params[i] = (GLint)res->gl_type;
                 break;
 
+            case GL_UNIFORM_ATOMIC_COUNTER_BUFFER_INDEX:
+                params[i] = res->gl_type == GL_UNSIGNED_INT_ATOMIC_COUNTER ? res->atomic_buffer : -1;
+                break;
+
             default:
                 ERROR_RETURN(GL_INVALID_ENUM);
         }
@@ -722,7 +753,7 @@ GLuint  mglGetUniformBlockIndex(GLMContext ctx, GLuint program, const GLchar *un
     ptr = getProgram(ctx, program);
 
     ERROR_CHECK_RETURN_VALUE(ptr, GL_INVALID_VALUE, GL_INVALID_INDEX);
-    ERROR_CHECK_RETURN_VALUE(ptr->linked_glsl_program, GL_INVALID_OPERATION, GL_INVALID_INDEX);
+    ERROR_CHECK_RETURN_VALUE(ptr->executable, GL_INVALID_OPERATION, GL_INVALID_INDEX);
 
     // GL wants the block's index, which is what the block queries take
     for (GLuint i = 0; i < (GLuint)uniformBlockCount(ptr); i++)
@@ -972,7 +1003,7 @@ Program *programForUniform(GLMContext ctx, GLuint program)
     // also be some shader's; it is still no program
     ERROR_CHECK_RETURN_VALUE(pptr, GL_INVALID_VALUE, NULL);
 
-    ERROR_CHECK_RETURN_VALUE(pptr->link_status == GL_TRUE && pptr->linked_glsl_program,
+    ERROR_CHECK_RETURN_VALUE(pptr->link_status == GL_TRUE && pptr->executable,
                              GL_INVALID_OPERATION, NULL);
 
     return pptr;
@@ -1215,6 +1246,87 @@ static bool writeStructLeaf(GLMContext ctx, Program *pptr, SpirvResource *res,
 void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size);
 static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, const void *ptr, GLsizei size);
 
+#define MGL_UNIFORM_SETTER(kind, cols, rows) ((GLuint)(kind) | ((GLuint)(cols) << 4) | ((GLuint)(rows) << 8))
+
+// The setter a uniform of this type takes, in the form above; 0 when MGL does
+// not know the type, and ~0 for one no glUniform* call may write.
+static GLuint setterForType(GLenum t)
+{
+    switch (t)
+    {
+        case GL_FLOAT:             return MGL_UNIFORM_SETTER(1, 0, 1);
+        case GL_FLOAT_VEC2:        return MGL_UNIFORM_SETTER(1, 0, 2);
+        case GL_FLOAT_VEC3:        return MGL_UNIFORM_SETTER(1, 0, 3);
+        case GL_FLOAT_VEC4:        return MGL_UNIFORM_SETTER(1, 0, 4);
+        case GL_INT:               return MGL_UNIFORM_SETTER(2, 0, 1);
+        case GL_INT_VEC2:          return MGL_UNIFORM_SETTER(2, 0, 2);
+        case GL_INT_VEC3:          return MGL_UNIFORM_SETTER(2, 0, 3);
+        case GL_INT_VEC4:          return MGL_UNIFORM_SETTER(2, 0, 4);
+        case GL_UNSIGNED_INT:      return MGL_UNIFORM_SETTER(3, 0, 1);
+        case GL_UNSIGNED_INT_VEC2: return MGL_UNIFORM_SETTER(3, 0, 2);
+        case GL_UNSIGNED_INT_VEC3: return MGL_UNIFORM_SETTER(3, 0, 3);
+        case GL_UNSIGNED_INT_VEC4: return MGL_UNIFORM_SETTER(3, 0, 4);
+        case GL_DOUBLE:            return MGL_UNIFORM_SETTER(4, 0, 1);
+        case GL_DOUBLE_VEC2:       return MGL_UNIFORM_SETTER(4, 0, 2);
+        case GL_DOUBLE_VEC3:       return MGL_UNIFORM_SETTER(4, 0, 3);
+        case GL_DOUBLE_VEC4:       return MGL_UNIFORM_SETTER(4, 0, 4);
+        case GL_FLOAT_MAT2:        return MGL_UNIFORM_SETTER(1, 2, 2);
+        case GL_FLOAT_MAT2x3:      return MGL_UNIFORM_SETTER(1, 2, 3);
+        case GL_FLOAT_MAT2x4:      return MGL_UNIFORM_SETTER(1, 2, 4);
+        case GL_FLOAT_MAT3x2:      return MGL_UNIFORM_SETTER(1, 3, 2);
+        case GL_FLOAT_MAT3:        return MGL_UNIFORM_SETTER(1, 3, 3);
+        case GL_FLOAT_MAT3x4:      return MGL_UNIFORM_SETTER(1, 3, 4);
+        case GL_FLOAT_MAT4x2:      return MGL_UNIFORM_SETTER(1, 4, 2);
+        case GL_FLOAT_MAT4x3:      return MGL_UNIFORM_SETTER(1, 4, 3);
+        case GL_FLOAT_MAT4:        return MGL_UNIFORM_SETTER(1, 4, 4);
+        case GL_DOUBLE_MAT2:       return MGL_UNIFORM_SETTER(4, 2, 2);
+        case GL_DOUBLE_MAT2x3:     return MGL_UNIFORM_SETTER(4, 2, 3);
+        case GL_DOUBLE_MAT2x4:     return MGL_UNIFORM_SETTER(4, 2, 4);
+        case GL_DOUBLE_MAT3x2:     return MGL_UNIFORM_SETTER(4, 3, 2);
+        case GL_DOUBLE_MAT3:       return MGL_UNIFORM_SETTER(4, 3, 3);
+        case GL_DOUBLE_MAT3x4:     return MGL_UNIFORM_SETTER(4, 3, 4);
+        case GL_DOUBLE_MAT4x2:     return MGL_UNIFORM_SETTER(4, 4, 2);
+        case GL_DOUBLE_MAT4x3:     return MGL_UNIFORM_SETTER(4, 4, 3);
+        case GL_DOUBLE_MAT4:       return MGL_UNIFORM_SETTER(4, 4, 4);
+        case GL_UNSIGNED_INT_ATOMIC_COUNTER: return ~0u;
+    }
+
+    // samplers and images take one int, the unit
+    if ((t >= GL_SAMPLER_1D && t <= GL_SAMPLER_2D_SHADOW) ||
+        (t >= GL_SAMPLER_1D_ARRAY && t <= GL_UNSIGNED_INT_SAMPLER_BUFFER) ||
+        (t >= GL_IMAGE_1D && t <= GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY) ||
+        t == GL_SAMPLER_2D_RECT || t == GL_SAMPLER_2D_RECT_SHADOW ||
+        t == GL_SAMPLER_CUBE_MAP_ARRAY || t == GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW ||
+        t == GL_INT_SAMPLER_CUBE_MAP_ARRAY || t == GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY ||
+        (t >= GL_SAMPLER_2D_MULTISAMPLE && t <= GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY))
+        return MGL_UNIFORM_SETTER(2, 0, 1);
+
+    return 0;
+}
+
+// GL 4.6 section 7.6.1: the call has to match the uniform's type and size,
+// except that a bool takes a float, int or uint call of its size. Uses up the
+// setter the call recorded.
+static bool setterMatches(GLMContext ctx, GLenum type)
+{
+    GLuint got = ctx->uniform_setter;
+    GLuint want = setterForType(type);
+    GLuint n = boolComponentsFor(type);
+
+    ctx->uniform_setter = 0;
+
+    if (got == 0)
+        return true;
+
+    if (n)
+        return (got & 0xF0) == 0 && (got >> 8) == n && (got & 0xF) != 4;
+
+    if (want == 0)
+        return true;
+
+    return got == want;
+}
+
 // Where a uniform of this name ended up, across every stage. Unlike
 // glGetUniformLocation this asks nothing about the program's link state, so
 // the driver can find its own uniforms while the link is still going on.
@@ -1310,6 +1422,8 @@ void mglWriteAlphaTest(GLMContext ctx, Program *pptr, GLint func, GLfloat ref)
     if (pptr == NULL)
         return;
 
+    ctx->uniform_setter = 0;
+
     if (pptr->alpha_func_loc >= 0)
         programUniformWrite(ctx, pptr, pptr->alpha_func_loc, &func, sizeof(GLint));
 
@@ -1324,7 +1438,10 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
 
     // GL says an unknown uniform is silently ignored
     if (location == -1)
+    {
+        ctx->uniform_setter = 0;
         return;
+    }
 
     ERROR_CHECK_RETURN(location >= 0, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(location < MAX_UNIFORM_LOCATIONS, GL_INVALID_OPERATION);
@@ -1332,6 +1449,15 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
 
     if (writeOpaqueUniform(ctx, pptr, location, ptr, size))
         return;
+
+    {
+        SpirvResource *plain = plainUniformByLocation(pptr, location, NULL);
+
+        if (plain && !setterMatches(ctx, plain->gl_type))
+            ERROR_RETURN(GL_INVALID_OPERATION);
+
+        ctx->uniform_setter = 0;
+    }
 
     {
         GLint element = 0;
@@ -1405,6 +1531,9 @@ void programUniformWriteD(GLMContext ctx, Program *pptr, GLint location, const v
     GLint element = 0;
     SpirvResource *res = plainUniformByLocation(pptr, location, &element);
 
+    if (res && !setterMatches(ctx, res->gl_type))
+        ERROR_RETURN(GL_INVALID_OPERATION);
+
     // the flag goes where the values go, an array's first element, and before
     // the write so it sizes the elements as doubles
     GLint base = res ? (GLint)res->location : location;
@@ -1477,6 +1606,12 @@ static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, co
     if (!res)
         return false;
 
+    if (!setterMatches(ctx, res->gl_type))
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        return true;
+    }
+
     if (size < (GLsizei)sizeof(GLint))
     {
         ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
@@ -1492,9 +1627,13 @@ static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, co
     if (count > size_of_array - first)
         count = size_of_array - first;
 
+    // an image names an image unit, of which there are fewer
+    bool image = res->gl_type >= GL_IMAGE_1D && res->gl_type <= GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY;
+    GLint limit = image ? STATE_VAR(max_image_units) : TEXTURE_UNITS;
+
     for (GLint k = 0; k < count; k++)
     {
-        if (units[k] < 0 || units[k] >= TEXTURE_UNITS)
+        if (units[k] < 0 || units[k] >= limit)
         {
             ctx->error_func(ctx, __FUNCTION__, GL_INVALID_VALUE);
             return true;
@@ -1556,46 +1695,55 @@ static void mglUniformFixedD(GLMContext ctx, GLint location, void *ptr, GLsizei 
 
 void mglUniform1d(GLMContext ctx, GLint location, GLdouble x)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 1);
     mglUniformFixedD(ctx, location, &x, sizeof(GLdouble));
 }
 
 void mglUniform1dv(GLMContext ctx, GLint location, GLsizei count, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 1);
     mglUniformD(ctx, location, (void *)value, count * sizeof(GLdouble));
 }
 
 void mglUniform1f(GLMContext ctx, GLint location, GLfloat v0)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 1);
     mglUniformFixed(ctx, location, &v0, sizeof(GLfloat));
 }
 
 void mglUniform1fv(GLMContext ctx, GLint location, GLsizei count, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 1);
     mglUniform(ctx, location, (void *)value, count * sizeof(GLfloat));
 }
 
 void mglUniform1i(GLMContext ctx, GLint location, GLint v0)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 1);
     mglUniformFixed(ctx, location, &v0, sizeof(GLint));
 }
 
 void mglUniform1iv(GLMContext ctx, GLint location, GLsizei count, const GLint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 1);
     mglUniform(ctx, location, (void *)value, count * sizeof(GLint));
 }
 
 void mglUniform1ui(GLMContext ctx, GLint location, GLuint v0)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 1);
     mglUniformFixed(ctx, location, &v0, sizeof(GLuint));
 }
 
 void mglUniform1uiv(GLMContext ctx, GLint location, GLsizei count, const GLuint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 1);
     mglUniform(ctx, location, (void *)value, count * sizeof(GLuint));
 }
 
 void mglUniform2d(GLMContext ctx, GLint location, volatile GLdouble x, volatile GLdouble y)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 2);
     GLdouble data[] = {x, y};
     
     mglUniformFixedD(ctx, location, data, 2 * sizeof(GLdouble));
@@ -1603,11 +1751,13 @@ void mglUniform2d(GLMContext ctx, GLint location, volatile GLdouble x, volatile 
 
 void mglUniform2dv(GLMContext ctx, GLint location, GLsizei count, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 2);
     mglUniformD(ctx, location, (void *)value, 2 * count * sizeof(GLdouble));
 }
 
 void mglUniform2f(GLMContext ctx, GLint location, GLfloat v0, GLfloat v1)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 2);
     GLfloat data[] = {v0, v1};
     
     mglUniformFixed(ctx, location, data, 2 * sizeof(GLfloat));
@@ -1615,11 +1765,13 @@ void mglUniform2f(GLMContext ctx, GLint location, GLfloat v0, GLfloat v1)
 
 void mglUniform2fv(GLMContext ctx, GLint location, GLsizei count, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 2);
     mglUniform(ctx, location, (void *)value, 2 * count * sizeof(GLfloat));
 }
 
 void mglUniform2i(GLMContext ctx, GLint location, GLint v0, GLint v1)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 2);
     GLint data[] = {v0, v1};
     
     mglUniformFixed(ctx, location, data, 2 * sizeof(GLint));
@@ -1627,11 +1779,13 @@ void mglUniform2i(GLMContext ctx, GLint location, GLint v0, GLint v1)
 
 void mglUniform2iv(GLMContext ctx, GLint location, GLsizei count, const GLint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 2);
     mglUniform(ctx, location, (void *)value, 2 * count * sizeof(GLint));
 }
 
 void mglUniform2ui(GLMContext ctx, GLint location, GLuint v0, GLuint v1)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 2);
     GLuint data[] = {v0, v1};
     
     mglUniformFixed(ctx, location, data, 2 * sizeof(GLuint));
@@ -1639,11 +1793,13 @@ void mglUniform2ui(GLMContext ctx, GLint location, GLuint v0, GLuint v1)
 
 void mglUniform2uiv(GLMContext ctx, GLint location, GLsizei count, const GLuint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 2);
     mglUniform(ctx, location, (void *)value, 2 * count * sizeof(GLuint));
 }
 
 void mglUniform3d(GLMContext ctx, GLint location, GLdouble x, GLdouble y, GLdouble z)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 3);
     GLdouble data[] = {x, y, z};
     
     mglUniformFixedD(ctx, location, data, 3 * sizeof(GLdouble));
@@ -1651,11 +1807,13 @@ void mglUniform3d(GLMContext ctx, GLint location, GLdouble x, GLdouble y, GLdoub
 
 void mglUniform3dv(GLMContext ctx, GLint location, GLsizei count, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 3);
     mglUniformD(ctx, location, (void *)value, 3 * count * sizeof(GLdouble));
 }
 
 void mglUniform3f(GLMContext ctx, GLint location, GLfloat v0, GLfloat v1, GLfloat v2)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 3);
     GLfloat data[] = {v0, v1, v2};
     
     mglUniformFixed(ctx, location, data, 3 * sizeof(GLfloat));
@@ -1663,11 +1821,13 @@ void mglUniform3f(GLMContext ctx, GLint location, GLfloat v0, GLfloat v1, GLfloa
 
 void mglUniform3fv(GLMContext ctx, GLint location, GLsizei count, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 3);
     mglUniform(ctx, location, (void *)value, 3 * count * sizeof(GLfloat));
 }
 
 void mglUniform3i(GLMContext ctx, GLint location, GLint v0, GLint v1, GLint v2)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 3);
     GLint data[] = {v0, v1, v2};
     
     mglUniformFixed(ctx, location, data, 3 * sizeof(GLint));
@@ -1675,11 +1835,13 @@ void mglUniform3i(GLMContext ctx, GLint location, GLint v0, GLint v1, GLint v2)
 
 void mglUniform3iv(GLMContext ctx, GLint location, GLsizei count, const GLint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 3);
     mglUniform(ctx, location, (void *)value, 3 * count * sizeof(GLint));
 }
 
 void mglUniform3ui(GLMContext ctx, GLint location, GLuint v0, GLuint v1, GLuint v2)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 3);
     GLuint data[] = {v0, v1, v2};
     
     mglUniformFixed(ctx, location, (void *)data, 3 * sizeof(GLuint));
@@ -1687,11 +1849,13 @@ void mglUniform3ui(GLMContext ctx, GLint location, GLuint v0, GLuint v1, GLuint 
 
 void mglUniform3uiv(GLMContext ctx, GLint location, GLsizei count, const GLuint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 3);
     mglUniform(ctx, location, (void *)value, 3 * count * sizeof(GLuint));
 }
 
 void mglUniform4d(GLMContext ctx, GLint location, GLdouble x, GLdouble y, GLdouble z, GLdouble w)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 4);
     GLdouble data[] = {x, y, z, w};
     
     mglUniformFixedD(ctx, location, data, 4 * sizeof(GLdouble));
@@ -1699,11 +1863,13 @@ void mglUniform4d(GLMContext ctx, GLint location, GLdouble x, GLdouble y, GLdoub
 
 void mglUniform4dv(GLMContext ctx, GLint location, GLsizei count, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 4);
     mglUniformD(ctx, location, (void *)value, 4 * count * sizeof(GLdouble));
 }
 
 void mglUniform4f(GLMContext ctx, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 4);
     GLfloat data[] = {v0, v1, v2, v3};
     
     mglUniformFixed(ctx, location, (void *)data, 4 * sizeof(GLfloat));
@@ -1711,11 +1877,13 @@ void mglUniform4f(GLMContext ctx, GLint location, GLfloat v0, GLfloat v1, GLfloa
 
 void mglUniform4fv(GLMContext ctx, GLint location, GLsizei count, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 4);
     mglUniform(ctx, location, (void *)value, 4 * count * sizeof(GLfloat));
 }
 
 void mglUniform4i(GLMContext ctx, GLint location, GLint v0, GLint v1, GLint v2, GLint v3)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 4);
     GLint data[] = {v0, v1, v2, v3};
     
     mglUniformFixed(ctx, location, data, 4 * sizeof(GLint));
@@ -1723,11 +1891,13 @@ void mglUniform4i(GLMContext ctx, GLint location, GLint v0, GLint v1, GLint v2, 
 
 void mglUniform4iv(GLMContext ctx, GLint location, GLsizei count, const GLint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 4);
     mglUniform(ctx, location, (void *)value, 4 * count * sizeof(GLint));
 }
 
 void mglUniform4ui(GLMContext ctx, GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 4);
     GLuint data[] = {v0, v1, v2, v3};
     
     mglUniformFixed(ctx, location, data, 4 * sizeof(GLuint));
@@ -1735,6 +1905,7 @@ void mglUniform4ui(GLMContext ctx, GLint location, GLuint v0, GLuint v1, GLuint 
 
 void mglUniform4uiv(GLMContext ctx, GLint location, GLsizei count, const GLuint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 4);
     mglUniform(ctx, location, (void *)value, 4 * count * sizeof(GLuint));
 }
 
@@ -1794,6 +1965,7 @@ DEFINE_TRANSPOSE_FUNC(GLdouble, 2, 2, Mat2x2dv, Mat2x2dvTrans)
 
 void mglUniformMatrix2dv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 2, 2);
     HANDLE_MATRIX_TRANSPOSE(
                             GLdouble,        // Element type
                             Mat2x2dv,          // Source matrix type
@@ -1808,6 +1980,7 @@ DEFINE_TRANSPOSE_FUNC(GLfloat, 2, 2, Mat2x2fv, Mat2x2fvTrans)
 
 void mglUniformMatrix2fv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 2, 2);
     HANDLE_MATRIX_TRANSPOSE(
                             GLfloat,        // Element type
                             Mat2x2fv,          // Source matrix type
@@ -1822,6 +1995,7 @@ DEFINE_TRANSPOSE_FUNC(GLdouble, 2, 3, Mat2x3dv, Mat2x3dvTrans)
 
 void mglUniformMatrix2x3dv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 2, 3);
     HANDLE_MATRIX_TRANSPOSE(
                             GLdouble,         // Element type
                             Mat2x3dv,          // Source matrix type
@@ -1836,6 +2010,7 @@ DEFINE_TRANSPOSE_FUNC(GLfloat, 2, 3, Mat2x3fv, Mat2x3fvTrans)
 
 void mglUniformMatrix2x3fv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 2, 3);
     HANDLE_MATRIX_TRANSPOSE(
                             GLfloat,        // Element type
                             Mat2x3fv,          // Source matrix type
@@ -1850,6 +2025,7 @@ DEFINE_TRANSPOSE_FUNC(GLdouble, 2, 4, Mat2x4dv, Mat2x4dvTrans)
 
 void mglUniformMatrix2x4dv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 2, 4);
     HANDLE_MATRIX_TRANSPOSE(
                             GLdouble,        // Element type
                             Mat2x4dv,          // Source matrix type
@@ -1864,6 +2040,7 @@ DEFINE_TRANSPOSE_FUNC(GLfloat, 2, 4, Mat2x4fv, Mat2x4fvTrans)
 
 void mglUniformMatrix2x4fv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 2, 4);
     HANDLE_MATRIX_TRANSPOSE(
                             GLfloat,        // Element type
                             Mat2x4fv,          // Source matrix type
@@ -1878,6 +2055,7 @@ DEFINE_TRANSPOSE_FUNC(GLdouble, 3, 3, Mat3x3dv, Mat3x3dvTrans)
 
 void mglUniformMatrix3dv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 3, 3);
     HANDLE_MATRIX_TRANSPOSE(
                             GLdouble,        // Element type
                             Mat3x3dv,          // Source matrix type
@@ -1892,6 +2070,7 @@ DEFINE_TRANSPOSE_FUNC(GLfloat, 3, 3, Mat3x3fv, Mat3x3fvTrans)
 
 void mglUniformMatrix3fv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 3, 3);
     HANDLE_MATRIX_TRANSPOSE(
                             GLfloat,        // Element type
                             Mat3x3fv,          // Source matrix type
@@ -1906,6 +2085,7 @@ DEFINE_TRANSPOSE_FUNC(GLdouble, 3, 2, Mat3x2dv, Mat3x2dvTrans)
 
 void mglUniformMatrix3x2dv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 3, 2);
     HANDLE_MATRIX_TRANSPOSE(
                             GLdouble,        // Element type
                             Mat3x2dv,          // Source matrix type
@@ -1920,6 +2100,7 @@ DEFINE_TRANSPOSE_FUNC(GLfloat, 3, 2, Mat3x2fv, Mat3x2fvTrans)
 
 void mglUniformMatrix3x2fv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 3, 2);
     HANDLE_MATRIX_TRANSPOSE(
                             GLfloat,        // Element type
                             Mat3x2fv,          // Source matrix type
@@ -1934,6 +2115,7 @@ DEFINE_TRANSPOSE_FUNC(GLdouble, 3, 4, Mat3x4dv, Mat3x4dvTrans)
 
 void mglUniformMatrix3x4dv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 3, 4);
     HANDLE_MATRIX_TRANSPOSE(
                             GLdouble,        // Element type
                             Mat3x4dv,          // Source matrix type
@@ -1948,6 +2130,7 @@ DEFINE_TRANSPOSE_FUNC(GLfloat, 3, 4, Mat3x4fv, Mat3x4fvTrans)
 
 void mglUniformMatrix3x4fv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 3, 4);
     HANDLE_MATRIX_TRANSPOSE(
                             GLfloat,        // Element type
                             Mat3x4fv,          // Source matrix type
@@ -1962,6 +2145,7 @@ DEFINE_TRANSPOSE_FUNC(GLdouble, 4, 4, Mat4x4dv, Mat4x4dvTrans)
 
 void mglUniformMatrix4dv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 4, 4);
     HANDLE_MATRIX_TRANSPOSE(
                             GLdouble,        // Element type
                             Mat4x4dv,          // Source matrix type
@@ -1976,6 +2160,7 @@ DEFINE_TRANSPOSE_FUNC(GLfloat, 4, 4, Mat4x4fv, Mat4x4fvTrans)
 
 void mglUniformMatrix4fv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 4, 4);
     HANDLE_MATRIX_TRANSPOSE(
                             GLfloat,        // Element type
                             Mat4x4fv,          // Source matrix type
@@ -1990,6 +2175,7 @@ DEFINE_TRANSPOSE_FUNC(GLdouble, 4, 2, Mat4x2dv, Mat4x2dvTrans)
 
 void mglUniformMatrix4x2dv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 4, 2);
     HANDLE_MATRIX_TRANSPOSE(
                             GLdouble,        // Element type
                             Mat4x2dv,          // Source matrix type
@@ -2004,6 +2190,7 @@ DEFINE_TRANSPOSE_FUNC(GLfloat, 4, 2, Mat4x2fv, Mat4x2fvTrans)
 
 void mglUniformMatrix4x2fv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 4, 2);
     HANDLE_MATRIX_TRANSPOSE(
                             GLfloat,        // Element type
                             Mat4x2fv,          // Source matrix type
@@ -2018,6 +2205,7 @@ DEFINE_TRANSPOSE_FUNC(GLdouble, 4, 3, Mat4x3dv, Mat4x3dvTrans)
 
 void mglUniformMatrix4x3dv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 4, 3);
     HANDLE_MATRIX_TRANSPOSE(
                             GLdouble,        // Element type
                             Mat4x3dv,          // Source matrix type
@@ -2032,6 +2220,7 @@ DEFINE_TRANSPOSE_FUNC(GLfloat, 4, 3, Mat4x3fv, Mat4x3fvTrans)
 
 void mglUniformMatrix4x3fv(GLMContext ctx, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 4, 3);
     HANDLE_MATRIX_TRANSPOSE(
                             GLfloat,        // Element type
                             Mat4x3fv,          // Source matrix type
@@ -2211,11 +2400,13 @@ static void puMatrixdv(GLMContext ctx, GLuint program, GLint location, GLsizei c
 
 void mglProgramUniform1f(GLMContext ctx, GLuint program, GLint location, GLfloat v0)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 1);
     puWrite(ctx, program, location, &v0, sizeof(GLfloat));
 }
 
 void mglProgramUniform2f(GLMContext ctx, GLuint program, GLint location, GLfloat v0, GLfloat v1)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 2);
     GLfloat data[] = {v0, v1};
 
     puWrite(ctx, program, location, data, 2 * sizeof(GLfloat));
@@ -2223,6 +2414,7 @@ void mglProgramUniform2f(GLMContext ctx, GLuint program, GLint location, GLfloat
 
 void mglProgramUniform3f(GLMContext ctx, GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 3);
     GLfloat data[] = {v0, v1, v2};
 
     puWrite(ctx, program, location, data, 3 * sizeof(GLfloat));
@@ -2230,6 +2422,7 @@ void mglProgramUniform3f(GLMContext ctx, GLuint program, GLint location, GLfloat
 
 void mglProgramUniform4f(GLMContext ctx, GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 4);
     GLfloat data[] = {v0, v1, v2, v3};
 
     puWrite(ctx, program, location, data, 4 * sizeof(GLfloat));
@@ -2237,31 +2430,37 @@ void mglProgramUniform4f(GLMContext ctx, GLuint program, GLint location, GLfloat
 
 void mglProgramUniform1fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 1);
     puVf(ctx, program, location, count, value, 1);
 }
 
 void mglProgramUniform2fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 2);
     puVf(ctx, program, location, count, value, 2);
 }
 
 void mglProgramUniform3fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 3);
     puVf(ctx, program, location, count, value, 3);
 }
 
 void mglProgramUniform4fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 0, 4);
     puVf(ctx, program, location, count, value, 4);
 }
 
 void mglProgramUniform1i(GLMContext ctx, GLuint program, GLint location, GLint v0)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 1);
     puWrite(ctx, program, location, &v0, sizeof(GLint));
 }
 
 void mglProgramUniform2i(GLMContext ctx, GLuint program, GLint location, GLint v0, GLint v1)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 2);
     GLint data[] = {v0, v1};
 
     puWrite(ctx, program, location, data, 2 * sizeof(GLint));
@@ -2269,6 +2468,7 @@ void mglProgramUniform2i(GLMContext ctx, GLuint program, GLint location, GLint v
 
 void mglProgramUniform3i(GLMContext ctx, GLuint program, GLint location, GLint v0, GLint v1, GLint v2)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 3);
     GLint data[] = {v0, v1, v2};
 
     puWrite(ctx, program, location, data, 3 * sizeof(GLint));
@@ -2276,6 +2476,7 @@ void mglProgramUniform3i(GLMContext ctx, GLuint program, GLint location, GLint v
 
 void mglProgramUniform4i(GLMContext ctx, GLuint program, GLint location, GLint v0, GLint v1, GLint v2, GLint v3)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 4);
     GLint data[] = {v0, v1, v2, v3};
 
     puWrite(ctx, program, location, data, 4 * sizeof(GLint));
@@ -2283,31 +2484,37 @@ void mglProgramUniform4i(GLMContext ctx, GLuint program, GLint location, GLint v
 
 void mglProgramUniform1iv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 1);
     puV(ctx, program, location, count, value, 1, sizeof(GLint));
 }
 
 void mglProgramUniform2iv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 2);
     puV(ctx, program, location, count, value, 2, sizeof(GLint));
 }
 
 void mglProgramUniform3iv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 3);
     puV(ctx, program, location, count, value, 3, sizeof(GLint));
 }
 
 void mglProgramUniform4iv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(2, 0, 4);
     puV(ctx, program, location, count, value, 4, sizeof(GLint));
 }
 
 void mglProgramUniform1ui(GLMContext ctx, GLuint program, GLint location, GLuint v0)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 1);
     puWrite(ctx, program, location, &v0, sizeof(GLuint));
 }
 
 void mglProgramUniform2ui(GLMContext ctx, GLuint program, GLint location, GLuint v0, GLuint v1)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 2);
     GLuint data[] = {v0, v1};
 
     puWrite(ctx, program, location, data, 2 * sizeof(GLuint));
@@ -2315,6 +2522,7 @@ void mglProgramUniform2ui(GLMContext ctx, GLuint program, GLint location, GLuint
 
 void mglProgramUniform3ui(GLMContext ctx, GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 3);
     GLuint data[] = {v0, v1, v2};
 
     puWrite(ctx, program, location, data, 3 * sizeof(GLuint));
@@ -2322,6 +2530,7 @@ void mglProgramUniform3ui(GLMContext ctx, GLuint program, GLint location, GLuint
 
 void mglProgramUniform4ui(GLMContext ctx, GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 4);
     GLuint data[] = {v0, v1, v2, v3};
 
     puWrite(ctx, program, location, data, 4 * sizeof(GLuint));
@@ -2329,31 +2538,37 @@ void mglProgramUniform4ui(GLMContext ctx, GLuint program, GLint location, GLuint
 
 void mglProgramUniform1uiv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLuint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 1);
     puV(ctx, program, location, count, value, 1, sizeof(GLuint));
 }
 
 void mglProgramUniform2uiv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLuint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 2);
     puV(ctx, program, location, count, value, 2, sizeof(GLuint));
 }
 
 void mglProgramUniform3uiv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLuint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 3);
     puV(ctx, program, location, count, value, 3, sizeof(GLuint));
 }
 
 void mglProgramUniform4uiv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLuint *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(3, 0, 4);
     puV(ctx, program, location, count, value, 4, sizeof(GLuint));
 }
 
 void mglProgramUniform1d(GLMContext ctx, GLuint program, GLint location, GLdouble v0)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 1);
     puVd(ctx, program, location, 1, &v0, 1);
 }
 
 void mglProgramUniform2d(GLMContext ctx, GLuint program, GLint location, GLdouble v0, GLdouble v1)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 2);
     GLdouble data[] = {v0, v1};
 
     puVd(ctx, program, location, 1, data, 2);
@@ -2361,6 +2576,7 @@ void mglProgramUniform2d(GLMContext ctx, GLuint program, GLint location, GLdoubl
 
 void mglProgramUniform3d(GLMContext ctx, GLuint program, GLint location, GLdouble v0, GLdouble v1, GLdouble v2)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 3);
     GLdouble data[] = {v0, v1, v2};
 
     puVd(ctx, program, location, 1, data, 3);
@@ -2368,6 +2584,7 @@ void mglProgramUniform3d(GLMContext ctx, GLuint program, GLint location, GLdoubl
 
 void mglProgramUniform4d(GLMContext ctx, GLuint program, GLint location, GLdouble v0, GLdouble v1, GLdouble v2, GLdouble v3)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 4);
     GLdouble data[] = {v0, v1, v2, v3};
 
     puVd(ctx, program, location, 1, data, 4);
@@ -2375,111 +2592,133 @@ void mglProgramUniform4d(GLMContext ctx, GLuint program, GLint location, GLdoubl
 
 void mglProgramUniform1dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 1);
     puVd(ctx, program, location, count, value, 1);
 }
 
 void mglProgramUniform2dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 2);
     puVd(ctx, program, location, count, value, 2);
 }
 
 void mglProgramUniform3dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 3);
     puVd(ctx, program, location, count, value, 3);
 }
 
 void mglProgramUniform4dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 0, 4);
     puVd(ctx, program, location, count, value, 4);
 }
 
 void mglProgramUniformMatrix2fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 2, 2);
     puMatrixfv(ctx, program, location, count, transpose, value, 2, 2);
 }
 
 void mglProgramUniformMatrix3fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 3, 3);
     puMatrixfv(ctx, program, location, count, transpose, value, 3, 3);
 }
 
 void mglProgramUniformMatrix4fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 4, 4);
     puMatrixfv(ctx, program, location, count, transpose, value, 4, 4);
 }
 
 void mglProgramUniformMatrix2x3fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 2, 3);
     puMatrixfv(ctx, program, location, count, transpose, value, 2, 3);
 }
 
 void mglProgramUniformMatrix3x2fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 3, 2);
     puMatrixfv(ctx, program, location, count, transpose, value, 3, 2);
 }
 
 void mglProgramUniformMatrix2x4fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 2, 4);
     puMatrixfv(ctx, program, location, count, transpose, value, 2, 4);
 }
 
 void mglProgramUniformMatrix4x2fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 4, 2);
     puMatrixfv(ctx, program, location, count, transpose, value, 4, 2);
 }
 
 void mglProgramUniformMatrix3x4fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 3, 4);
     puMatrixfv(ctx, program, location, count, transpose, value, 3, 4);
 }
 
 void mglProgramUniformMatrix4x3fv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(1, 4, 3);
     puMatrixfv(ctx, program, location, count, transpose, value, 4, 3);
 }
 
 void mglProgramUniformMatrix2dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 2, 2);
     puMatrixdv(ctx, program, location, count, transpose, value, 2, 2);
 }
 
 void mglProgramUniformMatrix3dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 3, 3);
     puMatrixdv(ctx, program, location, count, transpose, value, 3, 3);
 }
 
 void mglProgramUniformMatrix4dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 4, 4);
     puMatrixdv(ctx, program, location, count, transpose, value, 4, 4);
 }
 
 void mglProgramUniformMatrix2x3dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 2, 3);
     puMatrixdv(ctx, program, location, count, transpose, value, 2, 3);
 }
 
 void mglProgramUniformMatrix3x2dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 3, 2);
     puMatrixdv(ctx, program, location, count, transpose, value, 3, 2);
 }
 
 void mglProgramUniformMatrix2x4dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 2, 4);
     puMatrixdv(ctx, program, location, count, transpose, value, 2, 4);
 }
 
 void mglProgramUniformMatrix4x2dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 4, 2);
     puMatrixdv(ctx, program, location, count, transpose, value, 4, 2);
 }
 
 void mglProgramUniformMatrix3x4dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 3, 4);
     puMatrixdv(ctx, program, location, count, transpose, value, 3, 4);
 }
 
 void mglProgramUniformMatrix4x3dv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value)
 {
+    ctx->uniform_setter = MGL_UNIFORM_SETTER(4, 4, 3);
     puMatrixdv(ctx, program, location, count, transpose, value, 4, 3);
 }
 
@@ -2498,7 +2737,7 @@ static void getUniformTyped(GLMContext ctx, GLuint program, GLint location,
 {
     Program *pp = findProgram(ctx, program);
 
-    ERROR_CHECK_RETURN(pp, GL_INVALID_VALUE);
+    GET_UNIFORM_PROGRAM(pp);
 
     getUniformFrom(ctx, pp, location, bufSize, params, dst_type);
 }

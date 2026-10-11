@@ -161,6 +161,9 @@ static int layoutValue(const char *src, const char *inner, const char *name)
 // Eats one "layout(...)" at i, keeping the location and component it names --
 // GLSL 4.20 lets a declaration carry several, anywhere among its qualifiers,
 // and a later value overrides an earlier one. Returns the index past it, or 0.
+// the stream the last layout group read named, or -1
+static int g_layout_stream = -1;
+
 static size_t readLayoutGroup(const char *s, size_t i, int *loc, int *comp)
 {
     size_t open = skipSpace(s, i + 6);
@@ -193,6 +196,9 @@ static size_t readLayoutGroup(const char *s, size_t i, int *loc, int *comp)
 
     if (comp && (v = layoutValue(s, inner, "component")) >= 0)
         *comp = v;
+
+    if ((v = layoutValue(s, inner, "stream")) >= 0)
+        g_layout_stream = v;
 
     return skipSpace(s, j);
 }
@@ -266,6 +272,7 @@ typedef struct {
     char member[64];      // its own name inside the block
     int  loc;             // layout(location=) it asked for, or -1
     int  comp;            // layout(component=), 0 when not given
+    int  stream;          // layout(stream=), -1 for the default at that point
 } GsVarying;
 
 typedef struct {
@@ -274,6 +281,8 @@ typedef struct {
     // built-ins the shader writes; only those are passed on to the draw
     bool uses_layer;
     bool uses_viewport_index;
+    // "layout(stream = n) out;" sets the stream of the outputs after it
+    int  default_stream;
 } GsScan;
 
 // gl_ClipDistance and gl_CullDistance travel through the generated structs
@@ -340,6 +349,8 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
     // which the generated pass-through has to reproduce or the fragment stage
     // matches the wrong varying
     int want_loc = -1, want_comp = -1;
+
+    g_layout_stream = -1;
 
     while (wordAt(s, i, "layout"))
     {
@@ -429,6 +440,7 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
     snprintf(v->name, sizeof(v->name), "%s", prev);
     v->loc = want_loc;
     v->comp = want_comp > 0 ? want_comp : 0;
+    v->stream = g_layout_stream;
 
     // gl_ClipDistance and gl_CullDistance are redeclared like varyings but are
     // built-ins, so they travel under a name the generated struct can hold and
@@ -533,7 +545,7 @@ static size_t readBlockDecl(const char *s, size_t i, bool want_out,
 {
     size_t start = i;
     char word[64], block[64] = "", inst[64] = "";
-    int loc = -1;
+    int loc = -1, stream = -1;
     bool seen_dir = false;
 
     if (wordAt(s, i, "layout"))
@@ -573,6 +585,11 @@ static size_t readBlockDecl(const char *s, size_t i, bool want_out,
                 if (eq)
                     loc = atoi(eq + 1);
             }
+
+            at = strstr(inner, "stream");
+
+            if (at && strchr(at, '='))
+                stream = atoi(strchr(at, '=') + 1);
         }
 
         i = skipSpace(s, j);
@@ -667,6 +684,7 @@ static size_t readBlockDecl(const char *s, size_t i, bool want_out,
         if (inst[0])
             snprintf(v.name, sizeof(v.name), "%s_%s", inst, v.member);
         v.loc = loc;
+        v.stream = stream;
 
         out[(*count)++] = v;
         added++;
@@ -733,11 +751,11 @@ static int structStride(GsVarying *v, int count, bool is_out)
     int offset = 0, worst = 16;
 
     // vec4 mglPos, float mglPointSize, and for the output side mglValid,
-    // mglLayer, mglPrimitiveID and mglViewportIndex
+    // mglLayer, mglPrimitiveID, mglViewportIndex and mglStream
     offset = 16 + 4;
 
     if (is_out)
-        offset += 4 + 4 + 4 + 4;
+        offset += 4 + 4 + 4 + 4 + 4;
 
     for (int i = 0; i < count; i++)
     {
@@ -907,6 +925,12 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
                     }
                     else
                     {
+                        // "layout(stream = n) out;" names the stream from here on
+                        const char *st = strstr(inner, "stream");
+
+                        if (st && strchr(st, '='))
+                            sc->default_stream = atoi(strchr(st, '=') + 1);
+
                         if (strstr(inner, "triangle_strip")) gi->out_primitive = GL_TRIANGLE_STRIP;
                         else if (strstr(inner, "line_strip")) gi->out_primitive = GL_LINE_STRIP;
                         else if (strstr(inner, "points")) gi->out_primitive = GL_POINTS;
@@ -963,6 +987,10 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
 
             if (end)
             {
+                for (int k = before_out; k < sc->out_count; k++)
+                    if (sc->out[k].stream < 0)
+                        sc->out[k].stream = sc->default_stream;
+
                 if (!bufAddN(body, src + copied, i - copied))
                     return false;
 
@@ -1000,6 +1028,9 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
 
             if (is_varying && end && sc->out_count < MAX_GS_VARYINGS)
             {
+                if (v.stream < 0)
+                    v.stream = sc->default_stream;
+
                 sc->out[sc->out_count++] = v;
 
                 if (!bufAddN(body, src + copied, i - copied))
@@ -1021,6 +1052,17 @@ static bool scanGeometry(const char *src, GeometryInfo *gi, GsScan *sc, Buf *bod
             if (src[j] == '(')
             {
                 int depth = 0;
+
+                // "layout(stream = n) out;" names the stream from here on
+                g_layout_stream = -1;
+
+                if (readLayoutGroup(src, i, NULL, NULL) && g_layout_stream >= 0)
+                {
+                    size_t k = skipSpace(src, readLayoutGroup(src, i, NULL, NULL));
+
+                    if (wordAt(src, k, "out") && src[skipSpace(src, k + 3)] == ';')
+                        sc->default_stream = g_layout_stream;
+                }
 
                 for (; src[j]; j++)
                 {
@@ -1458,7 +1500,8 @@ static bool emitStructs(GsScan *sc, Buf *b)
     }
 
     if (!bufAdd(b, "};\n\nstruct MglGsOutV {\n  vec4 mglPos;\n  float mglPointSize;\n"
-                   "  float mglValid;\n  int mglLayer;\n  int mglPrimitiveID;\n  int mglViewportIndex;\n"))
+                   "  float mglValid;\n  int mglLayer;\n  int mglPrimitiveID;\n  int mglViewportIndex;\n"
+                   "  int mglStream;\n"))
         return false;
 
     for (int i = 0; i < sc->out_count; i++)
@@ -1576,7 +1619,7 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
     // the same walk as structStride, keeping each output's offset
     {
-        int offset = 16 + 4 + 4 + 4 + 4 + 4;
+        int offset = 16 + 4 + 4 + 4 + 4 + 4 + 4;
 
         gi->out_count = 0;
 
@@ -1597,6 +1640,7 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
             snprintf(gi->out_types[i], sizeof(gi->out_types[i]), "%s", sc.out[i].type);
             gi->out_offsets[i] = offset;
             gi->out_arrays[i] = sc.out[i].builtin[0] ? 0 : sc.out[i].array;
+            gi->out_streams[i] = sc.out[i].stream > 0 ? sc.out[i].stream : 0;
             gi->out_count = i + 1;
 
             // an array's elements each take the element's own alignment
@@ -1698,6 +1742,7 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
         "  mglGsOut[mglBase + mglWritten] = v;\n"
         "  mglWritten++;\n}\n\n"
         "void mglEmitVertex()\n{\n"
+        "  mglCur.mglStream = 0;\n"
         "  if (mglGsOutVerts == 1) { if (!mglCulled(mglCur, mglCur, mglCur, 1)) mglPut(mglCur); return; }\n"
         "  if (mglStripLen < mglGsOutVerts - 1) { mglStrip[mglStripLen] = mglCur; mglStripLen++; return; }\n"
         "  if (mglGsOutVerts == 2)\n  {\n"
@@ -1710,9 +1755,11 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
         "  mglStripFlip = !mglStripFlip;\n}\n\n"
         "void mglEndPrimitive()\n{\n  mglStripLen = 0;\n  mglStripFlip = false;\n}\n\n"
         // EmitStreamVertex and EndStreamPrimitive name a stream. Only stream
-        // zero is rasterised, and it is the only one MGL records; anything
-        // written to another stream is dropped here.
-        "void mglEmitVertex(int mglStream)\n{\n  if (mglStream == 0) mglEmitVertex();\n}\n\n"
+        // zero is rasterised; the others are recorded, and GL has them be
+        // points, so each vertex is a primitive of its own.
+        "void mglEmitVertex(int mglStream)\n{\n"
+        "  if (mglStream == 0) { mglEmitVertex(); return; }\n"
+        "  mglCur.mglStream = mglStream;\n  mglPut(mglCur);\n  mglCur.mglStream = 0;\n}\n\n"
         "void mglEndPrimitive(int mglStream)\n{\n  if (mglStream == 0) mglEndPrimitive();\n}\n\n"))
         goto done;
 
@@ -1938,7 +1985,7 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     // a slot the geometry shader never wrote is pushed outside the frustum,
     // where it covers nothing rather than drawing a stray primitive
     if (!bufAdd(&pass,
-        "  gl_Position = v.mglValid > 0.5 ? v.mglPos : vec4(2.0, 2.0, 2.0, 1.0);\n"))
+        "  gl_Position = v.mglValid > 0.5 && v.mglStream == 0 ? v.mglPos : vec4(2.0, 2.0, 2.0, 1.0);\n"))
         goto done;
 
     // Metal only accepts a point size when drawing points
@@ -2630,6 +2677,24 @@ static bool componentOffset(const char *type, int c, int *bytes)
     return true;
 }
 
+int mglGsItemStream(const GeometryInfo *gi, const MglXfbItem *item)
+{
+    char base[64], flat[64];
+    const char *open = strchr(item->expr, '[');
+
+    snprintf(base, sizeof(base), "%.*s", open ? (int)(open - item->expr) : (int)strlen(item->expr), item->expr);
+    snprintf(flat, sizeof(flat), "%s", base);
+
+    for (char *d = strchr(flat, '.'); d; d = strchr(d, '.'))
+        *d = '_';
+
+    for (int o = 0; o < gi->out_count; o++)
+        if (!strcmp(gi->out_names[o], base) || !strcmp(gi->out_gl_names[o], base) || !strcmp(gi->out_names[o], flat))
+            return gi->out_streams[o];
+
+    return 0;
+}
+
 int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
                      GLuint *table, int max_words)
 {
@@ -2658,6 +2723,12 @@ int mglGsGatherTable(const GeometryInfo *gi, const MglXfbItem *items, int count,
         {
             offset = 16;
             snprintf(type, sizeof(type), "float");
+        }
+        // the rest of the header: mglValid at 20, then these
+        else if (!strcmp(base, "gl_Layer") || !strcmp(base, "gl_PrimitiveID") || !strcmp(base, "gl_ViewportIndex"))
+        {
+            offset = !strcmp(base, "gl_Layer") ? 24 : !strcmp(base, "gl_PrimitiveID") ? 28 : 32;
+            snprintf(type, sizeof(type), "int");
         }
 
         // a block member comes named by its instance, "vegeta.trunk", which
@@ -2989,7 +3060,7 @@ char *mglAddTessGeneralCapture(const char *tes_src, const GeometryInfo *gi)
     snprintf(line, sizeof(line),
         "\nlayout(quads, equal_spacing, ccw) in;\n\n"
         "int mglCapIdx;\n"
-        "layout(std430, binding = %d) buffer MglTessGenB { vec4 mglTG[]; };\n",
+        "layout(std430, binding = %d) buffer MglTessGenB { uvec4 mglTG[]; };\n",
         MGL_TES_GEN_BINDING);
 
     // the capture declarations can be long, so they go in on their own
@@ -3002,13 +3073,15 @@ char *mglAddTessGeneralCapture(const char *tes_src, const GeometryInfo *gi)
         "  int mglV = int(round(gl_TessCoord.y * %d.0));\n"
         "  int mglIdx = mglV * %d + mglU;\n"
         "  int mglAt = gl_PrimitiveID * %d;\n"
-        "  vec4 mglHead = mglTG[mglAt];\n"
+        "  vec4 mglHead = uintBitsToFloat(mglTG[mglAt]);\n"
         "  if (mglIdx >= int(mglHead.x)) return;\n"
-        "  vec4 mglOut = mglTG[mglAt + 1];\n"
+        // Metal may run a shared vertex more than once; only the first counts
+        "  if (atomicExchange(mglTG[mglAt + 2 + mglIdx].w, 1u) != 0u) return;\n"
+        "  vec4 mglOut = uintBitsToFloat(mglTG[mglAt + 1]);\n"
         "  mglTLO[0] = mglOut.x; mglTLO[1] = mglOut.y; mglTLO[2] = mglOut.z; mglTLO[3] = mglOut.w;\n"
         "  mglTLI[0] = mglHead.y; mglTLI[1] = mglHead.z;\n"
         "  mglPVI = int(mglHead.w);\n"
-        "  mglTC = mglTG[mglAt + 2 + mglIdx].xyz;\n"
+        "  mglTC = uintBitsToFloat(mglTG[mglAt + 2 + mglIdx].xyz);\n"
         "  mglVsBody();\n"
         "  mglCapIdx = gl_PrimitiveID * %d + mglIdx;\n"
         "  mglGsCapture();\n}\n",

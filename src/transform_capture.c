@@ -171,6 +171,13 @@ static bool varyingType(const char *src, const char *name, char *type, size_t ty
     if (!strcmp(name, "gl_Position")) { snprintf(type, typelen, "vec4"); return true; }
     if (!strcmp(name, "gl_PointSize")) { snprintf(type, typelen, "float"); return true; }
 
+    // a geometry stage records these too; the vertex stage cannot write them
+    if (!strcmp(name, "gl_Layer") || !strcmp(name, "gl_ViewportIndex") || !strcmp(name, "gl_PrimitiveID"))
+    {
+        snprintf(type, typelen, "int");
+        return true;
+    }
+
     while (src[i])
     {
         if (!identChar(src[i]) || (i && identChar(src[i - 1])))
@@ -458,7 +465,8 @@ static bool buildCapture(const char *src, const MglXfbItem *items, int count,
             ci->buffer_count = b + 1;
     }
 
-    if (!bufAdd(&body, "\nvoid mglXfbCapture(int mglSlot, int mglOn)\n{\n  if (mglOn == 0) return;\n"))
+    // mglOn is how many vertices there is room for, and 0 when not recording
+    if (!bufAdd(&body, "\nvoid mglXfbCapture(int mglSlot, int mglOn)\n{\n  if (mglSlot >= mglOn) return;\n"))
         goto fail;
 
     for (int v = 0; v < count; v++)

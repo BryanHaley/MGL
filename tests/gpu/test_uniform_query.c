@@ -331,3 +331,48 @@ GPU_TEST(uniform_query, subroutine_uniforms_return_no_active)
 
     glDeleteProgram(prog);
 }
+
+// A shader's name where a program's belongs is the wrong kind of object, an
+// INVALID_OPERATION. It read as an unknown name.
+GPU_TEST(uniform_query, a_shader_name_is_not_a_program)
+{
+    GLuint sh = glCreateShader(GL_VERTEX_SHADER);
+    GLfloat f;
+    GLint i;
+
+    glGetUniformfv(sh, 0, &f);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glGetUniformiv(sh, 0, &i);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glGetUniformfv(987654, 0, &f);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glDeleteShader(sh);
+}
+
+// Shaders and programs share one set of names. A shader could get the same
+// number as a live program, so asking about one found the other.
+GPU_TEST(uniform_query, shaders_and_programs_never_share_a_name)
+{
+    GLuint p[4], s[4];
+
+    for (int i = 0; i < 4; i++)
+    {
+        p[i] = glCreateProgram();
+        s[i] = glCreateShader(GL_FRAGMENT_SHADER);
+    }
+
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            CHECK_MSG(p[i] != s[j], "program %d and shader %d are both %u", i, j, p[i]);
+
+    CHECK(glIsShader(p[0]) == GL_FALSE);
+    CHECK(glIsProgram(s[0]) == GL_FALSE);
+
+    for (int i = 0; i < 4; i++)
+    {
+        glDeleteProgram(p[i]);
+        glDeleteShader(s[i]);
+    }
+    mgl_drain_errors();
+}

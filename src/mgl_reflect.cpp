@@ -143,8 +143,14 @@ void matrixLayout(const glslang::TType &member, const glslang::TType *block, Mgl
 void addBlocks(Kind &kind, glslang::TProgram &prog, bool storage, int stage, std::vector<int> &local)
 {
     int n = storage ? prog.getNumBufferBlocks() : prog.getNumUniformBlocks();
+    bool any_stages = false;
 
     local.assign(n, -1);
+
+    // glslang marks the elements of a block array a stage reads; when it has
+    // marked none at all, every block counts
+    for (int i = 0; i < n; i++)
+        any_stages |= (storage ? prog.getBufferBlock(i) : prog.getUniformBlock(i)).stages != 0;
 
     for (int i = 0; i < n; i++)
     {
@@ -165,7 +171,9 @@ void addBlocks(Kind &kind, glslang::TProgram &prog, bool storage, int stage, std
             r.data_size = o.size;
         }
 
-        r.stages |= 1u << stage;
+        if (!any_stages || o.stages != 0)
+            r.stages |= 1u << stage;
+
         local[i] = at;
     }
 }
@@ -212,8 +220,11 @@ void addVariables(Kind &kind, glslang::TProgram &prog, bool storage, int stage,
                     r.top_level_size = o.topLevelArraySize > 0 ? o.topLevelArraySize : 1;
                     r.top_level_stride = o.topLevelArrayStride;
 
-                    // a runtime-sized array has no size of its own
-                    if (type->isArray() && (type->isUnsizedArray() || type->isImplicitlySizedArray()))
+                    // a runtime-sized array has no size of its own; in an
+                    // array of arrays only the outermost can be, and what is
+                    // listed is the innermost
+                    if (type->isArray() && type->getArraySizes()->getNumDims() == 1 &&
+                        (type->isUnsizedArray() || type->isImplicitlySizedArray()))
                         r.array_size = 0;
                 }
             }

@@ -23,6 +23,7 @@
 
 #include "glm_context.h"
 #include "mgl_log.h"
+#include "mgl_format_table.h"
 
 /* functions from buffers.c and textures.c that we call directly */
 extern Buffer *findBuffer(GLMContext ctx, GLuint buffer);
@@ -222,7 +223,8 @@ static void tex_buffer_impl(GLMContext ctx, Texture *tex, GLenum internalformat,
     bt->buffer = buffer;
     bt->internalformat = internalformat;
     bt->offset = offset;
-    bt->size = size;
+    // glTexBuffer views the whole buffer, however its storage changes later
+    bt->size = is_range ? size : -1;
 
     /* record the format and size on the texture object so queries
        (GL_TEXTURE_BUFFER_SIZE, GL_TEXTURE_INTERNAL_FORMAT etc.) work */
@@ -272,6 +274,54 @@ bool mglBufferTextureSource(GLMContext ctx, const Texture *tex, Buffer **buf,
     *size = bt->size < 0 ? (GLsizeiptr)(*buf)->size - bt->offset : bt->size;
 
     return true;
+}
+
+// What a level query reads from a buffer texture: its one level is the
+// buffer range it views
+bool mglBufferTextureLevelParam(GLMContext ctx, const Texture *tex, GLenum pname, GLint *out)
+{
+    BufferTextureBinding *bt = find_buf_tex_binding(tex->name);
+    GLenum format = bt ? bt->internalformat : GL_RGBA8;
+    Buffer *buf = NULL;
+    GLintptr offset = 0;
+    GLsizeiptr size = 0;
+    bool bound = mglBufferTextureSource(ctx, tex, &buf, &offset, &size);
+    size_t texel = mglFormatBytesPerRow(format, 1);
+
+    switch (pname)
+    {
+        case GL_TEXTURE_BUFFER_DATA_STORE_BINDING: *out = bound ? (GLint)buf->name : 0; return true;
+        case GL_TEXTURE_BUFFER_OFFSET:             *out = bound ? (GLint)offset : 0; return true;
+        case GL_TEXTURE_BUFFER_SIZE:               *out = bound ? (GLint)size : 0; return true;
+        case GL_TEXTURE_INTERNAL_FORMAT:           *out = (GLint)format; return true;
+        case GL_TEXTURE_WIDTH:                     *out = bound && texel ? (GLint)(size / texel) : 0; return true;
+        case GL_TEXTURE_HEIGHT:
+        case GL_TEXTURE_DEPTH:                     *out = bound ? 1 : 0; return true;
+        case GL_TEXTURE_SAMPLES:                   *out = 0; return true;
+        case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:    *out = GL_TRUE; return true;
+        case GL_TEXTURE_COMPRESSED:                *out = GL_FALSE; return true;
+        case GL_TEXTURE_RED_SIZE:                  *out = mglFormatComponentBits(format, GL_RED); return true;
+        case GL_TEXTURE_GREEN_SIZE:                *out = mglFormatComponentBits(format, GL_GREEN); return true;
+        case GL_TEXTURE_BLUE_SIZE:                 *out = mglFormatComponentBits(format, GL_BLUE); return true;
+        case GL_TEXTURE_ALPHA_SIZE:                *out = mglFormatComponentBits(format, GL_ALPHA); return true;
+        case GL_TEXTURE_DEPTH_SIZE:
+        case GL_TEXTURE_STENCIL_SIZE:
+        case GL_TEXTURE_SHARED_SIZE:               *out = 0; return true;
+        case GL_TEXTURE_RED_TYPE:
+        case GL_TEXTURE_GREEN_TYPE:
+        case GL_TEXTURE_BLUE_TYPE:
+        case GL_TEXTURE_ALPHA_TYPE:
+        {
+            GLenum channel = pname == GL_TEXTURE_RED_TYPE ? GL_RED : pname == GL_TEXTURE_GREEN_TYPE ? GL_GREEN :
+                             pname == GL_TEXTURE_BLUE_TYPE ? GL_BLUE : GL_ALPHA;
+
+            *out = mglFormatComponentBits(format, channel) ? (GLint)mglFormatComponentType(format) : GL_NONE;
+            return true;
+        }
+        case GL_TEXTURE_DEPTH_TYPE:                *out = GL_NONE; return true;
+    }
+
+    return false;
 }
 
 /* ---- entry points ---- */

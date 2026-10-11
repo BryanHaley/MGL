@@ -180,7 +180,7 @@ GPU_TEST(transform_feedback_gs, geometry_output_is_captured)
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb);
     buf = recordingBuffer(xfb, 0, 256);
 
-    glBeginTransformFeedback(GL_POINTS);
+    glBeginTransformFeedback(GL_TRIANGLES);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
     glDrawArrays(GL_POINTS, 0, 1);
     glEndTransformFeedback();
@@ -331,7 +331,7 @@ GPU_TEST(transform_feedback_gs, gl_layer_is_captured)
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb);
     buf = recordingBuffer(xfb, 0, 256);
 
-    glBeginTransformFeedback(GL_POINTS);
+    glBeginTransformFeedback(GL_TRIANGLES);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
     glDrawArrays(GL_POINTS, 0, 1);
     glEndTransformFeedback();
@@ -412,7 +412,7 @@ GPU_TEST(transform_feedback_gs, geometry_varyings_interleave_tightly)
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb);
     buf = recordingBuffer(xfb, 0, 256);
 
-    glBeginTransformFeedback(GL_POINTS);
+    glBeginTransformFeedback(GL_TRIANGLES);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
     glDrawArrays(GL_POINTS, 0, 1);
     glEndTransformFeedback();
@@ -850,4 +850,108 @@ GPU_TEST(transform_feedback_gs, an_unnamed_block_is_recorded)
     glDeleteBuffers(1, &ubo);
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
+}
+
+/* ---------- vertex streams ---------- */
+
+// A geometry stage writes one point to stream 0 and two to stream 1. Each
+// stream records into its own buffer, counts in its own queries, and a draw
+// from stream 1 replays two points. Everything off stream 0 used to be dropped.
+GPU_TEST(transform_feedback_gs, each_vertex_stream_records_on_its_own)
+{
+    static const GLfloat pt[2] = { 0.0f, 0.0f };
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *gs =
+        "#version 460 core\n"
+        "layout(points) in;\n"
+        "layout(points, max_vertices = 3) out;\n"
+        "layout(stream = 0) out float a;\n"
+        "layout(stream = 1) out float b;\n"
+        "void main() {\n"
+        "    gl_Position = gl_in[0].gl_Position;\n"
+        "    a = 7.0;\n"
+        "    EmitStreamVertex(0);\n"
+        "    b = 11.0;\n"
+        "    EmitStreamVertex(1);\n"
+        "    b = 13.0;\n"
+        "    EmitStreamVertex(1);\n"
+        "}\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const char *varyings[] = { "a", "gl_NextBuffer", "b" };
+    char log[2048] = "";
+    GLuint prog = linkRecording(vs, gs, fs, varyings, 3, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    GLuint vao, vbo, xfb, buf[2], q[4];
+    GLfloat got0[2] = {0}, got1[3] = {0};
+    GLuint gen0 = 0, gen1 = 0, wrote0 = 0, wrote1 = 0;
+
+    CHECK_MSG(prog != 0, "stream program did not link: %s", log);
+    if (!prog)
+        return;
+
+    glUseProgram(prog);
+    vao = pointsVAO(pt, sizeof pt, &vbo);
+    glGenTransformFeedbacks(1, &xfb);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb);
+    buf[0] = recordingBuffer(xfb, 0, 64);
+    buf[1] = recordingBuffer(xfb, 1, 64);
+    glGenQueries(4, q);
+
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginQueryIndexed(GL_PRIMITIVES_GENERATED, 0, q[0]);
+    glBeginQueryIndexed(GL_PRIMITIVES_GENERATED, 1, q[1]);
+    glBeginQueryIndexed(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, 0, q[2]);
+    glBeginQueryIndexed(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, 1, q[3]);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glEndTransformFeedback();
+    glEndQueryIndexed(GL_PRIMITIVES_GENERATED, 0);
+    glEndQueryIndexed(GL_PRIMITIVES_GENERATED, 1);
+    glEndQueryIndexed(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, 0);
+    glEndQueryIndexed(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetQueryObjectuiv(q[0], GL_QUERY_RESULT, &gen0);
+    glGetQueryObjectuiv(q[1], GL_QUERY_RESULT, &gen1);
+    glGetQueryObjectuiv(q[2], GL_QUERY_RESULT, &wrote0);
+    glGetQueryObjectuiv(q[3], GL_QUERY_RESULT, &wrote1);
+    CHECK_MSG(gen0 == 1 && gen1 == 2, "generated %u and %u, want 1 and 2", gen0, gen1);
+    CHECK_MSG(wrote0 == 1 && wrote1 == 2, "written %u and %u, want 1 and 2", wrote0, wrote1);
+
+    glBindBuffer(GL_ARRAY_BUFFER, buf[0]);
+    glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof got0, got0);
+    glBindBuffer(GL_ARRAY_BUFFER, buf[1]);
+    glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof got1, got1);
+    CHECK_MSG(got0[0] == 7.0f && got0[1] == 0.0f, "stream 0 recorded %g %g, want 7 alone", got0[0], got0[1]);
+    CHECK_MSG(got1[0] == 11.0f && got1[1] == 13.0f && got1[2] == 0.0f,
+              "stream 1 recorded %g %g %g, want 11 13", got1[0], got1[1], got1[2]);
+
+    // a draw from stream 1 replays its two points
+    {
+        GLuint gen = 0, qq;
+
+        glGenQueries(1, &qq);
+        glBeginQuery(GL_PRIMITIVES_GENERATED, qq);
+        glDrawTransformFeedbackStream(GL_POINTS, xfb, 1);
+        glEndQuery(GL_PRIMITIVES_GENERATED);
+        glGetQueryObjectuiv(qq, GL_QUERY_RESULT, &gen);
+        // each replayed point runs the geometry stage, which makes one on stream 0
+        CHECK_MSG(gen == 2, "replaying stream 1 generated %u, want 2", gen);
+        glDeleteQueries(1, &qq);
+    }
+
+    glDisable(GL_RASTERIZER_DISCARD);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+    glUseProgram(0);
+    glDeleteQueries(4, q);
+    glDeleteProgram(prog);
+    glDeleteBuffers(2, buf);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTransformFeedbacks(1, &xfb);
 }

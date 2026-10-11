@@ -208,3 +208,91 @@ GPU_TEST(buffer_texture, an_image_buffer_writes_into_the_buffer)
     glDeleteBuffers(1, &buf);
     glDeleteProgram(prog);
 }
+
+// A buffer texture's level 0 describes the range it views. Asking about it
+// raised INVALID_VALUE, as if the texture had no levels.
+GPU_TEST(buffer_texture, level_queries_describe_the_range)
+{
+    GLuint tex, buf;
+    GLint v = -1;
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_TEXTURE_BUFFER, buf);
+    glBufferData(GL_TEXTURE_BUFFER, 1024, NULL, GL_STATIC_DRAW);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_BUFFER, tex);
+    glTexBufferRange(GL_TEXTURE_BUFFER, GL_R32F, buf, 256, 512);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetTexLevelParameteriv(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_BUFFER_DATA_STORE_BINDING, &v);
+    CHECK_EQ_INT(v, (GLint)buf);
+    glGetTexLevelParameteriv(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_BUFFER_OFFSET, &v);
+    CHECK_EQ_INT(v, 256);
+    glGetTexLevelParameteriv(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_BUFFER_SIZE, &v);
+    CHECK_EQ_INT(v, 512);
+    glGetTexLevelParameteriv(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_WIDTH, &v);
+    CHECK_EQ_INT(v, 128);
+    glGetTextureLevelParameteriv(tex, 0, GL_TEXTURE_INTERNAL_FORMAT, &v);
+    CHECK_EQ_INT(v, GL_R32F);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetTexLevelParameteriv(GL_TEXTURE_BUFFER, 1, GL_TEXTURE_WIDTH, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glDeleteTextures(1, &tex);
+    glDeleteBuffers(1, &buf);
+}
+
+// The limits and state a few extensions add answer instead of raising
+// INVALID_ENUM.
+GPU_TEST(buffer_texture, extension_state_answers)
+{
+    GLfloat f = -1.0f;
+    GLint n = -1;
+    GLuint tex;
+
+    glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &f);
+    CHECK_MSG(f >= 2.0f, "max anisotropy %f", f);
+    glGetFloatv(GL_POLYGON_OFFSET_CLAMP, &f);
+    CHECK_MSG(f == 0.0f, "offset clamp %f", f);
+    glGetIntegerv(GL_NUM_SPIR_V_EXTENSIONS, &n);
+    CHECK_MSG(n >= 0, "spir-v extensions %d", n);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, 0.5f);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    glDeleteTextures(1, &tex);
+}
+
+// There are no SPIR-V extensions, so any index is out of range rather than
+// the name being unknown.
+GPU_TEST(buffer_texture, spirv_extension_strings_are_out_of_range)
+{
+    CHECK(glGetStringi(GL_SPIR_V_EXTENSIONS, 0) == NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+}
+
+// glTexBuffer views the whole buffer, so new storage under it changes the
+// size it reports. It kept the size from the moment it was attached.
+GPU_TEST(buffer_texture, whole_buffer_size_follows_new_storage)
+{
+    GLuint tex, buf;
+    GLint v = -1;
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_TEXTURE_BUFFER, buf);
+    glBufferData(GL_TEXTURE_BUFFER, 512, NULL, GL_STATIC_DRAW);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_BUFFER, tex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_R8, buf);
+    glBufferData(GL_TEXTURE_BUFFER, 1040, NULL, GL_STATIC_DRAW);
+
+    glGetTexLevelParameteriv(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_BUFFER_SIZE, &v);
+    CHECK_EQ_INT(v, 1040);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteTextures(1, &tex);
+    glDeleteBuffers(1, &buf);
+}

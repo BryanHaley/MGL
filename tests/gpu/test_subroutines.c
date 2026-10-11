@@ -432,3 +432,89 @@ GPU_TEST(subroutines, resource_index_is_the_subroutine_index)
 
     glDeleteProgram(prog);
 }
+
+// A function of another subroutine type cannot go in a uniform, a stage the
+// program lacks has no subroutine state, and an unlinked program has no
+// locations. All three were let through.
+GPU_TEST(subroutines, misuse_is_an_invalid_operation)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "subroutine float st(float x);\n"
+        "subroutine float other(float x);\n"
+        "subroutine(st) float twice(float x) { return x * 2.0; }\n"
+        "subroutine(other) float half_(float x) { return x * 0.5; }\n"
+        "subroutine uniform st routine;\n"
+        "subroutine uniform other routine2;\n"
+        "void main() { gl_Position = vec4(routine(1.0) + routine2(1.0)); }\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1); }\n";
+    char log[2048] = { 0 };
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log), idx[2], v = 0, bare;
+    GLint l0, l1;
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    glUseProgram(prog);
+    l0 = glGetSubroutineUniformLocation(prog, GL_VERTEX_SHADER, "routine");
+    l1 = glGetSubroutineUniformLocation(prog, GL_VERTEX_SHADER, "routine2");
+    CHECK_MSG(l0 >= 0 && l1 >= 0 && l0 != l1, "locations %d and %d", l0, l1);
+    if (l0 < 0 || l1 < 0 || l0 > 1 || l1 > 1) return;
+
+    idx[l0] = glGetSubroutineIndex(prog, GL_VERTEX_SHADER, "half_");
+    idx[l1] = glGetSubroutineIndex(prog, GL_VERTEX_SHADER, "twice");
+    glUniformSubroutinesuiv(GL_VERTEX_SHADER, 2, idx);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    idx[l0] = glGetSubroutineIndex(prog, GL_VERTEX_SHADER, "twice");
+    idx[l1] = glGetSubroutineIndex(prog, GL_VERTEX_SHADER, "half_");
+    glUniformSubroutinesuiv(GL_VERTEX_SHADER, 2, idx);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetUniformSubroutineuiv(GL_GEOMETRY_SHADER, 0, &v);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    bare = glCreateProgram();
+    glGetSubroutineUniformLocation(bare, GL_VERTEX_SHADER, "routine");
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glUseProgram(0);
+    glDeleteProgram(bare);
+    glDeleteProgram(prog);
+}
+
+// An array of arrays of subroutine uniforms is laid out row by row, and
+// glGetSubroutineUniformLocation agrees with the resource query. It read
+// only the first subscript.
+GPU_TEST(subroutines, arrays_of_arrays_take_a_location_each)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "subroutine float st(float x);\n"
+        "subroutine(st) float twice(float x) { return x * 2.0; }\n"
+        "subroutine uniform st u1[2][3];\n"
+        "void main() { gl_Position = vec4(u1[1][2](1.0)); }\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1); }\n";
+    char log[2048] = { 0 };
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log);
+    GLint base, loc;
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    base = glGetSubroutineUniformLocation(prog, GL_VERTEX_SHADER, "u1[0][0]");
+    loc = glGetSubroutineUniformLocation(prog, GL_VERTEX_SHADER, "u1[0][1]");
+    CHECK_EQ_INT(loc, base + 1);
+    loc = glGetSubroutineUniformLocation(prog, GL_VERTEX_SHADER, "u1[1][2]");
+    CHECK_EQ_INT(loc, base + 5);
+    CHECK_EQ_INT(glGetProgramResourceLocation(prog, GL_VERTEX_SUBROUTINE_UNIFORM, "u1[1][2]"), loc);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(prog);
+}

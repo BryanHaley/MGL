@@ -65,7 +65,9 @@ extern GLsizei genStrideFromTypeSize(GLenum type, GLint size);
 #define MGL_CONSTANT_ATTRIB_BUFFER_INDEX 30
 // the float, int or uint value of each attribute, then its double value
 #define MGL_CONSTANT_ATTRIB_FLOATS       (MAX_ATTRIBS * 16)
-#define MGL_CONSTANT_ATTRIB_STRIDE       (MGL_CONSTANT_ATTRIB_FLOATS + MAX_ATTRIBS * 32)
+// then the double (0, 0, 0, 1), for the components an array does not supply
+#define MGL_CONSTANT_ATTRIB_DEFAULT_D    (MGL_CONSTANT_ATTRIB_FLOATS + MAX_ATTRIBS * 32)
+#define MGL_CONSTANT_ATTRIB_STRIDE       (MGL_CONSTANT_ATTRIB_DEFAULT_D + 32)
 
 // What a disabled vertex array feeds the shader, in the layout the vertex
 // descriptor points into. A double input reads raw bits from the second half.
@@ -83,6 +85,10 @@ static void fillAttribConstants(GLMContext ctx, uint8_t *out)
 
         memcpy(out + MGL_CONSTANT_ATTRIB_FLOATS + i * 32, d, 32);
     }
+
+    const GLdouble fill[4] = { 0.0, 0.0, 0.0, 1.0 };
+
+    memcpy(out + MGL_CONSTANT_ATTRIB_DEFAULT_D, fill, 32);
 }
 
 // How many doubles a column of the vertex input at this location holds, or 0
@@ -412,7 +418,7 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
     MTLPrimitiveTopologyClass  _drawTopology;
 
     id<MTLSamplerState>        _defaultSampler;
-    id<MTLTexture>             _dummyTextures[4];
+    id<MTLTexture>             _dummyTextures[8];
 
     // the shader blit, for copies Metal's own cannot make
     id<MTLLibrary>             _blitLibrary;
@@ -438,6 +444,11 @@ static void *mgl_aligned_alloc(size_t alignment, size_t size)
 
 MTLVertexFormat glTypeSizeToMtlType(GLuint type, GLuint size, bool normalized)
 {
+    // GL_BGRA as a size swaps red and blue; Metal has that for bytes only
+    if (size == GL_BGRA)
+        return (type == GL_UNSIGNED_BYTE && normalized) ? MTLVertexFormatUChar4Normalized_BGRA
+                                                         : MTLVertexFormatInvalid;
+
     switch(type)
     {
         case GL_UNSIGNED_BYTE:
@@ -584,6 +595,103 @@ MTLVertexFormat glTypeSizeToMtlType(GLuint type, GLuint size, bool normalized)
         }
 
     return MTLVertexFormatInvalid;
+}
+
+// An attribute in a format Metal has no vertex format for: doubles the shader
+// reads as floats, and the packed ten-bit formats when not normalised.
+static bool attribNeedsConversion(GLMContext ctx, int a)
+{
+    if (VAO_ATTRIB_STATE(a).type == GL_DOUBLE)
+        return !VAO_ATTRIB_STATE(a).is_long;
+
+    if (VAO_ATTRIB_STATE(a).is_long)
+        return false;
+
+    // Metal turns bytes and shorts into floats, but not 32-bit integers,
+    // normalised or not
+    if (!VAO_ATTRIB_STATE(a).is_integer &&
+        (VAO_ATTRIB_STATE(a).type == GL_INT || VAO_ATTRIB_STATE(a).type == GL_UNSIGNED_INT))
+        return true;
+
+    return glTypeSizeToMtlType(VAO_ATTRIB_STATE(a).type, VAO_ATTRIB_STATE(a).size,
+                               VAO_ATTRIB_STATE(a).normalized) == MTLVertexFormatInvalid;
+}
+
+// One element of such an attribute as four floats, with the components it
+// does not have filled in the way GL does.
+static void convertAttribElement(GLenum type, GLint size, bool normalized, const uint8_t *src, float out[4])
+{
+    out[0] = 0.0f; out[1] = 0.0f; out[2] = 0.0f; out[3] = 1.0f;
+
+    switch (type)
+    {
+        case GL_DOUBLE:
+            for (GLint c = 0; c < size && c < 4; c++)
+            {
+                double d;
+
+                memcpy(&d, src + c * sizeof d, sizeof d);
+                out[c] = (float)d;
+            }
+            break;
+
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+            for (GLint c = 0; c < size && c < 4; c++)
+            {
+                uint32_t v;
+
+                memcpy(&v, src + c * sizeof v, sizeof v);
+
+                if (!normalized)
+                    out[c] = type == GL_INT ? (float)(int32_t)v : (float)v;
+                else if (type == GL_INT)
+                    out[c] = (float)fmax((double)(int32_t)v / 2147483647.0, -1.0);
+                else
+                    out[c] = (float)((double)v / 4294967295.0);
+            }
+            break;
+
+        case GL_FIXED:
+            for (GLint c = 0; c < size && c < 4; c++)
+            {
+                int32_t v;
+
+                memcpy(&v, src + c * sizeof v, sizeof v);
+                out[c] = (float)v / 65536.0f;
+            }
+            break;
+
+        case GL_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+        {
+            uint32_t v;
+            bool sign = type == GL_INT_2_10_10_10_REV;
+
+            memcpy(&v, src, sizeof v);
+
+            for (int c = 0; c < 4; c++)
+            {
+                int bits = c == 3 ? 2 : 10;
+                uint32_t f = (v >> (c * 10)) & ((1u << bits) - 1);
+                int32_t sv = (sign && (f & (1u << (bits - 1)))) ? (int32_t)f - (1 << bits) : (int32_t)f;
+                float m = (float)((1u << (bits - (sign ? 1 : 0))) - 1);
+
+                out[c] = !normalized ? (sign ? (float)sv : (float)f)
+                                     : sign ? fmaxf((float)sv / m, -1.0f) : (float)f / m;
+            }
+
+            // GL_BGRA: the first field is blue
+            if (size == GL_BGRA)
+            {
+                float t = out[0];
+
+                out[0] = out[2];
+                out[2] = t;
+            }
+            break;
+        }
+    }
 }
 
 #pragma mark debug code
@@ -762,6 +870,9 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     // init mapped buffer count
     buffer_map->count = 0;
 
+    for (int b = 0; b < MAX_MAPPED_BUFFERS; b++)
+        buffer_map->buffers[b].converted = 0;
+
     // bind uniforms, shader storage and atomics to buffer map
     for(int type=0; type<4; type++)
     {
@@ -799,9 +910,9 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                 else
                     spirv_binding = [self getProgramBinding:stage type:spvc_type index: i];
 
-                // a plain uniform the shader never reads has no Metal slot
-                if (spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT &&
-                    [self getProgramMSLIndex:stage type:spvc_type index: i] < 0)
+                // a plain uniform, or a block, the shader never reads has no
+                // Metal slot; mapping one anyway took over another's
+                if ([self getProgramMSLIndex:stage type:spvc_type index: i] < 0)
                 {
                     buffers_to_be_mapped--;
                     RETURN_FALSE_ON_FAILURE(i < count);
@@ -826,15 +937,35 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                 {
                     SpirvResource *res =
                         &ctx->state.program->spirv_resources_list[stage][spvc_type].list[i];
-                    GLint instances = ((spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_BUFFER ||
+                    // an instance array of one still keeps its binding per element
+                    bool per_element = (spvc_type == SPVC_RESOURCE_TYPE_UNIFORM_BUFFER ||
                                         spvc_type == SPVC_RESOURCE_TYPE_STORAGE_BUFFER) &&
-                                       res->array_size > 1 && res->element_binding)
-                                      ? res->array_size : 1;
+                                       res->array_size >= 1 && res->element_binding;
+                    GLint instances = per_element ? res->array_size : 1;
                     GLuint base_slot = (GLuint)[self getProgramMSLIndex:stage type:spvc_type index: i];
 
+
+                    // a block the stage never reads has only its binding for a
+                    // slot, which can be one a block it does read was given
+                    if (res->msl_guess)
+                    {
+                        SpirvResourceList *all = &ctx->state.program->spirv_resources_list[stage][spvc_type];
+                        bool taken = false;
+
+                        for (GLuint o = 0; o < all->count; o++)
+                            if (o != (GLuint)i && !all->list[o].msl_guess && all->list[o].msl_index == res->msl_index)
+                                taken = true;
+
+                        if (taken)
+                        {
+                            buffers_to_be_mapped--;
+                            RETURN_FALSE_ON_FAILURE(i < count);
+                            continue;
+                        }
+                    }
                     for (GLint e = 0; e < instances; e++)
                     {
-                        GLuint slot_binding = (instances > 1) ? res->element_binding[e] : spirv_binding;
+                        GLuint slot_binding = per_element ? res->element_binding[e] : spirv_binding;
 
                         buf = buffers[slot_binding].buf;
 
@@ -944,9 +1075,13 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                 // the first reads the wrong array.
                 bool found_buffer = false;
 
+                // an attribute Metal cannot read gets a converted copy, so a
+                // slot of its own
+                bool convert = attribNeedsConversion(ctx, att);
+
                 // a stride of zero is not a slot anything else can share: the
                 // slot is pointed straight at the one element it reads
-                for (int map=vao_buffer_start; stride && map<buffer_map->count; map++)
+                for (int map=vao_buffer_start; stride && !convert && map<buffer_map->count; map++)
                 {
                     Buffer *map_buffer = buffer_map->buffers[map].buf;
 
@@ -964,7 +1099,7 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                     if (buffer_map->buffers[map].divisor != divisor)
                         continue;
 
-                    if (buffer_map->buffers[map].constant_step)
+                    if (buffer_map->buffers[map].constant_step || buffer_map->buffers[map].converted)
                         continue;
 
                     GLintptr delta = base - buffer_map->buffers[map].offset;
@@ -996,7 +1131,8 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                     // Metal wants a stride even where nothing steps, and it has
                     // to be a multiple of four that covers the attribute
                     buffer_map->buffers[buffer_map->count].layout_stride =
-                        stride ? stride : ((extent + 3u) & ~3u);
+                        convert ? 16 : stride ? stride : ((extent + 3u) & ~3u);
+                    buffer_map->buffers[buffer_map->count].converted = convert;
                     buffer_map->buffers[buffer_map->count].buffer_base_index = attrib_slot++;
                     buffer_map->count++;
 
@@ -1235,6 +1371,16 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
             }
         }
 
+        {
+            id<MTLBuffer> converted = [self convertedVertexBuffer: map];
+
+            if (converted)
+            {
+                [_currentRenderEncoder setVertexBuffer: converted offset: 0 atIndex: map->buffer_base_index];
+                continue;
+            }
+        }
+
         if (!writable && ptr->size < 4096 && ptr->data.mtl_data == NULL)
         {
             // An offset past the end leaves nothing to bind, and a slot Metal
@@ -1271,6 +1417,45 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
     }
 
     return true;
+}
+
+// A slot whose attribute Metal cannot read is fed a copy of it, four floats
+// an element, made from the GL buffer as it stands.
+- (id<MTLBuffer>) convertedVertexBuffer: (BufferMap *) map
+{
+    if (!map->converted || ctx->state.vao == NULL || map->buf == NULL || map->buf->data.buffer_data == 0)
+        return nil;
+
+    int a = __builtin_ctz(map->attribute_mask);
+    GLenum type = VAO_ATTRIB_STATE(a).type;
+    GLint size = VAO_ATTRIB_STATE(a).size;
+    // a packed format is one 32-bit word whatever its component count
+    size_t elem = (type == GL_INT_2_10_10_10_REV || type == GL_UNSIGNED_INT_2_10_10_10_REV ||
+                   type == GL_UNSIGNED_INT_10F_11F_11F_REV) ? 4 : (size_t)genStrideFromTypeSize(type, size);
+    size_t stride = map->constant_step ? 0 : map->stride;
+    size_t total = (size_t)map->buf->size;
+    size_t at = (size_t)map->offset;
+    size_t n = 0;
+
+    if (elem == 0 || at + elem > total)
+        n = 0;
+    else
+        n = stride ? (total - at - elem) / stride + 1 : 1;
+
+    id<MTLBuffer> copy = [_scratchPool bufferOfLength: MAX(n, (size_t)1) * 16 forCommandBuffer: _currentCommandBuffer];
+
+    if (copy == nil)
+        return nil;
+
+    const uint8_t *src = (const uint8_t *)map->buf->data.buffer_data + at;
+    float *dst = (float *)copy.contents;
+
+    memset(dst, 0, MAX(n, (size_t)1) * 16);
+
+    for (size_t k = 0; k < n; k++)
+        convertAttribElement(type, size, VAO_ATTRIB_STATE(a).normalized, src + k * stride, dst + k * 4);
+
+    return copy;
 }
 
 - (bool) bindFragmentBuffersToCurrentRenderEncoder
@@ -3631,6 +3816,11 @@ static GLenum targetForSampler(GLenum type)
             Texture *ptr = target ? STATE(texture_units[unit].textures[textureIndexFromTarget(ctx, target)])
                                   : STATE(active_textures[unit]);
             id<MTLTexture> texture = nil;
+            Sampler *so = STATE(texture_samplers[unit]);
+
+            // an incomplete texture samples as black
+            if (ptr && !mglTextureSamplingComplete(ptr, so ? &so->params : NULL))
+                ptr = NULL;
 
             if (ptr && [self bindMTLTexture: ptr] && ptr->mtl_data)
                 texture = [self samplingTexture: ptr from: (__bridge id<MTLTexture>)(ptr->mtl_data)];
@@ -3669,7 +3859,8 @@ static GLenum targetForSampler(GLenum type)
             ImageUnit *iu = &STATE(image_units[binding]);
             id<MTLTexture> texture = nil;
 
-            if (iu->tex && ((iu->tex->mtl_data && !iu->tex->view_of) || [self bindMTLTexture: iu->tex]))
+            if (iu->tex && mglImageUnitValid(iu->tex, iu->level) &&
+                ((iu->tex->mtl_data && !iu->tex->view_of) || [self bindMTLTexture: iu->tex]))
                 texture = [self imageTexture: iu cubeAsArray: res->cube_as_array atomic: res->atomic];
 
             if (texture == nil)
@@ -4597,6 +4788,33 @@ static MTLTextureType viewTextureType(GLenum target)
         }
     }
 
+    // Images too. Making a Metal texture can end the encoder, and done in the
+    // binding loop that dropped the images bound before it.
+    Program *program = ctx->state.program;
+
+    for (int stage = 0; program && stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *images = &program->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_IMAGE];
+
+        for (GLuint i = 0; i < images->count; i++)
+        {
+            SpirvResource *res = &images->list[i];
+
+            for (GLint e = 0; e < (res->array_size > 1 ? res->array_size : 1); e++)
+            {
+                GLint binding = mglResourceUnit(res, e);
+
+                if (binding < 0 || binding >= TEXTURE_UNITS)
+                    continue;
+
+                Texture *tex = STATE(image_units[binding].tex);
+
+                if (tex && (tex->mtl_data == NULL || tex->dirty_bits))
+                    [self bindMTLTexture: tex];
+            }
+        }
+    }
+
     return true;
 }
 
@@ -4855,9 +5073,9 @@ static MTLTextureType viewTextureType(GLenum target)
         }
 
         {
-            Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster };
+            Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster, &ptr->vs_noraster };
 
-            for (int c = 0; c < 3; c++)
+            for (int c = 0; c < 4; c++)
             {
                 if (cull[c]->mtl_function)
                 {
@@ -6479,6 +6697,12 @@ static char clearColorKind(MTLPixelFormat f)
             mtl_type = MTLTextureType2D; slot = 0; break;
     }
 
+    // images get their own, all zero and writable: an invalid unit loads zero
+    bool image = gl_type >= GL_IMAGE_1D && gl_type <= GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY;
+
+    if (image)
+        slot += 4;
+
     if (_dummyTextures[slot] == nil)
     {
         MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
@@ -6490,7 +6714,7 @@ static char clearColorKind(MTLPixelFormat f)
         desc.depth = (mtl_type == MTLTextureType3D) ? 1 : 1;
         desc.arrayLength = (mtl_type == MTLTextureType2DArray) ? 1 : 1;
         desc.mipmapLevelCount = 1;
-        desc.usage = MTLTextureUsageShaderRead;
+        desc.usage = image ? MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite : MTLTextureUsageShaderRead;
         desc.storageMode = MTLStorageModeShared;
 
         id<MTLTexture> tex = [_device newTextureWithDescriptor: desc];
@@ -6501,7 +6725,7 @@ static char clearColorKind(MTLPixelFormat f)
             return nil;
         }
 
-        const uint8_t black[4] = { 0, 0, 0, 255 };
+        const uint8_t black[4] = { 0, 0, 0, image ? 0 : 255 };
         NSUInteger faces = (mtl_type == MTLTextureTypeCube) ? 6 : 1;
 
         for (NSUInteger f = 0; f < faces; f++)
@@ -6603,6 +6827,44 @@ static GLuint xfbVerticesRecorded(GLenum mode, GLsizei count)
     }
 }
 
+// Vertices the bound feedback buffers still have room for, in whole
+// primitives of the recording mode. GL records a primitive whole or not at
+// all, and the room is the GL buffer's or its bound range's.
+- (GLuint) xfbRoomVertices
+{
+    Program *program = ctx->state.program;
+    TransformFeedback *xfb = ctx->state.transform_feedback;
+    GLuint room = UINT32_MAX;
+
+    if (program == NULL || xfb == NULL)
+        return 0;
+
+    for (int b = 0; b < program->xfb.buffer_count && b < MAX_TF_BUFFERS; b++)
+    {
+        BufferBaseTarget *slot = &ctx->state.buffer_base[_TRANSFORM_FEEDBACK_BUFFER].buffers[b];
+        BufferBaseTarget *bound = xfb->buffers[b].buf ? &xfb->buffers[b] : slot;
+        GLint stride = program->xfb.stride_bytes[b];
+
+        if (bound->buf == NULL || stride <= 0)
+            continue;
+
+        NSUInteger end = (NSUInteger)bound->buf->size;
+        NSUInteger at = (NSUInteger)bound->offset + (NSUInteger)xfb->vertices_recorded * (NSUInteger)stride;
+
+        if (!bound->whole && bound->size > 0 && (NSUInteger)(bound->offset + bound->size) < end)
+            end = (NSUInteger)(bound->offset + bound->size);
+
+        room = MIN(room, at < end ? (GLuint)((end - at) / (NSUInteger)stride) : 0);
+    }
+
+    GLuint per = xfb->primitive_mode == GL_TRIANGLES ? 3 : xfb->primitive_mode == GL_LINES ? 2 : 1;
+
+    if (room != UINT32_MAX)
+        room -= room % per;
+
+    return room;
+}
+
 // Whether the shader records on this draw is a uniform, and uniform values are
 // handed to the encoder when the buffers are bound -- so this has to run before
 // the state is processed, not with the buffer binding below.
@@ -6617,7 +6879,9 @@ static GLuint xfbVerticesRecorded(GLenum mode, GLsizei count)
 
     on = xfb && xfb->active && !xfb->paused;
 
-    mglWriteProgramUniform(ctx, program, program->xfb.on_loc, on ? 1 : 0);
+    // how many vertices the shader may record; nothing past the buffer's end
+    mglWriteProgramUniform(ctx, program, program->xfb.on_loc,
+                           on ? (GLint)MIN([self xfbRoomVertices], (GLuint)INT32_MAX) : 0);
     mglWriteProgramUniform(ctx, program, program->xfb.base_loc, first > 0 ? first : 0);
     mglWriteProgramUniform(ctx, program, program->xfb.count_loc, count > 0 ? count : 0);
 }
@@ -6664,10 +6928,17 @@ static GLuint drawPrimitiveCount(GLenum mode, GLsizei count)
             // the geometry capture counts what that stage emitted while recording
             if (q->target == GL_PRIMITIVES_GENERATED)
                 q->result += (cpu_tess || (gs && recording && program->xfb.gather_words > 0)) ? 0 : prims;
-            else if (recording && !gs &&
-                     (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN ||
-                      q->target == GL_TRANSFORM_FEEDBACK_OVERFLOW))
-                q->result += (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) ? prims : 0;
+            else if (recording && !gs && !cpu_tess)
+            {
+                GLuint per = xfb->primitive_mode == GL_TRIANGLES ? 3 : xfb->primitive_mode == GL_LINES ? 2 : 1;
+                GLuint written = MIN(prims, [self xfbRoomVertices] / per);
+
+                if (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN)
+                    q->result += written;
+                else if ((q->target == GL_TRANSFORM_FEEDBACK_OVERFLOW ||
+                          (q->target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW && i == 0)) && written < prims)
+                    q->result = 1;
+            }
         }
 }
 
@@ -6698,6 +6969,14 @@ static bool restartIndexFor(GLMContext ctx, size_t elem, uint32_t *out)
 - (void) prepareFeedbackGather: (GLenum) mode count: (GLsizei) count instances: (GLsizei) instances
                     basevertex: (GLint) basevertex
 {
+    [self prepareFeedbackGather: mode count: count instances: instances basevertex: basevertex indexed: true];
+}
+
+// An array draw only needs this for the strip, loop and fan modes, whose
+// vertices GL records more than once; basevertex is then the first vertex.
+- (void) prepareFeedbackGather: (GLenum) mode count: (GLsizei) count instances: (GLsizei) instances
+                    basevertex: (GLint) basevertex indexed: (bool) indexed
+{
     Program *program = ctx->state.program;
     TransformFeedback *xfb = ctx->state.transform_feedback;
 
@@ -6707,26 +6986,33 @@ static bool restartIndexFor(GLMContext ctx, size_t elem, uint32_t *out)
         mglProgramHasGeometry(program) || mglProgramCulls(program) || program->tess.active || count <= 0)
         return;
 
-    if (mode != GL_POINTS && mode != GL_LINES && mode != GL_TRIANGLES)
+    if (mode != GL_POINTS && mode != GL_LINES && mode != GL_TRIANGLES && mode != GL_LINE_STRIP &&
+        mode != GL_LINE_LOOP && mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN)
         return;
 
-    Buffer *eb = getElementBuffer(ctx);
-    size_t elem = _gsElementType == GL_UNSIGNED_BYTE ? 1 : _gsElementType == GL_UNSIGNED_SHORT ? 2 : 4;
-
-    if (eb == NULL || !eb->data.buffer_data || _gsElementOffset + (size_t)count * elem > (size_t)eb->size)
+    if (!indexed && (mode == GL_POINTS || mode == GL_LINES || mode == GL_TRIANGLES))
         return;
 
-    const uint8_t *from = (const uint8_t *)eb->data.buffer_data + _gsElementOffset;
+    Buffer *eb = indexed ? getElementBuffer(ctx) : NULL;
+    size_t elem = !indexed ? 4 : _gsElementType == GL_UNSIGNED_BYTE ? 1 : _gsElementType == GL_UNSIGNED_SHORT ? 2 : 4;
+
+    if (indexed && (eb == NULL || !eb->data.buffer_data || _gsElementOffset + (size_t)count * elem > (size_t)eb->size))
+        return;
+
+    const uint8_t *from = indexed ? (const uint8_t *)eb->data.buffer_data + _gsElementOffset : NULL;
     uint32_t lo = UINT32_MAX, hi = 0, restart = 0;
 
     // a restart is never recorded, so it takes no part here; left in, its
     // index made the scratch gigabytes long
-    if (restartIndexFor(ctx, elem, &restart))
+    if (indexed && restartIndexFor(ctx, elem, &restart))
         return;
+
+    #define MGL_GATHER_INDEX(k) (!from ? (uint32_t)(k) : elem == 1 ? from[k] : \
+                                 elem == 2 ? ((const uint16_t *)from)[k] : ((const uint32_t *)from)[k])
 
     for (GLsizei k = 0; k < count; k++)
     {
-        uint32_t v = elem == 1 ? from[k] : elem == 2 ? ((const uint16_t *)from)[k] : ((const uint32_t *)from)[k];
+        uint32_t v = MGL_GATHER_INDEX(k);
 
         lo = MIN(lo, v);
         hi = MAX(hi, v);
@@ -6740,20 +7026,65 @@ static bool restartIndexFor(GLMContext ctx, size_t elem, uint32_t *out)
 
     NSUInteger span = (NSUInteger)(hi - lo) + 1;
 
-    _xfbGatherSlotList = [NSMutableData dataWithLength: (NSUInteger)count * (NSUInteger)instances * 4];
+    // which element each recorded vertex is, in the order GL assembles the
+    // primitives: a strip turns every other triangle round, a fan turns
+    // about its first vertex and a loop closes back to it
+    GLuint per = xfbVerticesRecorded(mode, count);
+    NSMutableData *order_data = [NSMutableData dataWithLength: MAX(per, 1) * sizeof(GLsizei)];
+    GLsizei *order = (GLsizei *)order_data.mutableBytes;
+    GLuint n = 0;
+
+    switch (mode)
+    {
+        case GL_LINE_STRIP:
+        case GL_LINE_LOOP:
+            for (GLsizei k = 0; k + 1 < count; k++) { order[n++] = k; order[n++] = k + 1; }
+            if (mode == GL_LINE_LOOP && count > 1) { order[n++] = count - 1; order[n++] = 0; }
+            break;
+
+        case GL_TRIANGLE_STRIP:
+            for (GLsizei k = 0; k + 2 < count; k++)
+            {
+                order[n++] = (k & 1) ? k + 1 : k;
+                order[n++] = (k & 1) ? k : k + 1;
+                order[n++] = k + 2;
+            }
+            break;
+
+        case GL_TRIANGLE_FAN:
+            for (GLsizei k = 1; k + 1 < count; k++) { order[n++] = 0; order[n++] = k; order[n++] = k + 1; }
+            break;
+
+        default:
+            for (GLsizei k = 0; k < (GLsizei)per; k++)
+                order[n++] = k;
+            break;
+    }
+
+    // only as many as the buffers have room for
+    NSUInteger total = MIN((NSUInteger)n * (NSUInteger)instances, (NSUInteger)[self xfbRoomVertices]);
+
+    _xfbGatherSlotList = [NSMutableData dataWithLength: MAX(total * 4, 4)];
 
     uint32_t *slots = (uint32_t *)_xfbGatherSlotList.mutableBytes;
 
-    for (GLsizei i = 0; i < instances; i++)
-        for (GLsizei k = 0; k < count; k++)
-        {
-            uint32_t v = elem == 1 ? from[k] : elem == 2 ? ((const uint16_t *)from)[k] : ((const uint32_t *)from)[k];
+    for (NSUInteger t = 0; t < total; t++)
+    {
+        GLsizei i = (GLsizei)(t / n);
+        uint32_t v = MGL_GATHER_INDEX(order[t % n]);
 
-            slots[i * count + k] = (v - lo) + (uint32_t)(i * span);
-        }
+        slots[t] = (v - lo) + (uint32_t)(i * span);
+    }
+
+    #undef MGL_GATHER_INDEX
+
+    if (total == 0)
+        return;
 
     mglWriteProgramUniform(ctx, program, program->xfb.base_loc, (GLint)lo + basevertex);
     mglWriteProgramUniform(ctx, program, program->xfb.count_loc, (GLint)span);
+    // the scratch takes every vertex; the copy is what stops at the room
+    mglWriteProgramUniform(ctx, program, program->xfb.on_loc, INT32_MAX);
 
     _xfbGatherSpan = span * (NSUInteger)instances;
     _xfbGather = true;
@@ -6854,8 +7185,10 @@ static bool restartIndexFor(GLMContext ctx, size_t elem, uint32_t *out)
                                        atIndex: program->xfb.buffer_slot[b]];
     }
 
-    // each instance records all its vertices after the one before
-    return xfbVerticesRecorded(mode, count) * (GLuint)(instances > 1 ? instances : 1);
+    // each instance records all its vertices after the one before, as far as
+    // there is room
+    return MIN(xfbVerticesRecorded(mode, count) * (GLuint)(instances > 1 ? instances : 1),
+               [self xfbRoomVertices]);
 }
 
 // Bytes one recorded vertex takes in this buffer.
@@ -6996,6 +7329,10 @@ static MTLTessellationPartitionMode mtlPartitionForSpv(GLuint mode);
     draw.vertexDescriptor = nil;
     draw.inputPrimitiveTopology = gsOutputTopologyClass(program->geom.out_primitive);
 
+    // the generated vertex shader always returns a position; with the raster
+    // off the draw pass is simply not run
+    draw.rasterizationEnabled = YES;
+
     // the usual pipeline block was skipped for this program, and the write
     // masks it keeps start out closed
     [self updateBlendStateCache];
@@ -7020,21 +7357,30 @@ static const char *mgl_gs_capture_msl =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     // before[s] is how many vertices the slots ahead of s emitted. A slot's
-    // vertices are packed at its front, so the first unused one ends it.
+    // vertices are packed at its front, so the first unused one ends it. With
+    // cfg.w set, the same again per vertex stream follows, slots + 1 apart.
     "kernel void mglGsCount(const device uint *w [[buffer(0)]],\n"
     "                       device uint *before [[buffer(1)]],\n"
-    "                       constant uint3 &cfg [[buffer(2)]],\n"
+    "                       constant uint4 &cfg [[buffer(2)]],\n"
     "                       uint id [[thread_position_in_grid]])\n"
     "{\n"
     "    uint stride = cfg.x, cap = cfg.y, slots = cfg.z, total = 0;\n"
+    "    uint t[4] = { 0, 0, 0, 0 };\n"
     "    for (uint s = 0; s < slots; s++) {\n"
     "        before[s] = total;\n"
+    "        if (cfg.w != 0) for (uint k = 0; k < 4; k++) before[(k + 1) * (slots + 1) + s] = t[k];\n"
     "        uint n = 0;\n"
-    "        while (n < cap && w[(s * cap + n) * stride + 5] != 0) n++;\n"
+    "        while (n < cap && w[(s * cap + n) * stride + 5] != 0) {\n"
+    "            t[w[(s * cap + n) * stride + 9] & 3]++;\n"
+    "            n++;\n"
+    "        }\n"
     "        total += n;\n"
     "    }\n"
     "    before[slots] = total;\n"
+    "    if (cfg.w != 0) for (uint k = 0; k < 4; k++) before[(k + 1) * (slots + 1) + slots] = t[k];\n"
     "}\n"
+    // Each emitted vertex goes to the buffers of its own stream, at the next
+    // place that stream has; fits says how many of each stream there is room for.
     "kernel void mglGsGather(const device uint *w [[buffer(0)]],\n"
     "                        const device uint *before [[buffer(1)]],\n"
     "                        const device uint *table [[buffer(2)]],\n"
@@ -7045,15 +7391,22 @@ static const char *mgl_gs_capture_msl =
     "                        device uint *b1 [[buffer(7)]],\n"
     "                        device uint *b2 [[buffer(8)]],\n"
     "                        device uint *b3 [[buffer(9)]],\n"
+    "                        constant uint4 &fits [[buffer(10)]],\n"
+    "                        constant uint4 &buf_stream [[buffer(11)]],\n"
     "                        uint s [[thread_position_in_grid]])\n"
     "{\n"
+    "    uint slots = cfg.w;\n"
     "    uint n = before[s + 1] - before[s];\n"
+    "    uint c[4];\n"
+    "    for (uint k = 0; k < 4; k++) c[k] = before[(k + 1) * (slots + 1) + s];\n"
     "    for (uint v = 0; v < n; v++) {\n"
     "        uint src = (s * cfg.y + v) * cfg.x;\n"
-    "        uint dst = before[s] + v;\n"
-    "        if (dst >= cfg.w) return;\n"
+    "        uint st = w[src + 9] & 3;\n"
+    "        uint dst = c[st]++;\n"
+    "        if (dst >= fits[st]) continue;\n"
     "        for (uint e = 0; e < cfg.z; e++) {\n"
     "            uint buf = table[e * 3 + 1];\n"
+    "            if (buf_stream[buf] != st) continue;\n"
     "            uint at = dst * dst_stride[buf] + table[e * 3 + 2];\n"
     "            if (at >= dst_room[buf]) continue;\n"
     "            uint val = w[src + table[e * 3] / 4];\n"
@@ -7119,7 +7472,7 @@ static const char *mgl_gs_capture_msl =
     if (enc == nil)
         return;
 
-    uint32_t cfg[3] = { (uint32_t)(gi->out_stride / 4), (uint32_t)gi->slot_capacity, (uint32_t)slots };
+    uint32_t cfg[4] = { (uint32_t)(gi->out_stride / 4), (uint32_t)gi->slot_capacity, (uint32_t)slots, 0 };
 
     [enc setComputePipelineState: _gsCountPipeline];
     [enc setBuffer: out_buf offset: 0 atIndex: 0];
@@ -7156,7 +7509,8 @@ static const char *mgl_gs_capture_msl =
     if ([self buildGsCapturePipelines] == false)
         return;
 
-    id<MTLBuffer> before = [_scratchPool bufferOfLength: (slots + 1) * sizeof(uint32_t)
+    // the all-streams count, then one per stream
+    id<MTLBuffer> before = [_scratchPool bufferOfLength: (slots + 1) * 5 * sizeof(uint32_t)
                                        forCommandBuffer: _currentCommandBuffer];
 
     if (before == nil)
@@ -7182,8 +7536,12 @@ static const char *mgl_gs_capture_msl =
         if (buf->data.mtl_data == NULL)
             continue;
 
+        // a buffer carries on from where its own stream left off
+        GLint st = ci->buffer_stream[b] & 3;
+        GLuint done = st == 0 ? xfb->vertices_recorded : xfb->stream_recorded[st];
+
         targets[b] = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
-        offsets[b] = (NSUInteger)offset + xfb->vertices_recorded * (NSUInteger)ci->stride_bytes[b];
+        offsets[b] = (NSUInteger)offset + done * (NSUInteger)ci->stride_bytes[b];
         stride_bytes[b] = (uint32_t)((ci->stride_bytes[b] + 3) / 4);
         // the room is the GL buffer's, or the bound range's -- the Metal
         // buffer behind it can be longer
@@ -7203,7 +7561,7 @@ static const char *mgl_gs_capture_msl =
     if (enc == nil)
         return;
 
-    uint32_t count_cfg[3] = { (uint32_t)(gi->out_stride / 4), (uint32_t)gi->slot_capacity, (uint32_t)slots };
+    uint32_t count_cfg[4] = { (uint32_t)(gi->out_stride / 4), (uint32_t)gi->slot_capacity, (uint32_t)slots, 1 };
 
     [enc setComputePipelineState: _gsCountPipeline];
     [enc setBuffer: out_buf offset: 0 atIndex: 0];
@@ -7212,18 +7570,24 @@ static const char *mgl_gs_capture_msl =
     [enc dispatchThreads: MTLSizeMake(1, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
 
     // GL records a primitive whole or not at all, and stops at the first one
-    // a buffer has no room left for
-    GLuint per = gi->out_primitive == GL_POINTS ? 1 : gi->out_primitive == GL_LINE_STRIP ? 2 : 3;
-    uint32_t fits = UINT32_MAX;
+    // a buffer has no room left for. The streams past zero are points.
+    GLuint per[4] = { gi->out_primitive == GL_POINTS ? 1 : gi->out_primitive == GL_LINE_STRIP ? 2 : 3, 1, 1, 1 };
+    uint32_t fits[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
+    uint32_t buf_stream[4] = { 0 };
 
     for (int b = 0; b < 4; b++)
+    {
+        buf_stream[b] = (uint32_t)(ci->buffer_stream[b] & 3);
+
         if (targets[b] && stride_bytes[b])
-            fits = MIN(fits, room[b] / stride_bytes[b]);
+            fits[buf_stream[b]] = MIN(fits[buf_stream[b]], room[b] / stride_bytes[b]);
+    }
 
-    if (fits != UINT32_MAX)
-        fits -= fits % per;
+    for (int k = 0; k < 4; k++)
+        if (fits[k] != UINT32_MAX)
+            fits[k] -= fits[k] % per[k];
 
-    uint32_t gather_cfg[4] = { count_cfg[0], count_cfg[1], (uint32_t)ci->gather_words, fits };
+    uint32_t gather_cfg[4] = { count_cfg[0], count_cfg[1], (uint32_t)ci->gather_words, (uint32_t)slots };
 
     [enc setComputePipelineState: _gsGatherPipeline];
     [enc setBuffer: out_buf offset: 0 atIndex: 0];
@@ -7238,28 +7602,46 @@ static const char *mgl_gs_capture_msl =
     for (int b = 0; b < 4; b++)
         [enc setBuffer: targets[b] ? targets[b] : before offset: targets[b] ? offsets[b] : 0 atIndex: 6 + b];
 
+    [enc setBytes: fits length: sizeof(fits) atIndex: 10];
+    [enc setBytes: buf_stream length: sizeof(buf_stream) atIndex: 11];
     [enc dispatchThreads: MTLSizeMake(slots, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
     [self endComputeEncoding];
 
     [self flushCommandBuffer: true];
 
-    uint32_t total = ((uint32_t *)before.contents)[slots];
+    uint32_t total[4], written[4];
+    bool overflow = false;
 
-    uint32_t written = MIN(total, fits);
+    for (int k = 0; k < 4; k++)
+    {
+        total[k] = ((uint32_t *)before.contents)[(k + 1) * (slots + 1) + slots];
+        written[k] = MIN(total[k], fits[k]);
+        overflow |= written[k] < total[k];
+    }
 
-    xfb->vertices_recorded += written;
+    xfb->vertices_recorded += written[0];
+
+    for (int k = 1; k < 4; k++)
+        xfb->stream_recorded[k] += written[k];
 
     for (int t = 0; t < _MAX_QUERY_TARGETS; t++)
-        for (int i = 0; i < MAX_QUERY_STREAMS; i++)
+        for (int i = 0; i < MAX_QUERY_STREAMS && i < 4; i++)
         {
             Query *q = ctx->state.active_query[t][i];
 
-            // what the geometry stage emitted is what it generated; what
-            // fitted is what was written
-            if (q && q->target == GL_PRIMITIVES_GENERATED)
-                q->result += total / per;
-            else if (q && q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN)
-                q->result += written / per;
+            if (q == NULL)
+                continue;
+
+            // what the geometry stage emitted on a stream is what it generated
+            // there; what fitted is what was written
+            if (q->target == GL_PRIMITIVES_GENERATED)
+                q->result += total[i] / per[i];
+            else if (q->target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN)
+                q->result += written[i] / per[i];
+            else if (q->target == GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW && written[i] < total[i])
+                q->result = 1;
+            else if (q->target == GL_TRANSFORM_FEEDBACK_OVERFLOW && overflow)
+                q->result = 1;
         }
 }
 
@@ -7740,13 +8122,16 @@ static const char *mgl_gs_capture_msl =
         [self updateCurrentRenderEncoder];
     }
 
-    [_currentRenderEncoder setRenderPipelineState: _gsDrawPipeline];
-    [self bindFragmentBuffersToCurrentRenderEncoder];
-    [self bindTexturesToCurrentRenderEncoder];
-    [_currentRenderEncoder setVertexBuffer: out_buf offset: 0 atIndex: gi->pass_out_slot];
-    [_currentRenderEncoder drawPrimitives: gsOutputPrimitive(gi->out_primitive)
-                              vertexStart: 0
-                              vertexCount: slots * (NSUInteger)gi->slot_capacity];
+    if (!ctx->state.caps.rasterizer_discard)
+    {
+        [_currentRenderEncoder setRenderPipelineState: _gsDrawPipeline];
+        [self bindFragmentBuffersToCurrentRenderEncoder];
+        [self bindTexturesToCurrentRenderEncoder];
+        [_currentRenderEncoder setVertexBuffer: out_buf offset: 0 atIndex: gi->pass_out_slot];
+        [_currentRenderEncoder drawPrimitives: gsOutputPrimitive(gi->out_primitive)
+                                  vertexStart: 0
+                                  vertexCount: slots * (NSUInteger)gi->slot_capacity];
+    }
 
     [self captureGeometry: program output: out_buf slots: slots];
     [self countGeometry: program output: out_buf slots: slots];
@@ -8644,11 +9029,25 @@ static MTLWinding mtlWindingFor(const Program *p)
     // fragment shader at all is legal to draw too; it rasterises nothing yet,
     // since its vertex function is built to return nothing.
     bool raster_off = ctx->state.caps.rasterizer_discard;
-    bool no_fs = program->shader_slots[_FRAGMENT_SHADER] == NULL;
+    // what was linked, not what is attached: a shader may be detached after
+    bool no_fs = program->spirv[_FRAGMENT_SHADER].msl_str == NULL;
     bool use_vs_raster = no_fs && !raster_off && program->vs_raster.mtl_function;
 
     if (use_vs_raster)
         vertexFunction = (__bridge id<MTLFunction>)(program->vs_raster.mtl_function);
+
+    // the raster off with a fragment shader there: Metal only turns it off
+    // for a vertex function that returns nothing
+    bool use_noraster = raster_off && !no_fs && !program->tess.active && !program->geom_shader &&
+                        !program->spirv[_VERTEX_SHADER].raster_off && program->vs_noraster.msl_str &&
+                        [self buildStageFunction: &program->vs_noraster] &&
+                        program->vs_noraster.mtl_function;
+
+    if (use_noraster)
+    {
+        vertexFunction = (__bridge id<MTLFunction>)(program->vs_noraster.mtl_function);
+        fragmentFunction = nil;
+    }
 
     if (!vertexFunction || (!fragmentFunction && !raster_off && !no_fs))
     {
@@ -8666,6 +9065,9 @@ static MTLWinding mtlWindingFor(const Program *p)
     pipelineStateDescriptor.fragmentFunction = fragmentFunction;
 
     if (!fragmentFunction && (!no_fs || raster_off))
+        pipelineStateDescriptor.rasterizationEnabled = NO;
+
+    if (use_noraster)
         pipelineStateDescriptor.rasterizationEnabled = NO;
 
     if (program->tess.active)
@@ -8842,6 +9244,9 @@ static MTLWinding mtlWindingFor(const Program *p)
 
             if (is_double)
                 format = VAO_ATTRIB_STATE(i).size >= 2 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
+            // the slot is fed a float4 copy
+            else if (attribNeedsConversion(ctx, i))
+                format = MTLVertexFormatFloat4;
             else
                 format = glTypeSizeToMtlType(VAO_ATTRIB_STATE(i).type,
                                              VAO_ATTRIB_STATE(i).size,
@@ -8877,6 +9282,18 @@ static MTLWinding mtlWindingFor(const Program *p)
                 vertexDescriptor.attributes[16 + i].offset = attrib_base - slot->offset + 16;
                 vertexDescriptor.attributes[16 + i].format = VAO_ATTRIB_STATE(i).size == 4 ? MTLVertexFormatUInt4
                                                                                            : MTLVertexFormatUInt2;
+            }
+            // the shader wants more than the array gives: z and w are 0 and 1
+            else if (is_double && doubleInputRowsAt(ctx->state.program, (GLuint)i) > 2)
+            {
+                GLuint rows = doubleInputRowsAt(ctx->state.program, (GLuint)i);
+
+                vertexDescriptor.attributes[16 + i].bufferIndex = MGL_CONSTANT_ATTRIB_BUFFER_INDEX;
+                vertexDescriptor.attributes[16 + i].offset = MGL_CONSTANT_ATTRIB_DEFAULT_D + 16;
+                vertexDescriptor.attributes[16 + i].format = rows == 4 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
+                vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stride = MGL_CONSTANT_ATTRIB_STRIDE;
+                vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stepRate = 0;
+                vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stepFunction = MTLVertexStepFunctionConstant;
             }
 
             vertexDescriptor.layouts[slot->buffer_base_index].stride = slot->layout_stride;
@@ -11894,6 +12311,9 @@ MTLPrimitiveType getMTLPrimitiveType(GLenum mode);
         MGL_NSERR(@"MGL ERROR: expanded %@ draw failed: %@", @(mode), e);
     }
 
+    // the callers return straight after this, past their own copy
+    [self finishFeedbackGather];
+
     return true;
 }
 
@@ -12059,6 +12479,7 @@ static bool drawRunsStages(GLMContext ctx)
     }
 
     [self updateTransformFeedbackUniforms: first count: count];
+    [self prepareFeedbackGather: mode count: count instances: 1 basevertex: first indexed: false];
     [self countDrawnPrimitives: mode count: count instances: 1];
     [self setDrawTopologyForMode: mode];
     if ([self processGLState: true] == false) {
@@ -12101,6 +12522,8 @@ static bool drawRunsStages(GLMContext ctx)
         MGL_NSERR(@"MGL ERROR: mtlDrawArrays - drawPrimitives failed: %@", exception);
         // Don't crash, just return gracefully
     }
+
+    [self finishFeedbackGather];
 }
 
 void mtlDrawArrays(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count)
@@ -12265,7 +12688,8 @@ void mtlDrawRangeElements(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint 
     MTLPrimitiveType primitiveType;
 
     [self updateTransformFeedbackUniforms: first count: count];
-    [self countDrawnPrimitives: mode count: count instances: 1];
+    [self prepareFeedbackGather: mode count: count instances: instancecount basevertex: first indexed: false];
+    [self countDrawnPrimitives: mode count: count instances: instancecount];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -12288,6 +12712,7 @@ void mtlDrawRangeElements(GLMContext glm_ctx, GLenum mode, GLuint start, GLuint 
     primitiveType = getMTLPrimitiveType(mode);
 
     [_currentRenderEncoder drawPrimitives:primitiveType vertexStart:first vertexCount:count instanceCount:instancecount];
+    [self finishFeedbackGather];
 }
 
 void mtlDrawArraysInstanced(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count, GLsizei instancecount)
@@ -12652,6 +13077,7 @@ void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const
     MTLPrimitiveType primitiveType;
 
     [self updateTransformFeedbackUniforms: first count: count];
+    [self prepareFeedbackGather: mode count: count instances: instancecount basevertex: first indexed: false];
     [self setDrawTopologyForMode: mode];
     RETURN_ON_FAILURE([self processGLState: true]);
 
@@ -12668,6 +13094,7 @@ void mtlDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, const
     primitiveType = getMTLPrimitiveType(mode);
 
     [_currentRenderEncoder drawPrimitives:primitiveType vertexStart:first vertexCount:count instanceCount:instancecount baseInstance:baseinstance];
+    [self finishFeedbackGather];
 }
 
 void mtlDrawArraysInstancedBaseInstance(GLMContext glm_ctx, GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance)

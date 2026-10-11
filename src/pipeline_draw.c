@@ -429,10 +429,10 @@ static int enter(GLMContext ctx, bool compute)
         return SKIP;
     }
 
-    // GL leaves a draw without a vertex or fragment stage undefined, but
-    // raising an error for it is not allowed
-    if (!compute && (pp->stage_programs[_VERTEX_SHADER] == NULL ||
-                     pp->stage_programs[_FRAGMENT_SHADER] == NULL))
+    // GL leaves a draw without a vertex stage undefined, but raising an error
+    // for it is not allowed. One without a fragment stage still runs the
+    // stages it has; only what reaches the framebuffer is undefined.
+    if (!compute && pp->stage_programs[_VERTEX_SHADER] == NULL)
         return SKIP;
 
     GLenum err = STATE(error);
@@ -443,7 +443,14 @@ static int enter(GLMContext ctx, bool compute)
     STATE(error) = err;
 
     if (p == NULL || p->link_status != GL_TRUE)
+    {
+        // stages that will not link together, a control stage with no
+        // evaluation stage say, make a pipeline GL refuses to draw with
+        if (!compute)
+            STATE(error) = GL_INVALID_OPERATION;
+
         return compute ? RUN : SKIP;
+    }
 
     STATE(program) = p;
     STATE(dirty_bits) |= DIRTY_PROGRAM;

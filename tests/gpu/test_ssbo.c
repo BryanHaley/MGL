@@ -340,3 +340,69 @@ GPU_TEST(ssbo, a_shared_block_cannot_place_members)
     glDeleteShader(sh);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 }
+
+// The generic binding queries name the buffer last bound to the target. They
+// read a value set once at startup and always said 0.
+GPU_TEST(ssbo, generic_binding_queries_follow_the_binds)
+{
+    GLuint b[2];
+    GLint v = -1;
+
+    glGenBuffers(2, b);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, b[0]);
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &v);
+    CHECK_EQ_INT(v, (GLint)b[0]);
+    glBindBuffer(GL_UNIFORM_BUFFER, b[1]);
+    glGetIntegerv(GL_UNIFORM_BUFFER_BINDING, &v);
+    CHECK_EQ_INT(v, (GLint)b[1]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    glDeleteBuffers(2, b);
+}
+
+// Deleting a buffer clears its indexed bindings whole, so START and SIZE read
+// 0 again; the range stayed behind. Unbinding still checks the alignment.
+GPU_TEST(ssbo, deleting_a_bound_range_clears_it)
+{
+    GLuint b;
+    GLint64 v = -1;
+    GLint align = 0;
+
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &align);
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, b);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 1024, NULL, GL_STATIC_DRAW);
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, b, 256, 128);
+    glDeleteBuffers(1, &b);
+
+    glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, 0, &v);
+    CHECK_EQ_INT((int)v, 0);
+    glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, 0, &v);
+    CHECK_EQ_INT((int)v, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    if (align > 1)
+    {
+        glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 0, align - 1, 0);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    }
+}
+
+// A range may be bound on a buffer that has no storage yet, as BindBufferBase
+// allows; it raised INVALID_VALUE and left the generic binding alone.
+GPU_TEST(ssbo, a_range_binds_before_storage)
+{
+    GLuint b;
+    GLint v = -1;
+
+    glGenBuffers(1, &b);
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, b, 256, 512);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &v);
+    CHECK_EQ_INT(v, (GLint)b);
+
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
+    glDeleteBuffers(1, &b);
+}

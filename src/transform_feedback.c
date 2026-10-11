@@ -78,6 +78,22 @@ void mglTransformFeedbackVaryings(GLMContext ctx, GLuint program, GLsizei count,
                        bufferMode == GL_SEPARATE_ATTRIBS, GL_INVALID_ENUM);
     ERROR_CHECK_RETURN(bufferMode != GL_SEPARATE_ATTRIBS || count <= MAX_TF_BUFFERS, GL_INVALID_VALUE);
 
+    // one gl_NextBuffer fewer than there are buffers to move on to
+    {
+        GLsizei next = 0;
+
+        for (GLsizei i = 0; i < count; i++)
+            next += varyings[i] && !strcmp(varyings[i], "gl_NextBuffer");
+
+        ERROR_CHECK_RETURN(next < MAX_TF_BUFFERS, GL_INVALID_OPERATION);
+    }
+
+    // the special names only mean something when the varyings share buffers
+    for (GLsizei i = 0; bufferMode == GL_SEPARATE_ATTRIBS && i < count; i++)
+        ERROR_CHECK_RETURN(!varyings[i] || (strcmp(varyings[i], "gl_NextBuffer") &&
+                                            strncmp(varyings[i], "gl_SkipComponents", 17)),
+                           GL_INVALID_OPERATION);
+
     if (count > 0)
     {
         names = (char **)calloc((size_t)count, sizeof(char *));
@@ -114,6 +130,8 @@ void mglTransformFeedbackVaryings(GLMContext ctx, GLuint program, GLsizei count,
     prog->xfb_buffer_mode = bufferMode;
 }
 
+void mglXfbVaryingTypeSize(Program *p, GLuint index, GLenum *type, GLsizei *size);
+
 void mglGetTransformFeedbackVarying(GLMContext ctx, GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name)
 {
     Program *prog = findProgram(ctx, program);
@@ -123,12 +141,18 @@ void mglGetTransformFeedbackVarying(GLMContext ctx, GLuint program, GLuint index
     ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(index < (GLuint)prog->xfb_varying_count, GL_INVALID_VALUE);
 
-    if (size)
-        *size = 1;
+    {
+        GLenum t;
+        GLsizei s;
 
-    // the linker does not keep the GLSL type of a captured varying
-    if (type)
-        *type = GL_NONE;
+        mglXfbVaryingTypeSize(prog, index, &t, &s);
+
+        if (size)
+            *size = s;
+
+        if (type)
+            *type = t;
+    }
 
     if (length)
         *length = 0;
@@ -162,6 +186,9 @@ static void bindXfbBuffer(GLMContext ctx, GLuint xfb, GLuint index, GLuint buffe
     {
         memset(&t->buffers[index], 0, sizeof(BufferBaseTarget));
 
+        if (t == ctx->state.transform_feedback)
+            ctx->state.buffer_base[_TRANSFORM_FEEDBACK_BUFFER].buffers[index] = t->buffers[index];
+
         return;
     }
 
@@ -185,6 +212,14 @@ static void bindXfbBuffer(GLMContext ctx, GLuint xfb, GLuint index, GLuint buffe
     t->buffers[index].offset = offset;
     t->buffers[index].size = size;
     t->buffers[index].buf = buf;
+    t->buffers[index].whole = ranged ? GL_FALSE : GL_TRUE;
+
+    // the bound object's bindings are the ones glGetIntegeri_v reads
+    if (t == ctx->state.transform_feedback)
+    {
+        ctx->state.buffer_base[_TRANSFORM_FEEDBACK_BUFFER].buffers[index] = t->buffers[index];
+        ctx->state.dirty_bits |= DIRTY_BUFFER_BASE_STATE;
+    }
 }
 
 void mglTransformFeedbackBufferBase(GLMContext ctx, GLuint xfb, GLuint index, GLuint buffer)
@@ -264,20 +299,22 @@ static void drawTransformFeedbackCommon(GLMContext ctx, GLenum mode, GLuint id, 
 
     t = findTransformFeedback(ctx, id);
 
-    ERROR_CHECK_RETURN(t, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(t && (t->created || id == 0), GL_INVALID_VALUE);
 
     // GL 4.6 section 10.5: the object has to have finished a capture at least
     // once, and it draws as many vertices as that capture came to. Being
     // active again right now is allowed, and is what a feedback loop does.
     ERROR_CHECK_RETURN(t->ever_ended, GL_INVALID_OPERATION);
 
-    GLsizei count = (GLsizei)t->vertices_captured;
+    // checked whether or not there is anything to draw
+    ERROR_CHECK_RETURN(validate_vao(ctx, false), GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
+
+    // a stream other than zero comes from a geometry stage, and is points
+    GLsizei count = (GLsizei)(stream == 0 ? t->vertices_captured : t->stream_captured[stream & 3]);
 
     if (count == 0 || instancecount == 0)
         return;
-
-    ERROR_CHECK_RETURN(validate_vao(ctx, false), GL_INVALID_OPERATION);
-    ERROR_CHECK_RETURN(validate_program(ctx, mode), GL_INVALID_OPERATION);
 
     if (mglConditionalRenderSkips(ctx))
         return;

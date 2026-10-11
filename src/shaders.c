@@ -283,7 +283,9 @@ GLuint mglCreateShader(GLMContext ctx, GLenum type)
             ERROR_RETURN_VALUE(GL_INVALID_ENUM, 0);
     }
 
-    shader = getNewName(&STATE(shader_table));
+    // shaders and programs share one set of names, so a shader's name never
+    // also names a program
+    shader = getNewName(&STATE(program_table));
 
     getShader(ctx, type, shader);
 
@@ -437,6 +439,163 @@ static bool blockPlacesMembers(const char *layout, const char *after)
 // std140 nor std430, and no "layout(std430) buffer;" before it does -- cannot
 // place its members with offset or align. glslang gives such a block std430
 // and takes them, so it is caught here.
+// GLSL 4.60 section 4.4.6.3: an atomic counter needs a binding, sits at a
+// multiple of four, may not overlap another in its binding, and must fit in
+// the largest buffer GL allows. glslang checks none of it as MGL runs it.
+// "layout(binding = b, offset = o) uniform atomic_uint;" sets where the next
+// counter of that binding goes.
+static const char *atomicLayoutProblem(const char *src, GLint max_size)
+{
+    enum { BINDINGS = 32, RANGES = 64 };
+    long next[BINDINGS] = { 0 };
+    struct { long binding, from, to; } used[RANGES];
+    int nused = 0;
+
+    for (const char *p = src; *p; p++)
+    {
+        if (!isWord(p, src, "atomic_uint"))
+            continue;
+
+        const char *stmt = p;
+        long binding = -1, offset = -1;
+        bool is_uniform = false;
+
+        while (stmt > src && stmt[-1] != ';' && stmt[-1] != '}' && stmt[-1] != '{')
+            stmt--;
+
+        for (const char *q = stmt; q < p; q++)
+        {
+            if (isWord(q, src, "uniform"))
+                is_uniform = true;
+
+            bool b = isWord(q, src, "binding"), o = isWord(q, src, "offset");
+
+            if (!b && !o)
+                continue;
+
+            const char *v = q + (b ? 7 : 6);
+
+            while (*v == ' ' || *v == '\t')
+                v++;
+
+            if (*v == '=')
+            {
+                if (b)
+                    binding = strtol(v + 1, NULL, 0);
+                else
+                    offset = strtol(v + 1, NULL, 0);
+            }
+        }
+
+        if (!is_uniform)
+            continue;
+
+        if (binding < 0)
+            return "ERROR: an atomic counter needs a binding\n";
+
+        if (binding >= BINDINGS)
+            continue;
+
+        if (offset >= 0 && (offset % 4) != 0)
+            return "ERROR: an atomic counter's offset must be a multiple of 4\n";
+
+        const char *q = p + 11;
+
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
+            q++;
+
+        // no name: this only sets where the binding's next counter goes
+        if (*q == ';')
+        {
+            if (offset >= 0)
+                next[binding] = offset;
+
+            continue;
+        }
+
+        // each name in the declaration, "a, b[2]"
+        long at = offset >= 0 ? offset : next[binding];
+        const char *end = strchr(q, ';');
+
+        while (q && end && q < end)
+        {
+            long count = 1;
+            const char *comma = memchr(q, ',', (size_t)(end - q));
+            const char *stop = comma ? comma : end;
+            const char *open = memchr(q, '[', (size_t)(stop - q));
+
+            if (open)
+                count = strtol(open + 1, NULL, 0);
+
+            if (count < 1)
+                count = 1;
+
+            for (int r = 0; r < nused; r++)
+                if (used[r].binding == binding && at < used[r].to && at + 4 * count > used[r].from)
+                    return "ERROR: two atomic counters share space in one binding\n";
+
+            if (at + 4 * count > max_size)
+                return "ERROR: an atomic counter's offset is past GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE\n";
+
+            if (nused < RANGES)
+            {
+                used[nused].binding = binding;
+                used[nused].from = at;
+                used[nused].to = at + 4 * count;
+                nused++;
+            }
+
+            at += 4 * count;
+            q = comma ? comma + 1 : NULL;
+        }
+
+        next[binding] = at;
+    }
+
+    return NULL;
+}
+
+// Rules glslang lets through when it targets SPIR-V: std430 is for buffer
+// blocks only, and imageSize came with GLSL 4.30
+static const char *glslRuleProblem(const char *src)
+{
+    int version = 0;
+    const char *v = strstr(src, "#version");
+
+    if (v)
+        sscanf(v, "#version %d", &version);
+
+    for (const char *p = src; *p; p++)
+    {
+        if (isWord(p, src, "layout"))
+        {
+            const char *open = strchr(p, '('), *close = open ? strchr(open, ')') : NULL;
+            bool std430 = false;
+
+            if (!open || !close)
+                continue;
+
+            for (const char *q = open; q < close; q++)
+                if (isWord(q, src, "std430"))
+                    std430 = true;
+
+            const char *after = close + 1;
+
+            while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r')
+                after++;
+
+            if (std430 && isWord(after, src, "uniform"))
+                return "ERROR: std430 may only be used with buffer blocks\n";
+        }
+
+        if (version && version < 430 && isWord(p, src, "imageSize") &&
+            !strstr(src, "GL_ARB_shader_image_size"))
+            return "ERROR: imageSize needs GLSL 4.30 or GL_ARB_shader_image_size\n";
+    }
+
+    return NULL;
+}
+
 static bool sharedBlockPlacesMembers(const char *src)
 {
     bool std_default[2] = { false, false };   // uniform, buffer
@@ -724,9 +883,17 @@ static char *normalizeFrontEnd(const char *src, GLenum type)
             {
                 for (char *q = stmt; q + 9 <= p; q++)
                 {
+                    // only as a qualifier, with a word after it; a variable
+                    // that takes the name must stay for glslang to refuse
+                    const char *after = q + 9;
+
+                    while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r')
+                        after++;
+
                     if (!strncmp(q, "invariant", 9) &&
                         (q == out || !(isalnum((unsigned char)q[-1]) || q[-1] == '_')) &&
-                        !(isalnum((unsigned char)q[9]) || q[9] == '_'))
+                        !(isalnum((unsigned char)q[9]) || q[9] == '_') &&
+                        (isalpha((unsigned char)*after) || *after == '_'))
                     {
                         memset(q, ' ', 9);
                         changed = true;
@@ -1042,6 +1209,8 @@ static char *rewriteSampleMask(const char *src)
         memcpy(q, my_name, n);
     }
 
+    bool renamed = false;
+
     // main becomes the body the new one calls
     for (char *m = strstr(out, "main"); m; m = strstr(m + 4, "main"))
     {
@@ -1061,8 +1230,16 @@ static char *rewriteSampleMask(const char *src)
 
             memmove(m + body_len, m + 4, strlen(m + 4) + 1);
             memcpy(m, MGL_SAMPLE_MASK_BODY, body_len);
+            renamed = true;
         }
         break;
+    }
+
+    // with no main to wrap, adding one would make a shader that has none link
+    if (!renamed)
+    {
+        free(out);
+        return NULL;
     }
 
     strcat(out, tail);
@@ -1203,6 +1380,10 @@ static bool fragmentOutputName(const char *src, char *name, size_t cap)
 
         if (trailingIdent(begin, end, name, cap))
         {
+            // an output array is tested through its first element
+            if (memchr(begin, '[', (size_t)(end - begin)) && strlen(name) + 4 <= cap)
+                strcat(name, "[0]");
+
             if (at_zero)
                 return true;
 
@@ -1254,6 +1435,8 @@ static char *rewriteAlphaTest(const char *src)
 
     strcpy(out, src);
 
+    bool renamed = false;
+
     // main becomes the body the new one calls
     for (char *m = strstr(out, "main"); m; m = strstr(m + 4, "main"))
     {
@@ -1273,8 +1456,16 @@ static char *rewriteAlphaTest(const char *src)
 
             memmove(m + body_len, m + 4, strlen(m + 4) + 1);
             memcpy(m, MGL_ALPHA_BODY, body_len);
+            renamed = true;
         }
         break;
+    }
+
+    // with no main to wrap, adding one would make a shader that has none link
+    if (!renamed)
+    {
+        free(out);
+        return NULL;
     }
 
     strcat(out, tail);
@@ -1631,6 +1822,38 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     free(normal);
     const char *front = raised ? raised : ended;
 
+    // samplers inside uniform structs come out into uniforms of their own
+    {
+        char *flat = mglFlattenOpaqueStructs(front);
+
+        if (flat)
+        {
+            free(raised);
+            raised = flat;
+            front = raised;
+        }
+    }
+
+    if (atomicLayoutProblem(front, STATE_VAR(max_atomic_counter_buffer_size)))
+    {
+        free(ptr->log);
+        ptr->log = strdup(atomicLayoutProblem(front, STATE_VAR(max_atomic_counter_buffer_size)));
+        free(raised);
+        free(ended);
+        ctx->error_suppress--;
+        return;
+    }
+
+    if (glslRuleProblem(front))
+    {
+        free(ptr->log);
+        ptr->log = strdup(glslRuleProblem(front));
+        free(raised);
+        free(ended);
+        ctx->error_suppress--;
+        return;
+    }
+
     if (sharedBlockPlacesMembers(front))
     {
         free(ptr->log);
@@ -1804,6 +2027,17 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     }
 
     err = glslang_shader_parse(glsl_shader, &glsl_input);
+
+    // glslang runs relaxed, for the preprocessor's sake, and that also turns
+    // integer mix() before GLSL 4.50, without its extension, into a warning.
+    // GL makes it an error.
+    {
+        const char *warn = glslang_shader_get_info_log(glsl_shader);
+
+        if (err && warn && strstr(warn, "extension GL_EXT_shader_integer_mix is being used"))
+            err = 0;
+    }
+
     if (!err)
     {
         // PROPER FIX: Enhanced parse error logging

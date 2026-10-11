@@ -248,19 +248,20 @@ GPU_TEST(objects, reused_names_never_collide_with_live_objects)
         for (int j = i + 1; j < 64; j++)
             CHECK_MSG(live[i] != live[j], "live buffers %d and %d share name %u", i, j, live[i]);
 
-    // free one, then bring the same name back by binding it directly -- a
-    // later Gen must not hand that name out while it is in use again
+    // a deleted name cannot be brought back by binding it; core GL binds
+    // only names Gen handed out, so a later Gen may reuse it
     GLuint victim = live[7];
 
     glDeleteBuffers(1, &victim);
     glBindBuffer(GL_ARRAY_BUFFER, victim);
-    glBufferData(GL_ARRAY_BUFFER, 16, NULL, GL_STATIC_DRAW);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     GLuint fresh[8];
     glGenBuffers(8, fresh);
 
     for (int i = 0; i < 8; i++)
-        CHECK_MSG(fresh[i] != victim, "name %u was handed out while still in use", victim);
+        for (int j = 0; j < 64; j++)
+            CHECK_MSG(j == 7 || fresh[i] != live[j], "name %u was handed out while still in use", fresh[i]);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glDeleteBuffers(8, fresh);
@@ -295,4 +296,30 @@ GPU_TEST(objects, reused_name_still_holds_data)
     glDeleteBuffers(1, &b);
 
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// A program deleted while in use is only flagged; its name stays valid until
+// it stops being current.
+GPU_TEST(objects, a_program_deleted_in_use_keeps_its_name)
+{
+    static const char *vs = "#version 460 core\nvoid main() { gl_Position = vec4(0.0); }\n";
+    static const char *fs = "#version 460 core\nout vec4 o;\nvoid main() { o = vec4(1.0); }\n";
+    char log[1024] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log);
+    GLint status = 0;
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    mgl_drain_errors();
+
+    glUseProgram(prog);
+    glDeleteProgram(prog);
+    CHECK(glIsProgram(prog));
+    glGetProgramiv(prog, GL_DELETE_STATUS, &status);
+    CHECK_EQ_INT(status, GL_TRUE);
+
+    glDeleteProgram(prog);
+    CHECK_EQ_UINT(glGetError(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    CHECK(!glIsProgram(prog));
 }

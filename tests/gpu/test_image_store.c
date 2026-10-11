@@ -789,3 +789,226 @@ GPU_TEST(image_store, a_cast_round_after_another_still_counts)
                   kind, got.v[0], got.v[1]);
     }
 }
+
+// A vertex shader writes an image with rasterizing off, as the CTS
+// image-size tests do from every stage.
+static void vertexStore(bool separable, GLint *out)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(rgba32i, binding = 0) writeonly uniform iimage2D result;\n"
+        "layout(rgba32f, binding = 1) uniform image2D sized;\n"
+        "void main() {\n"
+        "    imageStore(result, ivec2(gl_VertexID, 0), ivec4(imageSize(sized), 5, 6));\n"
+        "}\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    char log[2048] = "";
+    GLuint prog = 0, progs[2] = {0}, pipe = 0;
+
+    if (separable)
+    {
+        progs[0] = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &vs);
+        // no fragment stage at all, which is legal with rasterizing off
+        glGenProgramPipelines(1, &pipe);
+        glUseProgramStages(pipe, GL_VERTEX_SHADER_BIT, progs[0]);
+        glBindProgramPipeline(pipe);
+    }
+    else
+    {
+        prog = mgl_build_program(vs, fs, log, sizeof log);
+        CHECK_MSG(prog != 0, "program did not build: %s", log);
+        glUseProgram(prog);
+    }
+
+    MGLTestTarget target;
+    GLuint tex[2], vao;
+
+    CHECK(mgl_target_create(&target, 4, 4, GL_RGBA8, 0));
+    mgl_target_bind(&target);
+
+    GLint fill[8];
+
+    for (int i = 0; i < 8; i++)
+        fill[i] = 100000;
+
+    glGenTextures(2, tex);
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32I, 2, 1, 0, GL_RGBA_INTEGER, GL_INT, fill);
+    glBindTexture(GL_TEXTURE_2D, tex[1]);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 16, 8);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindImageTexture(0, tex[0], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32I);
+    glBindImageTexture(1, tex[1], 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA32F);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glDisable(GL_RASTERIZER_DISCARD);
+    glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_INT, out);
+
+    glUseProgram(0);
+    glBindProgramPipeline(0);
+    glDeleteProgram(prog);
+    glDeleteProgram(progs[0]);
+    glDeleteProgram(progs[1]);
+    glDeleteProgramPipelines(1, &pipe);
+    glDeleteTextures(2, tex);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&target);
+}
+
+GPU_TEST(image_store, a_vertex_shader_writes_an_image_with_rasterizing_off)
+{
+    GLint got[8];
+
+    vertexStore(false, got);
+    CHECK_MSG(got[0] == 16 && got[1] == 8 && got[2] == 5 && got[3] == 6,
+              "linked program wrote %d %d %d %d, want 16 8 5 6", got[0], got[1], got[2], got[3]);
+
+    vertexStore(true, got);
+    CHECK_MSG(got[0] == 16 && got[1] == 8 && got[2] == 5 && got[3] == 6,
+              "vertex-only pipeline wrote %d %d %d %d, want 16 8 5 6", got[0], got[1], got[2], got[3]);
+}
+
+// Pipelines with no fragment stage, writing from geometry and from an
+// evaluation stage with no control stage. The vertex stage redeclares
+// gl_PerVertex with only gl_Position, as the CTS ones do.
+static GLint laterStageStore(GLenum type, GLbitfield bit, const char *src)
+{
+    static const char *vs =
+        "#version 430 core\n"
+        "out gl_PerVertex { vec4 gl_Position; };\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    GLuint pv = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &vs);
+    GLuint ps = glCreateShaderProgramv(type, 1, &src);
+    GLuint pipe, tex, vao;
+    GLint fill[4] = {100000, 100000, 100000, 100000}, got[4] = {0};
+    MGLTestTarget target;
+
+    glGenProgramPipelines(1, &pipe);
+    glUseProgramStages(pipe, GL_VERTEX_SHADER_BIT, pv);
+    glUseProgramStages(pipe, bit, ps);
+    glBindProgramPipeline(pipe);
+
+    CHECK(mgl_target_create(&target, 4, 4, GL_RGBA8, 0));
+    mgl_target_bind(&target);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32I, 1, 1, 0, GL_RGBA_INTEGER, GL_INT, fill);
+    glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32I);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glEnable(GL_RASTERIZER_DISCARD);
+
+    if (type == GL_TESS_EVALUATION_SHADER)
+    {
+        glPatchParameteri(GL_PATCH_VERTICES, 1);
+        glDrawArrays(GL_PATCHES, 0, 1);
+        glPatchParameteri(GL_PATCH_VERTICES, 3);
+    }
+    else
+        glDrawArrays(GL_POINTS, 0, 1);
+
+    glDisable(GL_RASTERIZER_DISCARD);
+    glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_INT, got);
+
+    glBindProgramPipeline(0);
+    glDeleteProgramPipelines(1, &pipe);
+    glDeleteProgram(pv);
+    glDeleteProgram(ps);
+    glDeleteTextures(1, &tex);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&target);
+
+    return got[0];
+}
+
+GPU_TEST(image_store, geometry_and_evaluation_stages_write_without_a_fragment_stage)
+{
+    static const char *gs =
+        "#version 430 core\n"
+        "layout(binding = 0, rgba32i) writeonly uniform iimage2D result;\n"
+        "layout(points) in;\n"
+        "layout(points, max_vertices = 1) out;\n"
+        "void main() { imageStore(result, ivec2(gl_PrimitiveIDIn, 0), ivec4(7)); }\n";
+    static const char *tes =
+        "#version 430 core\n"
+        "layout(binding = 0, rgba32i) writeonly uniform iimage2D result;\n"
+        "layout(quads, point_mode) in;\n"
+        "void main() { imageStore(result, ivec2(gl_PrimitiveID, 0), ivec4(9)); }\n";
+    GLint got;
+
+    got = laterStageStore(GL_GEOMETRY_SHADER, GL_GEOMETRY_SHADER_BIT, gs);
+    CHECK_MSG(got == 7, "geometry stage wrote %d, want 7", got);
+
+    got = laterStageStore(GL_TESS_EVALUATION_SHADER, GL_TESS_EVALUATION_SHADER_BIT, tes);
+    CHECK_MSG(got == 9, "evaluation stage wrote %d, want 9", got);
+}
+
+// A linked program of a vertex and a geometry shader with no fragment shader
+// could not be used at all, and its uniform initialisers were never applied.
+GPU_TEST(image_store, a_geometry_program_without_a_fragment_shader_runs)
+{
+    static const char *vs = "#version 420 core\nvoid main() {}\n";
+    static const char *gs =
+        "#version 420 core\n"
+        "layout(rgba32i, binding = 0) writeonly uniform iimage2D result;\n"
+        "uniform int g_value = 11;\n"
+        "layout(points) in;\n"
+        "layout(points, max_vertices = 1) out;\n"
+        "void main() { imageStore(result, ivec2(gl_PrimitiveIDIn, 0), ivec4(g_value)); }\n";
+    GLuint prog = glCreateProgram(), v, g, tex, vao;
+    GLint ok = 0, fill[4] = {0}, got[4] = {0};
+    MGLTestTarget target;
+
+    v = glCreateShader(GL_VERTEX_SHADER);
+    g = glCreateShader(GL_GEOMETRY_SHADER);
+    glShaderSource(v, 1, &vs, NULL);
+    glShaderSource(g, 1, &gs, NULL);
+    glCompileShader(v);
+    glCompileShader(g);
+    glAttachShader(prog, v);
+    glAttachShader(prog, g);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+
+    mgl_drain_errors();
+    glUseProgram(prog);
+    CHECK_EQ_UINT(glGetError(), GL_NO_ERROR);
+
+    CHECK(mgl_target_create(&target, 4, 4, GL_RGBA8, 0));
+    mgl_target_bind(&target);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32I, 1, 1, 0, GL_RGBA_INTEGER, GL_INT, fill);
+    glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32I);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glDisable(GL_RASTERIZER_DISCARD);
+    glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_INT, got);
+    CHECK_MSG(got[0] == 11, "geometry stage wrote %d, want 11", got[0]);
+
+    glUseProgram(0);
+    glDeleteShader(v);
+    glDeleteShader(g);
+    glDeleteProgram(prog);
+    glDeleteTextures(1, &tex);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&target);
+}

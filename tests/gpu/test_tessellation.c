@@ -498,9 +498,9 @@ GPU_TEST(tessellation, point_mode_keeps_points_that_read_point_size)
     glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 1024, NULL, GL_STATIC_DRAW);
     glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
 
-    // a triangle at level one is its three corners; two draws make six points
+    // a triangle at level one is its three corners; two draws record six
     glEnable(GL_RASTERIZER_DISCARD);
-    glBeginTransformFeedback(GL_POINTS);
+    glBeginTransformFeedback(GL_TRIANGLES);
     glDrawArrays(GL_PATCHES, 0, 3);
     glDrawArrays(GL_PATCHES, 0, 3);
     glEndTransformFeedback();
@@ -772,4 +772,40 @@ GPU_TEST(tessellation, evaluation_stage_stores_to_an_image)
     glDeleteTextures(1, &tex);
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
+}
+
+// A pipeline with a control stage and no evaluation stage cannot link as one
+// program, so drawing with it is an error. The draw was quietly skipped.
+GPU_TEST(tessellation, a_control_stage_alone_cannot_draw)
+{
+    static const char *VS = "#version 460\nvoid main() { gl_Position = vec4(0); }\n";
+    static const char *TCS =
+        "#version 460\nlayout(vertices = 1) out;\n"
+        "void main() { gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0; }\n";
+    static const char *FS = "#version 460\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    GLuint vs = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &VS);
+    GLuint tcs = glCreateShaderProgramv(GL_TESS_CONTROL_SHADER, 1, &TCS);
+    GLuint fs = glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &FS);
+    GLuint pipe, vao;
+
+    glGenProgramPipelines(1, &pipe);
+    glUseProgramStages(pipe, GL_VERTEX_SHADER_BIT, vs);
+    glUseProgramStages(pipe, GL_TESS_CONTROL_SHADER_BIT, tcs);
+    glUseProgramStages(pipe, GL_FRAGMENT_SHADER_BIT, fs);
+    glUseProgram(0);
+    glBindProgramPipeline(pipe);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glPatchParameteri(GL_PATCH_VERTICES, 1);
+    mgl_drain_errors();
+
+    glDrawArrays(GL_PATCHES, 0, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glBindProgramPipeline(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgramPipelines(1, &pipe);
+    glDeleteProgram(vs);
+    glDeleteProgram(tcs);
+    glDeleteProgram(fs);
 }

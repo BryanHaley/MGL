@@ -311,3 +311,40 @@ GPU_TEST(readback_rules, skip_images_does_not_move_a_two_dimensional_read)
     glPixelStorei(GL_PACK_IMAGE_HEIGHT, 0);
     glDeleteTextures(1, &tex);
 }
+
+// A sub-image read stays inside the level: a 2D image has one slice, a 1D one
+// one row, a multisample image cannot be read at all, and a compressed read
+// past the edge is a bad value. These were let through or gave the wrong error.
+GPU_TEST(readback_rules, sub_image_reads_stay_inside_the_level)
+{
+    GLuint tex[4];
+    GLubyte out[4096];
+
+    glCreateTextures(GL_TEXTURE_2D, 1, &tex[0]);
+    glTextureStorage2D(tex[0], 1, GL_RGBA8, 4, 4);
+    glCreateTextures(GL_TEXTURE_1D, 1, &tex[1]);
+    glTextureStorage1D(tex[1], 1, GL_RGBA8, 4);
+    glCreateTextures(GL_TEXTURE_2D_MULTISAMPLE, 1, &tex[2]);
+    glTextureStorage2DMultisample(tex[2], 4, GL_RGBA8, 4, 4, GL_TRUE);
+    glCreateTextures(GL_TEXTURE_2D, 1, &tex[3]);
+    glTextureStorage2D(tex[3], 1, GL_COMPRESSED_RED_RGTC1, 8, 8);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetTextureSubImage(tex[0], 0, 0, 0, 1, 4, 4, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof out, out);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    glGetTextureSubImage(tex[0], 0, 0, 0, 0, 4, 4, 2, GL_RGBA, GL_UNSIGNED_BYTE, sizeof out, out);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    glGetTextureSubImage(tex[1], 0, 0, 0, 0, 4, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof out, out);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    glGetTextureSubImage(tex[2], 0, 0, 0, 0, 4, 4, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof out, out);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glGetCompressedTextureSubImage(tex[3], 0, 4, 0, 0, 8, 4, 1, sizeof out, out);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    glGetCompressedTextureSubImage(tex[3], 0, 0, 0, 1, 4, 4, 1, sizeof out, out);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+    glGetCompressedTextureSubImage(tex[3], 0, 0, 0, 0, 4, 4, 1, sizeof out, out);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteTextures(4, tex);
+}

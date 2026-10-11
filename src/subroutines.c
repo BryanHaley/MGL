@@ -208,8 +208,44 @@ static bool reservedName(const char *name)
         "static", "extern", "external", "interface", "long", "short", "half",
         "fixed", "unsigned", "superp", "input", "output", "hvec2", "hvec3", "hvec4",
         "fvec2", "fvec3", "fvec4", "sampler3DRect", "filter", "sizeof", "cast",
-        "namespace", "using", NULL
+        "namespace", "using",
+        // and the keywords themselves, GLSL 4.60 section 3.6
+        "const", "uniform", "buffer", "shared", "attribute", "varying", "coherent", "volatile",
+        "restrict", "readonly", "writeonly", "atomic_uint", "layout", "centroid", "flat", "smooth",
+        "noperspective", "patch", "sample", "invariant", "precise", "break", "continue", "do", "for",
+        "while", "switch", "case", "default", "if", "else", "subroutine", "in", "out", "inout", "int",
+        "void", "bool", "true", "false", "float", "double", "discard", "return", "uint", "struct",
+        "lowp", "mediump", "highp", "precision",
+        "vec2", "vec3", "vec4", "ivec2", "ivec3", "ivec4", "bvec2", "bvec3", "bvec4", "uvec2", "uvec3",
+        "uvec4", "dvec2", "dvec3", "dvec4", "mat2", "mat3", "mat4", "mat2x2", "mat2x3", "mat2x4",
+        "mat3x2", "mat3x3", "mat3x4", "mat4x2", "mat4x3", "mat4x4", "dmat2", "dmat3", "dmat4",
+        "dmat2x2", "dmat2x3", "dmat2x4", "dmat3x2", "dmat3x3", "dmat3x4", "dmat4x2", "dmat4x3", "dmat4x4",
+        NULL
     };
+    // sampler and image types, which share their prefixes
+    static const char *opaque[] = {
+        "sampler", "isampler", "usampler", "image", "iimage", "uimage", NULL
+    };
+
+    static const char *dims[] = {
+        "1D", "2D", "3D", "Cube", "2DRect", "Buffer", "1DArray", "2DArray", "CubeArray", "2DMS", "2DMSArray", NULL
+    };
+
+    for (int i = 0; opaque[i]; i++)
+    {
+        size_t n = strlen(opaque[i]);
+
+        if (strncmp(name, opaque[i], n))
+            continue;
+
+        for (int d = 0; dims[d]; d++)
+        {
+            size_t m = strlen(dims[d]);
+
+            if (!strncmp(name + n, dims[d], m) && (!name[n + m] || !strcmp(name + n + m, "Shadow")))
+                return true;
+        }
+    }
 
     // "__" is reserved too, but GLSL only warns about it
     if (!strncmp(name, "gl_", 3))
@@ -1178,7 +1214,13 @@ void mglFreeSubroutineInfo(SubroutineInfo *info)
         free(info->fn_names[i]);
 
     for (GLuint i = 0; i < info->uniform_count; i++)
+    {
         free(info->uniform_names[i]);
+        if (info->uniform_dims)
+            free(info->uniform_dims[i]);
+    }
+
+    free(info->uniform_dims);
 
     free(info->fn_names);
     free(info->uniform_names);
@@ -1222,6 +1264,7 @@ bool mglCopySubroutineInfo(SubroutineInfo *dst, const SubroutineInfo *src)
 
     dst->fn_names = (char **)calloc(src->fn_count ? src->fn_count : 1, sizeof(char *));
     dst->uniform_names = (char **)calloc(src->uniform_count ? src->uniform_count : 1, sizeof(char *));
+    dst->uniform_dims = (char **)calloc(src->uniform_count ? src->uniform_count : 1, sizeof(char *));
     dst->uniform_array_size = (GLuint *)calloc(src->uniform_count ? src->uniform_count : 1, sizeof(GLuint));
     dst->uniform_compatible = (GLuint *)calloc(src->uniform_count ? src->uniform_count : 1, sizeof(GLuint));
     dst->uniform_type = (GLuint *)calloc(src->uniform_count ? src->uniform_count : 1, sizeof(GLuint));
@@ -1229,7 +1272,7 @@ bool mglCopySubroutineInfo(SubroutineInfo *dst, const SubroutineInfo *src)
     dst->fn_types = (GLuint64 *)calloc(src->fn_count ? src->fn_count : 1, sizeof(GLuint64));
     dst->fn_index = (GLuint *)calloc(src->fn_count ? src->fn_count : 1, sizeof(GLuint));
 
-    if (dst->fn_names == NULL || dst->uniform_names == NULL ||
+    if (dst->fn_names == NULL || dst->uniform_names == NULL || dst->uniform_dims == NULL ||
         dst->uniform_array_size == NULL || dst->uniform_compatible == NULL ||
         dst->uniform_type == NULL || dst->uniform_location == NULL || dst->fn_types == NULL ||
         dst->fn_index == NULL)
@@ -1248,6 +1291,7 @@ bool mglCopySubroutineInfo(SubroutineInfo *dst, const SubroutineInfo *src)
     for (GLuint i = 0; i < src->uniform_count; i++)
     {
         dst->uniform_names[i] = strdup(src->uniform_names[i] ? src->uniform_names[i] : "");
+        dst->uniform_dims[i] = strdup(src->uniform_dims && src->uniform_dims[i] ? src->uniform_dims[i] : "");
         dst->uniform_array_size[i] = src->uniform_array_size[i];
         dst->uniform_compatible[i] = src->uniform_compatible[i];
         dst->uniform_type[i] = src->uniform_type ? src->uniform_type[i] : 0;
@@ -1303,6 +1347,7 @@ char *mglRewriteSubroutines(const char *src, SubroutineInfo *info)
 
         info->fn_names = (char **)calloc(sc.fn_count ? sc.fn_count : 1, sizeof(char *));
         info->uniform_names = (char **)calloc(sc.uniform_count ? sc.uniform_count : 1, sizeof(char *));
+        info->uniform_dims = (char **)calloc(sc.uniform_count ? sc.uniform_count : 1, sizeof(char *));
         info->uniform_array_size = (GLuint *)calloc(sc.uniform_count ? sc.uniform_count : 1, sizeof(GLuint));
         info->uniform_compatible = (GLuint *)calloc(sc.uniform_count ? sc.uniform_count : 1, sizeof(GLuint));
         info->uniform_type = (GLuint *)calloc(sc.uniform_count ? sc.uniform_count : 1, sizeof(GLuint));
@@ -1310,7 +1355,7 @@ char *mglRewriteSubroutines(const char *src, SubroutineInfo *info)
         info->fn_types = (GLuint64 *)calloc(sc.fn_count ? sc.fn_count : 1, sizeof(GLuint64));
         info->fn_index = (GLuint *)calloc(sc.fn_count ? sc.fn_count : 1, sizeof(GLuint));
 
-        if (info->fn_names == NULL || info->uniform_names == NULL ||
+        if (info->fn_names == NULL || info->uniform_names == NULL || info->uniform_dims == NULL ||
             info->uniform_array_size == NULL || info->uniform_compatible == NULL ||
             info->uniform_type == NULL || info->uniform_location == NULL || info->fn_types == NULL ||
             info->fn_index == NULL)
@@ -1333,6 +1378,7 @@ char *mglRewriteSubroutines(const char *src, SubroutineInfo *info)
             int compat = 0;
 
             info->uniform_names[i] = strdup(sc.uniforms[i].name);
+            info->uniform_dims[i] = strdup(sc.uniforms[i].dims_text);
             info->uniform_array_size[i] = (GLuint)sc.uniforms[i].array_size;
             info->uniform_type[i] = (GLuint)sc.uniforms[i].type;
             info->uniform_location[i] = sc.uniforms[i].location;
