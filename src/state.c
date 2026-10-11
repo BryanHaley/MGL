@@ -239,7 +239,7 @@ void mglPointSize(GLMContext ctx, GLfloat size)
 
 void mglPolygonMode(GLMContext ctx, GLenum face, GLenum mode)
 {
-    ERROR_CHECK_RETURN(face == GL_FRONT_AND_BACK, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(face == GL_FRONT_AND_BACK, GL_INVALID_ENUM);
 
     switch(mode)
     {
@@ -939,7 +939,7 @@ void mglPolygonOffset(GLMContext ctx, GLfloat factor, GLfloat units)
     ctx->state.var.polygon_offset_units = units;
     ctx->state.var.polygon_offset_clamp = 0.0f;
 
-    ctx->state.dirty_bits |= DIRTY_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE;
 }
 
 void mglPolygonOffsetClamp(GLMContext ctx, GLfloat factor, GLfloat units, GLfloat clamp)
@@ -948,7 +948,7 @@ void mglPolygonOffsetClamp(GLMContext ctx, GLfloat factor, GLfloat units, GLfloa
     ctx->state.var.polygon_offset_units = units;
     ctx->state.var.polygon_offset_clamp = clamp;
 
-    ctx->state.dirty_bits |= DIRTY_STATE;
+    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE;
 }
 
 void mglBlendFuncSeparate(GLMContext ctx, GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha)

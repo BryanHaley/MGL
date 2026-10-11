@@ -277,11 +277,11 @@ GPU_TEST(tex_sampler_params, tex_parameter_bound_set_and_get)
                      (const GLfloat[]){ 0.0f });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
 
-    // errors: no texture bound
+    // texture 0 is the default texture, which takes parameters like any other
     glBindTexture(GL_TEXTURE_2D, 0);
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR,
                      (const GLfloat[]){ 0.0f, 0.0f, 0.0f, 0.0f });
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     glDeleteTextures(1, &t);
 }

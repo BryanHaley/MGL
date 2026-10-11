@@ -506,7 +506,7 @@ GPU_TEST(framebuffer_dsa, stencil_renderbuffer_readback)
                 bad_stencil++;
 
         CHECK_MSG(bad_stencil == 0,
-                  "%d of %d stencil texels are not the written 5", bad_stencil, FW * FH);
+                  "%d of %d stencil texels are not the written 5 (first %u)", bad_stencil, FW * FH, stencil[0]);
 
         memset(depth, 0, sizeof depth);
         glReadPixels(0, 0, FW, FH, GL_DEPTH_COMPONENT, GL_FLOAT, depth);
@@ -782,4 +782,763 @@ GPU_TEST(framebuffer_dsa, compressed_texture_sub_image_dsa)
     CHECK(memcmp(got, data, sizeof data) == 0);
 
     glDeleteTextures(1, &tex);
+}
+
+// A stencil-only renderbuffer reads back what it was cleared to. It read 0.
+GPU_TEST(framebuffer_dsa, a_stencil_only_renderbuffer_reads_back)
+{
+    GLuint rb, fb;
+    GLubyte got[16 * 16];
+
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_STENCIL_INDEX8, 16, 16);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glClearStencil(7);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    memset(got, 0xAA, sizeof got);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, 16, 16, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(got[0] == 7 && got[16 * 16 - 1] == 7, "read %u and %u, want 7", got[0], got[16 * 16 - 1]);
+
+    // and as the wider types, which the suite reads it as
+    GLint gi[16 * 16];
+    GLuint gu[16 * 16];
+    GLfloat gf[16 * 16];
+
+    memset(gi, 0, sizeof gi);
+    glReadPixels(0, 0, 16, 16, GL_STENCIL_INDEX, GL_INT, gi);
+    CHECK_MSG(gi[0] == 7, "GL_INT read %d, want 7", gi[0]);
+    memset(gu, 0, sizeof gu);
+    glReadPixels(0, 0, 16, 16, GL_STENCIL_INDEX, GL_UNSIGNED_INT, gu);
+    CHECK_MSG(gu[0] == 7, "GL_UNSIGNED_INT read %u, want 7", gu[0]);
+    memset(gf, 0, sizeof gf);
+    glReadPixels(0, 0, 16, 16, GL_STENCIL_INDEX, GL_FLOAT, gf);
+    CHECK_MSG(gf[0] == 7.0f, "GL_FLOAT read %g, want 7", gf[0]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
+}
+
+// One layer of a 3D texture's second level is a complete attachment. It was
+// reported incomplete.
+GPU_TEST(framebuffer_dsa, a_layer_of_a_3d_level_attaches)
+{
+    GLuint tex, fb;
+
+    glCreateTextures(GL_TEXTURE_3D, 1, &tex);
+    glTextureStorage3D(tex, 2, GL_RGBA8, 8, 8, 48);
+    glCreateFramebuffers(1, &fb);
+    glNamedFramebufferTextureLayer(fb, GL_COLOR_ATTACHMENT0, tex, 1, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    {
+        GLint d = -1;
+
+        glGetTextureLevelParameteriv(tex, 1, GL_TEXTURE_DEPTH, &d);
+        CHECK_EQ_INT(d, 24);
+    }
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fb, GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    glNamedFramebufferTextureLayer(fb, GL_COLOR_ATTACHMENT0, tex, 1, 23);
+    CHECK_EQ_UINT(glCheckNamedFramebufferStatus(fb, GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}
+
+// A cleared depth-stencil attachment reads back packed as GL asks for it.
+GPU_TEST(framebuffer_dsa, depth_stencil_reads_back_packed)
+{
+    GLuint tex, fb;
+    GLuint packed[16 * 16];
+    struct { GLfloat d; GLuint s; } wide[16 * 16];
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH24_STENCIL8, 16, 16);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, tex, 0);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glClearDepth(0.5);
+    glClearStencil(3);
+    glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+    memset(packed, 0, sizeof packed);
+    glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG((packed[0] & 0xFF) == 3, "stencil %u, want 3", packed[0] & 0xFF);
+    CHECK_MSG(abs((int)(packed[0] >> 8) - 0x7FFFFF) <= 2, "depth %06x, want about 7fffff", packed[0] >> 8);
+
+    memset(wide, 0, sizeof wide);
+    glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, wide);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(wide[0].d > 0.499f && wide[0].d < 0.501f, "depth %g, want 0.5", wide[0].d);
+    CHECK_MSG((wide[0].s & 0xFF) == 3, "stencil %u, want 3", wide[0].s & 0xFF);
+
+    // and through glGetTexImage
+    memset(packed, 0, sizeof packed);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG((packed[0] & 0xFF) == 3, "GetTexImage stencil %u, want 3", packed[0] & 0xFF);
+    CHECK_MSG(abs((int)(packed[0] >> 8) - 0x7FFFFF) <= 2, "GetTexImage depth %06x", packed[0] >> 8);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}
+
+// Depth and stencil drawn with no colour buffer at all, as the packed
+// depth-stencil conformance cases do: a depth ramp up the target and a
+// stencil incremented once everywhere.
+GPU_TEST(framebuffer_dsa, depth_and_stencil_draw_without_colour)
+{
+    static const char *vs = "#version 460\nlayout(location = 0) in vec4 pos;\nvoid main() { gl_Position = pos; }\n";
+    static const char *fs = "#version 460\nout vec4 color;\nvoid main() { color = vec4(1); }\n";
+    static const GLfloat span[] = { -1, -1, -1, 1,  1, -1, -1, 1,  -1, 1, 1, 1,  1, 1, 1, 1 };
+    GLuint tex, fb, vao, vbo, prog;
+    GLuint packed[16 * 16];
+    char log[1024];
+    int bad_d = 0, bad_s = 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH24_STENCIL8, 16, 16);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, tex, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof span, span, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glUseProgram(prog);
+    glViewport(0, 0, 16, 16);
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LEQUAL);
+    glClearDepth(1.0);
+    glClearStencil(0);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_ALWAYS, 0, 0xFF);
+    glStencilOp(GL_ZERO, GL_INCR, GL_INCR);
+    glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_DEPTH_TEST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    memset(packed, 0, sizeof packed);
+    glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++)
+        {
+            GLuint v = packed[y * 16 + x];
+            float d = (float)(v >> 8) / 16777215.0f, want = (y + 0.5f) / 16.0f;
+
+            if (fabsf(d - want) > 0.05f)
+                bad_d++;
+            if ((v & 0xFF) != 1)
+                bad_s++;
+        }
+
+    CHECK_MSG(bad_d == 0, "%d depth values off the ramp; row 0 %g, row 15 %g", bad_d,
+              (packed[0] >> 8) / 16777215.0, (packed[15 * 16] >> 8) / 16777215.0);
+    CHECK_MSG(bad_s == 0, "%d stencil values are not 1; first %u", bad_s, packed[0] & 0xFF);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}
+
+// Stencil incremented 256 times in the lower half saturates at 255, and a
+// later draw tested EQUAL 255 writes depth only there.
+GPU_TEST(framebuffer_dsa, stencil_saturates_and_gates_later_draws)
+{
+    static const char *vs = "#version 460\nlayout(location = 0) in vec4 pos;\nvoid main() { gl_Position = pos; }\n";
+    static const char *fs = "#version 460\nout vec4 color;\nvoid main() { color = vec4(1); }\n";
+    static const GLfloat span1[] = { -1, -1, -1, 1,  1, -1, -1, 1,  -1, 1, 1, 1,  1, 1, 1, 1 };
+    static const GLfloat span2[] = { -1, -1, 1, 1,  1, -1, 1, 1,  -1, 1, -1, 1,  1, 1, -1, 1 };
+    GLuint tex, fb, vao, vbo[2], prog;
+    GLuint packed[16 * 16];
+    char log[1024];
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH24_STENCIL8, 16, 16);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, tex, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(2, vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof span1, span1, GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof span2, span2, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glUseProgram(prog);
+    glViewport(0, 0, 16, 16);
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LEQUAL);
+    glClearDepth(1.0);
+    glClearStencil(0);
+    glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 0, 16, 8);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_ALWAYS, 0, 0xFF);
+    glStencilOp(GL_ZERO, GL_INCR, GL_INCR);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+    for (int i = 0; i < 256; i++)
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_SCISSOR_TEST);
+
+    glStencilFunc(GL_EQUAL, 0xFF, 0xFF);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_DEPTH_TEST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    memset(packed, 0, sizeof packed);
+    glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+
+    GLuint low = packed[2 * 16 + 3], high = packed[13 * 16 + 3];
+    CHECK_MSG((low & 0xFF) == 255, "lower half stencil %u, want 255", low & 0xFF);
+    CHECK_MSG((high & 0xFF) == 0, "upper half stencil %u, want 0", high & 0xFF);
+    CHECK_MSG(fabs((low >> 8) / 16777215.0 - 2.5 / 16.0) < 0.05, "lower half depth %g, want the ramp", (low >> 8) / 16777215.0);
+    CHECK_MSG((high >> 8) > 0xFFFF00, "upper half depth %g, want 1", (high >> 8) / 16777215.0);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(2, vbo);
+    glDeleteVertexArrays(1, &vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}
+
+// Colour and depth-stencil renderbuffers asked for the same sample count end
+// up with the same one, so together they make a complete framebuffer at
+// every count up to GL_MAX_SAMPLES.
+GPU_TEST(framebuffer_dsa, same_requested_samples_match_across_formats)
+{
+    GLint max = 0;
+
+    glGetIntegerv(GL_MAX_SAMPLES, &max);
+
+    for (int i = 0; i <= max; i++)
+    {
+        GLuint fb, rb[2];
+        GLint sc = -1, sd = -1;
+
+        glGenFramebuffers(1, &fb);
+        glGenRenderbuffers(2, rb);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, i, GL_DEPTH24_STENCIL8, 16, 16);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_SAMPLES, &sd);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[0]);
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, i, GL_RGBA8, 16, 16);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_SAMPLES, &sc);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[1]);
+
+        CHECK_MSG(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+                  "%d samples asked: colour got %d, depth-stencil %d", i, sc, sd);
+
+        // what is reported is what Metal gives, a power of two, from the start
+        CHECK_MSG(sc == sd && (sc & (sc - 1)) == 0 && sc >= i, "%d samples asked: reported %d and %d", i, sc, sd);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &fb);
+        glDeleteRenderbuffers(2, rb);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// Depth and stencil blitted from one framebuffer to another, single-sampled
+// and resolved from a multisampled source, arrive intact.
+static GLuint dsStencilAfterBlit(int src_samples, GLuint *depth_out)
+{
+    GLuint fb[2], rb[2];
+    GLuint packed[16 * 16];
+
+    glGenFramebuffers(2, fb);
+    glGenRenderbuffers(2, rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, src_samples, GL_DEPTH24_STENCIL8, 16, 16);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[0]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[0]);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 0, GL_DEPTH24_STENCIL8, 16, 16);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[1]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[0]);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    glClearDepth(0.25);
+    glClearStencil(1);
+    glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fb[0]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb[1]);
+    glDrawBuffer(GL_NONE);
+    glBlitFramebuffer(0, 0, 16, 16, 0, 0, 16, 16, GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[1]);
+    glReadBuffer(GL_NONE);
+    memset(packed, 0, sizeof packed);
+    glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(2, fb);
+    glDeleteRenderbuffers(2, rb);
+
+    *depth_out = packed[5 * 16 + 5] >> 8;
+    return packed[5 * 16 + 5] & 0xFF;
+}
+
+GPU_TEST(framebuffer_dsa, depth_and_stencil_survive_a_blit)
+{
+    GLuint d = 0;
+    GLuint s = dsStencilAfterBlit(0, &d);
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(s == 1, "single-sampled: stencil %u, want 1", s);
+    CHECK_MSG(abs((int)d - 0x3FFFFF) < 4, "single-sampled: depth %06x, want 3fffff", d);
+
+    s = dsStencilAfterBlit(4, &d);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(s == 1, "resolved: stencil %u, want 1", s);
+    CHECK_MSG(abs((int)d - 0x3FFFFF) < 4, "resolved: depth %06x, want 3fffff", d);
+}
+
+// A single-sampled depth-stencil image blitted into a multisampled one fills
+// every sample, so resolving it back gives the same values.
+GPU_TEST(framebuffer_dsa, depth_and_stencil_blit_into_multisample)
+{
+    GLuint fb[3], rb[3];
+    GLuint packed[16 * 16];
+
+    glGenFramebuffers(3, fb);
+    glGenRenderbuffers(3, rb);
+    for (int k = 0; k < 3; k++)
+    {
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[k]);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, k == 1 ? 4 : 0, GL_DEPTH24_STENCIL8, 16, 16);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb[k]);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[k]);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[0]);
+    glClearDepth(0.25);
+    glClearStencil(1);
+    glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fb[0]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb[1]);
+    glBlitFramebuffer(0, 0, 16, 16, 0, 0, 16, 16, GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fb[1]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb[2]);
+    glBlitFramebuffer(0, 0, 16, 16, 0, 0, 16, 16, GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[2]);
+    memset(packed, 0, sizeof packed);
+    glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+    CHECK_MSG((packed[37] & 0xFF) == 1, "stencil %u, want 1", packed[37] & 0xFF);
+    CHECK_MSG(abs((int)(packed[37] >> 8) - 0x3FFFFF) < 4, "depth %06x, want 3fffff", packed[37] >> 8);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(3, fb);
+    glDeleteRenderbuffers(3, rb);
+}
+
+// A draw tested against a multisampled stencil buffer, then the colour
+// resolved to a single-sampled target.
+GPU_TEST(framebuffer_dsa, stencil_tested_draw_into_multisample_resolves)
+{
+    static const char *vs = "#version 460\nlayout(location = 0) in vec4 pos;\nvoid main() { gl_Position = pos; }\n";
+    static const char *fs = "#version 460\nout vec4 color;\nvoid main() { color = vec4(1, 0, 0, 1); }\n";
+    static const GLfloat quad[] = { -1, -1, 0, 1,  1, -1, 0, 1,  -1, 1, 0, 1,  1, 1, 0, 1 };
+    GLuint fb[2], rb[3], vao, vbo, prog;
+    GLubyte px[16 * 16 * 4];
+    char log[1024];
+
+    glGenFramebuffers(2, fb);
+    glGenRenderbuffers(3, rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH24_STENCIL8, 16, 16);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_RGBA8, 16, 16);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[0]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[0]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[1]);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[2]);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 0, GL_RGBA8, 16, 16);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[1]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[2]);
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glUseProgram(prog);
+    glViewport(0, 0, 16, 16);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[0]);
+    glClearColor(0, 0, 1, 1);
+    glClearStencil(1);
+    glClearDepth(1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_EQUAL, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_STENCIL_TEST);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fb[0]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb[1]);
+    glBlitFramebuffer(0, 0, 16, 16, 0, 0, 16, 16, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[1]);
+    memset(px, 0, sizeof px);
+    glReadPixels(0, 0, 16, 16, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_MSG(px[4 * 37] == 255 && px[4 * 37 + 2] == 0, "got %u %u %u, want red", px[4 * 37], px[4 * 37 + 1], px[4 * 37 + 2]);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(2, fb);
+    glDeleteRenderbuffers(3, rb);
+}
+
+// A draw into a multisampled depth-stencil framebuffer with no colour image
+// writes the stencil, and a blit resolves it.
+GPU_TEST(framebuffer_dsa, draw_into_multisample_depth_only)
+{
+    static const char *vs = "#version 460\nlayout(location = 0) in vec4 pos;\nvoid main() { gl_Position = pos; }\n";
+    static const char *fs = "#version 460\nout vec4 color;\nvoid main() { color = vec4(1); }\n";
+    static const GLfloat quad[] = { -1, -1, -1, 1,  1, -1, -1, 1,  -1, 1, 1, 1,  1, 1, 1, 1 };
+    GLuint fb[2], rb[2], vao, vbo, prog;
+    GLuint packed[16 * 16];
+    char log[1024];
+
+    glGenFramebuffers(2, fb);
+    glGenRenderbuffers(2, rb);
+    for (int k = 0; k < 2; k++)
+    {
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[k]);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, k == 0 ? 4 : 0, GL_DEPTH24_STENCIL8, 16, 16);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb[k]);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[k]);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+    }
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glUseProgram(prog);
+    glViewport(0, 0, 16, 16);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[0]);
+    glClearStencil(0);
+    glClearDepth(1.0);
+    glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_ALWAYS, 1, 0xFF);
+    glStencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_DEPTH_TEST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fb[0]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb[1]);
+    glBlitFramebuffer(0, 0, 16, 16, 0, 0, 16, 16, GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[1]);
+    memset(packed, 0, sizeof packed);
+    glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG((packed[37] & 0xFF) == 1, "stencil %u, want 1", packed[37] & 0xFF);
+    // a ramp from 0 at the bottom row to 1 at the top
+    for (int y = 0; y < 16; y += 5)
+    {
+        double d = (packed[y * 16 + 4] >> 8) / 16777215.0, want = (y + 0.5) / 16.0;
+
+        CHECK_MSG(fabs(d - want) < 0.04, "row %d depth %g, want %g", y, d, want);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(2, fb);
+    glDeleteRenderbuffers(2, rb);
+}
+
+// A drawn depth ramp blitted into a multisampled image and resolved back keeps
+// its values. Metal copied across sample counts, which it cannot do.
+GPU_TEST(framebuffer_dsa, a_depth_ramp_round_trips_through_multisample)
+{
+    static const char *vs = "#version 460\nlayout(location = 0) in vec4 pos;\nvoid main() { gl_Position = pos; }\n";
+    static const char *fs = "#version 460\nout vec4 color;\nvoid main() { color = vec4(1); }\n";
+    static const GLfloat ramp[] = { -1, -1, -1, 1,  1, -1, -1, 1,  -1, 1, 1, 1,  1, 1, 1, 1 };
+    GLuint fb[3], rb[3], vao, vbo, prog;
+    GLuint packed[16 * 16];
+    char log[1024];
+
+    glGenFramebuffers(3, fb);
+    glGenRenderbuffers(3, rb);
+    for (int k = 0; k < 3; k++)
+    {
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[k]);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, k == 1 ? 4 : 0, GL_DEPTH24_STENCIL8, 16, 16);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb[k]);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[k]);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+    }
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof ramp, ramp, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glUseProgram(prog);
+    glViewport(0, 0, 16, 16);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[0]);
+    glClearDepth(1.0);
+    glClearStencil(0);
+    glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_ALWAYS);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_ALWAYS, 6, 0xFF);
+    glStencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_DEPTH_TEST);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fb[0]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb[1]);
+    glBlitFramebuffer(0, 0, 16, 16, 0, 0, 16, 16, GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fb[1]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb[2]);
+    glBlitFramebuffer(0, 0, 16, 16, 0, 0, 16, 16, GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[2]);
+    memset(packed, 0, sizeof packed);
+    glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+    for (int y = 0; y < 16; y += 5)
+    {
+        double d = (packed[y * 16 + 4] >> 8) / 16777215.0, want = (y + 0.5) / 16.0;
+
+        CHECK_MSG(fabs(d - want) < 0.04, "row %d depth %g, want %g", y, d, want);
+        CHECK_MSG((packed[y * 16 + 4] & 0xFF) == 6, "row %d stencil %u, want 6", y, packed[y * 16 + 4] & 0xFF);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(3, fb);
+    glDeleteRenderbuffers(3, rb);
+}
+
+// A new framebuffer object reads from and draws to colour attachment 0, and
+// the queries say so; they reported the window's buffers.
+GPU_TEST(framebuffer_dsa, a_new_framebuffer_reports_its_own_buffers)
+{
+    GLuint fb;
+    GLint rb = -1, db = -1;
+
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glGetIntegerv(GL_READ_BUFFER, &rb);
+    glGetIntegerv(GL_DRAW_BUFFER0, &db);
+    CHECK_EQ_INT(rb, GL_COLOR_ATTACHMENT0);
+    CHECK_EQ_INT(db, GL_COLOR_ATTACHMENT0);
+
+    // what was read can be set back
+    glReadBuffer((GLenum)rb);
+    glDrawBuffers(1, (const GLenum *)&db);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+}
+
+// glCopyTexImage2D into a depth or depth-stencil format reads the framebuffer's
+// depth and stencil, converting where the formats differ. It read the colour
+// read buffer instead, which a depth-only framebuffer does not have.
+GPU_TEST(framebuffer_dsa, copy_tex_image_takes_depth_and_stencil)
+{
+    GLuint src, fb, d16, ds;
+    GLushort got16[8 * 8];
+    GLuint packed[8 * 8];
+
+    glGenTextures(1, &src);
+    glBindTexture(GL_TEXTURE_2D, src);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH24_STENCIL8, 8, 8);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, src, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    glClearDepth(0.5);
+    glClearStencil(9);
+    glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+    glGenTextures(1, &d16);
+    glBindTexture(GL_TEXTURE_2D, d16);
+    glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, 0, 0, 8, 8, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    memset(got16, 0, sizeof got16);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, got16);
+    CHECK_MSG(abs((int)got16[9] - 0x7FFF) < 4, "16-bit depth %04x, want 7fff", got16[9]);
+
+    glGenTextures(1, &ds);
+    glBindTexture(GL_TEXTURE_2D, ds);
+    glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, 0, 0, 8, 8, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    memset(packed, 0, sizeof packed);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
+    CHECK_MSG((packed[9] & 0xFF) == 9, "stencil %u, want 9", packed[9] & 0xFF);
+    CHECK_MSG(abs((int)(packed[9] >> 8) - 0x7FFFFF) < 4, "depth %06x, want 7fffff", packed[9] >> 8);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &src);
+    glDeleteTextures(1, &d16);
+    glDeleteTextures(1, &ds);
+}
+
+// A packed depth-stencil image attached as only one half: the missing half's
+// test always passes, so even NEVER lets the draw through.
+GPU_TEST(framebuffer_dsa, a_missing_half_always_passes)
+{
+    static const char *vs = "#version 460\nlayout(location = 0) in vec4 pos;\nvoid main() { gl_Position = pos; }\n";
+    static const char *fs = "#version 460\nout vec4 color;\nvoid main() { color = vec4(0, 1, 0, 1); }\n";
+    static const GLfloat quad[] = { -1, -1, 0, 1,  1, -1, 0, 1,  -1, 1, 0, 1,  1, 1, 0, 1 };
+    GLuint vao, vbo, prog;
+    char log[1024];
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glUseProgram(prog);
+    glViewport(0, 0, 16, 16);
+
+    for (int i = 0; i < 2; i++)
+    {
+        GLuint fb, rb[2];
+        GLubyte px[4] = { 0 };
+
+        glGenFramebuffers(1, &fb);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        glGenRenderbuffers(2, rb);
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 16, 16);
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 16, 16);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, i ? GL_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+
+        glClearColor(1, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (i)
+        {
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_NEVER);
+        }
+        else
+        {
+            glEnable(GL_STENCIL_TEST);
+            glStencilFunc(GL_NEVER, 0, 0xFF);
+        }
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_STENCIL_TEST);
+        glDepthFunc(GL_LESS);
+
+        glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK_MSG(px[1] == 255 && px[0] == 0, "%s only: got %u %u %u, want green", i ? "stencil" : "depth",
+                  px[0], px[1], px[2]);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &fb);
+        glDeleteRenderbuffers(2, rb);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
 }

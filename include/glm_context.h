@@ -359,6 +359,9 @@ typedef struct Texture_t {
     GLenum internalformat;
     // asked for as GL_COMPRESSED_RGBA and the like, though stored plain
     GLboolean generic_compressed;
+    // levels given a size that does not fit the chain: legal in GL, but the
+    // texture is incomplete until they are given the right one
+    GLuint mismatched_levels;
     GLuint width;
     GLuint height;
     GLuint depth;
@@ -532,6 +535,11 @@ int mglTessellate(int domain, int spacing, bool point_mode, bool cw,
 #define MGL_BUFFER_SIZES_MSL_SLOT 21
 // where SPIRV-Cross reads gl_DrawID from
 #define MGL_DRAW_ID_MSL_SLOT 19
+// where the last vertex stage reads glClipControl's depth mode
+#define MGL_CLIP_CONTROL_MSL_SLOT 20
+
+struct Program_t;
+bool mglBuildSampleRateFragment(struct GLMContextRec_t *ctx, struct Program_t *pptr);
 
 // Cull distance needs a pass of its own before the draw, and five buffers.
 #define MGL_CULL_FIRST_BINDING  20
@@ -724,7 +732,7 @@ typedef struct SubroutineInfo_t {
     const char *error;           // set when the shader misuses a subroutine
 } SubroutineInfo;
 
-char *mglRewriteSubroutines(const char *src, SubroutineInfo *info);
+char *mglRewriteSubroutines(const char *src, SubroutineInfo *info, int stage);
 // opaque_structs.c: samplers held in uniform structs become uniforms of their own
 char *mglFlattenOpaqueStructs(const char *src);
 bool mglOpaqueStructUniformName(const char *gl_name, char *out, size_t size);
@@ -738,6 +746,28 @@ void  mglFreeTextureObject(GLMContext ctx, Texture *tex);
 bool  mglBufferTextureLevelParam(GLMContext ctx, const Texture *tex, GLenum pname, GLint *out);
 bool  mglBufferTextureSource(GLMContext ctx, const Texture *tex, Buffer **buf,
                              GLintptr *offset, GLsizeiptr *size);
+// The sample count Metal will actually give: GL lets the driver round up, and
+// Metal has 2, 4 and 8. Decided when storage is defined, so every attachment
+// reports its final count before any of them reaches Metal.
+static inline GLuint mglRoundSamples(GLsizei samples)
+{
+    GLuint want;
+
+    if (samples <= 0)
+        return 0;
+
+    want = samples < 2 ? 2 : (GLuint)samples;
+
+    while (want & (want - 1))
+        want++;
+
+    return want;
+}
+
+struct Program_t;
+void  mglResetSubroutines(GLMContext ctx, struct Program_t *pptr);
+void  mglWriteSubroutineSelectors(GLMContext ctx, struct Program_t *to, const SubroutineInfo *si, int stage,
+                                  const GLuint *values, GLuint count);
 bool  mglSubroutineCompatible(const SubroutineInfo *info, GLuint uniform, GLuint fn);
 GLint mglSubroutineSlot(const SubroutineInfo *info, GLuint index);
 void  mglFreeSubroutineInfo(SubroutineInfo *info);
@@ -919,6 +949,9 @@ typedef struct Program_t {
     glslang_program_t *linked_glsl_program;
     // a link has succeeded at least once, so there is something to run
     GLboolean executable;
+    // the geometry stage takes a different primitive than tessellation makes:
+    // it links, but GL refuses to draw with it
+    GLboolean tess_geom_mismatch;
     Spirv spirv[_MAX_SHADER_TYPES];
     // indexed by the SPIRV-Cross resource enum, whose highest value has grown
     // over time; sized to cover it rather than to MGL's own shorter list
@@ -985,6 +1018,10 @@ typedef struct Program_t {
     // off when there is a fragment shader, made the first time it is needed
     Spirv vs_noraster;
     GLboolean building_vs_noraster;
+    // the fragment stage again, run once per sample, for GL_SAMPLE_SHADING;
+    // made the first time a draw needs it
+    Spirv fs_sample_rate;
+    GLboolean building_fs_sample_rate;
     // GL's view of the program's resources, for the interface queries
     MglResourceTable resources;
     // glBindAttribLocation and glBindFragDataLocation(Indexed), applied at link
@@ -996,6 +1033,8 @@ typedef struct Program_t {
     GLuint  link_serial;
     // does the vertex stage read gl_DrawID; -1 until the first draw asks
     GLint   uses_draw_id;
+    // does any stage read the clip control word; -1 until the first draw asks
+    GLint   uses_clip_control;
     GLboolean linked_separable;     // PROGRAM_SEPARABLE as of the last link
 } Program;
 

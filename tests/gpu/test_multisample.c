@@ -719,3 +719,93 @@ GPU_TEST(multisample, interpolate_at_offset_lands_on_the_sample)
     glDeleteProgram(prog);
     glDeleteProgram(resolve);
 }
+
+// With GL_SAMPLE_SHADING the fragment shader runs for each sample and reads
+// its inputs there, so a steep gradient gives every sample its own value.
+static int distinctSamples(int shading)
+{
+    static const char *VS =
+        "#version 450 core\n"
+        "layout(location = 0) in vec2 pos;\n"
+        "out float v;\n"
+        "void main() { v = pos.x * 64.0; gl_Position = vec4(pos, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 450 core\n"
+        "in float v;\n"
+        "out vec4 c;\n"
+        "void main() { c = vec4(fract(v), 0.0, 0.0, 1.0); }\n";
+    static const char *CS =
+        "#version 450 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "uniform sampler2DMS t;\n"
+        "layout(std430, binding = 0) buffer Out { float got[4]; };\n"
+        "void main() { for (int s = 0; s < 4; s++) got[s] = texelFetch(t, ivec2(2, 2), s).r; }\n";
+    GLuint tex, fbo, vbo, vao, prog, cprog, ssbo;
+    GLfloat got[4] = { -1, -1, -1, -1 };
+    char log[1024];
+    int distinct = 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, tex);
+    glTexStorage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA32F, 4, 4, GL_TRUE);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, tex, 0);
+    glViewport(0, 0, 4, 4);
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    cprog = mgl_build_compute_program(CS, log, sizeof log);
+    if (!prog || !cprog)
+        return -1;
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glMinSampleShading(1.0f);
+    if (shading)
+        glEnable(GL_SAMPLE_SHADING);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glDisable(GL_SAMPLE_SHADING);
+    glMinSampleShading(0.0f);
+
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof got, got, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+    glUseProgram(cprog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, tex);
+    glUniform1i(glGetUniformLocation(cprog, "t"), 0);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof got, got);
+
+    for (int i = 0; i < 4; i++)
+    {
+        int seen = 0;
+        for (int j = 0; j < i; j++)
+            if (got[j] == got[i])
+                seen = 1;
+        distinct += !seen;
+    }
+
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteBuffers(1, &ssbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    glDeleteProgram(cprog);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    return distinct;
+}
+
+GPU_TEST(multisample, sample_shading_gives_each_sample_its_own_value)
+{
+    int off = distinctSamples(0);
+    int on = distinctSamples(1);
+
+    CHECK_MSG(off == 1, "without sample shading %d distinct values in a pixel, want 1", off);
+    CHECK_MSG(on == 4, "with sample shading %d distinct values in a pixel, want 4", on);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}

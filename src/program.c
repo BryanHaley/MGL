@@ -336,9 +336,10 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
     mglFreeCullInfo(&ptr->cull);
 
     {
-        Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster, &ptr->vs_noraster };
+        Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster, &ptr->vs_noraster,
+                          &ptr->fs_sample_rate };
 
-        for (int c = 0; c < 4; c++)
+        for (int c = 0; c < 5; c++)
         {
             free(cull[c]->ir);
             free(cull[c]->msl_str);
@@ -1771,6 +1772,9 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
+    if (stage == _FRAGMENT_SHADER && ptr && ptr->building_fs_sample_rate)
+        spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_FORCE_SAMPLE_RATE_SHADING, SPVC_TRUE);
+
     // A program with no fragment stage can only be drawn with the raster off,
     // and Metal wants a vertex function that returns nothing for that.
     if (stage != _FRAGMENT_SHADER && stage != _COMPUTE_SHADER && ptr &&
@@ -1819,6 +1823,11 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         MGL_ERR("MGL Error: spvc_compiler_options_set_bool(SPVC_COMPILER_OPTION_FIXUP_DEPTH_CONVENTION) failed\n");
         { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
+
+    // glClipControl can ask for clip z from 0 to 1, so the fix-up above is
+    // skipped at run time when it does
+    spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_RUNTIME_CLIP_DEPTH, SPVC_TRUE);
+    spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_CLIP_CONTROL_BUFFER_INDEX, MGL_CLIP_CONTROL_MSL_SLOT);
 
     // Metal has no double. SPIRV-Cross carries every double as three floats
     // that add up to it, which is close enough for GL's fp64 rules.
@@ -3604,11 +3613,12 @@ static bool linkTessGeometryProgram(GLMContext ctx, Program *pptr)
     // and quads a triangles one
     GLenum wants = points ? GL_POINTS : domain == 2 ? GL_LINES : GL_TRIANGLES;
 
-    if (pptr->geom.in_primitive != wants)
-    {
-        MGL_ERR("MGL Error: the geometry shader's input does not match what tessellation makes\n");
-        return false;
-    }
+    // GL makes this a draw error, not a link error, so it links and the
+    // draws are refused
+    pptr->tess_geom_mismatch = pptr->geom.in_primitive != wants;
+
+    if (pptr->tess_geom_mismatch)
+        return true;
 
     bool general = domain >= 0;
 
@@ -4237,6 +4247,55 @@ bool mglBuildNoRasterVertex(GLMContext ctx, Program *pptr)
     return v->msl_str != NULL;
 }
 
+// The fragment stage again, run once per sample, for GL_SAMPLE_SHADING.
+// Built the first time a draw needs it.
+bool mglBuildSampleRateFragment(GLMContext ctx, Program *pptr)
+{
+    Spirv *src = &pptr->spirv[_FRAGMENT_SHADER];
+    Spirv *v = &pptr->fs_sample_rate;
+    SpirvResourceList keep[MAX_SPVC_RESOURCE_TYPES];
+    MglBindlessSets keep_bindless;
+
+    if (v->msl_str)
+        return true;
+
+    if (src->ir == NULL || src->size == 0)
+        return false;
+
+    free(v->ir);
+    free(v->entry_point);
+    if (v->mtl_function)
+        CFRelease(v->mtl_function);
+    if (v->mtl_library)
+        CFRelease(v->mtl_library);
+    memset(v, 0, sizeof(*v));
+
+    v->stage = src->stage;
+    v->size = src->size;
+    v->ir = (unsigned int *)malloc(v->size * sizeof(unsigned));
+
+    if (v->ir == NULL)
+        return false;
+
+    memcpy(v->ir, src->ir, v->size * sizeof(unsigned));
+
+    // the compile reads the stage's resources again; the linked ones stay
+    memcpy(keep, pptr->spirv_resources_list[_FRAGMENT_SHADER], sizeof keep);
+    memset(pptr->spirv_resources_list[_FRAGMENT_SHADER], 0, sizeof keep);
+    keep_bindless = pptr->bindless[_FRAGMENT_SHADER];
+
+    pptr->building_fs_sample_rate = GL_TRUE;
+    v->msl_str = parseSPIRVShaderToMetal(ctx, pptr, _FRAGMENT_SHADER, v, NULL);
+    pptr->building_fs_sample_rate = GL_FALSE;
+
+    for (int r = 0; r < MAX_SPVC_RESOURCE_TYPES; r++)
+        freeResourceList(&pptr->spirv_resources_list[_FRAGMENT_SHADER][r]);
+    memcpy(pptr->spirv_resources_list[_FRAGMENT_SHADER], keep, sizeof keep);
+    pptr->bindless[_FRAGMENT_SHADER] = keep_bindless;
+
+    return v->msl_str != NULL;
+}
+
 void mglLinkProgram(GLMContext ctx, GLuint program)
 {
     Program *pptr;
@@ -4263,6 +4322,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     }
 
     pptr->link_status = GL_TRUE;
+    pptr->tess_geom_mismatch = GL_FALSE;
     pptr->validate_status = GL_FALSE;
     mglFreeResourceTable(&pptr->resources);
 
@@ -4270,6 +4330,10 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     static GLuint serial;
     pptr->link_serial = ++serial;
     pptr->uses_draw_id = -1;
+    pptr->uses_clip_control = -1;
+    // a new link means a new fragment stage to run per sample
+    free(pptr->fs_sample_rate.msl_str);
+    pptr->fs_sample_rate.msl_str = NULL;
     pptr->linked_separable = pptr->separable;
 
     for (int s = 0; s < _MAX_SHADER_TYPES; s++)
@@ -4438,6 +4502,10 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         pptr->executable = pptr->executable || pptr->link_status == GL_TRUE;
         pptr->validate_status = pptr->link_status;
         reflectProgram(ctx, pptr);
+
+        if (pptr->link_status == GL_TRUE)
+            mglResetSubroutines(ctx, pptr);
+
         ctx->error_suppress--;
 
         return;
@@ -4514,6 +4582,9 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
         pptr->validate_status = pptr->link_status;
         reflectProgram(ctx, pptr);
+
+        if (pptr->link_status == GL_TRUE)
+            mglResetSubroutines(ctx, pptr);
         ctx->error_suppress--;
 
         return;
@@ -4665,6 +4736,9 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
     pptr->validate_status = pptr->link_status;
 
+    if (pptr->link_status == GL_TRUE)
+        mglResetSubroutines(ctx, pptr);
+
     /* Only call mtlBindProgram if Metal functions are initialized */
     if (ctx->mtl_funcs.mtlBindProgram) {
         ctx->mtl_funcs.mtlBindProgram(ctx, pptr);
@@ -4700,6 +4774,8 @@ void mglUseProgram(GLMContext ctx, GLuint program)
         }
 
         ERROR_CHECK_RETURN(pptr->executable, GL_INVALID_OPERATION);
+
+        mglResetSubroutines(ctx, pptr);
     }
     else
     {
@@ -5229,6 +5305,12 @@ void mglBindProgramPipeline(GLMContext ctx, GLuint pipeline)
     STATE(program_pipeline) = ptr;
     STATE(var.program_pipeline_binding) = pipeline;
     STATE(dirty_bits) |= DIRTY_PROGRAM;
+
+    // binding a pipeline resets its stages' subroutine choices, as
+    // glUseProgram does for a program
+    for (int s = 0; s < _MAX_SHADER_TYPES; s++)
+        if (ptr->stage_programs[s] && ptr->stage_programs[s]->executable)
+            mglResetSubroutines(ctx, ptr->stage_programs[s]);
 }
 
 // A pipeline stage holds its program the way glUseProgram does, so deleting
@@ -5311,12 +5393,13 @@ void mglUseProgramStages(GLMContext ctx, GLuint pipeline, GLbitfield stages, GLu
 
     pipe_ptr->validated = GL_FALSE;
     STATE(dirty_bits) |= DIRTY_PROGRAM;
+
+    // a program put in a pipeline starts its subroutines over
+    if (prog_ptr && prog_ptr->executable)
+        mglResetSubroutines(ctx, prog_ptr);
 }
 
 /* ---------- subroutines ---------- */
-
-// MGL's linker captures no subroutines, so every program has zero of them.
-// These answer as a program with none would, rather than pretending to work.
 
 bool validShaderType(GLenum shadertype)
 {
@@ -5598,9 +5681,22 @@ GLint mglGetSubroutineUniformLocation(GLMContext ctx, GLuint program, GLenum sha
     return si ? subroutineLocationOf(si, name) : -1;
 }
 
+// The program whose subroutine state a call means: the current program, or
+// with only a pipeline bound, the pipeline's program for that stage
+static Program *subroutineProgram(GLMContext ctx, GLenum shadertype)
+{
+    if (ctx->state.program)
+        return ctx->state.program;
+
+    if (ctx->state.program_pipeline && validShaderType(shadertype))
+        return ctx->state.program_pipeline->stage_programs[glShaderTypeToGLMType(shadertype)];
+
+    return NULL;
+}
+
 void mglGetUniformSubroutineuiv(GLMContext ctx, GLenum shadertype, GLint location, GLuint *params)
 {
-    Program *pptr = ctx->state.program;
+    Program *pptr = subroutineProgram(ctx, shadertype);
     SubroutineInfo *si;
     int stage;
 
@@ -5623,7 +5719,7 @@ void mglGetUniformSubroutineuiv(GLMContext ctx, GLenum shadertype, GLint locatio
 
 void mglUniformSubroutinesuiv(GLMContext ctx, GLenum shadertype, GLsizei count, const GLuint *indices)
 {
-    Program *pptr = ctx->state.program;
+    Program *pptr = subroutineProgram(ctx, shadertype);
     SubroutineInfo *si;
     int stage;
     GLuint locations;
@@ -5665,27 +5761,72 @@ void mglUniformSubroutinesuiv(GLMContext ctx, GLenum shadertype, GLsizei count, 
     }
 
     for (GLsizei i = 0; i < count; i++)
+        pptr->subroutine_values[stage][i] = indices[i];
+
+    mglWriteSubroutineSelectors(ctx, pptr, si, stage, pptr->subroutine_values[stage], (GLuint)count);
+}
+
+// GL 4.6 section 7.9: linking a program, or making it current, sets every
+// subroutine uniform to some compatible function. Each gets the first one.
+void mglResetSubroutines(GLMContext ctx, Program *pptr)
+{
+    for (int stage = 0; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SubroutineInfo *si = &pptr->subroutines[stage];
+        GLuint n = si->uniform_count ? subroutineLocationCount(si) : 0;
+
+        if (n == 0)
+            continue;
+
+        if (pptr->subroutine_values[stage] == NULL)
+            pptr->subroutine_values[stage] = (GLuint *)calloc(n, sizeof(GLuint));
+
+        if (pptr->subroutine_values[stage] == NULL)
+            continue;
+
+        for (GLuint i = 0; i < n; i++)
+        {
+            GLuint element = 0;
+            int u = subroutineUniformAt(si, i, &element);
+
+            for (GLuint f = 0; u >= 0 && f < si->fn_count; f++)
+                if (!si->uniform_type || !si->fn_types || mglSubroutineCompatible(si, (GLuint)u, f))
+                {
+                    pptr->subroutine_values[stage][i] = si->fn_index ? si->fn_index[f] : f;
+                    break;
+                }
+        }
+
+        mglWriteSubroutineSelectors(ctx, pptr, si, stage, pptr->subroutine_values[stage], n);
+    }
+}
+
+// Writes each selection into the selector uniform the rewrite gave the stage.
+// `to` may be another program built from the same stage, such as the one a
+// pipeline draws with.
+void mglWriteSubroutineSelectors(GLMContext ctx, Program *to, const SubroutineInfo *si, int stage,
+                                 const GLuint *values, GLuint count)
+{
+    for (GLuint i = 0; si && values && i < count; i++)
     {
         GLuint element = 0;
-        int u = subroutineUniformAt(si, (GLuint)i, &element);
+        int u = subroutineUniformAt(si, i, &element);
         char sel[128];
         GLint loc;
-
-        pptr->subroutine_values[stage][i] = indices[i];
 
         if (u < 0)
             continue;
 
-        snprintf(sel, sizeof(sel), "%s%s", si->uniform_names[u], MGL_SUBROUTINE_SUFFIX);
+        snprintf(sel, sizeof(sel), "%s%s%d", si->uniform_names[u], MGL_SUBROUTINE_SUFFIX, stage);
 
-        loc = mglGetUniformLocation(ctx, pptr->name, sel);
+        loc = mglGetUniformLocation(ctx, to->name, sel);
 
         if (loc >= 0)
         {
-            GLint v = (GLint)indices[i];
+            GLint v = (GLint)values[i];
 
             ctx->uniform_setter = 0;
-            programUniformWrite(ctx, pptr, loc + (GLint)element, &v, sizeof(GLint));
+            programUniformWrite(ctx, to, loc + (GLint)element, &v, sizeof(GLint));
         }
     }
 }

@@ -760,7 +760,9 @@ static char *normalizeFrontEnd(const char *src, GLenum type)
         for (size_t k = 0; k < sizeof(core_names) / sizeof(core_names[0]); k++)
             if (memmem(p, (size_t)(e - p), core_names[k], strlen(core_names[k])))
             {
-                if (k == 2)
+                // arrays of arrays and textureQueryLevels are only in
+                // glslang's core from 4.30
+                if (k == 1 || k == 2)
                     wants_430 = true;
 
                 memset(p, ' ', (size_t)(e - p));
@@ -788,6 +790,51 @@ static char *normalizeFrontEnd(const char *src, GLenum type)
                 atoi(num) < 430)
             {
                 memcpy(num, "430", 3);
+                changed = true;
+            }
+        }
+    }
+
+    // Below 4.10 a gl_PerVertex redeclaration needs separate shader objects,
+    // and below 4.20 a binding on a counter, image or storage block comes with
+    // the extension that added it. glslang wants those named; drivers do not.
+    {
+        int ver = 0;
+        char *v = strstr(out, "#version");
+        const char *add[2] = { NULL, NULL };
+        int na = 0;
+
+        if (v)
+            sscanf(v, "#version %d", &ver);
+
+        if (ver && ver < 410 && strstr(out, "gl_PerVertex") && !strstr(out, "GL_ARB_separate_shader_objects"))
+            add[na++] = "#extension GL_ARB_separate_shader_objects : enable\n";
+
+        if (ver && ver < 420 && !strstr(out, "GL_ARB_shading_language_420pack") &&
+            (strstr(out, "GL_ARB_shader_atomic_counters") || strstr(out, "GL_ARB_shader_image_load_store") ||
+             strstr(out, "GL_ARB_shader_storage_buffer_object")))
+            add[na++] = "#extension GL_ARB_shading_language_420pack : enable\n";
+
+        char *nl = v ? strchr(v, '\n') : NULL;
+
+        if (na && nl)
+        {
+            size_t head = (size_t)(nl + 1 - out), extra = 0;
+
+            for (int k = 0; k < na; k++)
+                extra += strlen(add[k]);
+
+            char *grown = (char *)malloc(strlen(out) + extra + 1);
+
+            if (grown)
+            {
+                memcpy(grown, out, head);
+                grown[head] = 0;
+                for (int k = 0; k < na; k++)
+                    strcat(grown, add[k]);
+                strcat(grown, out + head);
+                free(out);
+                out = grown;
                 changed = true;
             }
         }
@@ -1866,7 +1913,7 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
 
     // glslang will not take the subroutine keyword when it targets SPIR-V, so
     // the source is rewritten into plain GLSL before it ever sees it.
-    char *desub = mglRewriteSubroutines(front, &ptr->subroutines);
+    char *desub = mglRewriteSubroutines(front, &ptr->subroutines, (int)ptr->glm_type);
 
     if (ptr->subroutines.error)
     {
@@ -2308,25 +2355,111 @@ void mglShaderBinary(GLMContext ctx, GLsizei count, const GLuint *shaders, GLenu
     }
 }
 
+Program *findProgram(GLMContext ctx, GLuint program);
+
+// The SPIR-V execution model a GL shader type runs as
+static int spirvModelFor(GLenum type)
+{
+    switch (type)
+    {
+        case GL_VERTEX_SHADER:          return 0;
+        case GL_TESS_CONTROL_SHADER:    return 1;
+        case GL_TESS_EVALUATION_SHADER: return 2;
+        case GL_GEOMETRY_SHADER:        return 3;
+        case GL_FRAGMENT_SHADER:        return 4;
+        case GL_COMPUTE_SHADER:         return 5;
+    }
+    return -1;
+}
+
+// Walks a SPIR-V module one instruction at a time. Returns false at the end
+// or on a malformed length.
+static bool spirvNext(const uint32_t *w, size_t n, size_t *at, uint32_t *op, uint32_t *len)
+{
+    if (*at >= n)
+        return false;
+
+    *op = w[*at] & 0xffff;
+    *len = w[*at] >> 16;
+
+    return *len > 0 && *at + *len <= n;
+}
+
+// does the module have an entry point of this name for this stage
+static bool spirvHasEntryPoint(const uint32_t *w, size_t n, const char *name, int model)
+{
+    uint32_t op, len;
+
+    for (size_t at = 5; spirvNext(w, n, &at, &op, &len); at += len)
+    {
+        // OpEntryPoint: model, function id, then the name
+        if (op == 15 && len > 3 && (int)w[at + 1] == model &&
+            strncmp((const char *)&w[at + 3], name, (len - 3) * 4) == 0 &&
+            strlen(name) < (len - 3) * 4)
+            return true;
+    }
+
+    return false;
+}
+
+// the id a SpecId decoration names, or 0 for none
+static uint32_t spirvSpecConstant(const uint32_t *w, size_t n, GLuint spec_id)
+{
+    uint32_t op, len;
+
+    for (size_t at = 5; spirvNext(w, n, &at, &op, &len); at += len)
+        if (op == 71 && len >= 4 && w[at + 2] == 1 && w[at + 3] == spec_id)   // OpDecorate SpecId
+            return w[at + 1];
+
+    return 0;
+}
+
+// gives the specialization constant with this id a new default
+static void spirvSetSpecConstant(uint32_t *w, size_t n, uint32_t id, GLuint value)
+{
+    uint32_t op, len;
+
+    for (size_t at = 5; spirvNext(w, n, &at, &op, &len); at += len)
+    {
+        if ((op == 48 || op == 49) && len >= 3 && w[at + 2] == id)           // OpSpecConstantTrue / False
+            w[at] = (len << 16) | (value ? 48u : 49u);
+        else if (op == 50 && len >= 4 && w[at + 2] == id)                    // OpSpecConstant
+            w[at + 3] = value;
+    }
+}
+
 void mglSpecializeShader(GLMContext ctx, GLuint shader, const GLchar *pEntryPoint, GLuint numSpecializationConstants, const GLuint *pConstantIndex, const GLuint *pConstantValue)
 {
     Shader *ptr = findShader(ctx, shader);
     char *ep;
 
+    // a program's name is the wrong kind of object rather than no object
+    ERROR_CHECK_RETURN(ptr || findProgram(ctx, shader) == NULL, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(ptr, GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(ptr->spirv_binary, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(ptr->specialized == GL_FALSE, GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(numSpecializationConstants == 0 ||
                        (pConstantIndex && pConstantValue), GL_INVALID_VALUE);
 
-    ep = strdup(pEntryPoint ? pEntryPoint : "main");
+    uint32_t *words = (uint32_t *)ptr->spirv_binary;
+    size_t n = (size_t)ptr->spirv_binary_length / 4;
+    const char *name = pEntryPoint ? pEntryPoint : "main";
+
+    ERROR_CHECK_RETURN(spirvHasEntryPoint(words, n, name, spirvModelFor(ptr->type)), GL_INVALID_VALUE);
+
+    for (GLuint i = 0; i < numSpecializationConstants; i++)
+        ERROR_CHECK_RETURN(spirvSpecConstant(words, n, pConstantIndex[i]) != 0, GL_INVALID_VALUE);
+
+    for (GLuint i = 0; i < numSpecializationConstants; i++)
+        spirvSetSpecConstant(words, n, spirvSpecConstant(words, n, pConstantIndex[i]), pConstantValue[i]);
+
+    ep = strdup(name);
     ERROR_CHECK_RETURN(ep, GL_OUT_OF_MEMORY);
 
     free((void *)ptr->entry_point);
     ptr->entry_point = ep;
     ptr->specialized = GL_TRUE;
 
-    // specialization constants are not rewritten yet; the module is used as is
     free(ptr->log);
     ptr->log = NULL;
 }

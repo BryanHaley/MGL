@@ -529,7 +529,13 @@ extern "C" int mglCountAtomicCounters(const unsigned int *words, size_t count)
         if (op == 43 && wc >= 4)                                    // OpConstant
             constValue[words[i + 2]] = words[i + 3];
         else if (op == 28 && wc >= 4)                               // OpTypeArray
-            arrayLength[words[i + 1]] = constValue.count(words[i + 3]) ? constValue[words[i + 3]] : 1;
+        {
+            // an array of arrays holds every inner element
+            uint32_t n = constValue.count(words[i + 3]) ? constValue[words[i + 3]] : 1;
+            uint32_t inner = arrayLength.count(words[i + 2]) ? arrayLength[words[i + 2]] : 1;
+
+            arrayLength[words[i + 1]] = n * inner;
+        }
         else if (op == 32 && wc >= 4 && words[i + 2] == 10)         // pointer to AtomicCounter
             counterPtr[words[i + 1]] = words[i + 3];
         else if (op == 59 && wc >= 4 && words[i + 3] == 10)         // OpVariable in AtomicCounter

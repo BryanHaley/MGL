@@ -45,7 +45,13 @@ static bool drawCentre(GLuint prog, unsigned char c[4])
     glClear(GL_COLOR_BUFFER_BIT);
 
     vao = mgl_fullscreen_quad(&vbo);
-    glUseProgram(prog);
+
+    // glUseProgram resets subroutine choices, so only when it is not current
+    GLint current = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+    if ((GLuint)current != prog)
+        glUseProgram(prog);
+
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
     px = mgl_read_rgba8(&t);

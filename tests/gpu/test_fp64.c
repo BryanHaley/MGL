@@ -7,6 +7,9 @@
  */
 
 #include <string.h>
+#include <math.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 #include "mgl_test.h"
 #include "harness.h"
@@ -412,4 +415,270 @@ GPU_TEST(fp64, double_vertex_attributes_arrive_whole)
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(3, bufs);
     mgl_target_destroy(&t);
+}
+
+// One double built-in on a dvec2 uniform, read back as a double
+static double run_uniform(const char *expr, double a, double b)
+{
+    char src[1024];
+    GLuint prog, ssbo = 0;
+    double got = -12345.0;
+
+    snprintf(src, sizeof src,
+             "#version 460 core\nlayout(local_size_x = 1) in;\n"
+             "layout(std430, binding = 0) buffer Out { double r; };\n"
+             "uniform dvec2 u;\nvoid main() { r = %s; }\n", expr);
+    prog = compute_program(src);
+    if (!prog)
+        return got;
+
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof got, &got, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+    glUseProgram(prog);
+    glUniform2d(glGetUniformLocation(prog, "u"), a, b);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof got, &got);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &ssbo);
+    glDeleteProgram(prog);
+
+    return got;
+}
+
+// Values that came back wrong in the conformance suite, which picks fresh
+// random arguments on every run -- so the failures looked like a flake.
+GPU_TEST(fp64, builtins_hold_for_the_values_that_failed)
+{
+    static const struct { const char *expr; double a, b; } cases[] = {
+        { "normalize(u).x", 219.5, 219.625 },
+        { "normalize(u).y", -324.5, -324.375 },
+        { "normalize(u).x", 37.5, 37.625 },
+        { "sqrt(u).x", 89.5, 89.625 },
+        { "inversesqrt(u).y", 428.5, 428.625 },
+        { "mod(u.x, u.y)", -15.5, -11.5 },
+        { "length(u)", -372.5, -372.375 },
+    };
+
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++)
+    {
+        double a = cases[i].a, b = cases[i].b, len = sqrt(a * a + b * b), want;
+
+        switch (i)
+        {
+            case 0: case 2: want = a / len; break;
+            case 1: want = b / len; break;
+            case 3: want = sqrt(a); break;
+            case 4: want = 1.0 / sqrt(b); break;
+            case 5: want = a - b * floor(a / b); break;
+            default: want = len; break;
+        }
+
+        double got = run_uniform(cases[i].expr, a, b);
+
+        CHECK_MSG(fabs(got - want) <= 1e-9 * (fabs(want) + 1.0), "%s of (%g, %g): got %.12g, want %.12g",
+                  cases[i].expr, a, b, got, want);
+    }
+}
+
+// The same values through a vertex stage and transform feedback, the way the
+// conformance suite runs them
+static double run_vertex(const char *expr, double a, double b)
+{
+    static const char *FS = "#version 400 core\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    const char *varying = "result_0";
+    char vs[512];
+    GLuint vao, xfb, prog = glCreateProgram(), s[2];
+    double got[2] = { -12345.0, -12345.0 };
+
+    snprintf(vs, sizeof vs, "#version 400 core\nuniform dvec2 u;\nflat out dvec2 result_0;\n"
+             "void main() { result_0 = dvec2(%s); }\n", expr);
+
+    const char *src[2] = { vs, FS };
+    GLenum kinds[2] = { GL_VERTEX_SHADER, GL_FRAGMENT_SHADER };
+
+    for (int i = 0; i < 2; i++)
+    {
+        s[i] = glCreateShader(kinds[i]);
+        glShaderSource(s[i], 1, &src[i], NULL);
+        glCompileShader(s[i]);
+        glAttachShader(prog, s[i]);
+    }
+    glTransformFeedbackVaryings(prog, 1, &varying, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &xfb);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, xfb);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof got, got, GL_DYNAMIC_COPY);
+    glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, xfb, 0, sizeof got);
+    glUseProgram(prog);
+    glUniform2d(glGetUniformLocation(prog, "u"), a, b);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+
+    double *m = (double *)glMapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, GL_READ_ONLY);
+    if (m)
+        memcpy(got, m, sizeof got);
+    glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
+
+    glUseProgram(0);
+    for (int i = 0; i < 2; i++)
+        glDeleteShader(s[i]);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &xfb);
+    glDeleteVertexArrays(1, &vao);
+
+    return got[0];
+}
+
+GPU_TEST(fp64, vertex_builtins_hold_for_the_values_that_failed)
+{
+    double a = 219.5, b = 219.625, len = sqrt(a * a + b * b);
+    double got;
+
+    got = run_vertex("normalize(u).x", a, b);
+    CHECK_MSG(fabs(got - a / len) <= 1e-9, "normalize: got %.12g, want %.12g", got, a / len);
+    got = run_vertex("length(u)", a, b);
+    CHECK_MSG(fabs(got - len) <= 1e-9 * len, "length: got %.12g, want %.12g", got, len);
+    got = run_vertex("sqrt(u).x", 89.5, 89.625);
+    CHECK_MSG(fabs(got - sqrt(89.5)) <= 1e-9 * 10, "sqrt: got %.12g, want %.12g", got, sqrt(89.5));
+    got = run_vertex("mod(u.x, u.y)", -15.5, -11.5);
+    CHECK_MSG(fabs(got + 4.0) <= 1e-9, "mod: got %.12g, want -4", got);
+}
+
+// The conformance suite's own loop: one program, a new feedback buffer and a
+// new value before every draw, the arguments it uses. About one draw in 600
+// came back wrong, a different one each run: adding two emulated doubles read
+// one element past a three-float array, and the compiler took that as licence
+// to drop the bounds check, so the merge sometimes used stack garbage.
+GPU_TEST(fp64, one_program_many_draws_with_new_values)
+{
+    static const char *VS = "#version 400 core\nuniform dvec2 u;\nflat out dvec2 result_0;\n"
+                            "void main() { result_0 = normalize(u); }\n";
+    static const char *FS = "#version 400 core\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    const char *varying = "result_0";
+    GLuint vao, xfb, prog = glCreateProgram(), s[2];
+    const char *src[2] = { VS, FS };
+    GLenum kinds[2] = { GL_VERTEX_SHADER, GL_FRAGMENT_SHADER };
+    int wrong = 0;
+
+    for (int i = 0; i < 2; i++)
+    {
+        s[i] = glCreateShader(kinds[i]);
+        glShaderSource(s[i], 1, &src[i], NULL);
+        glCompileShader(s[i]);
+        glAttachShader(prog, s[i]);
+    }
+    glTransformFeedbackVaryings(prog, 1, &varying, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &xfb);
+    glUseProgram(prog);
+    glEnable(GL_RASTERIZER_DISCARD);
+
+    for (int v = 0; v < 4096; v++)
+    {
+        double a = -511.5 + (v % 1024), b = a + 0.125;
+        double zero[2] = { 0, 0 }, got[2] = { 0, 0 }, len = sqrt(a * a + b * b);
+
+        glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, xfb);
+        glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof zero, zero, GL_DYNAMIC_COPY);
+        glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, xfb, 0, sizeof zero);
+        glBindVertexArray(vao);
+        glUniform2dv(glGetUniformLocation(prog, "u"), 1, (const double[]){ a, b });
+
+        glBeginTransformFeedback(GL_POINTS);
+        glDrawArrays(GL_POINTS, 0, 1);
+        glEndTransformFeedback();
+
+        glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, xfb);
+        double *m = (double *)glMapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, GL_READ_ONLY);
+        if (m)
+            memcpy(got, m, sizeof got);
+        glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
+
+        if (fabs(got[0] - a / len) > 1e-9 || fabs(got[1] - b / len) > 1e-9)
+        {
+            if (wrong++ == 0)
+                fprintf(stderr, "draw %d (%g, %g): got (%.9g, %.9g) want (%.9g, %.9g)\n",
+                        v, a, b, got[0], got[1], a / len, b / len);
+        }
+    }
+
+    CHECK_MSG(wrong == 0, "%d of 4096 draws wrong", wrong);
+
+    glDisable(GL_RASTERIZER_DISCARD);
+    glUseProgram(0);
+    for (int i = 0; i < 2; i++)
+        glDeleteShader(s[i]);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &xfb);
+    glDeleteVertexArrays(1, &vao);
+}
+
+// Long chains of emulated arithmetic, thousands of dispatches, each checked
+// as a double. Apple's compiler sometimes made the helpers real calls with a
+// thread array passed by reference, and then some dispatches -- different ones
+// in each process -- lost the low parts or never stored a result.
+static int chain_errors(const char *expr, double (*want)(double))
+{
+    char src[512];
+    GLuint prog, ssbo;
+    static double out[8192];
+    int wrong = 0;
+
+    snprintf(src, sizeof src, "#version 460 core\nlayout(local_size_x = 1) in;\n"
+             "layout(std430, binding = 0) buffer Out { double r[]; };\n"
+             "uniform double u;\nuniform int slot;\nvoid main() { r[slot] = %s; }\n", expr);
+    prog = compute_program(src);
+    if (!prog)
+        return -1;
+
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof out, NULL, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+    glUseProgram(prog);
+
+    for (int v = 0; v < 8192; v++)
+    {
+        glUniform1d(glGetUniformLocation(prog, "u"), (double)(v % 1024) + 0.5);
+        glUniform1i(glGetUniformLocation(prog, "slot"), v);
+        glDispatchCompute(1, 1, 1);
+    }
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+
+    for (int v = 0; v < 8192; v++)
+    {
+        double w = want((double)(v % 1024) + 0.5);
+
+        if (fabs(out[v] - w) > 1e-9 * fabs(w))
+            wrong++;
+    }
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &ssbo);
+    glDeleteProgram(prog);
+
+    return wrong;
+}
+
+static double want_pow6(double x) { return x * x * x * x * x * x; }
+static double want_inv(double x) { return 1.0 / x; }
+static double want_sqrt(double x) { return sqrt(x); }
+
+GPU_TEST(fp64, long_chains_stay_exact_over_many_dispatches)
+{
+    CHECK_EQ_INT(chain_errors("u * u * u * u * u * u", want_pow6), 0);
+    CHECK_EQ_INT(chain_errors("1.0LF / u", want_inv), 0);
+    CHECK_EQ_INT(chain_errors("sqrt(u)", want_sqrt), 0);
 }

@@ -551,8 +551,11 @@ static GLboolean decode_native(const GLubyte *p, MGLNativeFormat fmt, MGLTexel *
             t->f[0] = rdf(p);
             return GL_TRUE;
 
+        // stencil is component 1 everywhere, as in the combined formats
         case MGL_NF_STENCIL8:
-            t->u[0] = p[0];
+            t->u[1] = p[0];
+            t->i[1] = p[0];
+            t->f[1] = (GLfloat)p[0];
             t->is_uint = GL_TRUE;
             return GL_TRUE;
 

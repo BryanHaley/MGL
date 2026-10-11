@@ -294,7 +294,7 @@ GPU_TEST(texture_query, texture_level_parameter_dsa)
     GLint iv = 0;
 
     glCreateTextures(GL_TEXTURE_2D, 1, &tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 32, 32);
+    glTextureStorage2D(tex, 1, GL_RGBA8, 32, 32);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     glGetTextureLevelParameteriv(tex, 0, GL_TEXTURE_WIDTH, &iv);
@@ -306,8 +306,9 @@ GPU_TEST(texture_query, texture_level_parameter_dsa)
     glGetTextureLevelParameteriv(tex, 0, GL_TEXTURE_INTERNAL_FORMAT, &iv);
     CHECK_EQ_INT(iv, GL_RGBA8);
 
-    glGetTextureLevelParameterfv(tex, 0, GL_TEXTURE_WIDTH, (GLfloat[]){ -1 });
-    CHECK_NEAR(*(GLfloat[]){ -1 }, 32.0f, 1e-5f);
+    GLfloat fw = -1;
+    glGetTextureLevelParameterfv(tex, 0, GL_TEXTURE_WIDTH, &fw);
+    CHECK_NEAR(fw, 32.0f, 1e-5f);
 
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
@@ -324,7 +325,7 @@ GPU_TEST(texture_query, texture_level_parameter_dsa_missing_validation)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 
     glCreateTextures(GL_TEXTURE_2D, 1, &tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 8);
+    glTextureStorage2D(tex, 1, GL_RGBA8, 8, 8);
 
     /* Invalid pname — should be GL_INVALID_ENUM but is silently ignored */
     glGetTextureLevelParameteriv(tex, 0, 0xFFFF, &iv);
@@ -342,7 +343,7 @@ GPU_TEST(texture_query, texture_parameter_dsa_stubs)
     GLfloat fv = -1.0f;
 
     glCreateTextures(GL_TEXTURE_2D, 1, &tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 8);
+    glTextureStorage2D(tex, 1, GL_RGBA8, 8, 8);
 
     /* These are stubs that always return 0. A correct implementation
      * would read the actual stored parameter value. */
@@ -599,7 +600,7 @@ GPU_TEST(texture_query, texture_level_parameter_fv_dsa)
     GLfloat fv = -1.0f;
 
     glCreateTextures(GL_TEXTURE_2D, 1, &tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 16, 16);
+    glTextureStorage2D(tex, 1, GL_RGBA8, 16, 16);
 
     glGetTextureLevelParameterfv(tex, 0, GL_TEXTURE_INTERNAL_FORMAT, &fv);
     CHECK_NEAR(fv, (GLfloat)GL_RGBA8, 1e-5f);

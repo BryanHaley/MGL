@@ -747,6 +747,11 @@ bool mglTextureSamplingComplete(Texture *tex, const TextureParameter *sampler)
     if (base >= tex->mipmap_levels || tex->faces[0].levels == NULL)
         return false;
 
+    // a level given the wrong size anywhere in the chain sampling reads
+    if (tex->mismatched_levels && minf != GL_NEAREST && minf != GL_LINEAR &&
+        (tex->mismatched_levels >> (base + 1)) != 0)
+        return false;
+
     const TextureLevel *b = &tex->faces[0].levels[base];
 
     if (!b->complete || b->width == 0)
@@ -1227,6 +1232,7 @@ void invalidateTexture(GLMContext ctx, Texture *tex)
 void initBaseTexLevel(GLMContext ctx, Texture *tex, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth)
 {
     tex->mipmapped = 0;
+    tex->mismatched_levels = 0;
     tex->mipmap_levels = ilog2(MAX(width, height)) + 1;
 
     for(int face=0; face<_CUBE_MAP_MAX_FACE; face++)
@@ -2128,6 +2134,31 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
             if (internalformat)
                 internalformat = mglFormatSizedForBase(internalformat);
 
+            // A level of the wrong size is legal and makes the texture
+            // incomplete. The storage keeps the chain's shape, so the level is
+            // only noted, not stored.
+            if ((GLuint)level < tex->mipmap_levels && level < 32 && !proxy &&
+                (internalformat == 0 || internalformat == (GLint)tex->internalformat))
+            {
+                bool layers_h = tex->target == GL_TEXTURE_1D_ARRAY;
+                bool layers_d = tex->target == GL_TEXTURE_2D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY;
+                GLsizei ew = (GLsizei)MAX(1u, tex->width >> level);
+                GLsizei eh = layers_h ? (GLsizei)tex->height : (GLsizei)MAX(1u, tex->height >> level);
+                GLsizei ed = tex->target == GL_TEXTURE_3D ? (GLsizei)MAX(1u, tex->depth >> level) : depth;
+
+                if (layers_d)
+                    ed = (GLsizei)tex->depth;
+
+                if (width != ew || (tex->target != GL_TEXTURE_1D && height != eh) ||
+                    ((tex->target == GL_TEXTURE_3D || layers_d) && depth != ed))
+                {
+                    tex->mismatched_levels |= 1u << level;
+                    return true;
+                }
+
+                tex->mismatched_levels &= ~(1u << level);
+            }
+
             if (checkTexLevelParams(ctx, tex, level, internalformat, width, height, depth, format, type) == false)
                 ERROR_RETURN_VALUE(GL_INVALID_OPERATION, false);
         }
@@ -2970,21 +3001,27 @@ void texStorage(GLMContext ctx, Texture *tex, GLuint faces, GLsizei levels, GLbo
 
     for(int face=0; face<faces; face++)
     {
-        GLuint level_width, level_height;
+        GLuint level_width, level_height, level_depth;
 
         level_width = width;
         level_height = height;
+        level_depth = depth;
 
         for(int level=0; level<levels; level++)
         {
-            createTextureLevel(ctx, tex, face, level, is_array, internalformat, level_width, level_height, depth, 0, 0, NULL, proxy);
+            createTextureLevel(ctx, tex, face, level, is_array, internalformat, level_width, level_height, level_depth, 0, 0, NULL, proxy);
 
             level_width >>= 1;
             level_height >>= 1;
+
+            // a 3D texture's depth shrinks with the level; an array's layers do not
+            if (tex->target == GL_TEXTURE_3D)
+                level_depth >>= 1;
             
             // Mipmap dimensions must be at least 1
             if (level_width == 0) level_width = 1;
             if (level_height == 0) level_height = 1;
+            if (level_depth == 0) level_depth = 1;
         }
     }
 
@@ -4015,10 +4052,23 @@ static bool copyTexImageLevel(GLMContext ctx, Texture *tex, GLuint face, GLint l
 
     ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, false);
 
-    desc = mglFormatDesc(internalformat);
+    desc = mglFormatDesc(mglFormatSizedForBase(internalformat));
 
     ERROR_CHECK_RETURN_VALUE(desc->gl_format, GL_INVALID_ENUM, false);
     ERROR_CHECK_RETURN_VALUE(desc->kind != MGL_FMT_COMPRESSED, GL_INVALID_OPERATION, false);
+
+    // a depth or stencil copy needs that image in the framebuffer it reads,
+    // and a depth-stencil one both
+    Framebuffer *rfb = ctx->state.readbuffer;
+
+    if (rfb)
+    {
+        bool need_d = desc->kind == MGL_FMT_DEPTH || desc->kind == MGL_FMT_DEPTH_STENCIL;
+        bool need_s = desc->kind == MGL_FMT_STENCIL || desc->kind == MGL_FMT_DEPTH_STENCIL;
+
+        ERROR_CHECK_RETURN_VALUE(!need_d || rfb->depth.texture, GL_INVALID_OPERATION, false);
+        ERROR_CHECK_RETURN_VALUE(!need_s || rfb->stencil.texture, GL_INVALID_OPERATION, false);
+    }
     ERROR_CHECK_RETURN_VALUE(checkInternalFormatForMetal(ctx, internalformat), GL_INVALID_OPERATION, false);
 
     // an empty level, sized and formatted, for the blit to land in
@@ -4599,14 +4649,44 @@ void mglGetTextureSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xo
 
     ERROR_CHECK_RETURN(pixel_size, GL_INVALID_ENUM);
 
-    bytes_per_row = (size_t)width * pixel_size;
+    bytes_per_row = mglPixelStoreRowPitch(&ctx->state.pack, width, pixel_size);
+
+    // a 1D array's layers are its rows, one image each
+    bool rows_are_layers = tex->target == GL_TEXTURE_1D_ARRAY;
+    GLsizei images = rows_are_layers ? height : depth;
+    GLsizei rows = rows_are_layers ? 1 : height;
+    size_t image_bytes = bytes_per_row * (size_t)(rows ? rows : 1);
 
     ERROR_CHECK_RETURN(bufSize >= 0, GL_INVALID_VALUE);
-    ERROR_CHECK_RETURN(bytes_per_row * (height ? height : 1) * (depth ? depth : 1) <= (size_t)bufSize,
-                       GL_INVALID_OPERATION);
 
-    ctx->mtl_funcs.mtlGetTexImage(ctx, tex, pixels, (GLuint)bytes_per_row, format, type,
-                                  xoffset, yoffset, width, height, level, zoffset);
+    // with a pack buffer bound the pointer is an offset into it
+    if (STATE(buffers[_PIXEL_PACK_BUFFER]))
+    {
+        Buffer *pbo = STATE(buffers[_PIXEL_PACK_BUFFER]);
+        uintptr_t offset = (uintptr_t)pixels;
+
+        ERROR_CHECK_RETURN(pbo->mapped == GL_FALSE, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(pbo->data.buffer_data, GL_INVALID_OPERATION);
+        ERROR_CHECK_RETURN(offset + image_bytes * (size_t)images <= (uintptr_t)pbo->size, GL_INVALID_OPERATION);
+
+        pixels = (void *)((uint8_t *)(uintptr_t)pbo->data.buffer_data + offset);
+    }
+    else
+    {
+        ERROR_CHECK_RETURN(image_bytes * (size_t)images <= (size_t)bufSize, GL_INVALID_OPERATION);
+    }
+
+    if (width == 0 || height == 0 || depth == 0)
+        return;
+
+    for (GLsizei i = 0; i < images; i++)
+    {
+        GLint slice = rows_are_layers ? yoffset + i : zoffset + i;
+
+        ctx->mtl_funcs.mtlGetTexImage(ctx, tex, (uint8_t *)pixels + (size_t)i * image_bytes, (GLuint)bytes_per_row,
+                                      format, type, xoffset, rows_are_layers ? 0 : yoffset, width, rows,
+                                      level, (GLuint)slice);
+    }
 }
 
 // Hands back the stored blocks of a compressed level.

@@ -617,6 +617,11 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
         ERROR_RETURN(GL_INVALID_ENUM);
     }
 
+    // DEPTH_STENCIL with any type but the two packed ones is a bad enum,
+    // GL 4.6 section 18.2.2, not a mismatched pair
+    ERROR_CHECK_RETURN(format != GL_DEPTH_STENCIL || type == GL_UNSIGNED_INT_24_8 ||
+                       type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV, GL_INVALID_ENUM);
+
     // the read buffer decides which client formats are legal here -- except a
     // depth or stencil read, which comes from its own attachment and ignores
     // whichever colour buffer READ_BUFFER names

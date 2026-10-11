@@ -12,6 +12,8 @@
 #include "harness.h"
 #include "MGLContext.h"
 #include <string.h>
+#include <stdlib.h>
+#include <math.h>
 
 /* ---------- dispatch compute ---------- */
 
@@ -870,4 +872,199 @@ GPU_TEST(misc_core, a_failed_recompile_fails_the_link)
     glDeleteShader(fs);
     glDeleteProgram(prog);
     mgl_drain_errors();
+}
+
+/* ---------- glClipControl changes what is drawn ---------- */
+
+static const char *CLIP_VS =
+    "#version 450 core\n"
+    "layout(location = 0) in vec2 pos;\n"
+    "uniform float z;\n"
+    "uniform float lower;\n"
+    "void main() { gl_Position = vec4(pos.x, lower > 0.5 ? pos.y * 0.5 - 0.5 : pos.y, z, 1.0); }\n";
+static const char *CLIP_FS =
+    "#version 450 core\n"
+    "out vec4 c;\n"
+    "void main() { c = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+
+static GLfloat clipDepthAfter(GLuint prog, GLuint vao, GLenum mode, GLfloat z)
+{
+    GLfloat d = -1.0f;
+
+    glClipControl(GL_LOWER_LEFT, mode);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUniform1f(glGetUniformLocation(prog, "z"), z);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glReadPixels(4, 4, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
+    return d;
+}
+
+GPU_TEST(misc_core, clip_depth_mode_zero_to_one_keeps_z)
+{
+    MGLTestTarget t;
+    GLuint vbo, vao, prog;
+    char log[1024];
+
+    if (!mgl_target_create(&t, 8, 8, GL_RGBA8, 1)) { CHECK(0); return; }
+    prog = mgl_build_program(CLIP_VS, CLIP_FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "clip program did not build: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_ALWAYS);
+
+    GLfloat d = clipDepthAfter(prog, vao, GL_NEGATIVE_ONE_TO_ONE, 0.5f);
+    CHECK_MSG(fabsf(d - 0.75f) < 1e-3f, "-1..1: depth %g, want 0.75", d);
+
+    d = clipDepthAfter(prog, vao, GL_ZERO_TO_ONE, 0.5f);
+    CHECK_MSG(fabsf(d - 0.5f) < 1e-3f, "0..1: depth %g, want 0.5", d);
+
+    // below zero is outside the clip volume now, so nothing is drawn
+    d = clipDepthAfter(prog, vao, GL_ZERO_TO_ONE, -0.5f);
+    CHECK_MSG(fabsf(d - 1.0f) < 1e-3f, "0..1 at z -0.5: depth %g, want 1 (clipped)", d);
+
+    d = clipDepthAfter(prog, vao, GL_NEGATIVE_ONE_TO_ONE, -0.5f);
+    CHECK_MSG(fabsf(d - 0.25f) < 1e-3f, "back to -1..1: depth %g, want 0.25", d);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+GPU_TEST(misc_core, clip_origin_upper_left_turns_the_picture_over)
+{
+    MGLTestTarget t;
+    GLuint vbo, vao, prog;
+    unsigned char *px, top[4], bottom[4];
+    char log[1024];
+
+    if (!mgl_target_create(&t, 8, 8, GL_RGBA8, 0)) { CHECK(0); return; }
+    prog = mgl_build_program(CLIP_VS, CLIP_FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "clip program did not build: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glUniform1f(glGetUniformLocation(prog, "lower"), 1.0f);
+
+    // back faces are culled; flipping the origin must not make the quad one
+    glEnable(GL_CULL_FACE);
+
+    for (int upper = 0; upper < 2; upper++)
+    {
+        glClipControl(upper ? GL_UPPER_LEFT : GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        px = mgl_read_rgba8(&t);
+        mgl_pixel_at(px, &t, 4, 6, top);
+        mgl_pixel_at(px, &t, 4, 1, bottom);
+        free(px);
+
+        CHECK_MSG((upper ? top[1] : bottom[1]) == 255 && (upper ? bottom[1] : top[1]) == 0,
+                  "origin %s: top green %d, bottom green %d", upper ? "upper-left" : "lower-left",
+                  top[1], bottom[1]);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+/* ---------- polygon offset and polygon mode reach the draw ---------- */
+
+static GLfloat offsetDepth(GLuint prog, GLboolean on, GLfloat units, GLfloat clamp)
+{
+    GLfloat d = -1.0f;
+
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (on) glEnable(GL_POLYGON_OFFSET_FILL); else glDisable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffsetClamp(0.0f, units, clamp);
+    glUniform1f(glGetUniformLocation(prog, "z"), 0.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glReadPixels(4, 4, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
+    return d;
+}
+
+GPU_TEST(misc_core, polygon_offset_moves_depth)
+{
+    MGLTestTarget t;
+    GLuint vbo, vao, prog;
+    char log[1024];
+
+    if (!mgl_target_create(&t, 8, 8, GL_RGBA8, 1)) { CHECK(0); return; }
+    prog = mgl_build_program(CLIP_VS, CLIP_FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "offset program did not build: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_ALWAYS);
+
+    GLfloat ref = offsetDepth(prog, GL_FALSE, 0.0f, 0.0f);
+    GLfloat up = offsetDepth(prog, GL_TRUE, 5000.0f, 0.0f);
+    GLfloat down = offsetDepth(prog, GL_TRUE, -5000.0f, 0.0f);
+    GLfloat clamped = offsetDepth(prog, GL_TRUE, 5000.0f, 0.0001f);
+
+    CHECK_MSG(fabsf(ref - 0.5f) < 1e-3f, "no offset: depth %g, want 0.5", ref);
+    CHECK_MSG(up > ref + 1e-4f, "offset up: depth %g, reference %g", up, ref);
+    CHECK_MSG(down < ref - 1e-4f, "offset down: depth %g, reference %g", down, ref);
+    CHECK_MSG(clamped > ref && clamped < up, "clamped: depth %g, between %g and %g", clamped, ref, up);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+GPU_TEST(misc_core, polygon_mode_line_leaves_the_middle_empty)
+{
+    MGLTestTarget t;
+    GLuint vbo, vao, prog;
+    unsigned char *px, mid[4];
+    char log[1024];
+
+    if (!mgl_target_create(&t, 16, 16, GL_RGBA8, 0)) { CHECK(0); return; }
+    prog = mgl_build_program(CLIP_VS, CLIP_FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "line program did not build: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glUniform1f(glGetUniformLocation(prog, "lower"), 0.0f);
+
+    glPolygonMode(GL_FRONT, GL_LINE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_ENUM);
+
+    // a quad of two triangles shares a diagonal, so look off it
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    px = mgl_read_rgba8(&t);
+    mgl_pixel_at(px, &t, 11, 4, mid);
+    free(px);
+    CHECK_MSG(mid[1] == 0, "line mode filled the inside (green %d)", mid[1]);
+
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    px = mgl_read_rgba8(&t);
+    mgl_pixel_at(px, &t, 11, 4, mid);
+    free(px);
+    CHECK_MSG(mid[1] == 255, "fill mode left the inside empty (green %d)", mid[1]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
 }

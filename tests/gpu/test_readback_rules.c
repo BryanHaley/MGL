@@ -348,3 +348,131 @@ GPU_TEST(readback_rules, sub_image_reads_stay_inside_the_level)
 
     glDeleteTextures(4, tex);
 }
+
+// The depth-stencil error rules, GL 4.6 sections 8.4.4, 8.6 and 18.2
+GPU_TEST(readback_rules, depth_stencil_errors)
+{
+    static const GLenum types[] = {
+        GL_UNSIGNED_BYTE, GL_BYTE, GL_UNSIGNED_SHORT, GL_SHORT, GL_UNSIGNED_INT, GL_INT, GL_HALF_FLOAT, GL_FLOAT,
+        GL_UNSIGNED_SHORT_5_6_5, GL_UNSIGNED_SHORT_4_4_4_4, GL_UNSIGNED_SHORT_5_5_5_1, GL_UNSIGNED_INT_2_10_10_10_REV,
+        GL_UNSIGNED_INT_10F_11F_11F_REV, GL_UNSIGNED_INT_5_9_9_9_REV, GL_UNSIGNED_BYTE_3_3_2, GL_UNSIGNED_BYTE_2_3_3_REV,
+        GL_UNSIGNED_SHORT_5_6_5_REV, GL_UNSIGNED_SHORT_4_4_4_4_REV, GL_UNSIGNED_SHORT_1_5_5_5_REV,
+        GL_UNSIGNED_INT_8_8_8_8, GL_UNSIGNED_INT_8_8_8_8_REV, GL_UNSIGNED_INT_10_10_10_2 };
+    static const GLenum formats[] = {
+        GL_STENCIL_INDEX, GL_RED, GL_GREEN, GL_BLUE, GL_RG, GL_RGB, GL_RGBA, GL_BGR, GL_BGRA, GL_RED_INTEGER,
+        GL_GREEN_INTEGER, GL_BLUE_INTEGER, GL_RG_INTEGER, GL_RGB_INTEGER, GL_RGBA_INTEGER, GL_BGR_INTEGER, GL_BGRA_INTEGER };
+    static const GLenum others[] = { GL_RED, GL_RG, GL_RGB, GL_RGBA };
+    static GLfloat data[4 * 16 * 16];
+    GLuint ds, fb, color, tex;
+    GLenum e;
+
+    glGenTextures(1, &ds);
+    glBindTexture(GL_TEXTURE_2D, ds);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, 16, 16, 0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    mgl_drain_errors();
+
+    for (unsigned i = 0; i < sizeof types / sizeof types[0]; i++)
+    {
+        glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, types[i], data);
+        e = mgl_drain_errors();
+        CHECK_MSG(e == GL_INVALID_ENUM, "DEPTH_STENCIL with type %x gave %x", types[i], e);
+    }
+
+    for (unsigned i = 0; i < sizeof formats / sizeof formats[0]; i++)
+    {
+        glReadPixels(0, 0, 16, 16, formats[i], GL_UNSIGNED_INT_24_8, data);
+        e = mgl_drain_errors();
+        CHECK_MSG(e == GL_INVALID_OPERATION, "format %x with UNSIGNED_INT_24_8 gave %x", formats[i], e);
+    }
+
+    // only half of a packed image attached cannot be read as both
+    for (int i = 0; i < 2; i++)
+    {
+        GLuint f2;
+
+        glGenTextures(1, &color);
+        glBindTexture(GL_TEXTURE_2D, color);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glGenFramebuffers(1, &f2);
+        glBindFramebuffer(GL_FRAMEBUFFER, f2);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, i ? GL_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, ds, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+        glReadPixels(0, 0, 16, 16, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, data);
+        e = mgl_drain_errors();
+        CHECK_MSG(e == GL_INVALID_OPERATION, "only the %s half: gave %x", i ? "stencil" : "depth", e);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        glDeleteFramebuffers(1, &f2);
+        glDeleteTextures(1, &color);
+    }
+
+    // a colour texture read as depth, and depth uploads that name a colour format
+    for (unsigned i = 0; i < sizeof others / sizeof others[0]; i++)
+    {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, others[i], 16, 16, 0, others[i], GL_UNSIGNED_BYTE, NULL);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, data);
+        e = mgl_drain_errors();
+        CHECK_MSG(e == GL_INVALID_OPERATION, "GetTexImage DEPTH_COMPONENT of %x gave %x", others[i], e);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, data);
+        e = mgl_drain_errors();
+        CHECK_MSG(e == GL_INVALID_OPERATION, "GetTexImage DEPTH_STENCIL of %x gave %x", others[i], e);
+        glDeleteTextures(1, &tex);
+    }
+
+    for (unsigned j = 1; j < sizeof formats / sizeof formats[0]; j++)
+        for (int k = 0; k < 2; k++)
+        {
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, k ? GL_DEPTH_STENCIL : GL_DEPTH_COMPONENT, 16, 16, 0, formats[j],
+                         GL_UNSIGNED_BYTE, NULL);
+            e = mgl_drain_errors();
+            CHECK_MSG(e == GL_INVALID_OPERATION, "%s with format %x gave %x", k ? "DEPTH_STENCIL" : "DEPTH_COMPONENT",
+                      formats[j], e);
+            glDeleteTextures(1, &tex);
+        }
+
+    for (unsigned j = 0; j < sizeof others / sizeof others[0]; j++)
+        for (int k = 0; k < 2; k++)
+        {
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, others[j], 16, 16, 0, k ? GL_DEPTH_STENCIL : GL_DEPTH_COMPONENT,
+                         k ? GL_UNSIGNED_INT_24_8 : GL_UNSIGNED_BYTE, NULL);
+            e = mgl_drain_errors();
+            CHECK_MSG(e == GL_INVALID_OPERATION, "internal %x with %s gave %x", others[j],
+                      k ? "DEPTH_STENCIL" : "DEPTH_COMPONENT", e);
+            glDeleteTextures(1, &tex);
+        }
+
+    // copying DEPTH_STENCIL needs both halves in the framebuffer
+    for (int i = 0; i < 2; i++)
+    {
+        GLuint f2;
+
+        glGenFramebuffers(1, &f2);
+        glBindFramebuffer(GL_FRAMEBUFFER, f2);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, i ? GL_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, ds, 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_STENCIL, 0, 0, 16, 16, 0);
+        e = mgl_drain_errors();
+        CHECK_MSG(e == GL_INVALID_OPERATION || e == GL_INVALID_ENUM, "copy with only the %s half gave %x",
+                  i ? "stencil" : "depth", e);
+        glDeleteTextures(1, &tex);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &f2);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &ds);
+}

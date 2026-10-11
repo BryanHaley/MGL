@@ -236,13 +236,6 @@ static void tex_buffer_impl(GLMContext ctx, Texture *tex, GLenum internalformat,
     tex->height = 1;
     tex->depth  = 1;
 
-    /* clamp to the implementation limit */
-    GLint max_texels = STATE_VAR(max_texture_buffer_size);
-    if (max_texels > 0 && (GLint)tex->width > max_texels)
-    {
-        ERROR_RETURN(GL_INVALID_VALUE);
-    }
-
     /* Release any previous Metal buffer texture. The renderer creates the
        actual MTLTexture lazily when the texture is bound for drawing, at
        which point the buffer's MTLBuffer is guaranteed to exist. */
@@ -294,7 +287,14 @@ bool mglBufferTextureLevelParam(GLMContext ctx, const Texture *tex, GLenum pname
         case GL_TEXTURE_BUFFER_OFFSET:             *out = bound ? (GLint)offset : 0; return true;
         case GL_TEXTURE_BUFFER_SIZE:               *out = bound ? (GLint)size : 0; return true;
         case GL_TEXTURE_INTERNAL_FORMAT:           *out = (GLint)format; return true;
-        case GL_TEXTURE_WIDTH:                     *out = bound && texel ? (GLint)(size / texel) : 0; return true;
+        case GL_TEXTURE_WIDTH:
+        {
+            // a range past the limit is not an error; the texture just stops there
+            GLsizeiptr n = bound && texel ? size / (GLsizeiptr)texel : 0;
+            GLint max = STATE_VAR(max_texture_buffer_size);
+            *out = (GLint)(max > 0 && n > max ? max : n);
+            return true;
+        }
         case GL_TEXTURE_HEIGHT:
         case GL_TEXTURE_DEPTH:                     *out = bound ? 1 : 0; return true;
         case GL_TEXTURE_SAMPLES:                   *out = 0; return true;

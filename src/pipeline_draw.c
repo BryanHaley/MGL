@@ -315,6 +315,18 @@ static void copyStageState(GLMContext ctx, ProgramPipeline *pp, Program *merged)
                 copyUniform(ctx, from, (GLint)(r->location + e), merged, (GLint)(to->location + e), r->gl_type);
         }
 
+        // the stage's subroutine choices, which a program holding only a
+        // geometry stage keeps without any selector of its own to put them in
+        if (from->subroutine_values[s] && from->subroutines[s].uniform_count)
+        {
+            GLuint n = 0;
+
+            for (GLuint u = 0; u < from->subroutines[s].uniform_count; u++)
+                n += from->subroutines[s].uniform_array_size[u] ? from->subroutines[s].uniform_array_size[u] : 1;
+
+            mglWriteSubroutineSelectors(ctx, merged, &from->subroutines[s], s, from->subroutine_values[s], n);
+        }
+
         // block bindings, by name, for the blocks this stage uses
         static const GLenum ifaces[2] = { GL_UNIFORM_BLOCK, GL_SHADER_STORAGE_BLOCK };
         static const MglResourceKind kinds[2] = { MGL_RES_UNIFORM_BLOCK, MGL_RES_STORAGE_BLOCK };

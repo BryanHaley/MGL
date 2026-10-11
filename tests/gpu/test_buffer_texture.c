@@ -296,3 +296,80 @@ GPU_TEST(buffer_texture, whole_buffer_size_follows_new_storage)
     glDeleteTextures(1, &tex);
     glDeleteBuffers(1, &buf);
 }
+
+// a buffer longer than the limit still attaches; the texture is cut to the limit
+GPU_TEST(buffer_texture, a_buffer_past_the_limit_is_clamped)
+{
+    GLuint tex, buf;
+    GLint max = 0, w = -1, sz = -1;
+
+    glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &max);
+    CHECK(max > 0);
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_TEXTURE_BUFFER, buf);
+    glBufferData(GL_TEXTURE_BUFFER, (GLsizeiptr)max + 10, NULL, GL_STATIC_DRAW);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_BUFFER, tex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_R8I, buf);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetTexLevelParameteriv(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_WIDTH, &w);
+    glGetTexLevelParameteriv(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_BUFFER_SIZE, &sz);
+    CHECK_EQ_INT(w, max);
+    CHECK_EQ_INT(sz, max + 10);
+
+    glTexBufferRange(GL_TEXTURE_BUFFER, GL_R8I, buf, 0, (GLsizeiptr)max + 10);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glGetTexLevelParameteriv(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_WIDTH, &w);
+    CHECK_EQ_INT(w, max);
+
+    glDeleteTextures(1, &tex);
+    glDeleteBuffers(1, &buf);
+}
+
+// Metal has no three-channel texel buffer, so these read through a wider copy
+GPU_TEST(buffer_texture, an_rgb32_buffer_reads_three_channels_and_one)
+{
+    static const char *SZ =
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "uniform samplerBuffer tb;\n"
+        "layout(std430, binding = 0) buffer Out { vec4 got[2]; };\n"
+        "void main() { got[0] = texelFetch(tb, 1); got[1] = vec4(textureSize(tb), texelFetch(tb, 2).xyz); }\n";
+    static const GLfloat texels[12] = { 0, 0, 0,  1, 2, 3,  5, 6, 7,  9, 9, 9 };
+    GLuint prog, buf = 0, tex = 0;
+    GLfloat got[8];
+    char log[1024];
+
+    prog = mgl_build_compute_program(SZ, log, sizeof log);
+    CHECK_MSG(prog != 0, "buffer texture shader did not build: %s", log);
+
+    if (!prog) return;
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_TEXTURE_BUFFER, buf);
+    glBufferData(GL_TEXTURE_BUFFER, sizeof texels, texels, GL_STATIC_DRAW);
+
+    glGenTextures(1, &tex);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_BUFFER, tex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_RGB32F, buf);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    CHECK(fetchTwo(prog, got));
+    CHECK_MSG(got[0] == 1 && got[1] == 2 && got[2] == 3 && got[3] == 1,
+              "read %g %g %g %g, want 1 2 3 1", got[0], got[1], got[2], got[3]);
+    CHECK_MSG(got[4] == 4 && got[5] == 5 && got[7] == 7,
+              "size %g, texel 2 %g %g %g; want 4, 5 6 7", got[4], got[5], got[6], got[7]);
+
+    // new data in the buffer is what the next read sees
+    GLfloat nine[3] = { 8, 8, 8 };
+    glBufferSubData(GL_TEXTURE_BUFFER, 12, sizeof nine, nine);
+    CHECK(fetchTwo(prog, got));
+    CHECK_MSG(got[0] == 8 && got[2] == 8, "after update read %g %g, want 8 8", got[0], got[2]);
+
+    glDeleteTextures(1, &tex);
+    glDeleteBuffers(1, &buf);
+    glDeleteProgram(prog);
+}

@@ -928,8 +928,22 @@ GPU_TEST(misc_state, buffer_parameter_64_matches_32)
 /* ---------- ARB_gl_spirv and the remaining loose ends ---------- */
 
 // a minimal valid SPIR-V header; MGL only checks the magic and word alignment
+// an empty vertex shader with entry point "main" and one specialization
+// constant, an int with SpecId 7 and default 3
 static const GLuint SPIRV_STUB[] = {
-    0x07230203u, 0x00010000u, 0x00080001u, 0x00000001u, 0x00000000u
+    0x07230203u, 0x00010000u, 0x00000000u, 7u, 0u,
+    0x00020011u, 1u,                                   // OpCapability Shader
+    0x0003000Eu, 0u, 1u,                               // OpMemoryModel Logical GLSL450
+    0x0005000Fu, 0u, 1u, 0x6E69616Du, 0u,              // OpEntryPoint Vertex %1 "main"
+    0x00040047u, 5u, 1u, 7u,                           // OpDecorate %5 SpecId 7
+    0x00020013u, 2u,                                   // %2 = OpTypeVoid
+    0x00030021u, 3u, 2u,                               // %3 = OpTypeFunction %2
+    0x00040015u, 4u, 32u, 1u,                          // %4 = OpTypeInt 32 1
+    0x00040032u, 4u, 5u, 3u,                           // %5 = OpSpecConstant %4 3
+    0x00050036u, 2u, 1u, 0u, 3u,                       // %1 = OpFunction %2 None %3
+    0x000200F8u, 6u,                                   // OpLabel
+    0x000100FDu,                                       // OpReturn
+    0x00010038u,                                       // OpFunctionEnd
 };
 
 GPU_TEST(spirv, shader_binary_accepts_a_module)
@@ -997,6 +1011,32 @@ GPU_TEST(spirv, specialize_needs_a_binary_and_runs_once)
     glSpecializeShader(999123, "main", 0, NULL, NULL);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 
+    glDeleteShader(s);
+}
+
+// GL 4.6 section 7.2.1: the entry point and each constant have to be in the
+// module, and a program's name is the wrong kind of object
+GPU_TEST(spirv, specialize_checks_names_and_constants)
+{
+    GLuint s = glCreateShader(GL_VERTEX_SHADER);
+    GLuint p = glCreateProgram();
+    GLuint missing = 8, present = 7, value = 9;
+
+    glShaderBinary(1, &s, GL_SHADER_BINARY_FORMAT_SPIR_V, SPIRV_STUB, sizeof SPIRV_STUB);
+
+    glSpecializeShader(p, "main", 0, NULL, NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glSpecializeShader(s, "entry", 0, NULL, NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glSpecializeShader(s, "main", 1, &missing, &value);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glSpecializeShader(s, "main", 1, &present, &value);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(p);
     glDeleteShader(s);
 }
 

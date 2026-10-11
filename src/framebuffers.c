@@ -754,7 +754,7 @@ static void renderbufferStorage(GLMContext ctx, Renderbuffer *rbo, GLsizei sampl
 
     tex->access = GL_READ_WRITE;
     tex->is_render_target = true;
-    tex->samples = samples;
+    tex->samples = mglRoundSamples(samples);
 
     rbo->tex = tex;
     rbo->dirty_bits |= DIRTY_FBO_BINDING;

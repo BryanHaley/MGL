@@ -483,3 +483,34 @@ GPU_TEST(atomics, counter_layouts_follow_the_rules)
                                   "layout(binding = 2) uniform atomic_uint a;\n"
                                   "layout(binding = 2) uniform atomic_uint b;"), GL_TRUE);
 }
+
+// An array of arrays of counters counts every element against the stage limit
+GPU_TEST(atomics, an_array_of_arrays_counts_every_counter)
+{
+    static const char *VS =
+        "#version 430 core\n"
+        "void main() { gl_Position = vec4(0.0); }\n";
+    GLint max = 0;
+    char fs[512], log[1024];
+
+    glGetIntegerv(GL_MAX_FRAGMENT_ATOMIC_COUNTERS, &max);
+    CHECK(max >= 2);
+
+    for (int over = 0; over < 2; over++)
+    {
+        snprintf(fs, sizeof fs,
+                 "#version 430 core\n"
+                 "layout(location = 0) out uvec4 o;\n"
+                 "layout(binding = 0) uniform atomic_uint a[2][%d];\n"
+                 "void main() {\n"
+                 "  for (int i = 0; i < 2; i++) for (int j = 0; j < %d; j++) o.x += atomicCounterIncrement(a[i][j]);\n"
+                 "}\n", max / 2 + over, max / 2 + over);
+
+        GLuint p = mgl_build_program(VS, fs, log, sizeof log);
+
+        CHECK_MSG(over ? p == 0 : p != 0, "%d counters %s, limit %d", 2 * (max / 2 + over),
+                  p ? "built" : "did not build", max);
+        if (p) glDeleteProgram(p);
+    }
+    mgl_drain_errors();
+}

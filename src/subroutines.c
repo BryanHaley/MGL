@@ -196,6 +196,7 @@ typedef struct {
     SubFn      fns[MAX_SUB_FNS];           int fn_count;
     SubUniform uniforms[MAX_SUB_UNIFORMS]; int uniform_count;
     const char *error;
+    int stage;          // added to every selector's name: each stage has its own
 } Scan;
 
 // Names GLSL keeps for itself. The rewrite drops a subroutine type's name and
@@ -365,6 +366,84 @@ static void paramNames(const char *params, char *dst, size_t dstlen)
     }
 
     dst[out] = 0;
+}
+
+// The parameter list with a name given to any parameter that has none, so the
+// dispatcher can pass it on: "in vec2" -> "in vec2 mglp0".
+static void nameParams(const char *params, char *dst, size_t dstlen)
+{
+    static const char *quals[] = { "in", "out", "inout", "const", "highp", "mediump", "lowp",
+                                   "precise", "flat", "smooth", "noperspective", NULL };
+    size_t out = 0;
+    const char *p = params;
+    int index = 0;
+
+    dst[0] = 0;
+
+    if (skipSpace(params, 0) == strlen(params))
+        return;
+
+    while (*p)
+    {
+        const char *end = p;
+        int depth = 0, words = 0;
+
+        for (; *end; end++)
+        {
+            if (*end == '(' || *end == '[') depth++;
+            else if (*end == ')' || *end == ']') depth--;
+            else if (*end == ',' && depth == 0) break;
+        }
+
+        // count the words that are neither qualifiers nor inside brackets
+        depth = 0;
+        for (const char *q = p; q < end; )
+        {
+            if (*q == '[') { depth++; q++; continue; }
+            if (*q == ']') { depth--; q++; continue; }
+
+            if (depth == 0 && identChar(*q) && !isdigit((unsigned char)*q))
+            {
+                const char *w = q;
+                bool qual = false;
+
+                while (q < end && identChar(*q))
+                    q++;
+
+                for (int k = 0; quals[k]; k++)
+                    if ((size_t)(q - w) == strlen(quals[k]) && !strncmp(w, quals[k], (size_t)(q - w)))
+                        qual = true;
+
+                if (!qual)
+                    words++;
+                continue;
+            }
+            q++;
+        }
+
+        int n = snprintf(dst + out, dstlen - out, "%s%.*s%s", out ? "," : "", (int)(end - p), p, "");
+
+        if (n < 0 || (size_t)n >= dstlen - out)
+            return;
+        out += (size_t)n;
+
+        // only a type: the parameter has no name of its own
+        if (words == 1)
+        {
+            n = snprintf(dst + out, dstlen - out, " mglp%d", index);
+
+            if (n < 0 || (size_t)n >= dstlen - out)
+                return;
+            out += (size_t)n;
+        }
+
+        index++;
+
+        if (*end == 0)
+            break;
+
+        p = end + 1;
+    }
 }
 
 // A subroutine function may return void, in which case the wrapper has no
@@ -865,11 +944,11 @@ static bool scanAndStrip(const char *src, Scan *sc, Buf *out)
                 char decl[128];
 
                 if (dims > 0)
-                    snprintf(decl, sizeof(decl), "uniform int %s%s%s;",
-                             name, MGL_SUBROUTINE_SUFFIX, u->dims_text);
+                    snprintf(decl, sizeof(decl), "uniform int %s%s%d%s;",
+                             name, MGL_SUBROUTINE_SUFFIX, sc->stage, u->dims_text);
                 else
-                    snprintf(decl, sizeof(decl), "uniform int %s%s;",
-                             name, MGL_SUBROUTINE_SUFFIX);
+                    snprintf(decl, sizeof(decl), "uniform int %s%s%d;",
+                             name, MGL_SUBROUTINE_SUFFIX, sc->stage);
 
                 if (!bufAdd(out, decl))
                     return false;
@@ -1002,6 +1081,8 @@ static bool rewriteCalls(const char *src, Scan *sc, Buf *out)
 
         int hit = -1;
         size_t sel_start = 0, sel_end = 0, argopen = 0;
+        size_t length_end = 0;
+        int length_value = -1;
 
         for (int u = 0; u < sc->uniform_count; u++)
         {
@@ -1012,13 +1093,46 @@ static bool rewriteCalls(const char *src, Scan *sc, Buf *out)
 
             size_t k = skipSpace(src, i + strlen(su->name));
 
-            if (su->dims > 0 && src[k] == '[')
+            if (su->dims > 0 && (src[k] == '[' || src[k] == '.'))
             {
                 size_t close = k;
+                int d = 0;
 
                 // one [..] per dimension
-                for (int d = 0; d < su->dims && src[close] == '['; d++)
+                for (; d < su->dims && src[close] == '['; d++)
                     close = skipSpace(src, matchBracket(src, close));
+
+                // .length() of the array, or of an inner one, is its declared
+                // size -- a constant, so it is written in as one
+                if (src[close] == '.' && d < su->dims)
+                {
+                    size_t w = skipSpace(src, close + 1);
+
+                    if (wordAt(src, w, "length"))
+                    {
+                        size_t pa = skipSpace(src, w + 6);
+
+                        if (src[pa] == '(' && src[skipSpace(src, pa + 1)] == ')')
+                        {
+                            const char *dim = su->dims_text;
+
+                            for (int n = 0; n <= d && dim; n++)
+                            {
+                                dim = strchr(dim, '[');
+
+                                if (dim && n < d)
+                                    dim++;
+                            }
+
+                            if (dim)
+                            {
+                                length_value = atoi(dim + 1);
+                                length_end = skipSpace(src, pa + 1) + 1;
+                            }
+                            break;
+                        }
+                    }
+                }
 
                 if (src[close] != '(')
                 {
@@ -1046,6 +1160,20 @@ static bool rewriteCalls(const char *src, Scan *sc, Buf *out)
             break;
         }
 
+        if (length_value >= 0)
+        {
+            char num[32];
+
+            snprintf(num, sizeof(num), "%d", length_value);
+
+            if (!bufAddN(out, src + copied, i - copied) || !bufAdd(out, num))
+                return false;
+
+            i = length_end;
+            copied = i;
+            continue;
+        }
+
         if (hit < 0)
         {
             while (src[i] && identChar(src[i])) i++;
@@ -1060,7 +1188,7 @@ static bool rewriteCalls(const char *src, Scan *sc, Buf *out)
         if (!bufAddN(out, src + copied, i - copied))
             return false;
 
-        snprintf(open, sizeof(open), "%s(%s%s", su->name, su->name, MGL_SUBROUTINE_SUFFIX);
+        snprintf(open, sizeof(open), "%s(%s%s%d", su->name, su->name, MGL_SUBROUTINE_SUFFIX, sc->stage);
 
         if (!bufAdd(out, open))
             return false;
@@ -1108,7 +1236,7 @@ static bool insertPrototypes(const char *src, Scan *sc, Buf *out)
             char decl[128];
             const char *at;
 
-            snprintf(decl, sizeof(decl), "uniform int %s%s", sc->uniforms[u].name, MGL_SUBROUTINE_SUFFIX);
+            snprintf(decl, sizeof(decl), "uniform int %s%s%d", sc->uniforms[u].name, MGL_SUBROUTINE_SUFFIX, sc->stage);
             at = strstr(src + copied, decl);
 
             if (at && (which < 0 || (size_t)(at - src) < best))
@@ -1153,13 +1281,15 @@ static bool appendDispatchers(Scan *sc, Buf *out)
         SubUniform *su = &sc->uniforms[u];
         SubType *t = &sc->types[su->type];
         char args[256];
+        char named[512];
         char line[1024];
 
-        paramNames(t->params, args, sizeof(args));
+        nameParams(t->params, named, sizeof(named));
+        paramNames(named, args, sizeof(args));
 
         snprintf(line, sizeof(line), "\n%s %s(int %s%s%s)\n{\n  switch (%s) {\n",
                  t->ret, su->name, MGL_SUBROUTINE_INDEX,
-                 t->params[0] ? ", " : "", t->params, MGL_SUBROUTINE_INDEX);
+                 named[0] ? ", " : "", named, MGL_SUBROUTINE_INDEX);
 
         if (!bufAdd(out, line))
             return false;
@@ -1192,7 +1322,9 @@ static bool appendDispatchers(Scan *sc, Buf *out)
         if (returnsVoid(t->ret))
             snprintf(line, sizeof(line), "  }\n}\n");
         else
-            snprintf(line, sizeof(line), "  }\n  return %s(0);\n}\n", t->ret);
+            // a local rather than a constructor, which an array or struct
+            // return type does not take with a single 0
+            snprintf(line, sizeof(line), "  }\n  %s mglUnset;\n  return mglUnset;\n}\n", t->ret);
 
         if (!bufAdd(out, line))
             return false;
@@ -1307,7 +1439,7 @@ bool mglCopySubroutineInfo(SubroutineInfo *dst, const SubroutineInfo *src)
 // Rewrites GLSL that uses subroutines into GLSL that does not, and records
 // what it found so the GL queries can answer. Returns NULL when the source
 // has no subroutines, which is the common case and costs one strstr.
-char *mglRewriteSubroutines(const char *src, SubroutineInfo *info)
+char *mglRewriteSubroutines(const char *src, SubroutineInfo *info, int stage)
 {
     Scan sc;
     Buf stripped = {0}, arrays = {0}, final = {0};
@@ -1320,6 +1452,7 @@ char *mglRewriteSubroutines(const char *src, SubroutineInfo *info)
         return NULL;
 
     memset(&sc, 0, sizeof(sc));
+    sc.stage = stage;
 
     if (!scanAndStrip(src, &sc, &stripped))
         goto done;

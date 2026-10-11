@@ -1133,6 +1133,9 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                     buffer_map->buffers[buffer_map->count].layout_stride =
                         convert ? 16 : stride ? stride : ((extent + 3u) & ~3u);
                     buffer_map->buffers[buffer_map->count].converted = convert;
+                    // the slots the driver binds its own words into are skipped
+                    while (attrib_slot >= MGL_DRAW_ID_MSL_SLOT && attrib_slot <= MGL_BUFFER_SIZES_MSL_SLOT)
+                        attrib_slot++;
                     buffer_map->buffers[buffer_map->count].buffer_base_index = attrib_slot++;
                     buffer_map->count++;
 
@@ -1565,6 +1568,11 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
 }
 
 
+static bool isRGB32BufferFormat(GLenum f)
+{
+    return f == GL_RGB32F || f == GL_RGB32I || f == GL_RGB32UI;
+}
+
 // A buffer texture is not a texture with storage of its own: Metal makes a
 // view straight onto the MTLBuffer, so the shader reads the buffer's own bytes.
 - (id<MTLTexture>) createMTLBufferTexture:(Texture *) tex
@@ -1584,6 +1592,46 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     MTLPixelFormat fmt = mtlPixelFormatForGLTex(tex);
     const MGLFormatDesc *fd = mglFormatDesc(tex->internalformat);
 
+    // Metal has no three-channel texel buffers, so an RGB32 one reads from a
+    // four-channel copy, made again on every bind
+    if (isRGB32BufferFormat(tex->internalformat))
+    {
+        NSUInteger texels = (NSUInteger)size / 12;
+        GLint max = ctx->state.var.max_texture_buffer_size;
+
+        if (max > 0 && texels > (NSUInteger)max)
+            texels = (NSUInteger)max;
+        if (texels == 0)
+            return nil;
+
+        id<MTLBuffer> wide = [_device newBufferWithLength: texels * 16 options: MTLResourceStorageModeShared];
+        const uint8_t *src = (const uint8_t *)mtlbuf.contents + offset;
+        uint8_t *dst = (uint8_t *)wide.contents;
+
+        // the missing alpha reads as one
+        float onef = 1.0f;
+        uint32_t one = 1;
+        const void *alpha = tex->internalformat == GL_RGB32F ? (const void *)&onef : (const void *)&one;
+
+        for (NSUInteger i = 0; i < texels; i++)
+        {
+            memcpy(dst + i * 16, src + i * 12, 12);
+            memcpy(dst + i * 16 + 12, alpha, 4);
+        }
+
+        fmt = tex->internalformat == GL_RGB32F ? MTLPixelFormatRGBA32Float :
+              tex->internalformat == GL_RGB32I ? MTLPixelFormatRGBA32Sint : MTLPixelFormatRGBA32Uint;
+
+        MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat: fmt
+                                                                                        width: texels
+                                                                              resourceOptions: wide.resourceOptions
+                                                                                        usage: MTLTextureUsageShaderRead];
+
+        tex->mtl_buffer_src = buf->data.mtl_data;
+
+        return [wide newTextureWithDescriptor: d offset: 0 bytesPerRow: texels * 16];
+    }
+
     if (fmt == MTLPixelFormatInvalid || fd == NULL || fd->bytes_per_block == 0)
     {
         MGL_NSERR(@"MGL: a buffer texture of format 0x%x has no Metal equivalent", tex->internalformat);
@@ -1591,6 +1639,8 @@ static MTLTextureSwizzle swizzleForGL(GLenum v, MTLTextureSwizzle fallback)
     }
 
     NSUInteger texels = (NSUInteger)size / fd->bytes_per_block;
+    if (ctx->state.var.max_texture_buffer_size > 0 && texels > (NSUInteger)ctx->state.var.max_texture_buffer_size)
+        texels = (NSUInteger)ctx->state.var.max_texture_buffer_size;
     NSUInteger align = [_device minimumTextureBufferAlignmentForPixelFormat: fmt];
 
     if (texels == 0 || (align && (NSUInteger)offset % align))
@@ -3937,6 +3987,151 @@ static bool mtlFormatIsStencil(MTLPixelFormat f)
 // Metal resolves a multisample texture by ending a render pass on it, so a
 // blit out of a multisampled framebuffer runs an empty pass first and copies
 // from the single-sample result.
+// Metal cannot copy into a multisampled image, so filling one from a
+// single-sampled depth or stencil image is a draw: every sample of a pixel
+// takes that pixel's depth and stencil from the source.
+- (bool) fillMultisample: (id<MTLTexture>) dst from: (id<MTLTexture>) src
+                      sx: (NSUInteger) sx sy: (NSUInteger) sy
+                      dx: (NSUInteger) dx dy: (NSUInteger) dy
+                       w: (NSUInteger) w h: (NSUInteger) h
+                   depth: (bool) do_depth stencil: (bool) do_stencil
+{
+    static NSString *const msl =
+        @"#include <metal_stdlib>\n"
+         "using namespace metal;\n"
+         "struct VOut { float4 pos [[position]]; };\n"
+         "vertex VOut mgl_fill_vs(uint vid [[vertex_id]]) {\n"
+         "    float2 p = float2((vid << 1) & 2, vid & 2);\n"
+         "    VOut o; o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0); return o;\n"
+         "}\n"
+         "struct OD { float depth [[depth(any)]]; };\n"
+         "struct OS { uint stencil [[stencil]]; };\n"
+         "struct ODS { float depth [[depth(any)]]; uint stencil [[stencil]]; };\n"
+         "fragment OD mgl_fill_d(VOut in [[stage_in]], depth2d<float> d [[texture(0)]], constant int2 &k [[buffer(0)]]) {\n"
+         "    OD o; o.depth = d.read(uint2(int2(in.pos.xy) + k)); return o;\n"
+         "}\n"
+         "fragment OS mgl_fill_s(VOut in [[stage_in]], texture2d<uint> s [[texture(1)]], constant int2 &k [[buffer(0)]]) {\n"
+         "    OS o; o.stencil = s.read(uint2(int2(in.pos.xy) + k)).r; return o;\n"
+         "}\n"
+         "fragment ODS mgl_fill_ds(VOut in [[stage_in]], depth2d<float> d [[texture(0)]], texture2d<uint> s [[texture(1)]],\n"
+         "                         constant int2 &k [[buffer(0)]]) {\n"
+         "    uint2 at = uint2(int2(in.pos.xy) + k);\n"
+         "    ODS o; o.depth = d.read(at); o.stencil = s.read(at).r; return o;\n"
+         "}\n";
+    static id<MTLLibrary> lib = nil;
+
+    bool has_depth = mtlFormatIsDepth(dst.pixelFormat), has_stencil = mtlFormatIsStencil(dst.pixelFormat);
+
+    do_depth = do_depth && has_depth && mtlFormatIsDepth(src.pixelFormat);
+    do_stencil = do_stencil && has_stencil && mtlFormatIsStencil(src.pixelFormat);
+
+    if (!do_depth && !do_stencil)
+        return true;
+
+    if (lib == nil)
+    {
+        NSError *err = nil;
+
+        lib = [_device newLibraryWithSource: msl options: nil error: &err];
+
+        if (lib == nil)
+        {
+            MGL_NSERR(@"MGL: the multisample fill shader did not build: %@", err);
+            return false;
+        }
+    }
+
+    MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
+
+    pd.vertexFunction = [lib newFunctionWithName: @"mgl_fill_vs"];
+    pd.fragmentFunction = [lib newFunctionWithName: do_depth && do_stencil ? @"mgl_fill_ds"
+                                                   : do_depth ? @"mgl_fill_d" : @"mgl_fill_s"];
+    pd.depthAttachmentPixelFormat = has_depth ? dst.pixelFormat : MTLPixelFormatInvalid;
+    pd.stencilAttachmentPixelFormat = has_stencil ? dst.pixelFormat : MTLPixelFormatInvalid;
+    pd.rasterSampleCount = dst.sampleCount;
+
+    NSError *err = nil;
+    id<MTLRenderPipelineState> pso = [_device newRenderPipelineStateWithDescriptor: pd error: &err];
+
+    if (pso == nil)
+    {
+        MGL_NSERR(@"MGL: no multisample fill pipeline: %@", err);
+        return false;
+    }
+
+    MTLDepthStencilDescriptor *dsd = [[MTLDepthStencilDescriptor alloc] init];
+
+    dsd.depthCompareFunction = MTLCompareFunctionAlways;
+    dsd.depthWriteEnabled = do_depth;
+
+    if (do_stencil)
+    {
+        MTLStencilDescriptor *sd = [[MTLStencilDescriptor alloc] init];
+
+        sd.stencilCompareFunction = MTLCompareFunctionAlways;
+        sd.depthStencilPassOperation = MTLStencilOperationReplace;
+        sd.readMask = 0xFF;
+        sd.writeMask = 0xFF;
+        dsd.frontFaceStencil = sd;
+        dsd.backFaceStencil = sd;
+    }
+
+    id<MTLDepthStencilState> dss = [_device newDepthStencilStateWithDescriptor: dsd];
+
+    [self endRenderEncoding];
+    [self endComputeEncoding];
+
+    if ([self liveCommandBuffer] == nil)
+        return false;
+
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+
+    if (has_depth)
+    {
+        pass.depthAttachment.texture = dst;
+        pass.depthAttachment.loadAction = MTLLoadActionLoad;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+    }
+
+    if (has_stencil)
+    {
+        pass.stencilAttachment.texture = dst;
+        pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+        pass.stencilAttachment.storeAction = MTLStoreActionStore;
+    }
+
+    id<MTLRenderCommandEncoder> enc = [_currentCommandBuffer renderCommandEncoderWithDescriptor: pass];
+
+    if (enc == nil)
+        return false;
+
+    int k[2] = { (int)sx - (int)dx, (int)sy - (int)dy };
+    id<MTLTexture> stencil_view = nil;
+
+    if (do_stencil)
+    {
+        MTLPixelFormat sf = src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLPixelFormatX32_Stencil8
+                          : src.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8 ? MTLPixelFormatX24_Stencil8
+                          : src.pixelFormat;
+
+        stencil_view = sf == src.pixelFormat ? src : [src newTextureViewWithPixelFormat: sf];
+    }
+
+    [enc setRenderPipelineState: pso];
+    [enc setDepthStencilState: dss];
+    [enc setViewport: (MTLViewport){ (double)dx, (double)dy, (double)w, (double)h, 0.0, 1.0 }];
+    [enc setScissorRect: (MTLScissorRect){ dx, dy, w, h }];
+    [enc setFragmentBytes: k length: sizeof k atIndex: 0];
+    if (do_depth)
+        [enc setFragmentTexture: src atIndex: 0];
+    if (do_stencil)
+        [enc setFragmentTexture: stencil_view atIndex: 1];
+    [enc drawPrimitives: MTLPrimitiveTypeTriangle vertexStart: 0 vertexCount: 3];
+    [enc endEncoding];
+
+    return true;
+}
+
 - (id<MTLTexture>) resolveMultisample: (id<MTLTexture>) src
 {
     if (src == nil || src.sampleCount <= 1)
@@ -4193,7 +4388,22 @@ static FBOAttachment *drawSlot(Framebuffer *fbo, int k);
             id<MTLTexture> from = [self blitImage: &readfbo->depth plane: &rp];
             id<MTLTexture> to = [self blitImage: &drawfbo->depth plane: &dp];
 
-            if (from && to && from.pixelFormat == to.pixelFormat)
+            // a copy cannot cross sample counts, so a multisampled source is
+            // resolved first, as the colour path does
+            if (from && to && from.sampleCount > 1 && to.sampleCount == 1)
+                from = [self resolveMultisample: from];
+
+            if (from && to && from.sampleCount == 1 && to.sampleCount > 1 && sw == dw && sh == dh)
+            {
+                // into a multisampled image, a packed one taking its stencil too
+                bool both = (mask & GL_STENCIL_BUFFER_BIT) && readfbo->stencil.buf.tex == readfbo->depth.buf.tex &&
+                            drawfbo->stencil.buf.tex == drawfbo->depth.buf.tex;
+
+                [self fillMultisample: to from: from sx: srcX0 sy: srcY0 dx: dstX0 dy: dstY0 w: dw h: dh
+                                depth: true stencil: both];
+                did_depth = true;
+            }
+            else if (from && to && from.pixelFormat == to.pixelFormat)
             {
                 [self nearestCopyFrom: from plane: rp x: srcX0 y: srcY0 w: sw h: sh
                                    to: to plane: dp x: dstX0 y: dstY0 w: dw h: dh];
@@ -4207,11 +4417,17 @@ static FBOAttachment *drawSlot(Framebuffer *fbo, int k);
             id<MTLTexture> from = [self blitImage: &readfbo->stencil plane: &rp];
             id<MTLTexture> to = [self blitImage: &drawfbo->stencil plane: &dp];
 
+            if (from && to && from.sampleCount > 1 && to.sampleCount == 1)
+                from = [self resolveMultisample: from];
+
             // a packed depth-stencil image went across whole with the depth
             bool packed = did_depth && readfbo->stencil.buf.tex == readfbo->depth.buf.tex &&
                           drawfbo->stencil.buf.tex == drawfbo->depth.buf.tex;
 
-            if (!packed && from && to && from.pixelFormat == to.pixelFormat)
+            if (!packed && from && to && from.sampleCount == 1 && to.sampleCount > 1 && sw == dw && sh == dh)
+                [self fillMultisample: to from: from sx: srcX0 sy: srcY0 dx: dstX0 dy: dstY0 w: dw h: dh
+                                depth: false stencil: true];
+            else if (!packed && from && to && from.pixelFormat == to.pixelFormat)
                 [self nearestCopyFrom: from plane: rp x: srcX0 y: srcY0 w: sw h: sh
                                    to: to plane: dp x: dstX0 y: dstY0 w: dw h: dh];
         }
@@ -4688,7 +4904,8 @@ static MTLTextureType viewTextureType(GLenum target)
         GLintptr off = 0;
         GLsizeiptr sz = 0;
 
-        if (!mglBufferTextureSource(ctx, tex, &buf, &off, &sz) || buf->data.mtl_data != tex->mtl_buffer_src)
+        if (!mglBufferTextureSource(ctx, tex, &buf, &off, &sz) || buf->data.mtl_data != tex->mtl_buffer_src ||
+            isRGB32BufferFormat(tex->internalformat))
         {
             CFBridgingRelease(tex->mtl_data);
             tex->mtl_data = NULL;
@@ -5073,9 +5290,10 @@ static MTLTextureType viewTextureType(GLenum target)
         }
 
         {
-            Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster, &ptr->vs_noraster };
+            Spirv *cull[] = { &ptr->cull_capture, &ptr->cull_kernel, &ptr->vs_raster, &ptr->vs_noraster,
+                              &ptr->fs_sample_rate };
 
-            for (int c = 0; c < 4; c++)
+            for (int c = 0; c < 5; c++)
             {
                 if (cull[c]->mtl_function)
                 {
@@ -5265,9 +5483,16 @@ static MTLTextureType viewTextureType(GLenum target)
     {
         MTLDepthStencilDescriptor *dsDesc = [[MTLDepthStencilDescriptor alloc] init];
 
+        // A framebuffer object with no depth, or no stencil, image passes that
+        // test, GL 4.6 sections 17.3.5 and 17.3.6 -- also when a packed image
+        // is attached as only the other half
+        Framebuffer *dfb = ctx->state.framebuffer;
+        bool has_depth = dfb == NULL || dfb->depth.texture;
+        bool has_stencil = dfb == NULL || dfb->stencil.texture;
+
         // mtl maps directly to gl
         // with no depth buffer in GL terms, the test always passes
-        if (ctx->state.caps.depth_test && !_encoderScratchDepth)
+        if (ctx->state.caps.depth_test && !_encoderScratchDepth && has_depth)
         {
             MTLCompareFunction depthCompareFunction;
 
@@ -5277,7 +5502,7 @@ static MTLTextureType viewTextureType(GLenum target)
             dsDesc.depthWriteEnabled = ctx->state.var.depth_writemask;
         }
 
-        if (ctx->state.caps.stencil_test)
+        if (ctx->state.caps.stencil_test && has_stencil)
         {
             // mtl maps directly to gl, GL_NEVER included: a test that always
             // fails still runs its fail operation
@@ -5349,6 +5574,14 @@ static MTLTextureType viewTextureType(GLenum target)
                 vy = (GLfloat)th - (vy + vh);
             }
 
+            // an upper-left clip origin turns the picture over; GL counts the
+            // area with its sign flipped too, so the winding below flips with it
+            if (ctx->state.var.clip_origin == GL_UPPER_LEFT)
+            {
+                vy = vy + vh;
+                vh = -vh;
+            }
+
             vps[i] = (MTLViewport){ vx, vy, vw, vh,
                                     ctx->state.depth_range[i].znear, ctx->state.depth_range[i].zfar };
 
@@ -5404,20 +5637,29 @@ static MTLTextureType viewTextureType(GLenum target)
         winding = ctx->state.var.front_face - GL_CW;
 
         // flipping the viewport mirrors every triangle, so front and back swap
-        if ([self renderTargetIsFlipped])
+        if ([self renderTargetIsFlipped] != (ctx->state.var.clip_origin == GL_UPPER_LEFT))
             winding = (winding == MTLWindingClockwise) ? MTLWindingCounterClockwise : MTLWindingClockwise;
 
         [_currentRenderEncoder setFrontFacingWinding:winding];
     }
 
-    if (ctx->state.caps.depth_clamp)
-    {
-        [_currentRenderEncoder setDepthClipMode: MTLDepthClipModeClamp];
-    }
+    [_currentRenderEncoder setDepthClipMode: ctx->state.caps.depth_clamp ? MTLDepthClipModeClamp : MTLDepthClipModeClip];
 
-    if (ctx->state.var.polygon_mode == GL_LINES)
+    [_currentRenderEncoder setTriangleFillMode: ctx->state.var.polygon_mode == GL_LINE ? MTLTriangleFillModeLines
+                                                                                      : MTLTriangleFillModeFill];
+
+    // polygon offset, switched on for the way polygons are being drawn
     {
-        [_currentRenderEncoder setTriangleFillMode: MTLTriangleFillModeLines];
+        GLuint mode = ctx->state.var.polygon_mode;
+        bool on = mode == GL_LINE ? ctx->state.caps.polygon_offset_line :
+                  mode == GL_POINT ? ctx->state.caps.polygon_offset_point : ctx->state.caps.polygon_offset_fill;
+
+        if (on)
+            [_currentRenderEncoder setDepthBias: ctx->state.var.polygon_offset_units
+                                     slopeScale: ctx->state.var.polygon_offset_factor
+                                          clamp: ctx->state.var.polygon_offset_clamp];
+        else
+            [_currentRenderEncoder setDepthBias: 0.0f slopeScale: 0.0f clamp: 0.0f];
     }
 
     [self bindBindlessToRenderEncoder];
@@ -5582,6 +5824,19 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
 
             if (fbo->stencil.layered)
                 _renderPassDescriptor.renderTargetArrayLength = layerCount(target);
+        }
+
+        // with no colour image the target is as big as the depth or stencil
+        // one; left at 0, the scissor was never set and drew everywhere
+        if (_renderPassDescriptor.renderTargetWidth == 0)
+        {
+            id<MTLTexture> ds = _renderPassDescriptor.depthAttachment.texture ?: _renderPassDescriptor.stencilAttachment.texture;
+
+            if (ds)
+            {
+                _renderPassDescriptor.renderTargetWidth = ds.width;
+                _renderPassDescriptor.renderTargetHeight = ds.height;
+            }
         }
     }
     else
@@ -9049,6 +9304,17 @@ static MTLWinding mtlWindingFor(const Program *p)
         fragmentFunction = nil;
     }
 
+    // GL_SAMPLE_SHADING asks for at least some samples shaded on their own;
+    // Metal shades every one or just the pixel, so any fraction above one
+    // sample's worth runs per sample
+    if (fragmentFunction && !use_noraster && ctx->state.caps.sample_shading &&
+        ctx->state.var.min_sample_shading * (GLfloat)mglDrawFramebufferSamples(ctx) > 1.0f &&
+        mglBuildSampleRateFragment(ctx, program) &&
+        [self buildStageFunction: &program->fs_sample_rate] && program->fs_sample_rate.mtl_function)
+    {
+        fragmentFunction = (__bridge id<MTLFunction>)(program->fs_sample_rate.mtl_function);
+    }
+
     if (!vertexFunction || (!fragmentFunction && !raster_off && !no_fs))
     {
         MGL_NSERR(@"MGL ERROR: program %u has no linked %s stage", program->name,
@@ -9780,6 +10046,22 @@ static int countingQueries(GLMContext ctx, Query **out)
 
     if (p->uses_draw_id)
         [_currentRenderEncoder setVertexBytes: &draw_id length: sizeof draw_id atIndex: MGL_DRAW_ID_MSL_SLOT];
+
+    if (p->uses_clip_control < 0)
+    {
+        p->uses_clip_control = 0;
+        for (int i = 0; i < _MAX_SHADER_TYPES; i++)
+            if (p->spirv[i].msl_str && strstr(p->spirv[i].msl_str, "spvClipControl"))
+                p->uses_clip_control = 1;
+        if (p->gs_passthrough.msl_str && strstr(p->gs_passthrough.msl_str, "spvClipControl"))
+            p->uses_clip_control = 1;
+    }
+
+    if (p->uses_clip_control)
+    {
+        uint32_t clip = ctx->state.var.clip_depth == GL_ZERO_TO_ONE ? 1u : 0u;
+        [_currentRenderEncoder setVertexBytes: &clip length: sizeof clip atIndex: MGL_CLIP_CONTROL_MSL_SLOT];
+    }
 }
 
 - (bool) processGLState: (bool) draw_command

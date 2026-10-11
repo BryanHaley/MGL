@@ -365,7 +365,7 @@ GPU_TEST(state_indexed, stencil_mask_separate_front_and_back)
     glGetIntegerv(GL_STENCIL_WRITEMASK, &front_mask);
     CHECK_EQ_INT(front_mask, 0xAA);
     glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &back_mask);
-    CHECK_EQ_INT(back_mask, 0xFFFFFFFFu);  // default
+    CHECK_EQ_UINT((GLuint)back_mask, 0xFFFFFFFFu);  // default
 
     glStencilMaskSeparate(GL_BACK, 0x55u);
     glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &back_mask);
@@ -388,6 +388,7 @@ GPU_TEST(state_indexed, viewport_indexedfv_sets_one)
 {
     GLfloat v[4] = { 99, 99, 99, 99 };
 
+    glViewport(0, 0, 256, 256);
     glViewportIndexedfv(2, (const GLfloat[]){ 10.0f, 20.0f, 128.0f, 64.0f });
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
@@ -399,7 +400,7 @@ GPU_TEST(state_indexed, viewport_indexedfv_sets_one)
 
     // viewport 0 must be unaffected
     glGetFloati_v(GL_VIEWPORT, 0, v);
-    CHECK_NEAR(v[2], 256.0f, 1e-5f);  // default width
+    CHECK_NEAR(v[2], 256.0f, 1e-5f);
 
     // index out of range
     glViewportIndexedfv(99, (const GLfloat[]){ 0, 0, 64, 64 });

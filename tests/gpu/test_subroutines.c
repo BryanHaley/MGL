@@ -518,3 +518,259 @@ GPU_TEST(subroutines, arrays_of_arrays_take_a_location_each)
 
     glDeleteProgram(prog);
 }
+
+// A vertex and a fragment stage may each have a subroutine uniform of the same
+// name, and each keeps its own selection. Both became one plain uniform, so
+// setting one stage set the other.
+GPU_TEST(subroutines, each_stage_keeps_its_own_selection)
+{
+    static const char *VS2 =
+        "#version 400\n"
+        "layout(location = 0) in vec2 p;\n"
+        "subroutine float level();\n"
+        "subroutine uniform level which;\n"
+        "subroutine(level) float low()  { return 0.0; }\n"
+        "subroutine(level) float high() { return 1.0; }\n"
+        "out float v;\n"
+        "void main() { v = which(); gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *FS2 =
+        "#version 400\n"
+        "subroutine float level();\n"
+        "subroutine uniform level which;\n"
+        "subroutine(level) float low()  { return 0.0; }\n"
+        "subroutine(level) float high() { return 1.0; }\n"
+        "in float v;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(v, which(), 0.0, 1.0); }\n";
+    MGLTestTarget t;
+    GLuint prog, vao, vbo, idx;
+    char log[2048];
+    unsigned char c[4] = { 0, 0, 0, 0 };
+
+    prog = mgl_build_program(VS2, FS2, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 32, 32, GL_RGBA8, 0))
+    {
+        CHECK(0);
+        return;
+    }
+
+    mgl_target_bind(&t);
+    glUseProgram(prog);
+    vao = mgl_fullscreen_quad(&vbo);
+    glViewport(0, 0, 32, 32);
+
+    // the vertex stage picks high, the fragment stage low
+    idx = glGetSubroutineIndex(prog, GL_VERTEX_SHADER, "high");
+    glUniformSubroutinesuiv(GL_VERTEX_SHADER, 1, &idx);
+    idx = glGetSubroutineIndex(prog, GL_FRAGMENT_SHADER, "low");
+    glUniformSubroutinesuiv(GL_FRAGMENT_SHADER, 1, &idx);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    unsigned char *px = mgl_read_rgba8(&t);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 16, 16, c);
+        free(px);
+    }
+    CHECK_MSG(c[0] > 250 && c[1] < 5, "got %u %u %u, want 255 0 0", c[0], c[1], c[2]);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// The geometry stage's selection reaches it, in a program of its own and
+// through a pipeline. In a pipeline it was dropped.
+static GLuint stageProgram(GLenum type, const char *src)
+{
+    return glCreateShaderProgramv(type, 1, &src);
+}
+
+GPU_TEST(subroutines, geometry_stage_selection_reaches_a_pipeline)
+{
+    static const char *VSP =
+        "#version 410\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out gl_PerVertex { vec4 gl_Position; };\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *GSP =
+        "#version 410\n"
+        "layout(triangles) in;\n"
+        "layout(triangle_strip, max_vertices = 3) out;\n"
+        "in gl_PerVertex { vec4 gl_Position; } gl_in[];\n"
+        "out gl_PerVertex { vec4 gl_Position; };\n"
+        "subroutine float level();\n"
+        "subroutine uniform level which;\n"
+        "subroutine(level) float low()  { return 0.0; }\n"
+        "subroutine(level) float high() { return 1.0; }\n"
+        "out float g;\n"
+        "void main() {\n"
+        "  for (int i = 0; i < 3; i++) { g = which(); gl_Position = gl_in[i].gl_Position; EmitVertex(); }\n"
+        "  EndPrimitive();\n"
+        "}\n";
+    static const char *FSP =
+        "#version 410\n"
+        "in float g;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(g, 0.0, 0.0, 1.0); }\n";
+    MGLTestTarget t;
+    GLuint vs, gs, fs, pipe, vao, vbo, idx;
+    unsigned char c[4] = { 0, 0, 0, 0 };
+
+    vs = stageProgram(GL_VERTEX_SHADER, VSP);
+    gs = stageProgram(GL_GEOMETRY_SHADER, GSP);
+    fs = stageProgram(GL_FRAGMENT_SHADER, FSP);
+
+    if (!mgl_target_create(&t, 32, 32, GL_RGBA8, 0))
+    {
+        CHECK(0);
+        return;
+    }
+
+    glGenProgramPipelines(1, &pipe);
+    glUseProgramStages(pipe, GL_VERTEX_SHADER_BIT, vs);
+    glUseProgramStages(pipe, GL_GEOMETRY_SHADER_BIT, gs);
+    glUseProgramStages(pipe, GL_FRAGMENT_SHADER_BIT, fs);
+    glUseProgram(0);
+    glBindProgramPipeline(pipe);
+
+    mgl_target_bind(&t);
+    vao = mgl_fullscreen_quad(&vbo);
+    glViewport(0, 0, 32, 32);
+
+    idx = glGetSubroutineIndex(gs, GL_GEOMETRY_SHADER, "high");
+    glUniformSubroutinesuiv(GL_GEOMETRY_SHADER, 1, &idx);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    unsigned char *px = mgl_read_rgba8(&t);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 16, 16, c);
+        free(px);
+    }
+    CHECK_MSG(c[0] > 250, "got %u %u %u, want 255 0 0", c[0], c[1], c[2]);
+
+    glBindProgramPipeline(0);
+    glDeleteProgramPipelines(1, &pipe);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(vs);
+    glDeleteProgram(gs);
+    glDeleteProgram(fs);
+    mgl_target_destroy(&t);
+}
+
+// Linking, and making a program current, leave every subroutine uniform on a
+// function of its own type. Every location read 0, which is not one for the
+// second type.
+GPU_TEST(subroutines, linking_picks_a_compatible_function)
+{
+    static const char *FS3 =
+        "#version 400\n"
+        "subroutine vec4 st1(vec4 a);\n"
+        "subroutine vec4 st2(vec4 a);\n"
+        "subroutine(st1) vec4 a1(vec4 a) { return a; }\n"
+        "subroutine(st1) vec4 b1(vec4 a) { return a * 2.0; }\n"
+        "subroutine(st2) vec4 a2(vec4 a) { return a + 1.0; }\n"
+        "subroutine(st2) vec4 b2(vec4 a) { return a - 1.0; }\n"
+        "subroutine uniform st1 one[2];\n"
+        "subroutine uniform st2 two[2];\n"
+        "out vec4 o;\n"
+        "void main() { o = one[0](vec4(0)) + one[1](vec4(0)) + two[0](vec4(0)) + two[1](vec4(0)); }\n";
+    char log[2048];
+    GLuint prog = mgl_build_program(VS, FS3, log, sizeof log);
+    GLuint v[4] = { 99, 99, 99, 99 };
+
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    glUseProgram(prog);
+    for (int l = 0; l < 4; l++)
+        glGetUniformSubroutineuiv(GL_FRAGMENT_SHADER, l, &v[l]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    GLuint a1 = glGetSubroutineIndex(prog, GL_FRAGMENT_SHADER, "a1"), b1 = glGetSubroutineIndex(prog, GL_FRAGMENT_SHADER, "b1");
+    GLuint a2 = glGetSubroutineIndex(prog, GL_FRAGMENT_SHADER, "a2"), b2 = glGetSubroutineIndex(prog, GL_FRAGMENT_SHADER, "b2");
+    GLint l1 = glGetSubroutineUniformLocation(prog, GL_FRAGMENT_SHADER, "one");
+    GLint l2 = glGetSubroutineUniformLocation(prog, GL_FRAGMENT_SHADER, "two");
+
+    for (int e = 0; e < 2; e++)
+    {
+        CHECK_MSG(v[l1 + e] == a1 || v[l1 + e] == b1, "one[%d] holds %u", e, v[l1 + e]);
+        CHECK_MSG(v[l2 + e] == a2 || v[l2 + e] == b2, "two[%d] holds %u", e, v[l2 + e]);
+    }
+
+    // a choice made, then the program made current again: back to a default
+    GLuint first[4];
+    for (int l = 0; l < 4; l++)
+        first[l] = v[l];
+    GLuint pick[4];
+    pick[l1] = first[l1] == a1 ? b1 : a1; pick[l1 + 1] = pick[l1];
+    pick[l2] = first[l2] == a2 ? b2 : a2; pick[l2 + 1] = pick[l2];
+    glUniformSubroutinesuiv(GL_FRAGMENT_SHADER, 4, pick);
+    glUseProgram(prog);
+    for (int l = 0; l < 4; l++)
+    {
+        glGetUniformSubroutineuiv(GL_FRAGMENT_SHADER, l, &v[l]);
+        CHECK_MSG(v[l] == first[l], "location %d holds %u after glUseProgram, want %u", l, v[l], first[l]);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+}
+
+GPU_TEST(subroutines, geometry_stage_starts_on_a_compatible_function)
+{
+    static const char *VS4 =
+        "#version 400\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *GS4 =
+        "#version 400\n"
+        "layout(points) in;\nlayout(points, max_vertices = 1) out;\n"
+        "subroutine vec4 st1(vec4 a);\nsubroutine vec4 st2(vec4 a);\n"
+        "subroutine(st1) vec4 a1(vec4 a) { return a; }\n"
+        "subroutine(st2) vec4 a2(vec4 a) { return a + 1.0; }\n"
+        "subroutine uniform st1 one;\nsubroutine uniform st2 two;\n"
+        "void main() { gl_Position = one(gl_in[0].gl_Position) + two(vec4(0)); EmitVertex(); }\n";
+    static const char *FS4 = "#version 400\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    const char *src[3] = { VS4, GS4, FS4 };
+    GLenum kinds[3] = { GL_VERTEX_SHADER, GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER };
+    GLuint prog = glCreateProgram(), s[3];
+    GLint ok = 0;
+
+    for (int i = 0; i < 3; i++)
+    {
+        s[i] = glCreateShader(kinds[i]);
+        glShaderSource(s[i], 1, &src[i], NULL);
+        glCompileShader(s[i]);
+        glAttachShader(prog, s[i]);
+    }
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK(ok);
+    glUseProgram(prog);
+
+    GLint l2 = glGetSubroutineUniformLocation(prog, GL_GEOMETRY_SHADER, "two");
+    GLuint v = 99, a2 = glGetSubroutineIndex(prog, GL_GEOMETRY_SHADER, "a2");
+
+    glGetUniformSubroutineuiv(GL_GEOMETRY_SHADER, l2, &v);
+    CHECK_MSG(v == a2, "two holds %u, a2 is %u", v, a2);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    for (int i = 0; i < 3; i++)
+        glDeleteShader(s[i]);
+    glDeleteProgram(prog);
+}

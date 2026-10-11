@@ -445,12 +445,12 @@ GPU_TEST(vertex_attrib_imm, error_null_pointer)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
 }
 
-/* ---------- error: index 0 has no current state ---------- */
+/* ---------- core profile: index 0 has a current value like any other ---------- */
 
 GPU_TEST(vertex_attrib_imm, error_index0_no_current)
 {
     GLfloat tmp[4];
 
     glGetVertexAttribfv(0, GL_CURRENT_VERTEX_ATTRIB, tmp);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 }

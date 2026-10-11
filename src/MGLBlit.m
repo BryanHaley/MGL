@@ -36,6 +36,11 @@
 - (NSUInteger) readPlane;
 - (void) applyPendingClears;
 - (bool) bindMTLTexture:(Texture *)tex;
+- (bool) fillMultisample: (id<MTLTexture>) dst from: (id<MTLTexture>) src
+                      sx: (NSUInteger) sx sy: (NSUInteger) sy
+                      dx: (NSUInteger) dx dy: (NSUInteger) dy
+                       w: (NSUInteger) w h: (NSUInteger) h
+                   depth: (bool) do_depth stencil: (bool) do_stencil;
 @end
 
 void mtlCopyTexSubImage(GLMContext glm_ctx, Texture *tex, GLint level,
@@ -49,13 +54,32 @@ void mtlCopyTexSubImage(GLMContext glm_ctx, Texture *tex, GLint level,
 
         if (![renderer bindMTLTexture:tex] || !tex->mtl_data) return;
 
-        id<MTLTexture> srcTex = [renderer readSourceTexture:glm_ctx forFormat:GL_RGBA];
+        // a depth or stencil destination reads the framebuffer's depth and
+        // stencil, not its colour read buffer
+        const MGLFormatDesc *fd = mglFormatDesc(tex->internalformat);
+        GLenum from = fd->kind == MGL_FMT_DEPTH_STENCIL ? GL_DEPTH_STENCIL
+                    : fd->kind == MGL_FMT_DEPTH ? GL_DEPTH_COMPONENT
+                    : fd->kind == MGL_FMT_STENCIL ? GL_STENCIL_INDEX : GL_RGBA;
+
+        id<MTLTexture> srcTex = [renderer readSourceTexture:glm_ctx forFormat:from];
         if (!srcTex) return;
 
         id<MTLTexture> dstTex = (__bridge id<MTLTexture>)(tex->mtl_data);
 
         [renderer applyPendingClears];
         [renderer endRenderEncoding];
+
+        // depth in another format -- 16 bits from a 24 bit buffer, say -- is
+        // drawn across, which converts it; a copy cannot
+        if (from != GL_RGBA && srcTex.pixelFormat != dstTex.pixelFormat && level == 0 && slice == 0 &&
+            dstTex.textureType == MTLTextureType2D)
+        {
+            [renderer fillMultisample:dstTex from:srcTex sx:(NSUInteger)x sy:(NSUInteger)y
+                                   dx:(NSUInteger)xoffset dy:(NSUInteger)yoffset
+                                    w:(NSUInteger)width h:(NSUInteger)height
+                                depth:(from != GL_STENCIL_INDEX) stencil:(from != GL_DEPTH_COMPONENT)];
+            return;
+        }
 
         id<MTLBlitCommandEncoder> blit = [[renderer liveCommandBuffer] blitCommandEncoder];
 

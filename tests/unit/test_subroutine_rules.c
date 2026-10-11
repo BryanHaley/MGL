@@ -34,7 +34,7 @@ static const char *rewriteError(const char *src)
     static SubroutineInfo info;
 
     mglFreeSubroutineInfo(&info);
-    free(mglRewriteSubroutines(src, &info));
+    free(mglRewriteSubroutines(src, &info, 0));
 
     return info.error;
 }
@@ -101,7 +101,7 @@ TEST(subroutine_rules, an_array_parameter_is_forwarded_by_name_not_by_size)
     char *out;
 
     memset(&info, 0, sizeof info);
-    out = mglRewriteSubroutines(src, &info);
+    out = mglRewriteSubroutines(src, &info, 0);
 
     CHECK(out != NULL);
     CHECK_MSG(out && strstr(out, "one(a, b, c)") != NULL,
@@ -128,7 +128,7 @@ TEST(subroutine_rules, an_explicit_index_is_the_one_used)
     char *out;
 
     memset(&info, 0, sizeof info);
-    out = mglRewriteSubroutines(src, &info);
+    out = mglRewriteSubroutines(src, &info, 0);
 
     CHECK(out != NULL);
     CHECK_MSG(out && strstr(out, "layout") == NULL, "a layout was left behind:\n%s", out ? out : "(null)");
@@ -225,7 +225,7 @@ TEST(subroutine_rules, a_void_parameter_list_is_empty)
                                 "subroutine(pick) int one(void) { return 1; }\n"
                                 "subroutine(pick) int two() { return 2; }\n"
                                 "subroutine uniform pick routine;\n"
-                                "void main() { int x = routine(); }\n", &info);
+                                "void main() { int x = routine(); }\n", &info, 0);
 
     CHECK(info.error == NULL);
     CHECK(out != NULL);
@@ -245,7 +245,7 @@ static char *rewriteOk(const char *src)
     char *out;
 
     mglFreeSubroutineInfo(&info);
-    out = mglRewriteSubroutines(src, &info);
+    out = mglRewriteSubroutines(src, &info, 0);
     CHECK_MSG(info.error == NULL, "rewrite refused: %s", info.error ? info.error : "");
     return out;
 }
@@ -266,8 +266,8 @@ TEST(subroutine_rules, nested_calls_are_rewritten)
     if (out)
     {
         // every call site becomes a call to the dispatcher with the selector first
-        CHECK_MSG(strstr(out, "routine(routine" MGL_SUBROUTINE_SUFFIX "[routine(routine" MGL_SUBROUTINE_SUFFIX "[0], 0, 1)], "
-                              "routine(routine" MGL_SUBROUTINE_SUFFIX "[1], 2, 3), 4)") != NULL,
+        CHECK_MSG(strstr(out, "routine(routine" MGL_SUBROUTINE_SUFFIX "0[routine(routine" MGL_SUBROUTINE_SUFFIX "0[0], 0, 1)], "
+                              "routine(routine" MGL_SUBROUTINE_SUFFIX "0[1], 2, 3), 4)") != NULL,
                   "nested calls not rewritten:\n%s", out);
         free(out);
     }
@@ -286,8 +286,8 @@ TEST(subroutine_rules, arrays_of_arrays_keep_every_index)
 
     if (out)
     {
-        CHECK_MSG(strstr(out, "uniform int routine" MGL_SUBROUTINE_SUFFIX "[2][3];") != NULL, "declaration:\n%s", out);
-        CHECK_MSG(strstr(out, "routine(routine" MGL_SUBROUTINE_SUFFIX "[1][2], p)") != NULL, "call:\n%s", out);
+        CHECK_MSG(strstr(out, "uniform int routine" MGL_SUBROUTINE_SUFFIX "0[2][3];") != NULL, "declaration:\n%s", out);
+        CHECK_MSG(strstr(out, "routine(routine" MGL_SUBROUTINE_SUFFIX "0[1][2], p)") != NULL, "call:\n%s", out);
         free(out);
     }
 }
@@ -357,7 +357,7 @@ TEST(subroutine_rules, one_function_for_three_types)
                                 "subroutine uniform t1 u1;\n"
                                 "subroutine uniform t2 u2;\n"
                                 "subroutine uniform t3 u3;\n"
-                                "void main() { float v = 0.0; u1(v); u2(v); u3(v); }\n", &info);
+                                "void main() { float v = 0.0; u1(v); u2(v); u3(v); }\n", &info, 0);
 
     CHECK_MSG(info.error == NULL, "refused: %s", info.error ? info.error : "");
     CHECK(out != NULL);
@@ -435,7 +435,7 @@ TEST(subroutine_rules, a_located_uniform_array_is_rewritten)
     {
         // the declaration ends once; a second ';' at global scope is a GLSL 4.30 error
         CHECK_MSG(strstr(out, ";;") == NULL && strstr(out, "\n;") == NULL, "stray semicolon:\n%s", out);
-        CHECK_MSG(strstr(out, "uniform int u0" MGL_SUBROUTINE_SUFFIX "[2];") != NULL, "declaration:\n%s", out);
+        CHECK_MSG(strstr(out, "uniform int u0" MGL_SUBROUTINE_SUFFIX "0[2];") != NULL, "declaration:\n%s", out);
         free(out);
     }
 }
@@ -455,7 +455,7 @@ TEST(subroutine_rules, location_and_index_are_kept)
                                 "layout(index = 2) subroutine(st0) vec4 sf1(float param) { return vec4(9.0); }\n"
                                 "layout(location = 3) subroutine uniform st0 u0;\n"
                                 "out vec4 o;\n"
-                                "void main() { o = u0(zero); }\n", &info);
+                                "void main() { o = u0(zero); }\n", &info, 0);
 
     CHECK_MSG(info.error == NULL, "refused: %s", info.error ? info.error : "");
     CHECK(out != NULL);

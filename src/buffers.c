@@ -1619,7 +1619,7 @@ static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsize
     }
 
     // GL 4.6 section 6.3: the rules about which bits go together
-    ERROR_CHECK_RETURN_VALUE(length != 0, GL_INVALID_VALUE, NULL);
+    ERROR_CHECK_RETURN_VALUE(length != 0, GL_INVALID_OPERATION, NULL);
     ERROR_CHECK_RETURN_VALUE(access_flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT), GL_INVALID_OPERATION, NULL);
     ERROR_CHECK_RETURN_VALUE(!((access_flags & GL_MAP_READ_BIT) &&
                                (access_flags & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT |

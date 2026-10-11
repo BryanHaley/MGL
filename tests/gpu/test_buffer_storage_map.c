@@ -613,3 +613,23 @@ GPU_TEST(buffer_storage_map, only_generated_names_bind)
     glBindBuffer(GL_ARRAY_BUFFER, 987654);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 }
+
+// GL 4.6 section 6.3: a zero length is an invalid operation, not a bad value
+GPU_TEST(buffer_storage_map, mapping_nothing_is_an_invalid_operation)
+{
+    GLuint b = 0;
+
+    glCreateBuffers(1, &b);
+    glNamedBufferData(b, 64, NULL, GL_DYNAMIC_DRAW);
+    mgl_drain_errors();
+
+    CHECK(glMapNamedBufferRange(b, 0, 0, GL_MAP_READ_BIT) == NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glBindBuffer(GL_ARRAY_BUFFER, b);
+    CHECK(glMapBufferRange(GL_ARRAY_BUFFER, 16, 0, GL_MAP_WRITE_BIT) == NULL);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDeleteBuffers(1, &b);
+}

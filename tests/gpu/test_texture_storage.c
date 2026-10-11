@@ -324,7 +324,7 @@ GPU_TEST(texture_storage, tex_sub_image_1D_modifies_pixels)
 
     glGetTexImage(GL_TEXTURE_1D, 0, GL_RGBA, GL_UNSIGNED_BYTE, dst);
     CHECK_EQ_INT(dst[0], 128);     // untouched
-    CHECK_EQ_INT(dst[16], 128);    // untouched (offset 4 pixels)
+    CHECK_EQ_INT(dst[12], 128);    // untouched (pixel 3)
     CHECK_EQ_INT(dst[4 * 4 + 0], 77);  // patched pixel
     CHECK_EQ_INT(dst[4 * 4 + 3], 255);
 
@@ -811,4 +811,125 @@ GPU_TEST(texture_storage, unsized_levels_build_one_chain)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     glDeleteTextures(1, &tex);
+}
+
+// One texel gathered or sampled by a compute shader, written to a buffer
+static int gatherProbe(const char *decl, const char *expr, GLuint tex, GLenum target, float out[4])
+{
+    char src[1024], log[2048] = { 0 };
+    GLuint prog, ssbo;
+
+    snprintf(src, sizeof src,
+             "#version 460 core\nlayout(local_size_x = 1) in;\n"
+             "layout(std430, binding = 0) buffer Out { vec4 r; };\n%s\n"
+             "void main() { r = %s; }\n", decl, expr);
+    prog = mgl_build_compute_program(src, log, sizeof log);
+    if (!prog)
+    {
+        fprintf(stderr, "%s\n", log);
+        return 0;
+    }
+
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 16, NULL, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(target, tex);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "t"), 0);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 16, out);
+    glUseProgram(0);
+    glDeleteBuffers(1, &ssbo);
+    glDeleteProgram(prog);
+    return 1;
+}
+
+// A gather that names its component on a rectangle texture. Metal wants an
+// offset in front of the component, and rectangles were not given one, so
+// the shader did not build.
+GPU_TEST(texture_storage, rectangle_gathers_a_chosen_component)
+{
+    GLuint tex;
+    GLfloat px[2 * 2 * 4] = { 0.1f, 0.2f, 0.3f, 0.4f,  0.1f, 0.2f, 0.3f, 0.4f,
+                              0.1f, 0.2f, 0.3f, 0.4f,  0.1f, 0.2f, 0.3f, 0.4f };
+    float r[4] = { -1, -1, -1, -1 };
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_RECTANGLE, tex);
+    glTexImage2D(GL_TEXTURE_RECTANGLE, 0, GL_RGBA32F, 2, 2, 0, GL_RGBA, GL_FLOAT, px);
+    CHECK(gatherProbe("uniform sampler2DRect t;", "textureGather(t, vec2(1.0), 1)", tex, GL_TEXTURE_RECTANGLE, r));
+    CHECK_NEAR(r[0], 0.2f, 1e-5f);
+    CHECK_NEAR(r[3], 0.2f, 1e-5f);
+    CHECK(gatherProbe("uniform sampler2DRect t;", "textureGatherOffset(t, vec2(1.0), ivec2(0), 2)", tex,
+                      GL_TEXTURE_RECTANGLE, r));
+    CHECK_NEAR(r[0], 0.3f, 1e-5f);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glDeleteTextures(1, &tex);
+}
+
+// A mip level defined at the wrong size is legal and leaves the texture
+// incomplete, which samples as (0, 0, 0, 1). The level was refused, so the
+// texture stayed complete and sampled its data.
+GPU_TEST(texture_storage, a_wrong_size_level_makes_the_texture_incomplete)
+{
+    GLuint tex;
+    static GLfloat px[4 * 4 * 4];
+    float r[4] = { -1, -1, -1, -1 };
+
+    for (int i = 0; i < 4 * 4 * 4; i++)
+        px[i] = 0.5f;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 4, 4, 0, GL_RGBA, GL_FLOAT, px);
+    glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 2, 2, 0, GL_RGBA, GL_FLOAT, px);
+    glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, px);
+    glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, px);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    CHECK(gatherProbe("uniform sampler2D t;", "textureLod(t, vec2(0.5), 0.0)", tex, GL_TEXTURE_2D, r));
+    CHECK_MSG(r[0] == 0.0f && r[3] == 1.0f, "sampled %g %g %g %g, want 0 0 0 1", r[0], r[1], r[2], r[3]);
+
+    // the right size makes it complete again
+    glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 2, 2, 0, GL_RGBA, GL_FLOAT, px);
+    CHECK(gatherProbe("uniform sampler2D t;", "textureLod(t, vec2(0.5), 0.0)", tex, GL_TEXTURE_2D, r));
+    CHECK_NEAR(r[0], 0.5f, 1e-5f);
+    glDeleteTextures(1, &tex);
+}
+
+// glGetTextureSubImage counts a 1D array's layers as rows, and reads every
+// slice its depth asks for
+GPU_TEST(texture_storage, sub_image_reads_layers_and_slices)
+{
+    GLuint t1 = 0, t2 = 0;
+    GLubyte src[3 * 4 * 4], got[2 * 2 * 4 * 2];
+
+    for (int i = 0; i < (int)sizeof src; i++)
+        src[i] = (GLubyte)i;
+
+    glCreateTextures(GL_TEXTURE_1D_ARRAY, 1, &t1);
+    glTextureStorage2D(t1, 1, GL_RGBA8, 4, 3);
+    glTextureSubImage2D(t1, 0, 0, 0, 4, 3, GL_RGBA, GL_UNSIGNED_BYTE, src);
+
+    memset(got, 0xEE, sizeof got);
+    glGetTextureSubImage(t1, 0, 1, 1, 0, 2, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof got, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    // layer 1 texel 1 starts at byte (1 * 4 + 1) * 4, layer 2 texel 1 at (2 * 4 + 1) * 4
+    CHECK_MSG(got[0] == 20 && got[8] == 36, "1D array: first bytes %d and %d, want 20 and 36", got[0], got[8]);
+
+    // a 2D array, two layers of a 2 x 2 corner
+    glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, &t2);
+    glTextureStorage3D(t2, 1, GL_RGBA8, 2, 2, 3);
+    glTextureSubImage3D(t2, 0, 0, 0, 0, 2, 2, 3, GL_RGBA, GL_UNSIGNED_BYTE, src);
+
+    memset(got, 0xEE, sizeof got);
+    glGetTextureSubImage(t2, 0, 0, 0, 1, 2, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, sizeof got, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(got[0] == 16 && got[16] == 32, "2D array: layer starts %d and %d, want 16 and 32", got[0], got[16]);
+
+    glDeleteTextures(1, &t1);
+    glDeleteTextures(1, &t2);
 }

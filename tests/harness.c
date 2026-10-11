@@ -77,7 +77,14 @@ void mgl_harness_reset(void)
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClearDepth(1.0);
     glClearStencil(0);
+    glStencilMask(0xFFFFFFFFu);
+    glStencilFunc(GL_ALWAYS, 0, 0xFFFFFFFFu);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
     glFrontFace(GL_CCW);
+    glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(0.0f, 0.0f);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glCullFace(GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
