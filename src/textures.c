@@ -210,6 +210,10 @@ Texture *getTex(GLMContext ctx, GLuint name, GLenum target)
     GLuint index;
     Texture *ptr;
 
+    // a direct state access call names the texture and gives no target;
+    // zero is then no texture at all
+    ERROR_CHECK_RETURN_VALUE(name != 0 || target != 0, GL_INVALID_OPERATION, NULL);
+
     if (name == 0)
     {
         index = textureIndexFromTarget(ctx, target);
@@ -1111,7 +1115,10 @@ void generateMipmaps(GLMContext ctx, GLuint texture, GLenum target)
     ptr->mipmapped = true;
     ptr->genmipmaps = true;
 
-    ptr->dirty_bits |= DIRTY_TEXTURE_LEVEL;
+    // immutable storage already has every level in Metal; making it again
+    // would only throw away what is in it
+    if (!ptr->immutable_storage)
+        ptr->dirty_bits |= DIRTY_TEXTURE_LEVEL;
 
     ctx->mtl_funcs.mtlGenerateMipmaps(ctx, ptr);
 }
@@ -2725,34 +2732,6 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
     if (unpackTexture(ctx, tex, face, level, format, type, pixels, texture_data, src_pitch, xoffset, yoffset, zoffset, width, height, depth) == false)
         return false;
 
-    // use a blit command to update data
-    do
-    {
-        Buffer *buf;
-
-        buf = STATE(buffers[_PIXEL_UNPACK_BUFFER]);
-
-        if (buf == NULL)
-            continue;
-
-        if (tex->mtl_data == NULL)
-            continue;
-
-        size_t src_offset;
-        size_t src_image_size;
-        size_t src_size;
-
-        src_offset = (size_t)0;
-
-        src_image_size = src_pitch * height;
-
-        src_size = src_image_size * depth;
-
-        ctx->mtl_funcs.mtlTexSubImage(ctx, tex, buf, src_offset, src_pitch, src_image_size, src_size, zoffset, level, width, height, depth, xoffset, yoffset, zoffset);
-
-        return true;
-    } while(false);
-
     // straight into the Metal texture where it already exists, otherwise
     // the next draw makes it from the CPU copy
     if (ctx->mtl_funcs.mtlUpdateTexRegion &&
@@ -3120,7 +3099,6 @@ void mglTexStorage2D(GLMContext ctx, GLenum target, GLsizei levels, GLenum inter
 
         case GL_TEXTURE_CUBE_MAP:
             num_faces = 6;
-            proxy = true;
             break;
 
         case GL_PROXY_TEXTURE_CUBE_MAP:
@@ -3806,7 +3784,8 @@ static bool compressedTexSubLevel(GLMContext ctx, Texture *tex, GLuint face, GLi
     src_pitch = mglFormatBytesPerRow(format, width);
     dst_pitch = lvl->pitch;
     block_rows = ((size_t)(height > 0 ? height : 1) + desc->block_h - 1) / desc->block_h;
-    slice_pitch = dst_pitch * (lvl->height ? lvl->height : 1);
+    // a level keeps one row per row of blocks, slices packed one after another
+    slice_pitch = dst_pitch * (((lvl->height ? lvl->height : 1) + desc->block_h - 1) / desc->block_h);
 
     for (size_t z = 0; z < (size_t)(depth > 0 ? depth : 1); z++)
     {
@@ -4814,7 +4793,7 @@ void mglGetCompressedTextureSubImage(GLMContext ctx, GLuint texture, GLint level
     size_t src_pitch = lvl->pitch;
     size_t dst_pitch = mglFormatBytesPerRow(tex->internalformat, width);
     size_t block_rows = ((size_t)(height > 0 ? height : 1) + desc->block_h - 1) / desc->block_h;
-    size_t slice_pitch = src_pitch * (lvl->height ? lvl->height : 1);
+    size_t slice_pitch = src_pitch * (((lvl->height ? lvl->height : 1) + desc->block_h - 1) / desc->block_h);
 
     for (size_t z = 0; z < (size_t)(depth > 0 ? depth : 1); z++)
     {

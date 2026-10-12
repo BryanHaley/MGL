@@ -7,6 +7,7 @@
  */
 
 #include <string.h>
+#include <stdint.h>
 #include "mgl_test.h"
 #include "harness.h"
 
@@ -932,4 +933,203 @@ GPU_TEST(texture_storage, sub_image_reads_layers_and_slices)
 
     glDeleteTextures(1, &t1);
     glDeleteTextures(1, &t2);
+}
+
+// A compressed level keeps each layer as rows of blocks, so a sub-image read
+// or write of layer 1 starts right after layer 0's blocks
+GPU_TEST(texture_storage, compressed_layers_line_up)
+{
+    GLuint t = 0;
+    GLubyte all[2 * 2 * 2 * 16], got[2 * 2 * 16], mine[2 * 2 * 16];
+
+    for (int i = 0; i < (int)sizeof all; i++)
+        all[i] = (GLubyte)(i * 7 + 1);
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+    glCompressedTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_COMPRESSED_RGBA8_ETC2_EAC, 8, 8, 2, 0, sizeof all, all);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetCompressedTextureSubImage(t, 0, 0, 0, 1, 8, 8, 1, sizeof got, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(memcmp(got, all + sizeof got, sizeof got) == 0, "layer 1 read back as layer %s",
+              memcmp(got, all, sizeof got) == 0 ? "0" : "garbage");
+
+    for (int i = 0; i < (int)sizeof mine; i++)
+        mine[i] = (GLubyte)(255 - i);
+
+    glCompressedTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 1, 8, 8, 1, GL_COMPRESSED_RGBA8_ETC2_EAC,
+                              sizeof mine, mine);
+    glGetCompressedTextureSubImage(t, 0, 0, 0, 1, 8, 8, 1, sizeof got, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_MSG(memcmp(got, mine, sizeof got) == 0, "layer 1 written and read back differ");
+
+    glGetCompressedTextureSubImage(t, 0, 0, 0, 0, 8, 8, 1, sizeof got, got);
+    CHECK_MSG(memcmp(got, all, sizeof got) == 0, "writing layer 1 changed layer 0");
+
+    glDeleteTextures(1, &t);
+}
+
+// Immutable compressed storage filled whole with glCompressedTexSubImage
+GPU_TEST(texture_storage, compressed_storage_takes_a_full_sub_image)
+{
+    static GLubyte blocks[16 * 16 * 16];
+    GLuint t2 = 0, ta = 0;
+
+    glGenTextures(1, &t2);
+    glBindTexture(GL_TEXTURE_2D, t2);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_COMPRESSED_RGBA8_ETC2_EAC, 64, 64);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 64, 64, GL_COMPRESSED_RGBA8_ETC2_EAC, sizeof blocks, blocks);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGenTextures(1, &ta);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ta);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_COMPRESSED_RGBA8_ETC2_EAC, 32, 32, 4);
+    glCompressedTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 32, 32, 4, GL_COMPRESSED_RGBA8_ETC2_EAC,
+                              sizeof blocks, blocks);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteTextures(1, &t2);
+    glDeleteTextures(1, &ta);
+}
+
+// A cube map array is layer-faces in a row: z counts faces, six to a layer.
+// Each one written on its own has to read back in its own place.
+GPU_TEST(texture_storage, cube_array_layer_faces_round_trip)
+{
+    enum { W = 4, LF = 12 };
+    GLubyte src[W * W * 4 * LF], got[W * W * 4 * LF];
+    GLuint t = 0, pbo = 0;
+
+    for (int z = 0; z < LF; z++)
+        for (int i = 0; i < W * W * 4; i++)
+            src[z * W * W * 4 + i] = (GLubyte)(z * 16 + (i & 15));
+
+    for (int use_pbo = 0; use_pbo < 2; use_pbo++)
+    {
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, t);
+        glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 1, GL_RGBA8, W, W, LF);
+
+        if (use_pbo)
+        {
+            glGenBuffers(1, &pbo);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+            glBufferData(GL_PIXEL_UNPACK_BUFFER, sizeof src, src, GL_STATIC_DRAW);
+        }
+
+        // first half as one call, the rest one layer-face at a time
+        glTexSubImage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 0, 0, 0, 0, W, W, 6, GL_RGBA, GL_UNSIGNED_BYTE,
+                        use_pbo ? (const void *)0 : src);
+        for (int z = 6; z < LF; z++)
+            glTexSubImage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 0, 0, 0, z, W, W, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            use_pbo ? (const void *)(uintptr_t)(z * W * W * 4) : src + z * W * W * 4);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        if (use_pbo)
+        {
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            glDeleteBuffers(1, &pbo);
+        }
+
+        memset(got, 0, sizeof got);
+        glGetTexImage(GL_TEXTURE_CUBE_MAP_ARRAY, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        for (int z = 0; z < LF; z++)
+            CHECK_MSG(got[z * W * W * 4] == src[z * W * W * 4] &&
+                      got[z * W * W * 4 + W * W * 4 - 1] == src[z * W * W * 4 + W * W * 4 - 1],
+                      "%s: layer-face %d reads %d, want %d", use_pbo ? "pbo" : "client",
+                      z, got[z * W * W * 4], src[z * W * W * 4]);
+
+        glDeleteTextures(1, &t);
+    }
+}
+
+// Each layer-face of a cube map array reads back through a framebuffer,
+// before and after mipmaps are made from it
+GPU_TEST(texture_storage, cube_array_layer_faces_read_through_a_framebuffer)
+{
+    enum { W = 8, LF = 12 };
+    static GLubyte src[W * W * 4 * LF];
+    GLubyte got[W * W * 4];
+    GLuint t = 0, fbo = 0;
+
+    for (int z = 0; z < LF; z++)
+        for (int i = 0; i < W * W * 4; i++)
+            src[z * W * W * 4 + i] = (GLubyte)(z * 16 + (i & 7));
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, t);
+    glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 4, GL_RGBA8, W, W, LF);
+    glTexSubImage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 0, 0, 0, 0, W, W, LF, GL_RGBA, GL_UNSIGNED_BYTE, src);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+
+    for (int pass = 0; pass < 2; pass++)
+    {
+        if (pass)
+            glGenerateMipmap(GL_TEXTURE_CUBE_MAP_ARRAY);
+
+        for (int z = 0; z < LF; z++)
+        {
+            glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, t, 0, z);
+            memset(got, 0, sizeof got);
+            glReadPixels(0, 0, W, W, GL_RGBA, GL_UNSIGNED_BYTE, got);
+            CHECK_MSG(memcmp(got, src + z * W * W * 4, sizeof got) == 0,
+                      "%s mipmaps: layer-face %d reads %d, want %d", pass ? "after" : "before",
+                      z, got[0], src[z * W * W * 4]);
+        }
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &t);
+}
+
+GPU_TEST(texture_storage, array_layers_survive_generated_mipmaps)
+{
+    enum { W = 8, LF = 12 };
+    static GLubyte src[W * W * 4 * LF];
+    GLubyte got[W * W * 4];
+    GLuint t = 0, fbo = 0;
+
+    for (int z = 0; z < LF; z++)
+        for (int i = 0; i < W * W * 4; i++)
+            src[z * W * W * 4 + i] = (GLubyte)(z * 16 + (i & 7));
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 4, GL_RGBA8, W, W, LF);
+    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, W, W, LF, GL_RGBA, GL_UNSIGNED_BYTE, src);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+
+    for (int pass = 0; pass < 2; pass++)
+    {
+        if (pass)
+        {
+            static GLubyte all[W * W * 4 * LF];
+            glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+            glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, GL_UNSIGNED_BYTE, all);
+            CHECK_MSG(memcmp(all, src, sizeof all) == 0, "GetTexImage after mipmaps differs (first %d %d)", all[0], all[W * W * 4]);
+        }
+
+        for (int z = 0; z < LF; z++)
+        {
+            glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, t, 0, z);
+            memset(got, 0, sizeof got);
+            glReadPixels(0, 0, W, W, GL_RGBA, GL_UNSIGNED_BYTE, got);
+            CHECK_MSG(memcmp(got, src + z * W * W * 4, sizeof got) == 0,
+                      "%s mipmaps: layer-face %d reads %d, want %d", pass ? "after" : "before",
+                      z, got[0], src[z * W * W * 4]);
+        }
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &t);
 }

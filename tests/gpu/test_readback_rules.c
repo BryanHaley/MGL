@@ -476,3 +476,33 @@ GPU_TEST(readback_rules, depth_stencil_errors)
     glDeleteFramebuffers(1, &fb);
     glDeleteTextures(1, &ds);
 }
+
+// GL 4.6 section 8.11.4: reading an integer texture as normalized values,
+// or a normalized one as integers, is an invalid operation
+GPU_TEST(readback_rules, integer_and_normalized_do_not_mix)
+{
+    GLuint ti = 0, tn = 0;
+    GLuint store[16 * 16 * 4];
+
+    glCreateTextures(GL_TEXTURE_2D, 1, &ti);
+    glTextureStorage2D(ti, 1, GL_R8I, 16, 16);
+    glCreateTextures(GL_TEXTURE_2D, 1, &tn);
+    glTextureStorage2D(tn, 1, GL_RGBA8, 16, 16);
+    mgl_drain_errors();
+
+    glGetTextureImage(ti, 0, GL_RED, GL_UNSIGNED_INT, sizeof store, store);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glGetTextureImage(tn, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, sizeof store, store);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glGetTextureImage(ti, 0, GL_RED_INTEGER, GL_INT, sizeof store, store);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    // texture zero is no texture to a direct state access call
+    glGetTextureImage(0, 0, GL_RED, GL_UNSIGNED_INT, sizeof store, store);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+
+    glDeleteTextures(1, &ti);
+    glDeleteTextures(1, &tn);
+}

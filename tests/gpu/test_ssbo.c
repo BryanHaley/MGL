@@ -406,3 +406,58 @@ GPU_TEST(ssbo, a_range_binds_before_storage)
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
     glDeleteBuffers(1, &b);
 }
+
+// The shader storage block spellings from the CTS's basic-syntax case: each
+// one reads three positions out of a buffer to cover the target
+GPU_TEST(ssbo, every_basic_syntax_draws)
+{
+    static const char *VS[] = {
+        "#version 430 core\nlayout(std430) buffer Buffer {\n  vec4 position[3];\n} g_input_buffer;\nvoid main() {\n  gl_Position = g_input_buffer.position[gl_VertexID];\n}\n",
+        "#version 430 core\ncoherent buffer Buffer {\n  buffer vec4 position0;\n  coherent vec4 position1;\n  restrict readonly vec4 position2;\n} g_input_buffer;\nvoid main() {\n  if (gl_VertexID == 0) gl_Position = g_input_buffer.position0;\n  if (gl_VertexID == 1) gl_Position = g_input_buffer.position1;\n  if (gl_VertexID == 2) gl_Position = g_input_buffer.position2;\n}\n",
+        "#version 430 core\nlayout(std140, binding = 0) readonly buffer Buffer {\n  readonly vec4 position[];\n};\nvoid main() {\n  gl_Position = position[gl_VertexID];\n}\n",
+        "#version 430 core\nlayout(std430, column_major, std140, std430, row_major, packed, shared) buffer;\nlayout(std430) buffer;\ncoherent restrict volatile buffer Buffer {\n  restrict coherent vec4 position[];\n} g_buffer;\nvoid main() {\n  gl_Position = g_buffer.position[gl_VertexID];\n}\n",
+        "#version 430 core\nbuffer Buffer {\n  vec4 position[3];\n} g_buffer[1];\nvoid main() {\n  gl_Position = g_buffer[0].position[gl_VertexID];\n}\n",
+        "#version 430 core\nlayout(shared) coherent buffer Buffer {\n  restrict volatile vec4 position0;\n  buffer readonly vec4 position1;\n  vec4 position2;\n} g_buffer[1];\nvoid main() {\n  if (gl_VertexID == 0) gl_Position = g_buffer[0].position0;\n  else if (gl_VertexID == 1) gl_Position = g_buffer[0].position1;\n  else if (gl_VertexID == 2) gl_Position = g_buffer[0].position2;\n}\n",
+        "#version 430 core\nlayout(packed) coherent buffer Buffer {\n  vec4 position01[];\n  vec4 position2;\n} g_buffer;\nvoid main() {\n  if (gl_VertexID == 0) gl_Position = g_buffer.position01[0];\n  else if (gl_VertexID == 1) gl_Position = g_buffer.position01[1];\n  else if (gl_VertexID == 2) gl_Position = g_buffer.position2;\n}\n",
+        "#version 430 core\nlayout(std430) coherent buffer Buffer {\n  coherent vec4 position01[];\n  vec4 position2[];\n} g_buffer;\nvoid main() {\n  switch (gl_VertexID) {\n    case 0: gl_Position = g_buffer.position01[0]; break;\n    case 1: gl_Position = g_buffer.position01[1]; break;\n    case 2: gl_Position = g_buffer.position2[gl_VertexID - 2]; break;\n  }\n}\n",
+    };
+    static const char *FS =
+        "#version 430 core\n"
+        "layout(location = 0) out vec4 o_color;\n"
+        "void main() { o_color = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+    static const float data[12] = { -1, -1, 0, 1,  3, -1, 0, 1,  -1, 3, 0, 1 };
+    MGLTestTarget t;
+    GLuint buf, vao;
+    char log[1024];
+
+    if (!mgl_target_create(&t, 8, 8, GL_RGBA8, 0)) { CHECK(0); return; }
+
+    glGenBuffers(1, &buf);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof data, data, GL_STATIC_DRAW);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    for (int i = 0; i < (int)(sizeof VS / sizeof VS[0]); i++)
+    {
+        GLuint p = mgl_build_program(VS[i], FS, log, sizeof log);
+        unsigned char *px, c[4] = { 0 };
+
+        CHECK_MSG(p != 0, "variant %d did not build: %s", i, log);
+        if (!p) continue;
+
+        glUseProgram(p);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        px = mgl_read_rgba8(&t);
+        mgl_pixel_at(px, &t, 4, 4, c);
+        free(px);
+        CHECK_MSG(c[1] == 255, "variant %d drew %d %d %d", i, c[0], c[1], c[2]);
+        glUseProgram(0);
+        glDeleteProgram(p);
+    }
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &buf);
+    mgl_target_destroy(&t);
+}

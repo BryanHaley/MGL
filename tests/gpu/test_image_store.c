@@ -1012,3 +1012,141 @@ GPU_TEST(image_store, a_geometry_program_without_a_fragment_shader_runs)
     glDeleteVertexArrays(1, &vao);
     mgl_target_destroy(&target);
 }
+
+// imageLoad and imageStore on a cube map array address a layer-face with z
+GPU_TEST(image_store, cube_array_copies_layer_faces)
+{
+    static const char *CS =
+        "#version 450\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(rgba32f, binding = 0) readonly uniform imageCubeArray src;\n"
+        "layout(rgba32f, binding = 1) writeonly uniform imageCubeArray dst;\n"
+        "void main() {\n"
+        "  for (int x = 0; x < 4; x++) for (int y = 0; y < 4; y++) for (int z = 0; z < 12; z++)\n"
+        "    imageStore(dst, ivec3(x, y, z), imageLoad(src, ivec3(x, y, z)));\n"
+        "}\n";
+    enum { W = 4, LF = 12 };
+    static GLfloat data[W * W * 4 * LF], got[W * W * 4];
+    GLuint t[2], fbo, prog;
+    char log[1024];
+
+    for (int i = 0; i < W * W * 4 * LF; i++)
+        data[i] = (GLfloat)i;
+
+    prog = mgl_build_compute_program(CS, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog) return;
+
+    glGenTextures(2, t);
+    for (int i = 0; i < 2; i++)
+    {
+        glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, t[i]);
+        glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 1, GL_RGBA32F, W, W, LF);
+    }
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, t[0]);
+    glTexSubImage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 0, 0, 0, 0, W, W, LF, GL_RGBA, GL_FLOAT, data);
+
+    glBindImageTexture(0, t[0], 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+    glBindImageTexture(1, t[1], 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+    glUseProgram(prog);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    for (int z = 0; z < LF; z++)
+    {
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, t[1], 0, z);
+        glReadPixels(0, 0, W, W, GL_RGBA, GL_FLOAT, got);
+        CHECK_MSG(got[0] == data[z * W * W * 4] && got[W * W * 4 - 1] == data[z * W * W * 4 + W * W * 4 - 1],
+                  "layer-face %d reads %g, want %g", z, got[0], data[z * W * W * 4]);
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(2, t);
+    glDeleteProgram(prog);
+}
+
+// The same copy from a vertex shader run once by a single point
+GPU_TEST(image_store, cube_array_copies_from_a_vertex_shader)
+{
+    static const char *VS =
+        "#version 450\n"
+        "layout(rgba32f, binding = 0) readonly uniform imageCubeArray src;\n"
+        "layout(rgba32f, binding = 1) writeonly uniform imageCubeArray dst;\n"
+        "layout(rgba32ui, binding = 2) writeonly uniform uimageCubeArray udst;\n"
+        "uniform ivec3 dims;\n"
+        "void main() {\n"
+        "  gl_PointSize = 1.0;\n"
+        "  for (int x = 0; x < dims.x; x++) for (int y = 0; y < dims.y; y++) for (int z = 0; z < dims.z; z++)\n"
+        "  { imageStore(dst, ivec3(x, y, z), imageLoad(src, ivec3(x, y, z)));\n"
+        "    imageStore(udst, ivec3(x, y, z), uvec4(z + 1)); }\n"
+        "}\n";
+    static const char *FS = "#version 450\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n";
+    enum { W = 4, LF = 12 };
+    static GLfloat data[W * W * 4 * LF], got[W * W * 4];
+    GLuint t[2], ut = 0, fbo, prog, vao;
+    GLuint ugot[W * W * 4];
+    MGLTestTarget target;
+    char log[1024];
+
+    for (int i = 0; i < W * W * 4 * LF; i++)
+        data[i] = (GLfloat)i;
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&target, 4, 4, GL_RGBA8, 0)) return;
+
+    glGenTextures(2, t);
+    for (int i = 0; i < 2; i++)
+    {
+        glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, t[i]);
+        glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 1, GL_RGBA32F, W, W, LF);
+    }
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, t[0]);
+    glTexSubImage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 0, 0, 0, 0, W, W, LF, GL_RGBA, GL_FLOAT, data);
+
+    glBindImageTexture(0, t[0], 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+    glBindImageTexture(1, t[1], 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+
+    // an earlier draw leaves its render encoder open
+    glUniform3i(glGetUniformLocation(prog, "dims"), 0, 0, 0);
+    glDrawArrays(GL_POINTS, 0, 1);
+
+    // made for the first time while the next draw is being set up
+    glGenTextures(1, &ut);
+    glBindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, ut);
+    glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, 1, GL_RGBA32UI, W, W, LF);
+    glBindImageTexture(2, ut, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32UI);
+    glUniform3i(glGetUniformLocation(prog, "dims"), W, W, LF);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    for (int z = 0; z < LF; z++)
+    {
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, t[1], 0, z);
+        glReadPixels(0, 0, W, W, GL_RGBA, GL_FLOAT, got);
+        CHECK_MSG(got[0] == data[z * W * W * 4], "layer-face %d reads %g, want %g", z, got[0], data[z * W * W * 4]);
+
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, ut, 0, z);
+        glReadPixels(0, 0, W, W, GL_RGBA_INTEGER, GL_UNSIGNED_INT, ugot);
+        CHECK_MSG(ugot[0] == (GLuint)z + 1, "unsigned layer-face %d reads %u, want %d", z, ugot[0], z + 1);
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTextures(2, t);
+    glDeleteTextures(1, &ut);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&target);
+}

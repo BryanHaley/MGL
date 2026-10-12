@@ -535,8 +535,6 @@ int mglTessellate(int domain, int spacing, bool point_mode, bool cw,
 #define MGL_BUFFER_SIZES_MSL_SLOT 21
 // where SPIRV-Cross reads gl_DrawID from
 #define MGL_DRAW_ID_MSL_SLOT 19
-// where the last vertex stage reads glClipControl's depth mode
-#define MGL_CLIP_CONTROL_MSL_SLOT 20
 
 struct Program_t;
 bool mglBuildSampleRateFragment(struct GLMContextRec_t *ctx, struct Program_t *pptr);
@@ -946,6 +944,9 @@ typedef struct Program_t {
     int refcount;
     GLboolean delete_status;
     Shader *shader_slots[_MAX_SHADER_TYPES];
+    // a second shader attached for a stage that already had one; MGL builds
+    // a stage from one shader, but the link still has to see it
+    Shader *also_attached[_MAX_SHADER_TYPES];
     glslang_program_t *linked_glsl_program;
     // a link has succeeded at least once, so there is something to run
     GLboolean executable;
@@ -1033,8 +1034,6 @@ typedef struct Program_t {
     GLuint  link_serial;
     // does the vertex stage read gl_DrawID; -1 until the first draw asks
     GLint   uses_draw_id;
-    // does any stage read the clip control word; -1 until the first draw asks
-    GLint   uses_clip_control;
     GLboolean linked_separable;     // PROGRAM_SEPARABLE as of the last link
 } Program;
 

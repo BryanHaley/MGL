@@ -541,7 +541,7 @@ GPU_TEST(tessellation, ids_read_back_through_feedback)
         "}\n";
     static const char *tes =
         "#version 440\n"
-        "layout(isolines, point_mode) in;\n"
+        "layout(triangles, point_mode) in;\n"
         "in int tc_invocation[];\n"
         "in int tc_prim[];\n"
         "flat out int last_invocation;\n"
@@ -582,12 +582,22 @@ GPU_TEST(tessellation, ids_read_back_through_feedback)
     glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, 4096, NULL, GL_STATIC_DRAW);
     glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
 
-    // two patches, drawn twice over: eight patches, two points each
+    // two patches, drawn twice over: four patches. A triangle at level one
+    // in point mode is its three corners, so twelve points.
+    GLuint q = 0;
+    GLint written = 0;
+
+    glGenQueries(1, &q);
     glEnable(GL_RASTERIZER_DISCARD);
+    glBeginQuery(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, q);
     glBeginTransformFeedback(GL_POINTS);
     glDrawArraysInstanced(GL_PATCHES, 0, 8, 2);
     glEndTransformFeedback();
+    glEndQuery(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN);
     glDisable(GL_RASTERIZER_DISCARD);
+    glGetQueryObjectiv(q, GL_QUERY_RESULT, &written);
+    glDeleteQueries(1, &q);
+    CHECK_EQ_INT(written, 12);
 
     const GLint *d = (const GLint *)glMapBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 4096, GL_MAP_READ_BIT);
 
@@ -597,7 +607,7 @@ GPU_TEST(tessellation, ids_read_back_through_feedback)
     if (d)
     {
         // the last vertex of the last patch of the second instance
-        const GLint *v = d + (4 * 2 - 1) * 4;
+        const GLint *v = d + (written > 0 ? written - 1 : 0) * 4;
 
         CHECK_EQ_INT(d[0], 3);      // gl_InvocationID of the last control invocation
         CHECK_EQ_INT(d[1], 4);      // gl_PatchVerticesIn
@@ -808,4 +818,43 @@ GPU_TEST(tessellation, a_control_stage_alone_cannot_draw)
     glDeleteProgram(vs);
     glDeleteProgram(tcs);
     glDeleteProgram(fs);
+}
+
+// A per-patch array has the same size on both sides of the tessellator
+GPU_TEST(tessellation, a_patch_array_links)
+{
+    static const char *VS = "#version 440\nvoid main() { }\n";
+    static const char *TCS =
+        "#version 440\n"
+        "layout (vertices = 16) out;\n"
+        "patch out int r[16];\n"
+        "void main() { r[gl_InvocationID] = gl_InvocationID; gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0; }\n";
+    static const char *TES =
+        "#version 440\n"
+        "layout(isolines, point_mode) in;\n"
+        "patch in int r[16];\n"
+        "flat out ivec4 o;\n"
+        "void main() { o = ivec4(r[0], r[1], r[2], r[15]); }\n";
+    static const char *FS = "#version 440\nvoid main() { }\n";
+    const char *src[4] = { VS, TCS, TES, FS };
+    GLenum types[4] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER, GL_FRAGMENT_SHADER };
+    GLuint p = glCreateProgram();
+    GLint ok = -1;
+    char log[512] = "";
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLuint sh = glCreateShader(types[i]);
+        glShaderSource(sh, 1, &src[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(p, sh);
+        glDeleteShader(sh);
+    }
+
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glGetProgramInfoLog(p, sizeof log, NULL, log);
+    CHECK_MSG(ok == GL_TRUE, "did not link: %s", log);
+    glDeleteProgram(p);
+    mgl_drain_errors();
 }

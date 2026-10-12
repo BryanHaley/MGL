@@ -24,6 +24,7 @@
 #include <glslang_c_shader_types.h>
 
 #include "shaders.h"
+#include "spirv_cross_c.h"
 #include <ctype.h>
 #include "mgl_reflect.h"
 #include "glm_context.h"
@@ -1800,14 +1801,11 @@ static const char *ppStrictError(const char *src)
     return err;
 }
 
+static void compileShaderObject(GLMContext ctx, Shader *ptr);
+
 void mglCompileShader(GLMContext ctx, GLuint shader)
 {
-
-
     Shader *ptr;
-    glslang_input_t glsl_input;
-    glslang_shader_t *glsl_shader;
-    int err;
 
     ERROR_CHECK_RETURN(isShader(ctx, shader), GL_INVALID_VALUE);
 
@@ -1818,6 +1816,15 @@ void mglCompileShader(GLMContext ctx, GLuint shader)
     // ARB_gl_spirv 7.1: a shader carrying a SPIR-V module is finalized with
     // SpecializeShader, never CompileShader.
     ERROR_CHECK_RETURN(ptr->spirv_binary == NULL, GL_INVALID_OPERATION);
+
+    compileShaderObject(ctx, ptr);
+}
+
+static void compileShaderObject(GLMContext ctx, Shader *ptr)
+{
+    glslang_input_t glsl_input;
+    glslang_shader_t *glsl_shader;
+    int err;
 
     // no source was ever accepted for this shader, so there is nothing to compile
     if (ptr->src == NULL)
@@ -2428,6 +2435,41 @@ static void spirvSetSpecConstant(uint32_t *w, size_t n, uint32_t id, GLuint valu
     }
 }
 
+// A SPIR-V module back as GLSL, so it goes down the same road as source and
+// the rewrites that work on source (geometry, tessellation) apply to it too
+static char *spirvToGlsl(const uint32_t *w, size_t n, const char *entry, int model)
+{
+    spvc_context c = NULL;
+    spvc_parsed_ir ir = NULL;
+    spvc_compiler comp = NULL;
+    spvc_compiler_options o = NULL;
+    const char *out = NULL;
+    char *ret = NULL;
+
+    if (spvc_context_create(&c) != SPVC_SUCCESS)
+        return NULL;
+
+    if (spvc_context_parse_spirv(c, w, n, &ir) == SPVC_SUCCESS &&
+        spvc_context_create_compiler(c, SPVC_BACKEND_GLSL, ir, SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &comp) == SPVC_SUCCESS &&
+        spvc_compiler_set_entry_point(comp, entry, (SpvExecutionModel)model) == SPVC_SUCCESS &&
+        spvc_compiler_create_compiler_options(comp, &o) == SPVC_SUCCESS)
+    {
+        spvc_compiler_options_set_uint(o, SPVC_COMPILER_OPTION_GLSL_VERSION, 460);
+        spvc_compiler_options_set_bool(o, SPVC_COMPILER_OPTION_GLSL_ES, SPVC_FALSE);
+        spvc_compiler_options_set_bool(o, SPVC_COMPILER_OPTION_GLSL_VULKAN_SEMANTICS, SPVC_FALSE);
+        spvc_compiler_install_compiler_options(comp, o);
+
+        if (spvc_compiler_compile(comp, &out) == SPVC_SUCCESS && out)
+            ret = strdup(out);
+        else
+            MGL_ERR("MGL Error: SPIR-V to GLSL failed: %s\n", spvc_context_get_last_error_string(c));
+    }
+
+    spvc_context_destroy(c);
+
+    return ret;
+}
+
 void mglSpecializeShader(GLMContext ctx, GLuint shader, const GLchar *pEntryPoint, GLuint numSpecializationConstants, const GLuint *pConstantIndex, const GLuint *pConstantValue)
 {
     Shader *ptr = findShader(ctx, shader);
@@ -2462,4 +2504,19 @@ void mglSpecializeShader(GLMContext ctx, GLuint shader, const GLchar *pEntryPoin
 
     free(ptr->log);
     ptr->log = NULL;
+
+    // the module becomes GLSL source and is compiled like any other
+    char *glsl = spirvToGlsl(words, n, name, spirvModelFor(ptr->type));
+
+    if (glsl == NULL)
+    {
+        ptr->log = strdup("the SPIR-V module could not be translated");
+        return;
+    }
+
+    free((void *)ptr->src);
+    ptr->src = glsl;
+    ptr->src_len = strlen(glsl);
+
+    compileShaderObject(ctx, ptr);
 }

@@ -18,6 +18,7 @@
  *
  */
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -35,6 +36,9 @@ extern bool mglInlineSpirv(const unsigned int *words, size_t count,
                            unsigned int **out_words, size_t *out_count);
 extern int mglCountAtomicCounters(const unsigned int *words, size_t count);
 static void assignPipeLocations(Program *ptr, spvc_compiler compiler, int stage);
+// the descriptor set MGL's own storage blocks live in
+#define MGL_INTERNAL_SET 2
+
 // in mgl_spirv_opt.cpp -- moves atomic counters into buffer blocks
 extern int mglLowerAtomicCounters(const unsigned int *words, size_t count,
                                   unsigned int **out_words, size_t *out_count,
@@ -485,6 +489,9 @@ void mglAttachShader(GLMContext ctx, GLuint program, GLuint shader)
 
     index = sptr->glm_type;
 
+    if (pptr->shader_slots[index] && pptr->shader_slots[index] != sptr && pptr->also_attached[index] == NULL)
+        pptr->also_attached[index] = pptr->shader_slots[index];
+
     pptr->shader_slots[index] = sptr;
     sptr->refcount++;
     pptr->dirty_bits |= DIRTY_PROGRAM;
@@ -527,6 +534,12 @@ void mglDetachShader(GLMContext ctx, GLuint program, GLuint shader)
     }
 
     index = sptr->glm_type;
+
+    if (pptr->also_attached[index] == sptr)
+    {
+        pptr->also_attached[index] = NULL;
+        return;
+    }
 
     if (pptr->shader_slots[index] != sptr)
     {
@@ -1824,10 +1837,9 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
-    // glClipControl can ask for clip z from 0 to 1, so the fix-up above is
-    // skipped at run time when it does
+    // glClipControl can ask for clip z from 0 to 1, so a function constant
+    // can switch the fix-up above off (see clipVariant in MGLRenderer.m)
     spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_RUNTIME_CLIP_DEPTH, SPVC_TRUE);
-    spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_CLIP_CONTROL_BUFFER_INDEX, MGL_CLIP_CONTROL_MSL_SLOT);
 
     // Metal has no double. SPIRV-Cross carries every double as three floats
     // that add up to it, which is close enough for GL's fp64 rules.
@@ -1863,7 +1875,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
             spvc_msl_resource_binding_init(&rb);
             rb.stage = SpvExecutionModelVertex;
-            rb.desc_set = 1;
+            rb.desc_set = MGL_INTERNAL_SET;
             rb.binding = MGL_XFB_FIRST_BINDING + b;
             rb.msl_buffer = MGL_XFB_FIRST_MSL_SLOT + b;
 
@@ -1882,7 +1894,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
             spvc_msl_resource_binding_init(&rb);
             rb.stage = spvc_compiler_get_execution_model(compiler_msl);
-            rb.desc_set = 1;
+            rb.desc_set = MGL_INTERNAL_SET;
             rb.binding = MGL_CULL_FIRST_BINDING + b;
             rb.msl_buffer = MGL_CULL_FIRST_MSL_SLOT + b;
 
@@ -1911,7 +1923,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
 
             // storage buffers were moved to their own descriptor set above
             rb.stage = spvc_compiler_get_execution_model(compiler_msl);
-            rb.desc_set = 1;
+            rb.desc_set = MGL_INTERNAL_SET;
             rb.binding = pins[b].binding;
             rb.msl_buffer = pins[b].msl;
 
@@ -2084,7 +2096,10 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
                         strncmp(sb_list[sb].name, "mglAtomic", 9) == 0)
                         continue;
 
-                    spvc_compiler_set_decoration(compiler_msl, sb_list[sb].id, SpvDecorationDescriptorSet, 1);
+                    // MGL's own blocks get a set apart from the application's,
+                    // whose binding numbers may be anything
+                    spvc_compiler_set_decoration(compiler_msl, sb_list[sb].id, SpvDecorationDescriptorSet,
+                                                 strncmp(sb_list[sb].name, "Mgl", 3) == 0 ? MGL_INTERNAL_SET : 1);
                 }
             }
         }
@@ -4284,8 +4299,9 @@ bool mglBuildSampleRateFragment(GLMContext ctx, Program *pptr)
     memset(pptr->spirv_resources_list[_FRAGMENT_SHADER], 0, sizeof keep);
     keep_bindless = pptr->bindless[_FRAGMENT_SHADER];
 
+    // the shader object may be gone by now, so the name comes from the link
     pptr->building_fs_sample_rate = GL_TRUE;
-    v->msl_str = parseSPIRVShaderToMetal(ctx, pptr, _FRAGMENT_SHADER, v, NULL);
+    v->msl_str = parseSPIRVShaderToMetal(ctx, pptr, _FRAGMENT_SHADER, v, src->entry_point);
     pptr->building_fs_sample_rate = GL_FALSE;
 
     for (int r = 0; r < MAX_SPVC_RESOURCE_TYPES; r++)
@@ -4294,6 +4310,77 @@ bool mglBuildSampleRateFragment(GLMContext ctx, Program *pptr)
     pptr->bindless[_FRAGMENT_SHADER] = keep_bindless;
 
     return v->msl_str != NULL;
+}
+
+// The members a stage's "in" or "out" gl_PerVertex redeclaration names, in
+// order and space separated. False when the stage does not redeclare it.
+static bool perVertexMembers(const char *src, const char *dir, char *out, size_t cap)
+{
+    const char *p = src;
+    size_t dl = strlen(dir);
+
+    if (!src || cap == 0)
+        return false;
+
+    while ((p = strstr(p, "gl_PerVertex")) != NULL)
+    {
+        // look back past spaces for the direction word
+        const char *q = p;
+
+        while (q > src && (q[-1] == ' ' || q[-1] == '\t' || q[-1] == '\n' || q[-1] == '\r'))
+            q--;
+
+        bool match = (size_t)(q - src) >= dl && !strncmp(q - dl, dir, dl) &&
+                     (q - dl == src || !(isalnum((unsigned char)q[-dl - 1]) || q[-dl - 1] == '_'));
+        const char *open = p + 12;
+
+        while (*open == ' ' || *open == '\t' || *open == '\n' || *open == '\r')
+            open++;
+
+        p += 12;
+
+        if (!match || *open != '{')
+            continue;
+
+        const char *close = strchr(open, '}');
+
+        if (!close)
+            return false;
+
+        // the last word before each ';' is a member name
+        size_t n = 0;
+        out[0] = 0;
+
+        for (const char *c = open + 1; c < close; c++)
+        {
+            if (*c != ';')
+                continue;
+
+            const char *e = c;
+
+            while (e > open && !(isalnum((unsigned char)e[-1]) || e[-1] == '_'))
+                e--;
+
+            const char *b = e;
+
+            while (b > open && (isalnum((unsigned char)b[-1]) || b[-1] == '_'))
+                b--;
+
+            size_t len = (size_t)(e - b);
+
+            if (n + len + 2 >= cap)
+                return false;
+
+            memcpy(out + n, b, len);
+            n += len;
+            out[n++] = ' ';
+            out[n] = 0;
+        }
+
+        return true;
+    }
+
+    return false;
 }
 
 void mglLinkProgram(GLMContext ctx, GLuint program)
@@ -4330,7 +4417,6 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     static GLuint serial;
     pptr->link_serial = ++serial;
     pptr->uses_draw_id = -1;
-    pptr->uses_clip_control = -1;
     // a new link means a new fragment stage to run per sample
     free(pptr->fs_sample_rate.msl_str);
     pptr->fs_sample_rate.msl_str = NULL;
@@ -4359,6 +4445,68 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
                 return;
             }
+        }
+    }
+
+    // GL 4.6 section 7.3: the shaders of one program are all SPIR-V or none are
+    {
+        int spirv = 0, glsl = 0;
+
+        for (int st = 0; st < _MAX_SHADER_TYPES; st++)
+            for (int k = 0; k < 2; k++)
+            {
+                Shader *sh = k ? pptr->also_attached[st] : pptr->shader_slots[st];
+
+                if (sh && sh->spirv_binary)
+                    spirv++;
+                else if (sh)
+                    glsl++;
+            }
+
+        if (spirv && glsl)
+        {
+            pptr->link_status = GL_FALSE;
+            pptr->validate_status = GL_FALSE;
+            free(pptr->log);
+            pptr->log = strdup("link failed: SPIR-V and GLSL shaders cannot be linked together");
+
+            return;
+        }
+    }
+
+    // GLSL 4.60 section 7.1: a gl_PerVertex redeclared in two stages of one
+    // program has to name the same members in both
+    {
+        static const int order[] = { _VERTEX_SHADER, _TESS_CONTROL_SHADER, _TESS_EVALUATION_SHADER,
+                                     _GEOMETRY_SHADER };
+        int prev = -1;
+
+        for (int i = 0; i < 4; i++)
+        {
+            int st = order[i];
+
+            if (!pptr->shader_slots[st])
+                continue;
+
+            if (prev >= 0)
+            {
+                Shader *a = pptr->shader_slots[prev], *b = pptr->shader_slots[st];
+                char out_m[512], in_m[512];
+
+                if (perVertexMembers(a->pp_src ? a->pp_src : a->src, "out", out_m, sizeof out_m) &&
+                    perVertexMembers(b->pp_src ? b->pp_src : b->src, "in", in_m, sizeof in_m) &&
+                    strcmp(out_m, in_m) != 0)
+                {
+                    pptr->link_status = GL_FALSE;
+                    pptr->validate_status = GL_FALSE;
+                    free(pptr->log);
+                    pptr->log = strdup("link failed: two stages redeclare gl_PerVertex with different members");
+
+                    return;
+                }
+            }
+
+            prev = st;
         }
     }
 

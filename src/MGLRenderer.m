@@ -422,6 +422,7 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
 
     // the shader blit, for copies Metal's own cannot make
     id<MTLLibrary>             _blitLibrary;
+    NSMapTable                *_clipVariants;
     NSMutableDictionary        *_blitPipelines;
 }
 
@@ -1133,9 +1134,6 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                     buffer_map->buffers[buffer_map->count].layout_stride =
                         convert ? 16 : stride ? stride : ((extent + 3u) & ~3u);
                     buffer_map->buffers[buffer_map->count].converted = convert;
-                    // the slots the driver binds its own words into are skipped
-                    while (attrib_slot >= MGL_DRAW_ID_MSL_SLOT && attrib_slot <= MGL_BUFFER_SIZES_MSL_SLOT)
-                        attrib_slot++;
                     buffer_map->buffers[buffer_map->count].buffer_base_index = attrib_slot++;
                     buffer_map->count++;
 
@@ -1793,15 +1791,6 @@ static bool isRGB32BufferFormat(GLenum f)
         case MTLPixelFormatPVRTC_RGB_2BPP:
         case MTLPixelFormatPVRTC_RGB_4BPP:
             // PVRTC compression can cause issues in virtualization
-            needsFormatConversion = YES;
-            pixelFormat = MTLPixelFormatRGBA8Unorm;
-            break;
-        case MTLPixelFormatEAC_R11Unorm:
-        case MTLPixelFormatEAC_RG11Unorm:
-        case MTLPixelFormatEAC_RGBA8:
-        case MTLPixelFormatETC2_RGB8:
-        case MTLPixelFormatETC2_RGB8A1:
-            // ETC/ETC2 compression can cause issues on AGX
             needsFormatConversion = YES;
             pixelFormat = MTLPixelFormatRGBA8Unorm;
             break;
@@ -2578,39 +2567,16 @@ static bool isRGB32BufferFormat(GLenum f)
                                             }
 
                                             // CRITICAL FIX: End active render encoder before creating blit encoder
-                                            // Metal API forbids multiple encoders on same command buffer
-                                            BOOL hadRenderEncoder = (_currentRenderEncoder != nil);
-                                            if (hadRenderEncoder) {
-                                                MGL_NSINFO(@"MGL INFO: Ending render encoder temporarily for texture blit operation");
-                                                [_currentRenderEncoder endEncoding];
-                                                _currentRenderEncoder = nil;
-                                            }
+                                            // A command buffer of its own, committed now, runs ahead of
+                                            // the current one and leaves its render encoder alone: a texture
+                                            // made in the middle of a draw's setup used to end that draw's
+                                            // encoder, and the draw was then dropped.
+                                            id<MTLCommandBuffer> fillBuffer = [_commandQueue commandBuffer];
 
-                                            // CRITICAL FIX: Enhanced command buffer validation before blit encoder creation
-                                            // Prevents MTLReleaseAssertionFailure in AGX driver
-                                            if (!_currentCommandBuffer) {
-                                                MGL_NSINFO(@"MGL AGX: Command buffer invalid during texture fill - skipping");
+                                            if (!fillBuffer)
                                                 goto skip_texture_fill;
-                                            }
 
-                                            MTLCommandBufferStatus cmdStatus = _currentCommandBuffer.status;
-                                            if (cmdStatus >= MTLCommandBufferStatusCommitted) {
-                                                MGL_NSINFO(@"MGL AGX: Command buffer already committed (status: %ld) - creating new buffer", (long)cmdStatus);
-                                                _currentCommandBuffer = [_commandQueue commandBuffer];
-                                                if (!_currentCommandBuffer) {
-                                                    MGL_NSINFO(@"MGL AGX: Failed to create new command buffer - skipping texture fill");
-                                                    goto skip_texture_fill;
-                                                }
-                                            }
-
-                                            // CRITICAL FIX: Ensure no active encoders before creating blit encoder
-                                            if (_currentRenderEncoder) {
-                                                MGL_NSERR(@"MGL WARNING: Active render encoder still detected during texture fill - ending encoder");
-                                                [_currentRenderEncoder endEncoding];
-                                                _currentRenderEncoder = nil;
-                                            }
-
-                                            id<MTLBlitCommandEncoder> blitEncoder = [self newBlitEncoder];
+                                            id<MTLBlitCommandEncoder> blitEncoder = [fillBuffer blitCommandEncoder];
                                             if (blitEncoder) {
                                                 [blitEncoder copyFromBuffer:tempBuffer
                                                           sourceOffset:0
@@ -2623,14 +2589,7 @@ static bool isRGB32BufferFormat(GLenum f)
                                                   destinationOrigin:MTLOriginMake(0, 0, 0)];
                                                 [blitEncoder endEncoding];
 
-                                                MGL_NSINFO(@"MGL SUCCESS: Texture data copied using main command buffer");
-
-                                                // CRITICAL FIX: Restore render encoder if it was active before
-                                                if (hadRenderEncoder) {
-                                                    MGL_NSINFO(@"MGL INFO: Restoring render encoder after texture blit operation");
-                                                    // Note: We need to recreate the render encoder with proper state
-                                                    // This will be handled by the next render pass that needs it
-                                                }
+                                                [fillBuffer commit];
                                             } else {
                                                 MGL_NSERR(@"MGL WARNING: Failed to create blit encoder - texture will be empty");
                                             }
@@ -4920,6 +4879,8 @@ static MTLTextureType viewTextureType(GLenum target)
 
     if (storage_changed && tex->mtl_data)
     {
+        // the new texture starts empty, so it is filled from the CPU copy
+        tex->dirty_bits |= DIRTY_TEXTURE_DATA;
         CFBridgingRelease(tex->mtl_data);
         tex->mtl_data = NULL;
     }
@@ -5242,6 +5203,11 @@ static MTLTextureType viewTextureType(GLenum target)
     return library;
 }
 
+static id<MTLFunction> stageFunction(id<MTLLibrary> library, const char *entry)
+{
+    return [library newFunctionWithName: [NSString stringWithUTF8String: entry]];
+}
+
 // Turns one stage's MSL into a Metal function, or leaves it alone when it has
 // already been built.
 - (bool) buildStageFunction: (Spirv *) sp
@@ -5257,8 +5223,7 @@ static MTLTextureType viewTextureType(GLenum target)
         return false;
     }
 
-    id<MTLFunction> function = [library newFunctionWithName:
-        [NSString stringWithUTF8String: sp->entry_point]];
+    id<MTLFunction> function = stageFunction(library, sp->entry_point);
 
     if (!function)
     {
@@ -5344,8 +5309,7 @@ static MTLTextureType viewTextureType(GLenum target)
             return false;
         }
 
-        id<MTLFunction> function = [library newFunctionWithName:
-            [NSString stringWithUTF8String: ptr->spirv[i].entry_point]];
+        id<MTLFunction> function = stageFunction(library, ptr->spirv[i].entry_point);
 
         if (!function)
         {
@@ -7579,7 +7543,7 @@ static MTLTessellationPartitionMode mtlPartitionForSpv(GLuint mode);
         return false;
 
     draw.label = @"GS Draw";
-    draw.vertexFunction = pfn;
+    draw.vertexFunction = pfn ? [self clipVariant: &program->gs_passthrough] : pfn;
     draw.fragmentFunction = ffn;
     draw.vertexDescriptor = nil;
     draw.inputPrimitiveTopology = gsOutputTopologyClass(program->geom.out_primitive);
@@ -9276,6 +9240,8 @@ static MTLWinding mtlWindingFor(const Program *p)
 
     program = ctx->state.program;
 
+    Spirv *vsp = &program->spirv[_VERTEX_SHADER];
+
     vertexFunction = (__bridge id<MTLFunction>)(program->spirv[_VERTEX_SHADER].mtl_function);
     fragmentFunction = (__bridge id<MTLFunction>)(program->spirv[_FRAGMENT_SHADER].mtl_function);
 
@@ -9289,7 +9255,10 @@ static MTLWinding mtlWindingFor(const Program *p)
     bool use_vs_raster = no_fs && !raster_off && program->vs_raster.mtl_function;
 
     if (use_vs_raster)
+    {
+        vsp = &program->vs_raster;
         vertexFunction = (__bridge id<MTLFunction>)(program->vs_raster.mtl_function);
+    }
 
     // the raster off with a fragment shader there: Metal only turns it off
     // for a vertex function that returns nothing
@@ -9300,6 +9269,7 @@ static MTLWinding mtlWindingFor(const Program *p)
 
     if (use_noraster)
     {
+        vsp = &program->vs_noraster;
         vertexFunction = (__bridge id<MTLFunction>)(program->vs_noraster.mtl_function);
         fragmentFunction = nil;
     }
@@ -9327,7 +9297,7 @@ static MTLWinding mtlWindingFor(const Program *p)
     pipelineStateDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     MTL_CHECK_RETURN_VALUE(pipelineStateDescriptor, GL_OUT_OF_MEMORY, NULL);
     pipelineStateDescriptor.label = @"GLSL Pipeline";
-    pipelineStateDescriptor.vertexFunction = vertexFunction;
+    pipelineStateDescriptor.vertexFunction = [self clipVariant: vsp];
     pipelineStateDescriptor.fragmentFunction = fragmentFunction;
 
     if (!fragmentFunction && (!no_fs || raster_off))
@@ -9364,7 +9334,7 @@ static MTLWinding mtlWindingFor(const Program *p)
             return NULL;
         }
 
-        pipelineStateDescriptor.vertexFunction = vertexFunction;
+        pipelineStateDescriptor.vertexFunction = [self clipVariant: &program->spirv[_TESS_EVALUATION_SHADER]];
     }
 
     // A vertex stage that writes nothing but images or buffers comes out of
@@ -10046,22 +10016,53 @@ static int countingQueries(GLMContext ctx, Query **out)
 
     if (p->uses_draw_id)
         [_currentRenderEncoder setVertexBytes: &draw_id length: sizeof draw_id atIndex: MGL_DRAW_ID_MSL_SLOT];
+}
 
-    if (p->uses_clip_control < 0)
+// glClipControl's zero-to-one depth: the same vertex stage compiled again
+// with its depth fix-up left out, made the first time a draw needs it and kept
+// for as long as the plain one lives
+- (id<MTLFunction>) clipVariant: (Spirv *) sp
+{
+    id<MTLFunction> f = (__bridge id<MTLFunction>)(sp ? sp->mtl_function : NULL);
+
+    if (f == nil || sp->msl_str == NULL || sp->entry_point == NULL ||
+        ctx->state.var.clip_depth != GL_ZERO_TO_ONE || !strstr(sp->msl_str, "SPV_CLIP_ZERO_TO_ONE"))
+        return f;
+
+    if (_clipVariants == nil)
+        _clipVariants = [NSMapTable weakToStrongObjectsMapTable];
+
+    id<MTLFunction> v = [_clipVariants objectForKey: f];
+
+    if (v == nil)
     {
-        p->uses_clip_control = 0;
-        for (int i = 0; i < _MAX_SHADER_TYPES; i++)
-            if (p->spirv[i].msl_str && strstr(p->spirv[i].msl_str, "spvClipControl"))
-                p->uses_clip_control = 1;
-        if (p->gs_passthrough.msl_str && strstr(p->gs_passthrough.msl_str, "spvClipControl"))
-            p->uses_clip_control = 1;
+        MTLCompileOptions *opts = [MTLCompileOptions new];
+        NSError *err = nil;
+
+        if (@available(macOS 15.0, *)) {
+            opts.mathMode = MTLMathModeSafe;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            opts.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+        }
+        opts.preprocessorMacros = @{ @"SPV_CLIP_ZERO_TO_ONE": @1 };
+
+        id<MTLLibrary> lib = [_device newLibraryWithSource: [NSString stringWithUTF8String: sp->msl_str]
+                                                   options: opts error: &err];
+        v = lib ? stageFunction(lib, sp->entry_point) : nil;
+
+        if (v == nil)
+        {
+            MGL_NSERR(@"MGL ERROR: zero-to-one clip depth variant failed: %@", err);
+            return f;
+        }
+
+        [_clipVariants setObject: v forKey: f];
     }
 
-    if (p->uses_clip_control)
-    {
-        uint32_t clip = ctx->state.var.clip_depth == GL_ZERO_TO_ONE ? 1u : 0u;
-        [_currentRenderEncoder setVertexBytes: &clip length: sizeof clip atIndex: MGL_CLIP_CONTROL_MSL_SLOT];
-    }
+    return v;
 }
 
 - (bool) processGLState: (bool) draw_command

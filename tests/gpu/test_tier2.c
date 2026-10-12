@@ -1040,6 +1040,41 @@ GPU_TEST(spirv, specialize_checks_names_and_constants)
     glDeleteShader(s);
 }
 
+// A specialized module links like a compiled shader, and a program may not
+// mix SPIR-V shaders with GLSL ones
+GPU_TEST(spirv, a_module_links_but_not_beside_glsl)
+{
+    static const char *FS = "#version 450\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n";
+    GLuint v = glCreateShader(GL_VERTEX_SHADER);
+    GLuint f = glCreateShader(GL_FRAGMENT_SHADER);
+    GLuint p = glCreateProgram(), q = glCreateProgram();
+    GLint ok = -1;
+
+    glShaderBinary(1, &v, GL_SHADER_BINARY_FORMAT_SPIR_V, SPIRV_STUB, sizeof SPIRV_STUB);
+    glSpecializeShader(v, "main", 0, NULL, NULL);
+    glGetShaderiv(v, GL_COMPILE_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_TRUE);
+
+    glAttachShader(p, v);
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK_MSG(ok == GL_TRUE, "a SPIR-V vertex shader alone did not link");
+
+    glShaderSource(f, 1, &FS, NULL);
+    glCompileShader(f);
+    glAttachShader(q, v);
+    glAttachShader(q, f);
+    glLinkProgram(q);
+    glGetProgramiv(q, GL_LINK_STATUS, &ok);
+    CHECK_MSG(ok == GL_FALSE, "SPIR-V and GLSL shaders linked together");
+    mgl_drain_errors();
+
+    glDeleteProgram(p);
+    glDeleteProgram(q);
+    glDeleteShader(v);
+    glDeleteShader(f);
+}
+
 GPU_TEST(spirv, specialize_checks_the_constant_arrays)
 {
     GLuint s = glCreateShader(GL_VERTEX_SHADER);

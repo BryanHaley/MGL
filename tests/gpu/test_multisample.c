@@ -728,7 +728,7 @@ static int distinctSamples(int shading)
         "#version 450 core\n"
         "layout(location = 0) in vec2 pos;\n"
         "out float v;\n"
-        "void main() { v = pos.x * 64.0; gl_Position = vec4(pos, 0.0, 1.0); }\n";
+        "void main() { v = pos.x * 0.7 + pos.y * 0.31; gl_Position = vec4(pos, 0.0, 1.0); }\n";
     static const char *FS =
         "#version 450 core\n"
         "in float v;\n"

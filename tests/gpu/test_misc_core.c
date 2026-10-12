@@ -1068,3 +1068,55 @@ GPU_TEST(misc_core, polygon_mode_line_leaves_the_middle_empty)
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
 }
+
+// GLSL 4.60 section 7.1: stages of one program that both redeclare
+// gl_PerVertex have to agree on its members. These are the CTS's shaders;
+// the evaluation stage's isolines and the geometry stage's points disagree
+// too, but that is a draw-time error and must not be what stops the link.
+GPU_TEST(misc_core, mismatched_per_vertex_blocks_do_not_link)
+{
+    static const char *VS =
+        "#version 410\n"
+        "out gl_PerVertex { vec4 gl_Position; };\n"
+        "void main() { gl_Position = vec4(2.0); }\n";
+    static const char *TCS =
+        "#version 410\n"
+        "layout (vertices = 4) out;\n"
+        "in gl_PerVertex { float gl_PointSize; } gl_in[];\n"
+        "out gl_PerVertex { float gl_PointSize; } gl_out[];\n"
+        "void main() { gl_out[gl_InvocationID].gl_PointSize = gl_in[0].gl_PointSize + 1.0; }\n";
+    static const char *TES =
+        "#version 410\n"
+        "layout (isolines) in;\n"
+        "in gl_PerVertex { float gl_PointSize; vec4 gl_Position; } gl_in[gl_MaxPatchVertices];\n"
+        "out gl_PerVertex { float gl_PointSize; vec4 gl_Position; };\n"
+        "void main() { gl_Position = vec4(gl_in[0].gl_PointSize) + gl_in[1].gl_Position; }\n";
+    static const char *GS =
+        "#version 410\n"
+        "layout (points) in; layout (points, max_vertices = 4) out;\n"
+        "in gl_PerVertex { float gl_ClipDistance[]; } gl_in[];\n"
+        "out gl_PerVertex { float gl_ClipDistance[]; };\n"
+        "void main() { gl_ClipDistance[0] = 0.5; EmitVertex(); }\n";
+    const char *src[4] = { VS, TCS, TES, GS };
+    GLenum types[4] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER, GL_GEOMETRY_SHADER };
+    GLuint p = glCreateProgram();
+    GLint ok = -1;
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLuint sh = glCreateShader(types[i]);
+        glShaderSource(sh, 1, &src[i], NULL);
+        glCompileShader(sh);
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        CHECK_MSG(ok == GL_TRUE, "stage %d did not compile", i);
+        glAttachShader(p, sh);
+        glDeleteShader(sh);
+    }
+
+    glProgramParameteri(p, GL_PROGRAM_SEPARABLE, GL_TRUE);
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK_MSG(ok == GL_FALSE, "mismatched gl_PerVertex blocks linked");
+    glDeleteProgram(p);
+    mgl_drain_errors();
+}
