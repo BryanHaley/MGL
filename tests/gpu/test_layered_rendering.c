@@ -558,3 +558,140 @@ GPU_TEST(layered_rendering, an_unknown_texture_name_is_a_bad_value)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDeleteFramebuffers(1, &fb);
 }
+
+GPU_TEST(layered_rendering, each_draw_keeps_its_own_geometry_uniform)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "void main() { gl_Position = vec4(0, 0, 0, 1); }\n";
+    static const char *gs =
+        "#version 460 core\n"
+        "layout(points) in;\n"
+        "layout(triangle_strip, max_vertices = 4) out;\n"
+        "uniform int layer;\n"
+        "void main() {\n"
+        "    for (int i = 0; i < 4; i++) {\n"
+        "        gl_Layer = layer;\n"
+        "        gl_Position = vec4((i & 1) * 2 - 1, (i >> 1) * 2 - 1, 0, 1);\n"
+        "        EmitVertex();\n"
+        "    }\n"
+        "}\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "uniform vec4 c;\n"
+        "out vec4 o;\n"
+        "void main() { o = c; }\n";
+    GLuint prog, vao, tex, fb;
+    GLubyte px[4 * 4 * 4 * 4];
+    char log[2048];
+
+    prog = linkVGF(vs, gs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "geometry program did not link: %s", log);
+    if (!prog)
+        return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, 4, 4, 4);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0);
+    glViewport(0, 0, 4, 4);
+    glUseProgram(prog);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    // no readback between draws, so they share one command buffer
+    for (int l = 0; l < 4; l++)
+    {
+        glUniform1i(glGetUniformLocation(prog, "layer"), l);
+        glUniform4f(glGetUniformLocation(prog, "c"), l / 4.0f, 0.5f, 0, 1);
+        glDrawArrays(GL_POINTS, 0, 1);
+    }
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+
+    for (int l = 0; l < 4; l++)
+    {
+        const GLubyte *p = px + l * 64;
+
+        CHECK_MSG(abs(p[0] - l * 64) <= 1 && abs(p[1] - 128) <= 1,
+                  "layer %d is (%d, %d), want (%d, 128)", l, p[0], p[1], l * 64);
+    }
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}
+
+// a framebuffer with no attachments still rasterises at its default size
+GPU_TEST(layered_rendering, no_attachment_framebuffer_draws_every_layer)
+{
+    static const char *vs =
+        "#version 440\n"
+        "void main() { gl_Position = vec4(0, 0, 0, 1); }\n";
+    static const char *gs =
+        "#version 440\n"
+        "layout(points) in;\n"
+        "layout(triangle_strip, max_vertices = 16) out;\n"
+        "flat out int layer_id;\n"
+        "void main() {\n"
+        "    for (int n = 0; n < 4; n++)\n"
+        "        for (int i = 0; i < 4; i++) {\n"
+        "            gl_Layer = n; layer_id = n;\n"
+        "            gl_Position = vec4((i & 1) * 2 - 1, (i >> 1) * 2 - 1, 0, 1);\n"
+        "            EmitVertex();\n"
+        "        }\n"
+        "}\n";
+    static const char *fs =
+        "#version 440\n"
+        "layout(r32i, binding = 0) writeonly uniform iimage2DArray img;\n"
+        "flat in int layer_id;\n"
+        "void main() { imageStore(img, ivec3(gl_FragCoord.xy, layer_id), ivec4(7)); }\n";
+    static GLint got[8 * 8 * 4];
+    GLuint prog, vao, tex, fb;
+    char log[2048];
+    int hits = 0;
+
+    prog = linkVGF(vs, gs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "program did not link: %s", log);
+    if (!prog)
+        return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_R32I, 8, 8, 4);
+    glBindImageTexture(0, tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_R32I);
+
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferParameteri(GL_FRAMEBUFFER, GL_FRAMEBUFFER_DEFAULT_WIDTH, 8);
+    glFramebufferParameteri(GL_FRAMEBUFFER, GL_FRAMEBUFFER_DEFAULT_HEIGHT, 8);
+    glFramebufferParameteri(GL_FRAMEBUFFER, GL_FRAMEBUFFER_DEFAULT_LAYERS, 4);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glViewport(0, 0, 8, 8);
+    glUseProgram(prog);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_RED_INTEGER, GL_INT, got);
+    for (int i = 0; i < 8 * 8 * 4; i++)
+        hits += got[i] == 7;
+    CHECK_MSG(hits == 8 * 8 * 4, "%d of %d texels written", hits, 8 * 8 * 4);
+
+    glBindImageTexture(0, 0, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32I);
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteTextures(1, &tex);
+}

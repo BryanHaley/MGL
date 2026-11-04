@@ -1911,7 +1911,7 @@ static bool compressUploadedTexLevel(GLMContext ctx, Texture *tex, GLuint face, 
         }
     }
 
-    GLboolean compressed = mglCompressToRGTC((const GLubyte *)pixels, src_pitch, format, type,
+    GLboolean compressed = mglCompressPixels((const GLubyte *)pixels, src_pitch, format, type,
                                              blocks, internalformat, width, height);
 
     free(swapped);
@@ -2203,10 +2203,7 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
     // GL 4.6 section 8.5 lets an application hand uncompressed pixels to a
     // compressed internal format and expects the driver to compress them.
     {
-        GLuint rgtc_channels = 0;
-        GLboolean rgtc_signed = GL_FALSE;
-
-        if (pixels && mglFormatIsRGTC(internalformat, &rgtc_channels, &rgtc_signed))
+        if (pixels && mglFormatCompressible(internalformat))
             return compressUploadedTexLevel(ctx, tex, face, level, internalformat,
                                             width, height, depth, format, type, pixels);
     }
@@ -2547,7 +2544,7 @@ static bool compressedSubImageFromPixels(GLMContext ctx, Texture *tex, GLuint fa
     bool ok = blocks != NULL && slice != 0;
 
     for (GLsizei z = 0; ok && z < d; z++)
-        ok = mglCompressToRGTC((const GLubyte *)pixels + (size_t)z * src_pitch * rows_per_image, src_pitch,
+        ok = mglCompressPixels((const GLubyte *)pixels + (size_t)z * src_pitch * rows_per_image, src_pitch,
                                format, type, blocks + (size_t)z * slice, tex->internalformat,
                                width, height) == GL_TRUE;
 
@@ -2714,13 +2711,10 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
         return viewSubImage(ctx, tex, face, level, xoffset, yoffset, zoffset, width, height, depth,
                             format, type, pixels, src_pitch);
 
-    // plain pixels into an RGTC texture are compressed on the way in, as
-    // glTexImage already does
+    // plain pixels into an RGTC or BPTC texture are compressed on the way in,
+    // as glTexImage already does
     {
-        GLuint channels = 0;
-        GLboolean is_signed = GL_FALSE;
-
-        if (mglFormatIsRGTC(tex->internalformat, &channels, &is_signed))
+        if (mglFormatCompressible(tex->internalformat))
             return compressedSubImageFromPixels(ctx, tex, face, level, xoffset, yoffset, zoffset,
                                                 width, height, depth, format, type, pixels, src_pitch);
     }
@@ -2991,7 +2985,10 @@ void texStorage(GLMContext ctx, Texture *tex, GLuint faces, GLsizei levels, GLbo
             createTextureLevel(ctx, tex, face, level, is_array, internalformat, level_width, level_height, level_depth, 0, 0, NULL, proxy);
 
             level_width >>= 1;
-            level_height >>= 1;
+
+            // a 1D array keeps its layer count in height, which never shrinks
+            if (tex->target != GL_TEXTURE_1D_ARRAY && tex->target != GL_PROXY_TEXTURE_1D_ARRAY)
+                level_height >>= 1;
 
             // a 3D texture's depth shrinks with the level; an array's layers do not
             if (tex->target == GL_TEXTURE_3D)
@@ -4343,19 +4340,16 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLint fa
     ERROR_CHECK_RETURN_VALUE(pixels, GL_INVALID_VALUE, false);
     ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, false);
     ERROR_CHECK_RETURN_VALUE(level >= 0, GL_INVALID_VALUE, false);
-    ERROR_CHECK_RETURN_VALUE((GLuint)level < tex->mipmap_levels, GL_INVALID_VALUE, false);
-    ERROR_CHECK_RETURN_VALUE(texLevelDefined(tex, 0, level), GL_INVALID_OPERATION, false);
 
-    // GL reads a compressed texture back as plain pixels; only the formats MGL
-    // can unpack are supported, the rest still need GetCompressedTexImage
-    if (mglFormatIsCompressed(tex->internalformat))
-    {
-        GLuint rgtc_channels = 0;
-        GLboolean rgtc_signed = GL_FALSE;
+    // a view has no levels of its own; its level is one of the original's
+    Texture *store = tex->view_of ? tex->view_of : tex;
+    GLint slevel = level + (tex->view_of ? (GLint)tex->view_min_level : 0);
 
-        ERROR_CHECK_RETURN_VALUE(mglFormatIsRGTC(tex->internalformat, &rgtc_channels, &rgtc_signed),
-                                 GL_INVALID_OPERATION, false);
-    }
+    ERROR_CHECK_RETURN_VALUE((GLuint)slevel < store->mipmap_levels, GL_INVALID_VALUE, false);
+    ERROR_CHECK_RETURN_VALUE(texLevelDefined(store, 0, slevel), GL_INVALID_OPERATION, false);
+
+    // GL reads a compressed texture back as plain pixels; RGTC is unpacked on
+    // the CPU and the rest by a shader (readCompressed in MGLRenderer.m)
 
     // a bad enum first, then a pair that does not go together
     ERROR_CHECK_RETURN_VALUE(readFormatEnum(format) && readTypeEnum(type), GL_INVALID_ENUM, false);
@@ -4369,7 +4363,7 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLint fa
 
     ERROR_CHECK_RETURN_VALUE(pixel_size, GL_INVALID_OPERATION, false);
 
-    lvl = &tex->faces[0].levels[level];
+    lvl = &store->faces[0].levels[slevel];
 
     GLsizei width = lvl->width ? (GLsizei)lvl->width : 1;
     GLsizei height = lvl->height ? (GLsizei)lvl->height : 1;
@@ -4431,18 +4425,18 @@ static bool getTexImageLevel(GLMContext ctx, Texture *tex, GLint level, GLint fa
     if (ctx->state.pack.image_height > 0)
         image_bytes = bytes_per_row * (size_t)ctx->state.pack.image_height;
 
-    // A compressed level is unpacked from MGL's own copy: the Metal texture
-    // holds blocks, and a blit would hand back blocks too.
-    if (mglFormatIsCompressed(tex->internalformat))
+    // An RGTC level is unpacked from MGL's own copy: the Metal texture holds
+    // blocks, and a blit would hand back blocks too. Other compressed formats
+    // are decoded by mtlGetTexImage.
+    GLuint channels = 0;
+    GLboolean is_signed = GL_FALSE;
+
+    if (mglFormatIsRGTC(tex->internalformat, &channels, &is_signed))
     {
         MGLNativeFormat nf = mglRGTCNativeFormat(tex->internalformat);
-        GLuint channels = 0;
-        GLboolean is_signed = GL_FALSE;
         size_t plain_pitch;
         GLubyte *plain;
         bool ok;
-
-        mglFormatIsRGTC(tex->internalformat, &channels, &is_signed);
 
         plain_pitch = (size_t)width * channels;
         plain = (GLubyte *)calloc(plain_pitch ? plain_pitch : 1, (size_t)(height ? height : 1));

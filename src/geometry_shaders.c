@@ -281,6 +281,7 @@ typedef struct {
     // built-ins the shader writes; only those are passed on to the draw
     bool uses_layer;
     bool uses_viewport_index;
+    bool uses_primitive_id;
     // "layout(stream = n) out;" sets the stream of the outputs after it
     int  default_stream;
 } GsScan;
@@ -1196,7 +1197,7 @@ static bool rewriteBody(const char *src, GsScan *sc, Buf *out)
         else if (wordAt(src, i, "gl_PointSize"))       { simple = "mglCur.mglPointSize"; skip = 12; }
         else if (wordAt(src, i, "gl_Layer"))           { simple = "mglCur.mglLayer"; skip = 8; sc->uses_layer = true; }
         else if (wordAt(src, i, "gl_ViewportIndex"))  { simple = "mglCur.mglViewportIndex"; skip = 16; sc->uses_viewport_index = true; }
-        else if (wordAt(src, i, "gl_PrimitiveID"))     { simple = "mglCur.mglPrimitiveID"; skip = 14; }
+        else if (wordAt(src, i, "gl_PrimitiveID"))     { simple = "mglCur.mglPrimitiveID"; skip = 14; sc->uses_primitive_id = true; }
         else if (wordAt(src, i, "gl_ClipDistance") || wordAt(src, i, "gl_CullDistance"))
         {
             const char *gl_name = src[i + 3] == 'C' && src[i + 4] == 'l' ?
@@ -1947,6 +1948,10 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     if (sc.uses_viewport_index && !bufAdd(&pass, "out int mglViewportIndexBuiltin;\n"))
         goto done;
 
+    // Metal's fragment primitive_id counts the passthrough's own triangles
+    if (sc.uses_primitive_id && !bufAdd(&pass, "flat out int mglPrimitiveIdOut;\n"))
+        goto done;
+
     if (!bufAdd(&pass, "\nvoid main()\n{\n  MglGsOutV v = mglGsOut[gl_VertexID];\n"))
         goto done;
 
@@ -1999,6 +2004,9 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     if (sc.uses_viewport_index && !bufAdd(&pass, "  mglViewportIndexBuiltin = v.mglViewportIndex;\n"))
         goto done;
 
+    if (sc.uses_primitive_id && !bufAdd(&pass, "  mglPrimitiveIdOut = v.mglPrimitiveID;\n"))
+        goto done;
+
     if (!bufAdd(&pass, "}\n"))
         goto done;
 
@@ -2049,6 +2057,7 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
     if (!bufAdd(&decl, "}\n"))
         goto done;
 
+    gi->writes_primitive_id = sc.uses_primitive_id;
     gi->compute_src = out.s;      out.s = NULL;
     gi->passthrough_src = pass.s; pass.s = NULL;
     gi->capture_decl = decl.s;    decl.s = NULL;
@@ -2216,6 +2225,58 @@ static char *replaceAll(const char *src, const char *from, const char *to)
     return b.s;
 }
 
+static bool hasWord(const char *src, const char *w)
+{
+    for (size_t i = 0; src[i]; i++)
+        if (wordAt(src, i, w))
+            return true;
+
+    return false;
+}
+
+// GL leaves an input the stage before never writes undefined, so its copy is
+// dropped rather than naming something that does not exist.
+static char *dropUnwrittenInputs(char *capture, const char *writer_src)
+{
+    Buf b = {0};
+    const char *line = capture;
+
+    while (*line)
+    {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line + 1) : strlen(line);
+        const char *dst = strstr(line, "mglGsIn[");
+        const char *eq = dst && dst < line + len ? memchr(dst, '=', (size_t)(line + len - dst)) : NULL;
+        bool keep = true;
+
+        if (eq && eq[1] == ' ' && !(eq[2] >= '0' && eq[2] <= '9'))
+        {
+            char name[128];
+            size_t n = 0;
+            const char *q = eq + 2;
+
+            while (identChar(*q) && n + 1 < sizeof name)
+                name[n++] = *q++;
+
+            name[n] = 0;
+
+            if (n && (*q == ';' || *q == '[') && strncmp(name, "gl_", 3) && !hasWord(writer_src, name))
+                keep = false;
+        }
+
+        if (keep && !bufAddN(&b, line, len))
+        {
+            free(b.s);
+            return capture;
+        }
+
+        line += len;
+    }
+
+    free(capture);
+    return b.s ? b.s : strdup("");
+}
+
 // The capture was written against the geometry stage's own spelling of each
 // input block; the stage writing it may name the instance differently, or
 // not at all.
@@ -2241,7 +2302,7 @@ static char *captureForWriter(const GeometryInfo *gi, const char *writer_src)
         capture = next;
     }
 
-    return capture;
+    return capture ? dropUnwrittenInputs(capture, writer_src) : NULL;
 }
 
 static bool replaceWord(Buf *out, const char *src, const char *from, const char *to);

@@ -328,6 +328,18 @@ static const char *const mgl_kernels_msl_source =
 "                                 uint pos [[thread_position_in_grid]]) {\n"
 "    if (idx[pos] == glRestartIndex) idx[pos] = ~0u;\n"
 "}\n"
+"\n"
+"// a compressed texture's texels as floats, for reading one back\n"
+"kernel void decodeCompressed(texture2d<float> t [[ texture(0) ]],\n"
+"                             device float4* out [[ buffer(0) ]],\n"
+"                             constant uint4& r [[ buffer(1) ]],\n"
+"                             uint2 gid [[ thread_position_in_grid ]])\n"
+"{\n"
+"    constexpr sampler s(filter::nearest, coord::normalized, address::clamp_to_edge);\n"
+"    if (gid.x >= r.z || gid.y >= r.w) return;\n"
+"    float2 uv = (float2(r.xy + gid) + 0.5) / float2(t.get_width(), t.get_height());\n"
+"    out[gid.y * r.z + gid.x] = t.sample(s, uv, level(0));\n"
+"}\n"
 ;
 
 #endif /* mgl_kernels_msl_h */

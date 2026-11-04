@@ -858,3 +858,80 @@ GPU_TEST(tessellation, a_patch_array_links)
     glDeleteProgram(p);
     mgl_drain_errors();
 }
+
+// the evaluation stage reads back the levels the control stage wrote, not
+// 16-bit roundings of them
+GPU_TEST(tessellation, evaluation_reads_exact_levels)
+{
+    static const char *src[3] = {
+        "#version 440\n"
+        "void main() { gl_Position = vec4(0, 0, 0, 1); }\n",
+        "#version 440\n"
+        "layout(vertices = 1) out;\n"
+        "void main() {\n"
+        "    gl_TessLevelOuter[0] = 2.7; gl_TessLevelOuter[1] = 3.1;\n"
+        "    gl_TessLevelOuter[2] = 1.0; gl_TessLevelOuter[3] = 1.0;\n"
+        "    gl_TessLevelInner[0] = 1.3; gl_TessLevelInner[1] = 1.0;\n"
+        "    gl_out[gl_InvocationID].gl_Position = gl_in[0].gl_Position;\n"
+        "}\n",
+        "#version 440\n"
+        "layout(quads, equal_spacing, point_mode) in;\n"
+        "out vec4 r;\n"
+        "void main() {\n"
+        "    r = vec4(gl_TessLevelOuter[0], gl_TessLevelOuter[1], gl_TessLevelInner[0], 0);\n"
+        "    gl_Position = vec4(gl_TessCoord.xy, 0, 1);\n"
+        "}\n" };
+    static const GLenum stages[3] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER };
+    const char *names[] = { "r" };
+    GLfloat got[4 * 64] = { 0 };
+    GLuint prog = glCreateProgram(), vao, buf;
+    char log[2048] = "";
+    GLint ok = 0;
+
+    for (int i = 0; i < 3; i++)
+    {
+        GLuint sh = glCreateShader(stages[i]);
+
+        glShaderSource(sh, 1, &src[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(prog, sh);
+        glDeleteShader(sh);
+    }
+
+    glTransformFeedbackVaryings(prog, 1, names, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok)
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "program did not link: %s", log);
+    if (!ok)
+    {
+        glDeleteProgram(prog);
+        return;
+    }
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof got, got, GL_DYNAMIC_READ);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 1);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_PATCHES, 0, 1);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+    CHECK_MSG(got[0] == 2.7f && got[1] == 3.1f && got[2] == 1.3f,
+              "read %.6f %.6f %.6f, want 2.7 3.1 1.3", got[0], got[1], got[2]);
+
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &buf);
+    glDeleteVertexArrays(1, &vao);
+}

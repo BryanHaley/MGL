@@ -461,3 +461,23 @@ GPU_TEST(ssbo, every_basic_syntax_draws)
     glDeleteBuffers(1, &buf);
     mgl_target_destroy(&t);
 }
+
+GPU_TEST(ssbo, block_size_limits_read_as_positive_ints)
+{
+    GLint ubo = 0, ssbo = 0, bindings = 0;
+    GLuint buf = 0;
+
+    glGetIntegerv(GL_MAX_UNIFORM_BLOCK_SIZE, &ubo);
+    glGetIntegerv(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &ssbo);
+    glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS, &bindings);
+    CHECK_MSG(ubo >= 16384, "GL_MAX_UNIFORM_BLOCK_SIZE %d", ubo);
+    CHECK_MSG(ssbo >= 134217728, "GL_MAX_SHADER_STORAGE_BLOCK_SIZE %d", ssbo);
+    if (ubo <= 0 || bindings <= 0) return;
+
+    // what CTS multi_bind allocates per binding
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_UNIFORM_BUFFER, buf);
+    glBufferData(GL_UNIFORM_BUFFER, ubo / bindings, NULL, GL_STATIC_DRAW);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glDeleteBuffers(1, &buf);
+}

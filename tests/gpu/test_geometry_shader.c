@@ -304,6 +304,9 @@ GPU_TEST(geometry_shader, limits_meet_the_floor)
         { "GL_MAX_GEOMETRY_UNIFORM_COMPONENTS",      0x8DDF, 1024 },
         { "GL_MAX_VERTEX_STREAMS",                   0x8E71, 1 },
         { "GL_MAX_VARYING_COMPONENTS",               0x8B4B, 60 },
+        { "GL_MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS", 0x8A32, 1024 },
+        { "GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS",   0x8A31, 1024 },
+        { "GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS", 0x8A33, 1024 },
     };
 
     for (unsigned i = 0; i < sizeof req / sizeof *req; i++)
@@ -706,4 +709,141 @@ GPU_TEST(geometry_shader, uniforms_fill_every_location)
     for (int i = 0; i < 3; i++)
         glDeleteShader(s[i]);
     glDeleteProgram(prog);
+}
+
+// an input the vertex shader never writes is undefined, not a link error
+GPU_TEST(geometry_shader, an_unwritten_input_still_links)
+{
+    static const char *vs =
+        "#version 440\n"
+        "void main() { gl_Position = vec4(0, 0, 0, 1); }\n";
+    static const char *gs =
+        "#version 440\n"
+        "layout(points) in;\n"
+        "layout(points, max_vertices = 1) out;\n"
+        "in vec4 v1[];\n"
+        "void main() { gl_Position = vec4(0, 0, 0, 1); EmitVertex(); }\n";
+    static const char *fs =
+        "#version 440\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(0, 1, 0, 1); }\n";
+    const char *srcs[3] = { vs, gs, fs };
+    const GLenum stages[3] = { GL_VERTEX_SHADER, GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER };
+    GLuint prog = glCreateProgram(), vao;
+    MGLTestTarget t;
+    unsigned char *px;
+    char log[2048] = "";
+    GLint ok = 0;
+
+    for (int i = 0; i < 3; i++)
+    {
+        GLuint sh = glCreateShader(stages[i]);
+
+        glShaderSource(sh, 1, &srcs[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(prog, sh);
+        glDeleteShader(sh);
+    }
+
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok)
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "program did not link: %s", log);
+    if (!ok || !mgl_target_create(&t, 1, 1, GL_RGBA8, 0))
+    {
+        glDeleteProgram(prog);
+        return;
+    }
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_POINTS, 0, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    px = mgl_read_rgba8(&t);
+    CHECK_MSG(px[1] == 255, "point read %d %d %d", px[0], px[1], px[2]);
+    free(px);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// the fragment stage reads the gl_PrimitiveID the geometry shader wrote, not
+// Metal's count of the triangles drawn
+GPU_TEST(geometry_shader, fragment_reads_the_written_primitive_id)
+{
+    static const char *vs =
+        "#version 440\n"
+        "void main() { gl_Position = vec4(gl_VertexID, 0, 0, 1); }\n";
+    static const char *gs =
+        "#version 440\n"
+        "layout(points) in;\n"
+        "layout(triangle_strip, max_vertices = 4) out;\n"
+        "void main() {\n"
+        "    float x0 = gl_in[0].gl_Position.x - 1.0;\n"
+        "    for (int i = 0; i < 4; i++) {\n"
+        "        gl_PrimitiveID = gl_PrimitiveIDIn + 10;\n"
+        "        gl_Position = vec4(x0 + float(i & 1), float(i >> 1) * 2.0 - 1.0, 0, 1);\n"
+        "        EmitVertex();\n"
+        "    }\n"
+        "}\n";
+    static const char *fs =
+        "#version 440\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(float(gl_PrimitiveID) / 255.0, 0, 0, 1); }\n";
+    const char *srcs[3] = { vs, gs, fs };
+    const GLenum stages[3] = { GL_VERTEX_SHADER, GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER };
+    GLuint prog = glCreateProgram(), vao;
+    MGLTestTarget t;
+    unsigned char *px;
+    char log[2048] = "";
+    GLint ok = 0;
+
+    for (int i = 0; i < 3; i++)
+    {
+        GLuint sh = glCreateShader(stages[i]);
+
+        glShaderSource(sh, 1, &srcs[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(prog, sh);
+        glDeleteShader(sh);
+    }
+
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok)
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "program did not link: %s", log);
+    if (!ok || !mgl_target_create(&t, 4, 2, GL_RGBA8, 0))
+    {
+        glDeleteProgram(prog);
+        return;
+    }
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_POINTS, 0, 2);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    // the left half came from point 0, the right from point 1
+    px = mgl_read_rgba8(&t);
+    for (int x = 0; x < 4; x++)
+        for (int y = 0; y < 2; y++)
+        {
+            int want = x < 2 ? 10 : 11, got = px[(y * 4 + x) * 4];
+
+            CHECK_MSG(got == want, "pixel (%d, %d) read %d, want %d", x, y, got, want);
+        }
+    free(px);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
 }

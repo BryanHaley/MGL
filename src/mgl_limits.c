@@ -38,7 +38,10 @@ static void at_least(GLuint *v, GLuint floor)
 // everything its uniform blocks can hold, plus its own default block.
 static GLuint combined_components(GLuint block_size, GLuint blocks, GLuint components)
 {
-    return block_size / 4 * blocks + components;
+    uint64_t n = (uint64_t)block_size / 4 * blocks + components;
+
+    // queried as a GLint
+    return n > 0x7FFFFFFF ? 0x7FFFFFFF : (GLuint)n;
 }
 
 // MGL used to fill these by asking Apple's OpenGL framework, which answers for

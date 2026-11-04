@@ -119,12 +119,12 @@ extern "C" bool mglInlineSpirv(const unsigned int *words, size_t count,
 // [[render_target_array_index]] and [[viewport_array_index]].
 // ---------------------------------------------------------------------------
 
-extern "C" bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count)
+extern "C" bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count, uint32_t prim_location)
 {
     const uint32_t OpName = 5, OpDecorate = 71;
     const uint32_t DecBuiltIn = 11, DecLocation = 30;
     const uint32_t BuiltInLayer = 9, BuiltInViewportIndex = 10;
-    uint32_t layer = 0, viewport = 0;
+    uint32_t layer = 0, viewport = 0, prim = 0;
     bool patched = false;
 
     if (words == nullptr || count < 5 || words[0] != 0x07230203)
@@ -148,13 +148,15 @@ extern "C" bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count)
                     layer = words[i + 1];
                 else if (strcmp(name, "mglViewportIndexBuiltin") == 0)
                     viewport = words[i + 1];
+                else if (strcmp(name, "mglPrimitiveIdOut") == 0)
+                    prim = words[i + 1];
             }
         }
 
         i += wc;
     }
 
-    if (layer == 0 && viewport == 0)
+    if (layer == 0 && viewport == 0 && prim == 0)
         return false;
 
     for (size_t i = 5; i < count; i += words[i] >> 16)
@@ -164,10 +166,45 @@ extern "C" bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count)
         if (op != OpDecorate || wc < 4 || words[i + 2] != DecLocation)
             continue;
 
-        if (words[i + 1] == layer || words[i + 1] == viewport)
+        if (prim && words[i + 1] == prim)
+        {
+            words[i + 3] = prim_location;
+            patched = true;
+            continue;
+        }
+
+        if (layer && words[i + 1] == layer || viewport && words[i + 1] == viewport)
         {
             words[i + 3] = words[i + 1] == layer ? BuiltInLayer : BuiltInViewportIndex;
             words[i + 2] = DecBuiltIn;
+            patched = true;
+        }
+    }
+
+    return patched;
+}
+
+// With a geometry stage, the fragment stage's gl_PrimitiveID is what the
+// geometry shader wrote, handed over as a plain flat input.
+extern "C" bool mglPatchFsPrimitiveId(unsigned int *words, size_t count, uint32_t location)
+{
+    const uint32_t OpDecorate = 71, DecBuiltIn = 11, DecLocation = 30, BuiltInPrimitiveId = 7;
+    bool patched = false;
+
+    if (words == nullptr || count < 5 || words[0] != 0x07230203)
+        return false;
+
+    for (size_t i = 5; i < count; i += words[i] >> 16)
+    {
+        uint32_t wc = words[i] >> 16, op = words[i] & 0xffff;
+
+        if (wc == 0 || i + wc > count)
+            return false;
+
+        if (op == OpDecorate && wc >= 4 && words[i + 2] == DecBuiltIn && words[i + 3] == BuiltInPrimitiveId)
+        {
+            words[i + 2] = DecLocation;
+            words[i + 3] = location;
             patched = true;
         }
     }

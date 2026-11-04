@@ -44,7 +44,8 @@ extern int mglLowerAtomicCounters(const unsigned int *words, size_t count,
                                   unsigned int **out_words, size_t *out_count,
                                   unsigned int *block_ids, unsigned int *block_bindings,
                                   int max_blocks);
-extern bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count);
+extern bool mglPatchGsPassthroughBuiltins(unsigned int *words, size_t count, uint32_t prim_location);
+extern bool mglPatchFsPrimitiveId(unsigned int *words, size_t count, uint32_t location);
 extern bool mglZeroBaseInstance(const unsigned int *words, size_t count,
                                 unsigned int **out_words, size_t *out_count);
 #include "shaders.h"
@@ -1785,6 +1786,20 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
+    // levels MGL's own tessellator reads keep their float precision
+    if (stage == _TESS_CONTROL_SHADER && ptr && ptr->tess.general)
+        spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_FLOAT_TESS_FACTORS, SPVC_TRUE);
+
+    // texture state Metal samplers cannot hold. A vertex stage that runs as
+    // compute, ahead of tessellation or a geometry stage, goes without.
+    if (stage == _FRAGMENT_SHADER ||
+        (stage == _VERTEX_SHADER && ptr && !ptr->tess.active && !ptr->geom_shader && !ptr->cull.building))
+    {
+        spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_PARAMS, SPVC_TRUE);
+        spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_PARAMS_BUFFER_INDEX,
+                                       stage == _FRAGMENT_SHADER ? MGL_TEX_PARAM_MSL_SLOT : MGL_VERTEX_TEX_PARAM_MSL_SLOT);
+    }
+
     if (stage == _FRAGMENT_SHADER && ptr && ptr->building_fs_sample_rate)
         spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_FORCE_SAMPLE_RATE_SHADING, SPVC_TRUE);
 
@@ -3337,7 +3352,7 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
 
     // its stand-ins for gl_Layer and gl_ViewportIndex become real built-ins
     if (sp == &pptr->gs_passthrough)
-        mglPatchGsPassthroughBuiltins(sp->ir, sp->size);
+        mglPatchGsPassthroughBuiltins(sp->ir, sp->size, MGL_GS_PRIMITIVE_ID_LOCATION);
 
     sp->msl_str = parseSPIRVShaderToMetal(ctx, pptr, spirv_slot >= 0 ? spirv_slot : _COMPUTE_SHADER,
                                           sp, entry);
@@ -3607,6 +3622,44 @@ static void linkGeometryCapture(Program *pptr)
     }
 }
 
+// A tessellation shader that ignores a built-in the stage before it writes is
+// rebuilt with a read of it, so the two lay out the buffer between them the
+// same way.
+static bool linkStageToMetal(GLMContext ctx, Program *pptr, int stage)
+{
+    bool tcs = stage == _TESS_CONTROL_SHADER;
+
+    if ((stage == _TESS_EVALUATION_SHADER || tcs) && pptr->tess.active)
+    {
+        bool from_control = !tcs && pptr->tess.has_control;
+        Shader *sh = pptr->shader_slots[stage];
+        Shader *w = from_control ? pptr->shader_slots[_TESS_CONTROL_SHADER]
+                                 : pptr->shader_slots[_VERTEX_SHADER];
+        const char *tsrc = sh->pp_src ? sh->pp_src : sh->src;
+        const char *wsrc = w ? (w->pp_src ? w->pp_src : w->src) : NULL;
+        char *touched = (tsrc && wsrc) ? mglTouchTessInputs(tsrc, wsrc, from_control) : NULL;
+
+        if (touched)
+        {
+            char entry[128];
+            bool ok;
+
+            snprintf(entry, sizeof(entry), tcs ? "tess_control_%d_main" : "tess_evaluation_%d_main", sh->name);
+            ok = buildGeneratedStageInto(ctx, pptr, tcs ? GL_TESS_CONTROL_SHADER : GL_TESS_EVALUATION_SHADER,
+                                         stage, NULL, touched, entry,
+                                         from_control ? GL_TESS_CONTROL_SHADER : GL_VERTEX_SHADER, wsrc);
+            free(touched);
+
+            if (ok)
+                scanTessExecutionModes(pptr, stage);
+
+            return ok;
+        }
+    }
+
+    return linkAndCompileProgramToMetal(ctx, pptr, stage, false);
+}
+
 // With tessellation ahead of it, the evaluation stage feeds the geometry stage
 // instead: isolines as points or line segments from a quad grid, triangles and
 // quads from the CPU tessellator.
@@ -3693,8 +3746,7 @@ static bool linkTessGeometryProgram(GLMContext ctx, Program *pptr)
     if (!linkAndCompileProgramToMetal(ctx, pptr, _VERTEX_SHADER, false))
         return false;
 
-    if (pptr->tess.has_control &&
-        !linkAndCompileProgramToMetal(ctx, pptr, _TESS_CONTROL_SHADER, false))
+    if (pptr->tess.has_control && !linkStageToMetal(ctx, pptr, _TESS_CONTROL_SHADER))
         return false;
 
     snprintf(entry, sizeof(entry), "geometry_%d", pptr->geom_shader->name);
@@ -3904,6 +3956,9 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     MGL_INFO("MGL DEBUG: Getting SPIRV IR\n");
     glslang_program_SPIRV_get(glsl_program, pptr->spirv[stage].ir);
     MGL_INFO("MGL DEBUG: SPIRV IR obtained\n");
+
+    if (stage == _FRAGMENT_SHADER && pptr->geom_shader && pptr->geom.writes_primitive_id)
+        mglPatchFsPrimitiveId(pptr->spirv[stage].ir, pptr->spirv[stage].size, MGL_GS_PRIMITIVE_ID_LOCATION);
 
     // Any function the application wrote that touches a uniform hits the same
     // wall as the generated ones: SPIRV-Cross passes the uniform in, and Metal
@@ -4771,41 +4826,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         if (pptr->shader_slots[stage] == NULL)
             continue;
 
-        // an evaluation shader that ignores a built-in the stage before it
-        // writes is rebuilt with a read of it, so the two lay out the buffer
-        // between them the same way
-        if (stage == _TESS_EVALUATION_SHADER && pptr->tess.active)
-        {
-            Shader *tes = pptr->shader_slots[stage];
-            Shader *w = pptr->tess.has_control ? pptr->shader_slots[_TESS_CONTROL_SHADER]
-                                               : pptr->shader_slots[_VERTEX_SHADER];
-            const char *tsrc = tes->pp_src ? tes->pp_src : tes->src;
-            const char *wsrc = w ? (w->pp_src ? w->pp_src : w->src) : NULL;
-            char *touched = (tsrc && wsrc) ? mglTouchTessInputs(tsrc, wsrc, pptr->tess.has_control) : NULL;
-
-            if (touched)
-            {
-                char entry[128];
-                bool ok;
-
-                snprintf(entry, sizeof(entry), "tess_evaluation_%d_main", tes->name);
-                ok = buildGeneratedStageInto(ctx, pptr, GL_TESS_EVALUATION_SHADER, stage, NULL, touched, entry,
-                                             pptr->tess.has_control ? GL_TESS_CONTROL_SHADER : GL_VERTEX_SHADER, wsrc);
-                free(touched);
-
-                if (ok)
-                {
-                    scanTessExecutionModes(pptr, stage);
-                    stages_linked++;
-                }
-                else
-                    pptr->link_status = GL_FALSE;
-
-                continue;
-            }
-        }
-
-        if (linkAndCompileProgramToMetal(ctx, pptr, stage, false) == false)
+        if (linkStageToMetal(ctx, pptr, stage) == false)
             pptr->link_status = GL_FALSE;
         else
             stages_linked++;

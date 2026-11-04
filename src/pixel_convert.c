@@ -1959,6 +1959,240 @@ GLboolean mglCompressToRGTC(const void *src, size_t src_row_pitch, GLenum format
 }
 
 /* ---------------------------------------------------------------- */
+/*  BPTC encoding                                                    */
+/* ---------------------------------------------------------------- */
+
+// Every block is written in the simplest mode that holds a whole block: BC7
+// mode 6 (one RGBA line, 7-bit endpoints plus a p-bit, 4-bit indices) and
+// BC6H mode 11 (one RGB line, 10-bit endpoints, 4-bit indices). Not the best
+// a full encoder could find, but valid BPTC any decoder reads the same way.
+
+static const int bptcWeights4[16] = { 0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64 };
+
+// bits go in least significant first, as BPTC reads them
+static void putBits(GLubyte *blk, int *pos, GLuint value, int count)
+{
+    for (int i = 0; i < count; i++, (*pos)++)
+        if (value & (1u << i))
+            blk[*pos >> 3] |= (GLubyte)(1u << (*pos & 7));
+}
+
+// The 4-bit index of each texel along e0 -> e1; the first texel's index has
+// to fit in 3 bits, so the line is flipped when it would not
+static void bptcIndices(const float px[16][4], int n, float e0[4], float e1[4], int idx[16])
+{
+    float d[4], len = 0;
+
+    for (int c = 0; c < n; c++)
+    {
+        d[c] = e1[c] - e0[c];
+        len += d[c] * d[c];
+    }
+
+    for (int k = 0; k < 16; k++)
+    {
+        float t = 0;
+
+        for (int c = 0; len > 0 && c < n; c++)
+            t += (px[k][c] - e0[c]) * d[c];
+
+        t = len > 0 ? t / len : 0;
+
+        int best = 0;
+        float bd = 1e30f;
+
+        for (int w = 0; w < 16; w++)
+        {
+            float e = t - (float)bptcWeights4[w] / 64.0f;
+
+            if (e * e < bd)
+                bd = e * e, best = w;
+        }
+
+        idx[k] = best;
+    }
+
+    if (idx[0] >= 8)
+    {
+        for (int c = 0; c < n; c++)
+        {
+            float t = e0[c];
+
+            e0[c] = e1[c];
+            e1[c] = t;
+        }
+
+        for (int k = 0; k < 16; k++)
+            idx[k] = 15 - idx[k];
+    }
+}
+
+static void putIndices(GLubyte *blk, int *pos, const int idx[16])
+{
+    putBits(blk, pos, (GLuint)idx[0], 3);
+
+    for (int k = 1; k < 16; k++)
+        putBits(blk, pos, (GLuint)idx[k], 4);
+}
+
+// BC7 mode 6 from 0..255 texels
+static void encodeBC7Block(const float px[16][4], GLubyte *blk)
+{
+    float e0[4], e1[4];
+    int idx[16], pos = 0;
+
+    for (int c = 0; c < 4; c++)
+    {
+        e0[c] = 255, e1[c] = 0;
+
+        for (int k = 0; k < 16; k++)
+        {
+            e0[c] = fminf(e0[c], px[k][c]);
+            e1[c] = fmaxf(e1[c], px[k][c]);
+        }
+
+        // what 7 bits and a zero p-bit can hold
+        e0[c] = (float)(((int)(e0[c] + 0.5f) >> 1) << 1);
+        e1[c] = (float)(((int)(e1[c] + 0.5f) >> 1) << 1);
+    }
+
+    bptcIndices(px, 4, e0, e1, idx);
+
+    memset(blk, 0, 16);
+    putBits(blk, &pos, 1u << 6, 7);
+
+    for (int c = 0; c < 4; c++)
+    {
+        putBits(blk, &pos, (GLuint)e0[c] >> 1, 7);
+        putBits(blk, &pos, (GLuint)e1[c] >> 1, 7);
+    }
+
+    putBits(blk, &pos, 0, 2);
+    putIndices(blk, &pos, idx);
+}
+
+// BC6H mode 11 from texels already in endpoint units. A decoder turns
+// endpoint e into half bits 31e + 15 unsigned, or a magnitude of 62e + 31
+// signed, so those are undone here.
+static void encodeBC6HBlock(const float px[16][4], GLboolean is_signed, GLubyte *blk)
+{
+    float e0[4] = { 0 }, e1[4] = { 0 };
+    int idx[16], pos = 0;
+    float lo = is_signed ? -511.0f : 0.0f, hi = is_signed ? 511.0f : 1023.0f;
+
+    for (int c = 0; c < 3; c++)
+    {
+        e0[c] = 1e30f, e1[c] = -1e30f;
+
+        for (int k = 0; k < 16; k++)
+        {
+            e0[c] = fminf(e0[c], px[k][c]);
+            e1[c] = fmaxf(e1[c], px[k][c]);
+        }
+
+        e0[c] = fminf(fmaxf(roundf(e0[c]), lo), hi);
+        e1[c] = fminf(fmaxf(roundf(e1[c]), lo), hi);
+    }
+
+    bptcIndices(px, 3, e0, e1, idx);
+
+    memset(blk, 0, 16);
+    putBits(blk, &pos, 0x03, 5);
+
+    for (int c = 0; c < 3; c++)
+        putBits(blk, &pos, (GLuint)(GLint)e0[c] & 0x3ffu, 10);
+
+    for (int c = 0; c < 3; c++)
+        putBits(blk, &pos, (GLuint)(GLint)e1[c] & 0x3ffu, 10);
+
+    putIndices(blk, &pos, idx);
+}
+
+static GLboolean formatIsBPTC(GLenum internalformat)
+{
+    return internalformat == GL_COMPRESSED_RGBA_BPTC_UNORM || internalformat == GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM ||
+           internalformat == GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT ||
+           internalformat == GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT;
+}
+
+static GLboolean compressToBPTC(const void *src, size_t src_row_pitch, GLenum format, GLenum type,
+                                void *dst, GLenum internalformat, GLsizei width, GLsizei height)
+{
+    bool bc6 = internalformat == GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT ||
+               internalformat == GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT;
+    bool is_signed = internalformat == GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT;
+    GLubyte *out = (GLubyte *)dst;
+
+    if (!src || !dst || width < 0 || height < 0)
+        return GL_FALSE;
+
+    for (GLsizei by = 0; by < height; by += 4)
+        for (GLsizei bx = 0; bx < width; bx += 4, out += 16)
+        {
+            float px[16][4];
+
+            // texels past the edge repeat the last one, so they cost nothing
+            for (int k = 0; k < 16; k++)
+            {
+                GLsizei x = bx + (k & 3), y = by + (k >> 2);
+
+                if (x >= width) x = width - 1;
+                if (y >= height) y = height - 1;
+
+                const GLubyte *p = (const GLubyte *)src + (size_t)y * src_row_pitch
+                                 + (size_t)x * mglPackedPixelSize(format, type);
+                MGLTexel t;
+                GLboolean got = packed_type_size(type) ? decode_packed(p, format, type, &t)
+                                                       : decode_plain(p, format, type, &t);
+
+                if (!got)
+                    return GL_FALSE;
+
+                for (int c = 0; c < 4; c++)
+                {
+                    float v = t.f[c];
+
+                    if (!bc6)
+                        px[k][c] = fminf(fmaxf(v, 0.0f), 1.0f) * 255.0f;
+                    else if (!is_signed)
+                        px[k][c] = fmaxf((float)(mglFloatToHalf(fmaxf(v, 0.0f)) & 0x7fff) - 15.0f, 0.0f) / 31.0f;
+                    else
+                    {
+                        GLushort h = mglFloatToHalf(v);
+                        float m = fmaxf((float)(h & 0x7fff) - 31.0f, 0.0f) / 62.0f;
+
+                        px[k][c] = (h & 0x8000) ? -m : m;
+                    }
+                }
+            }
+
+            if (bc6)
+                encodeBC6HBlock(px, is_signed, out);
+            else
+                encodeBC7Block(px, out);
+        }
+
+    return GL_TRUE;
+}
+
+GLboolean mglFormatCompressible(GLenum internalformat)
+{
+    GLuint channels = 0;
+    GLboolean is_signed = GL_FALSE;
+
+    return mglFormatIsRGTC(internalformat, &channels, &is_signed) || formatIsBPTC(internalformat);
+}
+
+GLboolean mglCompressPixels(const void *src, size_t src_row_pitch, GLenum format, GLenum type,
+                            void *dst, GLenum internalformat, GLsizei width, GLsizei height)
+{
+    if (formatIsBPTC(internalformat))
+        return compressToBPTC(src, src_row_pitch, format, type, dst, internalformat, width, height);
+
+    return mglCompressToRGTC(src, src_row_pitch, format, type, dst, internalformat, width, height);
+}
+
+/* ---------------------------------------------------------------- */
 /*  SWAP_BYTES                                                       */
 /* ---------------------------------------------------------------- */
 

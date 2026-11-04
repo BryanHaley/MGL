@@ -535,6 +535,11 @@ int mglTessellate(int domain, int spacing, bool point_mode, bool cw,
 #define MGL_BUFFER_SIZES_MSL_SLOT 21
 // where SPIRV-Cross reads gl_DrawID from
 #define MGL_DRAW_ID_MSL_SLOT 19
+// where a fragment, or a vertex stage that is a real vertex function, reads
+// each texture's LOD bias and border colour
+#define MGL_TEX_PARAM_MSL_SLOT        30
+#define MGL_VERTEX_TEX_PARAM_MSL_SLOT 18
+#define MGL_TEX_PARAM_SLOTS    128
 
 struct Program_t;
 bool mglBuildSampleRateFragment(struct GLMContextRec_t *ctx, struct Program_t *pptr);
@@ -632,6 +637,10 @@ int  mglTransformCaptureItems(const char *src, void *shader, char *const *varyin
 void mglFreeCaptureInfo(CaptureInfo *ci);
 
 // What a geometry shader turned into, and what it needs to run.
+// where the geometry stage's gl_PrimitiveID reaches the fragment stage, past
+// every location GL lets an application use
+#define MGL_GS_PRIMITIVE_ID_LOCATION 32
+
 typedef struct GeometryInfo_t {
     GLenum in_primitive;            // points / lines / triangles (+ adjacency)
     GLenum out_primitive;           // points / line_strip / triangle_strip
@@ -669,6 +678,7 @@ typedef struct GeometryInfo_t {
     GLint  out_offsets[32];
     GLint  out_arrays[32];          // elements, 0 when not an array
     GLint  out_streams[32];         // the vertex stream each one goes to
+    bool   writes_primitive_id;
 } GeometryInfo;
 
 // Transform feedback behind a geometry stage copies words straight out of the

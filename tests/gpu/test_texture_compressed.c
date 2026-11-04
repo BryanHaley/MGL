@@ -7,6 +7,7 @@
  * known exactly and a decode can be checked against them.
  */
 
+#include <math.h>
 #include "mgl_test.h"
 #include "harness.h"
 #include <stdlib.h>
@@ -811,4 +812,78 @@ GPU_TEST(texture_compressed, rgtc_sub_image_compresses_plain_pixels)
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glDeleteTextures(1, &t);
+}
+
+// Plain pixels into a BPTC texture are compressed by MGL, as GL asks of the
+// driver; sampling one flat colour gives that colour back
+static void bptcRoundTrip(GLenum internalformat, GLenum target_format, const GLfloat want[3], GLfloat tol)
+{
+    static const char *VS =
+        "#version 410\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 410\n"
+        "uniform sampler2D t;\n"
+        "out vec4 o;\n"
+        "void main() { o = texture(t, vec2(0.5)); }\n";
+    GLfloat src[8 * 8 * 4], got[4] = { -1, -1, -1, -1 };
+    GLuint tex, fbo, rb, prog, vao, vbo;
+    char log[1024];
+
+    for (int i = 0; i < 8 * 8; i++)
+    {
+        src[i * 4 + 0] = want[0];
+        src[i * 4 + 1] = want[1];
+        src[i * 4 + 2] = want[2];
+        src[i * 4 + 3] = 1.0f;
+    }
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, internalformat, 8, 8, 0, GL_RGBA, GL_FLOAT, src);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    // and a sub-image into it, the call the CTS makes
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 8, 8, GL_RGBA, GL_FLOAT, src);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, target_format, 4, 4);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    glViewport(0, 0, 4, 4);
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "t"), 0);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glReadPixels(1, 1, 1, 1, GL_RGBA, GL_FLOAT, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    for (int c = 0; c < 3; c++)
+        CHECK_MSG(fabsf(got[c] - want[c]) <= tol * fmaxf(1.0f, fabsf(want[c])),
+                  "0x%x channel %d read %g, want %g", internalformat, c, got[c], want[c]);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteRenderbuffers(1, &rb);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    glDeleteTextures(1, &tex);
+}
+
+GPU_TEST(texture_compressed, bptc_compresses_plain_pixels)
+{
+    bptcRoundTrip(GL_COMPRESSED_RGBA_BPTC_UNORM, GL_RGBA8, (const GLfloat[3]){ 0.8f, 0.4f, 0.2f }, 2.0f / 255.0f);
+    // one BC6H endpoint step is 31 half-float steps unsigned and 62 signed
+    bptcRoundTrip(GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT, GL_RGBA32F, (const GLfloat[3]){ 1.5f, 0.25f, 3.0f }, 0.02f);
+    bptcRoundTrip(GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT, GL_RGBA32F, (const GLfloat[3]){ -1.5f, 0.25f, 3.0f }, 0.04f);
 }

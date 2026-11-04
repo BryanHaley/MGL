@@ -1133,3 +1133,29 @@ GPU_TEST(texture_storage, array_layers_survive_generated_mipmaps)
     glDeleteFramebuffers(1, &fbo);
     glDeleteTextures(1, &t);
 }
+
+// A 1D array keeps its layers at every level, so each level attaches whole
+GPU_TEST(texture_storage, a_1d_array_keeps_its_layers_at_every_level)
+{
+    GLuint t, f;
+    GLint h = -1;
+
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_1D_ARRAY, t);
+    glTexStorage2D(GL_TEXTURE_1D_ARRAY, 3, GL_RGBA8, 4, 4);
+    glGetTexLevelParameteriv(GL_TEXTURE_1D_ARRAY, 2, GL_TEXTURE_HEIGHT, &h);
+    CHECK_EQ_INT(h, 4);
+
+    glGenFramebuffers(1, &f);
+    glBindFramebuffer(GL_FRAMEBUFFER, f);
+    for (int lv = 0; lv < 3; lv++)
+    {
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, t, lv);
+        CHECK_MSG(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "level %d incomplete", lv);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &f);
+    glDeleteTextures(1, &t);
+}

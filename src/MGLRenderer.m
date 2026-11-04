@@ -184,6 +184,15 @@ static inline id<NSObject> SafeMetalBridge(void *ptr, Class expectedClass, const
 // GL keeps a plain uniform packed tight, but Metal puts each three-component
 // column, and each vec3 of an array, 16 bytes apart. Writes the Metal layout
 // to out and returns its size, or 0 when the stored bytes already fit.
+// a shared MTLBuffer would make every draw in the command buffer see the last value
+static bool inlineable(const BufferMap *map, const Buffer *buf)
+{
+    return map->gl_buffer_type != _SHADER_STORAGE_BUFFER &&
+           map->gl_buffer_type != _ATOMIC_COUNTER_BUFFER &&
+           buf->data.mtl_data == NULL && buf->data.buffer_data &&
+           buf->size < 4096 && map->offset < buf->size;
+}
+
 static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyte *out, size_t room)
 {
     size_t vectors, have;
@@ -2926,6 +2935,12 @@ static bool isRGB32BufferFormat(GLenum f)
             break;
     }
 
+    // GL_TEXTURE_MIN_LOD and _MAX_LOD; the sampling view starts at the base
+    // level, so Metal's levels count from the same place as GL's
+    samplerDescriptor.lodMinClamp = tex_param->min_lod > 0.0f ? tex_param->min_lod : 0.0f;
+    samplerDescriptor.lodMaxClamp = tex_param->max_lod > samplerDescriptor.lodMinClamp ? tex_param->max_lod
+                                                                                         : samplerDescriptor.lodMinClamp;
+
     switch(tex_param->mag_filter)
     {
         case GL_NEAREST:
@@ -3792,17 +3807,111 @@ static GLenum targetForSampler(GLenum type)
     }
 }
 
+// Matches spvTexParam in SPIRV-Cross's MSL output
+typedef struct {
+    float    lod_bias;
+    uint32_t border;        // a bit per axis that clamps to a colour Metal cannot hold
+    uint32_t pad[2];
+    uint32_t border_bits[4];
+} MGLTexParam;
+
+static bool isIntegerSampler(GLenum t)
+{
+    switch (t)
+    {
+        case GL_INT_SAMPLER_1D: case GL_INT_SAMPLER_2D: case GL_INT_SAMPLER_3D: case GL_INT_SAMPLER_CUBE:
+        case GL_INT_SAMPLER_1D_ARRAY: case GL_INT_SAMPLER_2D_ARRAY: case GL_INT_SAMPLER_2D_RECT:
+        case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool isUnsignedSampler(GLenum t)
+{
+    switch (t)
+    {
+        case GL_UNSIGNED_INT_SAMPLER_1D: case GL_UNSIGNED_INT_SAMPLER_2D: case GL_UNSIGNED_INT_SAMPLER_3D:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE: case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY: case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The LOD bias and border colour a texture unit's sampling needs and Metal's
+// sampler cannot hold
+static bool isCubeSampler(GLenum t)
+{
+    switch (t)
+    {
+        case GL_SAMPLER_CUBE: case GL_SAMPLER_CUBE_SHADOW: case GL_INT_SAMPLER_CUBE:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE: case GL_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW: case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+            return true;
+    }
+
+    return false;
+}
+
+static MGLTexParam texParamFor(GLMContext ctx, const TextureParameter *p, GLenum sampler_type)
+{
+    MGLTexParam tp = { 0 };
+    GLfloat max = (GLfloat)ctx->state.var.max_texture_lod_bias;
+    bool is_int = isIntegerSampler(sampler_type), is_uint = isUnsignedSampler(sampler_type);
+    const GLfloat *c = p->border_color;
+
+    tp.lod_bias = p->lod_bias > max ? max : (p->lod_bias < -max ? -max : p->lod_bias);
+
+    // Metal's three border colours cover a float border of all zeros, or of
+    // zeros or ones with alpha one; an integer texture needs the exact values
+    bool native = !is_int && !is_uint &&
+                  ((c[0] == 0 && c[1] == 0 && c[2] == 0 && (c[3] == 0 || c[3] == 1)) ||
+                   (c[0] == 1 && c[1] == 1 && c[2] == 1 && c[3] == 1));
+
+    if (!native)
+    {
+        tp.border = (p->wrap_s == GL_CLAMP_TO_BORDER ? 1u : 0u) | (p->wrap_t == GL_CLAMP_TO_BORDER ? 2u : 0u) |
+                    (p->wrap_r == GL_CLAMP_TO_BORDER ? 4u : 0u);
+
+        if (is_int)
+            memcpy(tp.border_bits, p->border_color_i, sizeof tp.border_bits);
+        else if (is_uint)
+            memcpy(tp.border_bits, p->border_color_ui, sizeof tp.border_bits);
+        else
+            memcpy(tp.border_bits, p->border_color, sizeof tp.border_bits);
+    }
+
+    // Metal always filters cube maps across faces
+    if (!ctx->state.caps.texture_cube_map_seamless && isCubeSampler(sampler_type))
+        tp.border |= 8u;
+
+    return tp;
+}
+
 // Binds every texture and image a stage reads, each into the Metal slot
 // SPIRV-Cross gave it. The GL unit decides which texture; the slot is fixed
 // when the shader is compiled and has nothing to do with the unit number.
 - (bool) bindTexturesForStage: (int) stage
                    setTexture: (void (^)(id<MTLTexture>, NSUInteger)) setTexture
                    setSampler: (void (^)(id<MTLSamplerState>, NSUInteger)) setSampler
+                  setParams: (void (^)(const void *, NSUInteger)) setParams
 {
     Program *program = ctx->state.program;
 
     if (program == NULL)
         return true;
+
+    MGLTexParam params[MGL_TEX_PARAM_SLOTS];
+    GLuint param_count = 0;
+    bool wants_params = setParams && program->spirv[stage].msl_str &&
+                        strstr(program->spirv[stage].msl_str, "spvTexParams");
+
+    memset(params, 0, sizeof params);
 
     SpirvResourceList *samplers = &program->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_SAMPLED_IMAGE];
 
@@ -3846,8 +3955,20 @@ static GLenum targetForSampler(GLenum type)
 
             setTexture(texture, res->msl_index + e);
             setSampler([self samplerForUnit: unit texture: ptr], res->msl_sampler_index + e);
+
+            GLuint slot = res->msl_index + (GLuint)e;
+
+            if (wants_params && slot < MGL_TEX_PARAM_SLOTS)
+            {
+                params[slot] = texParamFor(ctx, so ? &so->params : &ptr->params, res->gl_type);
+                if (slot + 1 > param_count)
+                    param_count = slot + 1;
+            }
         }
     }
+
+    if (wants_params)
+        setParams(params, sizeof(MGLTexParam) * (param_count ? param_count : 1));
 
     SpirvResourceList *images = &program->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_IMAGE];
 
@@ -3890,11 +4011,13 @@ static GLenum targetForSampler(GLenum type)
     if (stage == _VERTEX_SHADER)
         return [self bindTexturesForStage: stage
                                setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setVertexTexture: t atIndex: i]; }
-                               setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setVertexSamplerState: s atIndex: i]; }];
+                               setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setVertexSamplerState: s atIndex: i]; }
+                                setParams: ^(const void *p, NSUInteger n) { [self->_currentRenderEncoder setVertexBytes: p length: n atIndex: MGL_VERTEX_TEX_PARAM_MSL_SLOT]; }];
 
     return [self bindTexturesForStage: stage
                            setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setFragmentTexture: t atIndex: i]; }
-                           setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setFragmentSamplerState: s atIndex: i]; }];
+                           setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setFragmentSamplerState: s atIndex: i]; }
+                            setParams: ^(const void *p, NSUInteger n) { [self->_currentRenderEncoder setFragmentBytes: p length: n atIndex: MGL_TEX_PARAM_MSL_SLOT]; }];
 }
 
 // The stages MGL runs as compute passes, or through another stage's slot,
@@ -3905,14 +4028,16 @@ static GLenum targetForSampler(GLenum type)
 {
     [self bindTexturesForStage: stage
                     setTexture: ^(id<MTLTexture> t, NSUInteger i) { [enc setTexture: t atIndex: i]; }
-                    setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [enc setSamplerState: s atIndex: i]; }];
+                    setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [enc setSamplerState: s atIndex: i]; }
+                     setParams: nil];
 }
 
 - (void) bindTexturesForStageAsVertex: (int) stage
 {
     [self bindTexturesForStage: stage
                     setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setVertexTexture: t atIndex: i]; }
-                    setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setVertexSamplerState: s atIndex: i]; }];
+                    setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setVertexSamplerState: s atIndex: i]; }
+                     setParams: nil];
 }
 
 - (bool) bindTexturesToCurrentRenderEncoder
@@ -5800,6 +5925,15 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
             {
                 _renderPassDescriptor.renderTargetWidth = ds.width;
                 _renderPassDescriptor.renderTargetHeight = ds.height;
+            }
+            else if (fbo->default_width > 0 && fbo->default_height > 0)
+            {
+                _renderPassDescriptor.renderTargetWidth = (NSUInteger)fbo->default_width;
+                _renderPassDescriptor.renderTargetHeight = (NSUInteger)fbo->default_height;
+                _renderPassDescriptor.renderTargetArrayLength =
+                    fbo->default_layers > 0 ? (NSUInteger)fbo->default_layers : 0;
+                _renderPassDescriptor.defaultRasterSampleCount =
+                    fbo->default_samples > 1 ? (NSUInteger)fbo->default_samples : 1;
             }
         }
     }
@@ -7932,7 +8066,7 @@ static const char *mgl_gs_capture_msl =
         return 0;
     }
 
-    const __fp16 *half = (const __fp16 *)_tessGenLevels.contents;
+    const float *levels_in = (const float *)_tessGenLevels.contents;
     float *dst = (float *)_tessGenCoords.contents;
 
     for (GLuint p = 0; p < patches; p++)
@@ -7950,10 +8084,10 @@ static const char *mgl_gs_capture_msl =
         else
         {
             for (int e = 0; e < 4; e++)
-                outer[e] = (float)half[p * 6 + e];
+                outer[e] = levels_in[p * 6 + e];
 
-            inner[0] = (float)half[p * 6 + 4];
-            inner[1] = (float)half[p * 6 + 5];
+            inner[0] = levels_in[p * 6 + 4];
+            inner[1] = levels_in[p * 6 + 5];
         }
 
         int prims = 0;
@@ -8667,6 +8801,14 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
             continue;
         }
 
+        if (inlineable(map, ptr))
+        {
+            [enc setBytes: (const GLubyte *)ptr->data.buffer_data + map->offset
+                   length: (NSUInteger)(ptr->size - map->offset)
+                  atIndex: map->buffer_base_index];
+            continue;
+        }
+
         if (ptr->data.mtl_data == NULL)
             [self bindMTLBuffer: ptr];
 
@@ -8925,6 +9067,14 @@ static const char *mgl_isoline_levels_msl =
             continue;
         }
 
+        if (inlineable(map, ptr))
+        {
+            [_currentRenderEncoder setVertexBytes: (const GLubyte *)ptr->data.buffer_data + map->offset
+                                           length: (NSUInteger)(ptr->size - map->offset)
+                                          atIndex: map->buffer_base_index];
+            continue;
+        }
+
         if (ptr->data.mtl_data == NULL)
             [self bindMTLBuffer: ptr];
 
@@ -9055,6 +9205,10 @@ static const char *mgl_isoline_levels_msl =
     size_t ctl_bytes = (size_t)patches * out_cp * MGL_TESS_BYTES_PER_VERTEX;
     size_t patch_bytes = (size_t)patches * MGL_TESS_BYTES_PER_VERTEX;
     size_t level_bytes = (size_t)patches * sizeof(MTLQuadTessellationFactorsHalf);
+
+    // the CPU tessellator's control stage writes float levels, twice the room
+    if (program->tess.general && program->tess.has_control)
+        level_bytes *= 2;
 
     id<MTLBuffer> vtx_out, ctl_out, patch_out, levels;
 
@@ -9317,8 +9471,16 @@ static MTLWinding mtlWindingFor(const Program *p)
     }
     else
     {
-        pipelineStateDescriptor.inputPrimitiveTopology =
-            _drawTopology ? _drawTopology : MTLPrimitiveTopologyClassTriangle;
+        MTLPrimitiveTopologyClass cls = _drawTopology ? _drawTopology : MTLPrimitiveTopologyClassTriangle;
+        const char *msl = program->spirv[_VERTEX_SHADER].msl_str;
+
+        // macOS 27 refuses a point size write on a line or triangle pipeline.
+        // Layer and viewport writes still need the class set.
+        if (cls != MTLPrimitiveTopologyClassPoint && msl && strstr(msl, "[[point_size]]") &&
+            !strstr(msl, "render_target_array_index") && !strstr(msl, "viewport_array_index"))
+            cls = MTLPrimitiveTopologyClassUnspecified;
+
+        pipelineStateDescriptor.inputPrimitiveTopology = cls;
     }
 
     // A tessellating program rasterises from its evaluation stage: that is the
@@ -10633,7 +10795,8 @@ static int countingQueries(GLMContext ctx, Query **out)
 
     bool ok = [self bindTexturesForStage: _COMPUTE_SHADER
                               setTexture: ^(id<MTLTexture> t, NSUInteger i) { [computeCommandEncoder setTexture: t atIndex: i]; }
-                              setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [computeCommandEncoder setSamplerState: s atIndex: i]; }];
+                              setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [computeCommandEncoder setSamplerState: s atIndex: i]; }
+                     setParams: nil];
 
     ctx->state.dirty_bits &= ~(DIRTY_TEX_BINDING | DIRTY_SAMPLER | DIRTY_IMAGE_UNIT_STATE);
 
@@ -12166,6 +12329,54 @@ static bool isCombinedDepthStencil(MTLPixelFormat f)
 }
 
 #pragma mark C interface to mtlGetTexImage
+// Metal will not copy a compressed texture out as pixels, but a shader can
+// sample it; the texels come back as floats and convert from there
+- (void) readCompressed: (id<MTLTexture>) texture region: (MTLRegion) region level: (NSUInteger) level
+                  slice: (NSUInteger) slice pixels: (void *) pixelBytes bytesPerRow: (NSUInteger) bytesPerRow
+                 format: (GLenum) format type: (GLenum) type
+{
+    const MGLMetalFormatDesc *md = mglMetalFormatDesc((uint16_t)texture.pixelFormat);
+    MTLPixelFormat linear = md && md->mtl_linear ? (MTLPixelFormat)md->mtl_linear : texture.pixelFormat;
+    NSUInteger w = region.size.width, h = region.size.height;
+    id<MTLComputePipelineState> pso = [_kernels pipelineNamed: "decodeCompressed"];
+    id<MTLTexture> view = [texture newTextureViewWithPixelFormat: linear
+                                                     textureType: MTLTextureType2D
+                                                          levels: NSMakeRange(level, 1)
+                                                          slices: NSMakeRange(slice, 1)];
+    id<MTLBuffer> out = [_device newBufferWithLength: (w ? w : 1) * (h ? h : 1) * 16
+                                             options: MTLResourceStorageModeShared];
+
+    if (pso == nil || view == nil || out == nil)
+    {
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+        return;
+    }
+
+    uint32_t r[4] = { (uint32_t)region.origin.x, (uint32_t)region.origin.y, (uint32_t)w, (uint32_t)h };
+
+    if (_currentCommandBuffer == nil)
+        [self newCommandBuffer];
+
+    id<MTLComputeCommandEncoder> enc = [_currentCommandBuffer computeCommandEncoder];
+
+    [enc setComputePipelineState: pso];
+    [enc setTexture: view atIndex: 0];
+    [enc setBuffer: out offset: 0 atIndex: 0];
+    [enc setBytes: r length: sizeof r atIndex: 1];
+    [enc dispatchThreads: MTLSizeMake(w, h, 1) threadsPerThreadgroup: MTLSizeMake(8, 8, 1)];
+    [enc endEncoding];
+
+    [_currentCommandBuffer commit];
+    [_currentCommandBuffer waitUntilCompleted];
+    _currentCommandBuffer = nil;
+
+    if (!mglConvertPixels(out.contents, w * 16, MGL_NF_RGBA32_FLOAT, pixelBytes, bytesPerRow, format, type,
+                          (GLsizei)w, (GLsizei)h, GL_FALSE))
+        ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
+
+    [self newCommandBuffer];
+}
+
 -(void) mtlGetTexImage:(GLMContext) glm_ctx tex: (Texture *)tex pixelBytes:(void *)pixelBytes bytesPerRow:(NSUInteger)bytesPerRow format:(GLenum)format type:(GLenum)type fromRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice
 {
     if (!tex || !pixelBytes)
@@ -12189,6 +12400,14 @@ static bool isCombinedDepthStencil(MTLPixelFormat f)
     }
 
     MGLNativeFormat nf = nativeFormatForMTL(texture.pixelFormat);
+
+    if (nf == MGL_NF_UNKNOWN && mglFormatIsCompressed(tex->internalformat) &&
+        texture.textureType != MTLTextureType3D)
+    {
+        [self readCompressed: texture region: region level: level slice: slice
+                       pixels: pixelBytes bytesPerRow: bytesPerRow format: format type: type];
+        return;
+    }
 
     if (nf == MGL_NF_UNKNOWN)
     {
@@ -14003,8 +14222,10 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
 
     if (@available(macOS 10.14, *))
     {
-        glm_ctx->state.var.max_shader_storage_block_size = (GLuint)[_device maxBufferLength];
-        glm_ctx->state.var.max_uniform_block_size = (GLuint)[_device maxBufferLength];
+        // maxBufferLength can pass 4 GB, and these are read back as a GLint
+        NSUInteger len = [_device maxBufferLength];
+        glm_ctx->state.var.max_shader_storage_block_size = (GLuint)MIN(len, 128u << 20);
+        glm_ctx->state.var.max_uniform_block_size = (GLuint)MIN(len, 64u << 10);
     }
 
     // highest sample count Metal will actually give us

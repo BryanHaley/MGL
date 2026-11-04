@@ -565,3 +565,109 @@ GPU_TEST(tess_geometry, evaluation_stage_samples_a_rectangle)
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
 }
+
+// A vertex shader that writes gl_PointSize, which the control shader never
+// reads, must not shift the control stage's view of later patches.
+GPU_TEST(tess_geometry, vertex_point_size_keeps_control_inputs_aligned)
+{
+    static const char *vs =
+        "#version 440\n"
+        "layout(location = 0) in vec4 p;\n"
+        "layout(location = 1) in vec4 c;\n"
+        "out vec4 v_c;\n"
+        "void main() { gl_PointSize = 1.0; gl_Position = p; v_c = c; }\n";
+    static const char *tcs =
+        "#version 440\n"
+        "layout(vertices = 1) out;\n"
+        "in vec4 v_c[];\n"
+        "out vec4 t_c[];\n"
+        "void main() {\n"
+        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0;\n"
+        "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "    t_c[gl_InvocationID] = v_c[gl_InvocationID];\n"
+        "}\n";
+    static const char *tes =
+        "#version 440\n"
+        "layout(isolines, point_mode) in;\n"
+        "in vec4 t_c[];\n"
+        "out vec4 f_c;\n"
+        "void main() { gl_Position = gl_in[0].gl_Position; f_c = t_c[0]; }\n";
+    static const char *fs =
+        "#version 440\n"
+        "in vec4 f_c;\n"
+        "out vec4 o;\n"
+        "void main() { o = f_c; }\n";
+    const char *srcs[4] = { vs, tcs, tes, fs };
+    const GLenum stages[4] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER,
+                               GL_FRAGMENT_SHADER };
+    enum { W = 8 };
+    static GLfloat v[W * W * 8];
+    MGLTestTarget t;
+    GLuint prog = glCreateProgram(), vao, vbo;
+    unsigned char *px;
+    char log[4096] = "";
+    GLint ok = 0;
+    int bad = 0;
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLuint sh = glCreateShader(stages[i]);
+
+        glShaderSource(sh, 1, &srcs[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(prog, sh);
+        glDeleteShader(sh);
+    }
+
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok)
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "program did not link: %s", log);
+    if (!ok || !mgl_target_create(&t, W, W, GL_RGBA8, 0))
+    {
+        glDeleteProgram(prog);
+        return;
+    }
+
+    // one point per pixel, odd pixels red and even ones green
+    for (int i = 0; i < W * W; i++)
+    {
+        GLfloat *q = v + i * 8;
+
+        q[0] = ((i % W) + 0.5f) / W * 2 - 1;
+        q[1] = ((i / W) + 0.5f) / W * 2 - 1;
+        q[2] = 0; q[3] = 1;
+        q[4] = (GLfloat)(i & 1); q[5] = (GLfloat)!(i & 1); q[6] = 0; q[7] = 1;
+    }
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 32, (void *)0);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 32, (void *)16);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 1);
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_PATCHES, 0, W * W);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+    for (int i = 0; i < W * W; i++)
+        bad += px[i * 4] != ((i & 1) ? 255 : 0) || px[i * 4 + 1] != ((i & 1) ? 0 : 255) || px[i * 4 + 2] != 0;
+    free(px);
+    CHECK_MSG(bad == 0, "%d of %d points came out wrong", bad, W * W);
+
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&t);
+}

@@ -1171,3 +1171,36 @@ GPU_TEST(program_uniform, array_of_arrays_elements_have_locations)
     glUseProgram(0);
     glDeleteProgram(prog);
 }
+
+// A glProgramUniform call that fails on its program name must not leave its
+// setter type behind for the driver's own uniform writes at the next draw.
+GPU_TEST(program_uniform, a_failed_call_does_not_break_the_next_draw)
+{
+    static const char *VS =
+        "#version 410\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); gl_PointSize = 1.0; }\n";
+    static const char *FS =
+        "#version 410\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(float(gl_NumSamples)); }\n";
+    char log[1024];
+    GLuint prog = mgl_build_program(VS, FS, log, sizeof log), vao;
+    MGLTestTarget t;
+
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&t, 4, 4, GL_RGBA8, 0)) return;
+
+    glProgramUniformMatrix4dv(999999, 0, 1, GL_FALSE, (const GLdouble[16]){0});
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_VALUE);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glDrawArrays(GL_POINTS, 0, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

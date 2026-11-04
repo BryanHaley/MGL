@@ -1370,6 +1370,8 @@ void mglWriteProgramUniform(GLMContext ctx, Program *pptr, GLint location, GLint
     if (pptr == NULL || location < 0)
         return;
 
+    // a failed glUniform call can leave its setter behind
+    ctx->uniform_setter = 0;
     programUniformWrite(ctx, pptr, location, &value, sizeof(GLint));
 }
 
@@ -1379,6 +1381,7 @@ void mglWriteIndexedDraw(GLMContext ctx, Program *pptr, GLint indexed)
     if (pptr == NULL || pptr->indexed_draw_loc < 0)
         return;
 
+    ctx->uniform_setter = 0;
     programUniformWrite(ctx, pptr, pptr->indexed_draw_loc, &indexed, sizeof(GLint));
 }
 
@@ -1389,6 +1392,7 @@ void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples)
     if (pptr == NULL || pptr->num_samples_loc < 0)
         return;
 
+    ctx->uniform_setter = 0;
     programUniformWrite(ctx, pptr, pptr->num_samples_loc, &samples, sizeof(GLint));
 }
 
@@ -1399,6 +1403,7 @@ void mglWriteSampleMaskOff(GLMContext ctx, Program *pptr, GLint off)
     if (pptr == NULL || pptr->sample_mask_off_loc < 0)
         return;
 
+    ctx->uniform_setter = 0;
     programUniformWrite(ctx, pptr, pptr->sample_mask_off_loc, &off, sizeof(GLint));
 }
 

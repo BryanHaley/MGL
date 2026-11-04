@@ -6,6 +6,7 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include "mgl_test.h"
 #include "harness.h"
 
@@ -610,4 +611,233 @@ GPU_TEST(tex_sampler_params, swizzle_rejects_values_that_are_not_channels)
     }
 
     glDeleteTextures(1, &tex);
+}
+
+// Metal samplers have three fixed border colours; anything else, and any
+// integer border, comes from MGL's own per-texture values in the shader
+GPU_TEST(tex_sampler_params, integer_border_colour_reaches_the_shader)
+{
+    static const char *VS =
+        "#version 410\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out vec2 uv;\n"
+        "void main() { uv = p * 1.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 410\n"
+        "uniform isampler2D t;\n"
+        "in vec2 uv;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(texture(t, uv)) / 255.0; }\n";
+    static const GLint texels[4] = { 7, 7, 7, 7 };
+    static const GLint border[4] = { 255, 0, 0, 0 };
+    MGLTestTarget target;
+    GLuint prog, tex, vbo, vao;
+    unsigned char *px, in[4], out[4];
+    char log[1024];
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&target, 8, 8, GL_RGBA8, 0)) return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32I, 2, 2, 0, GL_RED_INTEGER, GL_INT, texels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameterIiv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "t"), 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&target);
+    mgl_pixel_at(px, &target, 4, 4, in);   // uv near 0.5
+    mgl_pixel_at(px, &target, 0, 0, out);  // uv below 0
+    free(px);
+
+    CHECK_MSG(in[0] == 7, "inside read %d, want 7", in[0]);
+    CHECK_MSG(out[0] == 255, "outside read %d, want the border 255", out[0]);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&target);
+}
+
+// GL_TEXTURE_LOD_BIAS moves an implicit level of detail; a draw at one texel
+// a pixel with a bias of one reads level one
+GPU_TEST(tex_sampler_params, texture_lod_bias_moves_the_level)
+{
+    static const char *VS =
+        "#version 410\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out vec2 uv;\n"
+        "void main() { uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 410\n"
+        "uniform sampler2D t;\n"
+        "in vec2 uv;\n"
+        "out vec4 o;\n"
+        "void main() { o = texture(t, uv); }\n";
+    static GLubyte red[8 * 8 * 4], green[4 * 4 * 4];
+    MGLTestTarget target;
+    GLuint prog, tex, vbo, vao;
+    unsigned char *px, c[4];
+    char log[1024];
+
+    for (int i = 0; i < 8 * 8; i++) { red[i * 4] = 255; red[i * 4 + 3] = 255; }
+    for (int i = 0; i < 4 * 4; i++) { green[i * 4 + 1] = 255; green[i * 4 + 3] = 255; }
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&target, 8, 8, GL_RGBA8, 0)) return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 8, 8);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 8, 8, GL_RGBA, GL_UNSIGNED_BYTE, red);
+    glTexSubImage2D(GL_TEXTURE_2D, 1, 0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, green);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "t"), 0);
+
+    for (int bias = 0; bias < 2; bias++)
+    {
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, (GLfloat)bias);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        px = mgl_read_rgba8(&target);
+        mgl_pixel_at(px, &target, 3, 3, c);
+        free(px);
+        CHECK_MSG(bias ? c[1] == 255 : c[0] == 255, "bias %d read %d %d %d", bias, c[0], c[1], c[2]);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&target);
+}
+
+// GL_TEXTURE_MIN_LOD keeps a draw at one texel a pixel off level zero
+GPU_TEST(tex_sampler_params, min_lod_keeps_a_draw_off_level_zero)
+{
+    static const char *VS =
+        "#version 410\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out vec2 uv;\n"
+        "void main() { uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 410\n"
+        "uniform sampler2D t;\n"
+        "in vec2 uv;\n"
+        "out vec4 o;\n"
+        "void main() { o = texture(t, uv); }\n";
+    static GLubyte red[8 * 8 * 4], green[4 * 4 * 4];
+    MGLTestTarget target;
+    GLuint prog, tex, vbo, vao;
+    unsigned char *px, c[4];
+    char log[1024];
+
+    for (int i = 0; i < 8 * 8; i++) { red[i * 4] = 255; red[i * 4 + 3] = 255; }
+    for (int i = 0; i < 4 * 4; i++) { green[i * 4 + 1] = 255; green[i * 4 + 3] = 255; }
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&target, 8, 8, GL_RGBA8, 0)) return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 8, 8);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 8, 8, GL_RGBA, GL_UNSIGNED_BYTE, red);
+    glTexSubImage2D(GL_TEXTURE_2D, 1, 0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, green);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "t"), 0);
+
+    for (int bias = 0; bias < 2; bias++)
+    {
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, (GLfloat)bias);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        px = mgl_read_rgba8(&target);
+        mgl_pixel_at(px, &target, 3, 3, c);
+        free(px);
+        CHECK_MSG(bias ? c[1] == 255 : c[0] == 255, "min lod %d read %d %d %d", bias, c[0], c[1], c[2]);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&target);
+}
+
+// with GL_TEXTURE_CUBE_MAP_SEAMLESS off, a linear sample at a face edge stays on its face
+GPU_TEST(tex_sampler_params, cube_edges_are_not_seamless_by_default)
+{
+    static const char *VS =
+        "#version 410\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out vec2 uv;\n"
+        "void main() { uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *FS =
+        "#version 410\n"
+        "uniform samplerCube t;\n"
+        "in vec2 uv;\n"
+        "out vec4 o;\n"
+        "void main() { o = textureLod(t, normalize(vec3(1.0, uv)), 0.0); }\n";
+    static GLubyte face[4 * 4 * 4];
+    MGLTestTarget target;
+    GLuint prog, tex, vbo, vao;
+    unsigned char *px, c[4];
+    char log[1024];
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&target, 4, 4, GL_RGBA8, 0)) return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+    glTexStorage2D(GL_TEXTURE_CUBE_MAP, 1, GL_RGBA8, 4, 4);
+
+    for (int f = 0; f < 6; f++)
+    {
+        for (int i = 0; i < 16; i++) { face[i * 4] = (GLubyte)(f * 40); face[i * 4 + 3] = 255; }
+        glTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, 0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, face);
+    }
+
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    px = mgl_read_rgba8(&target);
+
+    // the top right pixel looks close to the +Y and +Z edges of +X
+    mgl_pixel_at(px, &target, 3, 3, c);
+    free(px);
+    CHECK_MSG(c[0] == 0, "+X edge read %d, want 0", c[0]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&target);
 }

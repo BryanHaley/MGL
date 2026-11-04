@@ -303,6 +303,35 @@ static void tessTriangles(Out *o, int spacing, const float *outer, const float *
     }
 }
 
+// An inner level of 1 with an outer edge still cut is taken as 1 + epsilon.
+// Fractional odd then makes three segments, the two at the ends of zero length.
+static int widenInner(float *level, int spacing, float *t)
+{
+    if (spacing != 2)
+        return subdivide(*level = innerAtLeastTwo(*level, spacing), spacing, t);
+
+    *level = 1.0f;
+    t[0] = t[1] = 0.0f;
+    t[2] = t[3] = 1.0f;
+
+    return 3;
+}
+
+// Positions along the first inner ring, indexed like t: the ring runs from
+// t[1] to t[n - 1] and is cut as an edge of level - 2.
+static void ringCuts(float level, int spacing, int n, const float *t, float *r)
+{
+    float c[SIDE_MAX];
+
+    memcpy(r, t, sizeof(float) * (size_t)(n + 1));
+
+    if (n < 3 || subdivide(level - 2.0f, spacing, c) != n - 2)
+        return;
+
+    for (int i = 1; i < n; i++)
+        r[i] = t[1] + c[i - 1] * (t[n - 1] - t[1]);
+}
+
 static void tessQuads(Out *o, int spacing, const float *outer, const float *inner)
 {
     float t_out[4][SIDE_MAX], t0[SIDE_MAX], t1[SIDE_MAX];
@@ -324,18 +353,28 @@ static void tessQuads(Out *o, int spacing, const float *outer, const float *inne
         return;
     }
 
+    float l0 = inner[0], l1 = inner[1];
+
     if (n0 == 1)
-        n0 = subdivide(innerAtLeastTwo(inner[0], spacing), spacing, t0);
+        n0 = widenInner(&l0, spacing, t0);
 
     if (n1 == 1)
-        n1 = subdivide(innerAtLeastTwo(inner[1], spacing), spacing, t1);
+        n1 = widenInner(&l1, spacing, t1);
+
+    // the first inner ring is cut at its own level, two less, so a
+    // fractional level gives it short end segments of its own
+    float r0[SIDE_MAX], r1[SIDE_MAX];
+
+    ringCuts(l0, spacing, n0, t0, r0);
+    ringCuts(l1, spacing, n1, t1, r1);
 
     // the inner grid, from the first cut to the last in each direction
     static int grid[SIDE_MAX][SIDE_MAX];
 
     for (int j = 1; j < n1; j++)
         for (int i = 1; i < n0; i++)
-            grid[i][j] = addVertex(o, t0[i], t1[j], 0);
+            grid[i][j] = addVertex(o, j == 1 || j == n1 - 1 ? r0[i] : t0[i],
+                                   i == 1 || i == n0 - 1 ? r1[j] : t1[j], 0);
 
     for (int j = 1; j < n1 - 1; j++)
         for (int i = 1; i < n0 - 1; i++)
@@ -391,7 +430,7 @@ static void tessQuads(Out *o, int spacing, const float *outer, const float *inne
     {
         in[0][k] = grid[1 + k][1];
         in[2][k] = grid[n0 - 1 - k][n1 - 1];
-        in_t[0][k] = h ? (t0[1 + k] - t0[1]) / (t0[n0 - 1] - t0[1]) : 0.0f;
+        in_t[0][k] = h ? (r0[1 + k] - r0[1]) / (r0[n0 - 1] - r0[1]) : 0.0f;
         in_t[2][k] = in_t[0][k];
     }
 
@@ -399,7 +438,7 @@ static void tessQuads(Out *o, int spacing, const float *outer, const float *inne
     {
         in[1][k] = grid[n0 - 1][1 + k];
         in[3][k] = grid[1][n1 - 1 - k];
-        in_t[1][k] = vv ? (t1[1 + k] - t1[1]) / (t1[n1 - 1] - t1[1]) : 0.0f;
+        in_t[1][k] = vv ? (r1[1 + k] - r1[1]) / (r1[n1 - 1] - r1[1]) : 0.0f;
         in_t[3][k] = in_t[1][k];
     }
 

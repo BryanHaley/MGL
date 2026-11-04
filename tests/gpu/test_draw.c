@@ -133,6 +133,88 @@ GPU_TEST(draw, fullscreen_quad_fills_target)
     mgl_target_destroy(&t);
 }
 
+GPU_TEST(draw, triangles_ignore_a_written_point_size)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 pos;\n"
+        "void main() { gl_Position = vec4(pos, 0.0, 1.0); gl_PointSize = 1.0; }\n";
+    MGLTestTarget t;
+    char log[2048] = { 0 };
+    GLuint prog, vao, vbo = 0;
+    unsigned char *px, c[4];
+
+    if (!mgl_target_create(&t, W, H, GL_RGBA8, 0)) SKIP("no target");
+
+    prog = mgl_build_program(VS, FS_SOLID, log, sizeof log);
+    CHECK_MSG(prog != 0, "link failed: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    vao = mgl_fullscreen_quad(&vbo);
+    mgl_target_bind(&t);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+    mgl_pixel_at(px, &t, W / 2, H / 2, c);
+    CHECK_MSG(c[1] > 200 && c[0] < 60, "centre = %d,%d,%d - want green", c[0], c[1], c[2]);
+
+    free(px);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+}
+
+GPU_TEST(draw, vertex_id_mixes_with_int_math)
+{
+    static const char *VS =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 pos;\n"
+        "out vec4 c;\n"
+        "void main() {\n"
+        "    int i = min(4, gl_VertexID) + max(0, gl_InstanceID);\n"
+        "    c = i >= 0 ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1);\n"
+        "    gl_Position = vec4(pos, 0.0, 1.0);\n"
+        "}\n";
+    static const char *FS =
+        "#version 460 core\n"
+        "in vec4 c;\n"
+        "out vec4 o;\n"
+        "void main() { o = c; }\n";
+    MGLTestTarget t;
+    char log[2048] = { 0 };
+    GLuint prog, vao, vbo = 0;
+    unsigned char *px, c[4];
+
+    if (!mgl_target_create(&t, W, H, GL_RGBA8, 0)) SKIP("no target");
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link failed: %s", log);
+    if (!prog) { mgl_target_destroy(&t); return; }
+
+    vao = mgl_fullscreen_quad(&vbo);
+    mgl_target_bind(&t);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+    mgl_pixel_at(px, &t, W / 2, H / 2, c);
+    CHECK_MSG(c[1] > 200 && c[0] < 60, "centre = %d,%d,%d - want green", c[0], c[1], c[2]);
+
+    free(px);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+}
+
 GPU_TEST(draw, half_covering_triangle_leaves_background)
 {
     MGLTestTarget t;

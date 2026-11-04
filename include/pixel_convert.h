@@ -58,6 +58,10 @@ GLboolean mglDecompressRGTC(const void *src, GLenum internalformat,
 MGLNativeFormat mglRGTCNativeFormat(GLenum internalformat);
 GLboolean mglCompressToRGTC(const void *src, size_t src_row_pitch, GLenum format, GLenum type,
                             void *dst, GLenum internalformat, GLsizei width, GLsizei height);
+// RGTC and BPTC take plain pixels and are compressed by MGL
+GLboolean mglFormatCompressible(GLenum internalformat);
+GLboolean mglCompressPixels(const void *src, size_t src_row_pitch, GLenum format, GLenum type,
+                            void *dst, GLenum internalformat, GLsizei width, GLsizei height);
 GLuint    mglNativeFormatBytesPerPixel(MGLNativeFormat fmt);
 GLboolean mglNativeFormatIsInteger(MGLNativeFormat fmt);
 GLboolean mglNativeFormatIsDepth(MGLNativeFormat fmt);
