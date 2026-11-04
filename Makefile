@@ -18,7 +18,7 @@ spirv_headers_path ?= ./submodules/SPIRV-Headers
 spirv_tools_include_path ?= ./external/SPIRV-Tools/include
 spirv_tools_path ?= ./external/SPIRV-Tools/build
 
-glslang_include_path ?= ./external/glslang/glslang/Include
+glslang_include_path ?= ./submodules/glslang/glslang/Include
 
 
 #glslang_path ?= glslang
@@ -70,7 +70,7 @@ CXXFLAGS += -I./external/glfw/include -I./external/glfw/src
 CFLAGS += -D_COCOA -D_GLFW_COCOA
 CXXFLAGS += -D_COCOA -D_GLFW_COCOA
 CXXFLAGS += -I./external/SPIRV-Tools/include -Iinclude -std=c++17
-CXXFLAGS += -I./external/glslang -Iinclude/GL
+CXXFLAGS += -I./submodules/glslang -Iinclude/GL
 
 # GL_CORE SPECIFIC FLAGS
 CFLAGS_GL_CORE := $(CFLAGS) -DMGL_GL_CORE
@@ -119,8 +119,8 @@ CFLAGS_GL_ES += -isysroot $(SDK_ROOT)
 endif
 
 LIBS += -L$(spirv_cross_lib_path) -lspirv-cross-core -lspirv-cross-c -lspirv-cross-cpp -lspirv-cross-msl -lspirv-cross-glsl -lspirv-cross-hlsl -lspirv-cross-reflect
-# Use static libraries from external/glslang instead of homebrew
-LIBS += external/glslang/build/glslang/libglslang.a external/glslang/build/glslang/libMachineIndependent.a external/glslang/build/glslang/libGenericCodeGen.a external/glslang/build/glslang/OSDependent/Unix/libOSDependent.a external/glslang/build/glslang/libglslang-default-resource-limits.a external/glslang/build/SPIRV/libSPIRV.a
+# Use static libraries from submodules/glslang instead of homebrew
+LIBS += submodules/glslang/build/glslang/libglslang.a submodules/glslang/build/glslang/libMachineIndependent.a submodules/glslang/build/glslang/libGenericCodeGen.a submodules/glslang/build/glslang/OSDependent/Unix/libOSDependent.a submodules/glslang/build/glslang/libglslang-default-resource-limits.a submodules/glslang/build/SPIRV/libSPIRV.a
 LIBS += -L/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib
 LIBS += -lc++
 
@@ -128,7 +128,7 @@ LIBS += -lc++
 SPIRV_LIBS := $(wildcard $(spirv_cross_lib_path)/libspirv*.a)
 LIBS += $(SPIRV_LIBS)
 
-GLSL_LIBS := $(wildcard external/glslang/build/glslang/lib*.a)
+GLSL_LIBS := $(wildcard submodules/glslang/build/glslang/lib*.a)
 LIBS += $(GLSL_LIBS)
 
 # SPIRV-Tools
@@ -222,15 +222,13 @@ $(generated): $(gen_stamp)
 generate: $(generated)
 
 # Define the directories and repositories
-# SPIRV-Cross and SPIRV-Headers are submodules; only these are cloned
+# SPIRV-Cross, SPIRV-Headers and glslang are submodules; the repos below are cloned
 EXT_DIRS = ./external/OpenGL-Registry \
            ./external/SPIRV-Tools \
-           ./external/glslang \
            ./external/ezxml
 
 REPOS = https://github.com/KhronosGroup/OpenGL-Registry.git \
         https://github.com/KhronosGroup/SPIRV-Tools.git \
-        https://github.com/KhronosGroup/glslang.git \
         https://github.com/lxfontes/ezxml.git
 
 # Simplified index_of function - find position of directory in EXT_DIRS
@@ -243,8 +241,7 @@ endef
 define get_repo_url
 $(if $(filter $(1),./external/OpenGL-Registry),https://github.com/KhronosGroup/OpenGL-Registry.git, \
 $(if $(filter $(1),./external/SPIRV-Tools),https://github.com/KhronosGroup/SPIRV-Tools.git, \
-$(if $(filter $(1),./external/glslang),https://github.com/KhronosGroup/glslang.git, \
-https://github.com/lxfontes/ezxml.git)))
+https://github.com/lxfontes/ezxml.git))
 endef
 
 # Function to check if a directory exists, and if not, clone it
