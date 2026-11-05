@@ -322,6 +322,8 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
     switch(pname)
     {
         case 0x0B11: RET_TYPE_VAR(type, point_size); break; // GL_POINT_SIZE
+        case 0x8128: RET_TYPE_VAR(type, point_fade_threshold_size); break; // GL_POINT_FADE_THRESHOLD_SIZE
+        case 0x8CA0: RET_TYPE_VAR(type, point_sprite_coord_origin); break; // GL_POINT_SPRITE_COORD_ORIGIN
         case 0x0B12: RET_PAIR(1.0, 511.0); break; // GL_POINT_SIZE_RANGE, what Metal draws
         case 0x0B13: RET_TYPE_VAR(type, point_size_granularity); break; // GL_POINT_SIZE_GRANULARITY
         case 0x0B21: RET_TYPE_VAR(type, line_width); break; // GL_LINE_WIDTH
@@ -620,6 +622,7 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x84F6: RET_TYPE_VAR(type, texture_binding_rectangle); break; // GL_TEXTURE_BINDING_RECTANGLE
         case 0x84F8: RET_TYPE_VAR(type, max_rectangle_texture_size); break; // GL_MAX_RECTANGLE_TEXTURE_SIZE
         case 0x8F9E: RET_TYPE_VAR(type, primitive_restart_index); break; // GL_PRIMITIVE_RESTART_INDEX
+        case 0x891C: RET_TYPE_VAR(type, clamp_read_color); break; // GL_CLAMP_READ_COLOR
         case 0x8A29: RET_TYPE_VAR(type, uniform_buffer_start); break; // GL_UNIFORM_BUFFER_START
         case 0x8A2A: RET_TYPE_VAR(type, uniform_buffer_size); break; // GL_UNIFORM_BUFFER_SIZE
         case 0x8A2B: RET_TYPE_VAR(type, max_vertex_uniform_blocks); break; // GL_MAX_VERTEX_UNIFORM_BLOCKS

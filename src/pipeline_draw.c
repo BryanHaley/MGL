@@ -96,7 +96,8 @@ const char *mglPipelineProblem(const ProgramPipeline *pp)
 
         any = true;
 
-        if (p->link_status != GL_TRUE)
+        // a failed relink keeps the executable a program already had
+        if (!p->executable)
             return "a stage's program did not link";
 
         if (!p->linked_separable)
@@ -315,6 +316,30 @@ static void copyStageState(GLMContext ctx, ProgramPipeline *pp, Program *merged)
                 copyUniform(ctx, from, (GLint)(r->location + e), merged, (GLint)(to->location + e), r->gl_type);
         }
 
+        // texture and image units, element by element
+        static const int opaque[] = { SPVC_RESOURCE_TYPE_SAMPLED_IMAGE, SPVC_RESOURCE_TYPE_STORAGE_IMAGE,
+                                      SPVC_RESOURCE_TYPE_SEPARATE_IMAGE };
+
+        for (unsigned t = 0; t < sizeof(opaque) / sizeof(opaque[0]); t++)
+        {
+            SpirvResourceList *src = &from->spirv_resources_list[s][opaque[t]];
+            SpirvResourceList *dst = &merged->spirv_resources_list[s][opaque[t]];
+
+            for (GLuint i = 0; i < src->count; i++)
+                for (GLuint j = 0; j < dst->count; j++)
+                {
+                    SpirvResource *a = &src->list[i], *b = &dst->list[j];
+
+                    if (!a->name || !b->name || strcmp(a->name, b->name))
+                        continue;
+
+                    b->tex_unit = a->tex_unit;
+                    if (a->element_unit && b->element_unit)
+                        for (GLint e = 0; e < a->array_size && e < b->array_size; e++)
+                            b->element_unit[e] = a->element_unit[e];
+                }
+        }
+
         // the stage's subroutine choices, which a program holding only a
         // geometry stage keeps without any selector of its own to put them in
         if (from->subroutine_values[s] && from->subroutines[s].uniform_count)
@@ -378,7 +403,7 @@ static Program *pipelineProgram(GLMContext ctx, ProgramPipeline *pp)
 
     // one program for every stage is simply that program
     if (one)
-        return only->link_status == GL_TRUE ? only : NULL;
+        return only->executable ? only : NULL;
 
     bool fresh = pp->merged != NULL;
 
@@ -454,7 +479,7 @@ static int enter(GLMContext ctx, bool compute)
     ctx->error_suppress--;
     STATE(error) = err;
 
-    if (p == NULL || p->link_status != GL_TRUE)
+    if (p == NULL || !p->executable)
     {
         // stages that will not link together, a control stage with no
         // evaluation stage say, make a pipeline GL refuses to draw with

@@ -644,6 +644,116 @@ GPU_TEST(misc_core, texture_barrier_shows_earlier_rendering)
     glDeleteProgram(prog);
 }
 
+// The CTS texture_barrier disjoint case in small: draws that read texels the
+// same draw does not write, from an integer texture it renders into
+GPU_TEST(misc_core, rendering_into_a_texture_it_reads_disjointly)
+{
+    enum { W = 16, H = 16 };
+    static const char *VS =
+        "#version 450 core\n"
+        "void main() {\n"
+        "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;\n"
+        "    gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const char *FS =
+        "#version 450 core\n"
+        "uniform int blockSize;\n"
+        "uniform usampler2D tex[8];\n"
+        "out uvec4 o[8];\n"
+        "void main() {\n"
+        "    ivec2 c = ivec2(gl_FragCoord.xy), b = c / blockSize;\n"
+        "    ivec2 dx = ivec2(blockSize, 0), dy = ivec2(0, blockSize);\n"
+        "    if ((b.x + b.y) % 2 != 0) discard;\n"
+        "    for (int i = 0; i < 8; ++i)\n"
+        "        o[i] = texelFetch(tex[i], c + dx, 0) + texelFetch(tex[i], c - dx, 0) +\n"
+        "               texelFetch(tex[i], c + dy, 0) + texelFetch(tex[i], c - dy, 0);\n"
+        "}\n";
+    static GLuint ref[W * H], got[W * H];
+    GLuint prog, vao, tex[8], fb;
+    GLenum bufs[8];
+    char log[2048] = { 0 };
+
+    prog = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(prog != 0, "link: %s", log);
+    if (!prog) return;
+
+    glGenTextures(8, tex);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glUseProgram(prog);
+    for (int i = 0; i < 8; i++)
+    {
+        char name[16];
+
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32UI, W, H);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, tex[i], 0);
+        snprintf(name, sizeof name, "tex[%d]", i);
+        glUniform1i(glGetUniformLocation(prog, name), i);
+        bufs[i] = GL_COLOR_ATTACHMENT0 + i;
+    }
+    glDrawBuffers(8, bufs);
+    glViewport(0, 0, W, H);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    
+    for (int bs = 1; bs <= 3; bs++)
+    {
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                ref[x + y * W] = (GLuint)((y << 12) + x);
+
+        for (int i = 0; i < 8; i++)
+        {
+            glActiveTexture(GL_TEXTURE0 + i);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RED_INTEGER, GL_UNSIGNED_INT, ref);
+        }
+        glUniform1i(glGetUniformLocation(prog, "blockSize"), bs);
+
+        for (int pass = 0; pass < 3; pass++)
+        {
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++)
+                {
+                    if (((x / bs) + (y / bs)) % 2 != 0)
+                        continue;
+#define AT(X, Y) ((X) < 0 || (X) >= W || (Y) < 0 || (Y) >= H ? 0u : ref[(X) + (Y) * W])
+                    ref[x + y * W] = AT(x + bs, y) + AT(x - bs, y) + AT(x, y + bs) + AT(x, y - bs);
+#undef AT
+                }
+        }
+
+        for (int t = 0; t < 8; t++)
+        {
+            int bad = -1;
+
+            glActiveTexture(GL_TEXTURE0 + t);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, got);
+
+            for (int i = 0; i < W * H && bad < 0; i++)
+                if (got[i] != ref[i])
+                    bad = i;
+
+            CHECK_MSG(bad < 0, "block size %d, texture %d: texel (%d, %d) is %u, want %u", bs, t,
+                      bad % W, bad / W, bad >= 0 ? got[bad] : 0, bad >= 0 ? ref[bad] : 0);
+        }
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteVertexArrays(1, &vao);
+    glActiveTexture(GL_TEXTURE0);
+    glDeleteTextures(8, tex);
+    glDeleteProgram(prog);
+}
+
 // The multi-bind calls: a bad entry fails alone, the span is checked against
 // the limits GL reports, a missing array empties the span, and each unit's
 // texture binding can be read by index.
@@ -1119,4 +1229,187 @@ GPU_TEST(misc_core, mismatched_per_vertex_blocks_do_not_link)
     CHECK_MSG(ok == GL_FALSE, "mismatched gl_PerVertex blocks linked");
     glDeleteProgram(p);
     mgl_drain_errors();
+}
+
+// A failed relink leaves the program's last good executable, and its uniform
+// values, in use (GL 4.6 7.3)
+GPU_TEST(misc_core, a_failed_relink_keeps_the_old_executable)
+{
+    static const char *VS =
+        "#version 450 core\n"
+        "void main() {\n"
+        "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;\n"
+        "    gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const char *FS = "#version 450 core\nuniform vec4 c;\nout vec4 o;\nvoid main() { o = c; }\n";
+    static const char *NO_MAIN = "#version 450 core\nuniform vec4 c;\nout vec4 o;\nvoid niaM() { o = c; }\n";
+    MGLTestTarget t;
+    GLuint vs, fs, prog, vao;
+    GLint ok = -1;
+    unsigned char px4[4] = { 0 };
+
+    if (!mgl_target_create(&t, 4, 4, GL_RGBA8, 0)) { CHECK(0); return; }
+
+    vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, 1, &VS, NULL);
+    glCompileShader(vs);
+    fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, 1, &FS, NULL);
+    glCompileShader(fs);
+    prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    glUseProgram(prog);
+    glUniform4f(glGetUniformLocation(prog, "c"), 1.0f, 1.0f, 1.0f, 1.0f);
+
+    glShaderSource(fs, 1, &NO_MAIN, NULL);
+    glCompileShader(fs);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_FALSE);
+    mgl_drain_errors();
+
+    mgl_target_bind(&t);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    unsigned char *px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 1, 1, px4);
+        free(px);
+    }
+    CHECK_MSG(px4[0] == 255 && px4[1] == 255 && px4[2] == 255, "drew %d %d %d, want white", px4[0], px4[1], px4[2]);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// The same through a program pipeline: the stage keeps drawing with the
+// executable it had before the failed relink
+GPU_TEST(misc_core, a_failed_relink_keeps_the_pipeline_stage)
+{
+    static const char *VS =
+        "#version 450 core\n"
+        "out gl_PerVertex { vec4 gl_Position; };\n"
+        "void main() {\n"
+        "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;\n"
+        "    gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const char *FS = "#version 450 core\nuniform vec4 c;\nout vec4 o;\nvoid main() { o = c; }\n";
+    static const char *NO_MAIN = "#version 450 core\nuniform vec4 c;\nout vec4 o;\nvoid niaM() { o = c; }\n";
+    MGLTestTarget t;
+    GLuint vp, fp, pipe, vao, sh;
+    GLint ok = -1;
+    unsigned char px4[4] = { 0 };
+
+    if (!mgl_target_create(&t, 4, 4, GL_RGBA8, 0)) { CHECK(0); return; }
+
+    vp = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &VS);
+    fp = glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &FS);
+    glGenProgramPipelines(1, &pipe);
+    glUseProgramStages(pipe, GL_VERTEX_SHADER_BIT, vp);
+    glUseProgramStages(pipe, GL_FRAGMENT_SHADER_BIT, fp);
+    glBindProgramPipeline(pipe);
+    glProgramUniform4f(fp, glGetUniformLocation(fp, "c"), 1.0f, 1.0f, 1.0f, 1.0f);
+
+    sh = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(sh, 1, &NO_MAIN, NULL);
+    glCompileShader(sh);
+    glAttachShader(fp, sh);
+    glLinkProgram(fp);
+    glGetProgramiv(fp, GL_LINK_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_FALSE);
+    mgl_drain_errors();
+
+    mgl_target_bind(&t);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    unsigned char *px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 1, 1, px4);
+        free(px);
+    }
+    CHECK_MSG(px4[0] == 255 && px4[1] == 255 && px4[2] == 255, "drew %d %d %d, want white", px4[0], px4[1], px4[2]);
+
+    glBindProgramPipeline(0);
+    glDeleteProgramPipelines(1, &pipe);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteShader(sh);
+    glDeleteProgram(vp);
+    glDeleteProgram(fp);
+    mgl_target_destroy(&t);
+}
+
+// gl_PointCoord's t runs from the point's top under the default upper-left
+// origin, and from its bottom under lower-left
+GPU_TEST(misc_core, point_coord_follows_the_sprite_origin)
+{
+    static const char *vs =
+        "#version 330 core\nvoid main() { gl_PointSize = 8.0; gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 330 core\nout vec4 o;\nvoid main() { o = vec4(gl_PointCoord.y, 0.0, 0.0, 1.0); }\n";
+    static const GLenum origins[2] = { GL_UPPER_LEFT, GL_LOWER_LEFT };
+    char log[1024] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log), vao;
+    GLint origin = 0;
+    MGLTestTarget target;
+
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&target, 8, 8, GL_RGBA8, 0))
+        return;
+
+    glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, GL_LOWER_LEFT);
+    glGetIntegerv(GL_POINT_SPRITE_COORD_ORIGIN, &origin);
+    CHECK_EQ_UINT((GLuint)origin, GL_LOWER_LEFT);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glEnable(GL_PROGRAM_POINT_SIZE);
+
+    for (int i = 0; i < 2; i++)
+    {
+        GLubyte top[4], bottom[4];
+        unsigned char *img;
+
+        glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, origins[i]);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_POINTS, 0, 1);
+        img = mgl_read_rgba8(&target);
+        mgl_pixel_at(img, &target, 4, 7, top);
+        mgl_pixel_at(img, &target, 4, 0, bottom);
+        free(img);
+
+        // t is 1/16 at the top row and 15/16 at the bottom one, or the reverse
+        if (i == 0)
+            CHECK_MSG(top[0] < 32 && bottom[0] > 224, "upper-left origin read %u at the top, %u at the bottom",
+                      top[0], bottom[0]);
+        else
+            CHECK_MSG(top[0] > 224 && bottom[0] < 32, "lower-left origin read %u at the top, %u at the bottom",
+                      top[0], bottom[0]);
+    }
+
+    glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, GL_UPPER_LEFT);
+    glDisable(GL_PROGRAM_POINT_SIZE);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&target);
 }

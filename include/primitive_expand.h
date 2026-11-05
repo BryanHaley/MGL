@@ -102,5 +102,6 @@ PrimitiveExpansion primitive_expand_elements(PrimitiveExpander *exp,
  * decide whether to call the expander or to use getMTLPrimitiveType.
  */
 bool primitive_mode_needs_expand(GLenum mode);
+bool primitive_mode_needs_expand_ctx(GLMContext ctx, GLenum mode);
 
 #endif /* primitive_expand_h */

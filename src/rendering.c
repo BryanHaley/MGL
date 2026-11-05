@@ -606,6 +606,26 @@ static bool fboAttachmentPresent(const FBOAttachment *att)
     return att && (att->buf.tex != NULL || att->buf.rbo != NULL);
 }
 
+// GL_CLAMP_READ_COLOR: GL_FIXED_ONLY, the default, clamps a fixed-point
+// buffer's colours to [0, 1], signed-normalised ones included
+static bool readClamps(GLMContext ctx, GLenum src_format)
+{
+    if (ctx->state.var.clamp_read_color == GL_TRUE)
+        return true;
+
+    if (ctx->state.var.clamp_read_color == GL_FALSE)
+        return false;
+
+    // the default framebuffer is fixed-point
+    if (src_format == 0)
+        return true;
+
+    const MGLFormatDesc *d = mglFormatDesc(src_format);
+
+    return d && d->kind == MGL_FMT_COLOR_FLOAT && d->upload_type != GL_FLOAT && d->upload_type != GL_HALF_FLOAT &&
+           d->upload_type != GL_UNSIGNED_INT_10F_11F_11F_REV && d->upload_type != GL_UNSIGNED_INT_5_9_9_9_REV;
+}
+
 void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void *pixels)
 {
     GLuint pixel_size;
@@ -622,6 +642,8 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
     ERROR_CHECK_RETURN(format != GL_DEPTH_STENCIL || type == GL_UNSIGNED_INT_24_8 ||
                        type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV, GL_INVALID_ENUM);
 
+    GLenum src_format = 0;
+
     // the read buffer decides which client formats are legal here -- except a
     // depth or stencil read, which comes from its own attachment and ignores
     // whichever colour buffer READ_BUFFER names
@@ -629,7 +651,6 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
         format != GL_STENCIL_INDEX)
     {
         Framebuffer *fbo = ctx->state.readbuffer;
-        GLenum src_format = 0;
 
         if (fbo)
         {
@@ -796,6 +817,18 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
     pixels = (GLubyte *)pixels + mglPixelStoreSkipBytes2D(&ctx->state.pack, pixel_size, pitch);
 
     ctx->mtl_funcs.mtlReadPixels(ctx, pixels, pitch, format, type, x, y, width, height);
+
+    if (type == GL_FLOAT && format != GL_DEPTH_COMPONENT && format != GL_DEPTH_STENCIL &&
+        format != GL_STENCIL_INDEX && readClamps(ctx, src_format))
+    {
+        for (GLsizei r = 0; r < height; r++)
+        {
+            GLfloat *row = (GLfloat *)((GLubyte *)pixels + (size_t)r * pitch);
+
+            for (size_t i = 0; i < (size_t)width * pixel_size / sizeof(GLfloat); i++)
+                row[i] = row[i] < 0.0f ? 0.0f : row[i] > 1.0f ? 1.0f : row[i];
+        }
+    }
 
     if (ctx->state.pack.swap_bytes)
         mglSwapPixelBytes(pixels, pitch, format, type, width, height);

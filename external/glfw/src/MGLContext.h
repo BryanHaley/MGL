@@ -21,7 +21,8 @@ enum {
     MGL_DEPTH_TYPE,
     MGL_STENCIL_FORMAT,
     MGL_STENCIL_TYPE,
-    MGL_CONTEXT_FLAGS
+    MGL_CONTEXT_FLAGS,
+    MGL_SWAP_INTERVAL
 };
 
 #ifdef __cplusplus
@@ -35,11 +36,17 @@ GLMContext createGLMContext(GLenum format, GLenum type,
 GLuint sizeForFormatType(GLenum format, GLenum type);
 GLuint bicountForFormatType(GLenum format, GLenum type, GLenum component);
 
+// frees the context, every object in it, and its hold on the renderer
+void destroyGLMContext(GLMContext ctx);
+
 GLMContext MGLgetCurrentContext(void);
 void MGLsetCurrentContext(GLMContext ctx);
 
 // MGLswapBuffers can take NULL for the ctx, in this case it will use the current ctx
 void MGLswapBuffers(GLMContext ctx);
+
+// 0 turns vsync off, anything else on. NULL ctx means the current one.
+void MGLsetSwapInterval(GLMContext ctx, int interval);
 
 // MGLget can take NULL for the ctx, in this case it will use the current ctx
 void MGLget(GLMContext ctx, GLenum param, GLuint *data);

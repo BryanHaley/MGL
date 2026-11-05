@@ -180,6 +180,9 @@ static void tex_buffer_impl(GLMContext ctx, Texture *tex, GLenum internalformat,
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
+    // an image unit may write it, and the texture holds its storage
+    buf->data.gpu_written = GL_TRUE;
+
     /* glTexBufferRange names its size; glTexBuffer takes the whole buffer */
     if (is_range && size <= 0)
     {

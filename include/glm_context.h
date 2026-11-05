@@ -208,6 +208,10 @@ typedef struct BufferData_t {
     size_t          buffer_size;
     vm_address_t    buffer_data;
     void            *mtl_data;
+    // the GPU work count when the CPU last had this storage to itself
+    uint64_t        write_epoch;
+    // bound somewhere a shader, copy or clear writes it
+    GLboolean       gpu_written;
 } BufferData;
 
 #define BUFFER_IMMUTABLE_STORAGE_FLAG   0x1
@@ -533,8 +537,14 @@ int mglTessellate(int domain, int spacing, bool point_mode, bool cw,
 
 // where a stage finds the table of buffer lengths .length() reads
 #define MGL_BUFFER_SIZES_MSL_SLOT 21
+// the table of pointers to a stage's plain uniforms, when they have one
+#define MGL_PLAIN_TABLE_MSL_SLOT 20
 // where SPIRV-Cross reads gl_DrawID from
 #define MGL_DRAW_ID_MSL_SLOT 19
+// fragment stage only: whether gl_PointCoord is turned over
+#define MGL_POINT_COORD_FLIP_MSL_SLOT 19
+// fragment stage only: the GL sample mask
+#define MGL_SAMPLE_MASK_MSL_SLOT 18
 // where a fragment, or a vertex stage that is a real vertex function, reads
 // each texture's LOD bias and border colour
 #define MGL_TEX_PARAM_MSL_SLOT        30
@@ -820,6 +830,9 @@ typedef struct Spirv_t {
     // SPIRV-Cross made this a vertex function that returns nothing -- it writes
     // no outputs at all -- and Metal refuses to rasterise from one of those
     GLboolean raster_off;
+    // the plain uniforms are reached through one table of pointers, too many
+    // for a Metal buffer slot each
+    GLboolean plain_table;
     // the shader asks how long a buffer is, so the sizes go in a table
     GLboolean needs_sizes;
 } Spirv;
@@ -834,6 +847,9 @@ typedef struct Spirv_t {
 #define MGL_TESS_LEVEL_INDEX        27   // the tessellation factors
 #define MGL_TESS_PARAMS_INDEX       26   // patch size and patch count
 #define MGL_TESS_INDEX_INDEX        25   // the element buffer, for indexed patches
+// the vertex kernel's attribute constants; 30 is its output, and it never
+// captures feedback, so a feedback slot is free
+#define MGL_TESS_CONSTANTS_INDEX    23
 
 // What the tessellation stages said about the domain, read back out of the
 // SPIR-V at link time so the render pipeline can be built to match.
@@ -940,6 +956,9 @@ typedef struct BufferMap_t {
     GLubyte     gl_buffer_type;
     // a plain uniform's type and element count, 0 for anything else
     GLenum      uniform_type;
+    // a plain uniform reached through the stage's table: buffer_base_index is
+    // its place in the table, not a Metal slot
+    GLubyte     in_table;
     GLint       uniform_count;
 } BufferMap;
 
@@ -947,6 +966,8 @@ typedef struct BufferMapList_t {
     GLuint      count;
     BufferMap   buffers[MAX_MAPPED_BUFFERS];
 } BufferMapList;
+
+#define MGL_STAGE_EXTRA_UNITS 7
 
 typedef struct Program_t {
     GLuint dirty_bits;
@@ -956,7 +977,8 @@ typedef struct Program_t {
     Shader *shader_slots[_MAX_SHADER_TYPES];
     // a second shader attached for a stage that already had one; MGL builds
     // a stage from one shader, but the link still has to see it
-    Shader *also_attached[_MAX_SHADER_TYPES];
+    // the stage's other compilation units, linked with the one in shader_slots
+    Shader *also_attached[_MAX_SHADER_TYPES][MGL_STAGE_EXTRA_UNITS];
     glslang_program_t *linked_glsl_program;
     // a link has succeeded at least once, so there is something to run
     GLboolean executable;
@@ -1044,6 +1066,7 @@ typedef struct Program_t {
     GLuint  link_serial;
     // does the vertex stage read gl_DrawID; -1 until the first draw asks
     GLint   uses_draw_id;
+    GLint   uses_point_coord;
     GLboolean linked_separable;     // PROGRAM_SEPARABLE as of the last link
 } Program;
 
@@ -1525,6 +1548,7 @@ struct GLMMetalFuncs {
     void (*mtlQueryResult)(GLMContext glm_ctx, Query *q);
 
     void (*mtlFlush)(GLMContext glm_ctx, bool finish);
+    void (*mtlApplyPendingClears)(GLMContext glm_ctx);
     void (*mtlSwapBuffers)(GLMContext glm_ctx);
     
     void (*mtlClearBuffer)(GLMContext glm_ctx, GLuint type, GLbitfield mask);
@@ -1532,6 +1556,7 @@ struct GLMMetalFuncs {
 
 
     void (*mtlBufferSubData)(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, const void *ptr);
+    void (*mtlRenameBuffer)(GLMContext glm_ctx, Buffer *buf);
     void *(*mtlMapUnmapBuffer)(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, GLenum access, bool map);
     void (*mtlFlushBufferRange)(GLMContext glm_ctx, Buffer *buf, GLintptr offset, GLsizeiptr length);
 
@@ -1614,6 +1639,11 @@ typedef struct GLMContextRec_t {
     PixelFormat stencil_format;
 
     BufferData  *temp_element_buffer;
+
+    // counts GPU work as it is recorded; idle_epoch is the count when the GPU
+    // was last known to be done with all of it
+    uint64_t    gpu_epoch;
+    uint64_t    idle_epoch;
 
     void (* error_func)(GLMContext ctx, const char *func, GLenum type);
 } GLMContextRec;

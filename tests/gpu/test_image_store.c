@@ -1150,3 +1150,329 @@ GPU_TEST(image_store, cube_array_copies_from_a_vertex_shader)
     glDeleteProgram(prog);
     mgl_target_destroy(&target);
 }
+
+// one layer of an array or 3D texture bound as a 2D image, rebound layer by
+// layer with no barrier between the draws
+GPU_TEST(image_store, single_layers_copy_as_2d_images)
+{
+    static const char *fs =
+        "#version 460 core\n"
+        "layout(rgba8, binding = 1) readonly uniform image2D src;\n"
+        "layout(rgba8, binding = 0) writeonly uniform image2D dst;\n"
+        "out vec4 o;\n"
+        "void main() {\n"
+        "    imageStore(dst, ivec2(gl_FragCoord.xy), imageLoad(src, ivec2(gl_FragCoord.xy)));\n"
+        "    o = vec4(1.0);\n"
+        "    discard;\n"
+        "}\n";
+    static const GLenum targets[3] = { GL_TEXTURE_2D_ARRAY, GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_3D };
+    enum { E = 64, L = 6 };
+    static GLubyte in[E * E * L * 4], out[E * E * L * 4];
+    char log[2048] = "";
+    GLuint prog = mgl_build_program(QUAD_VS, fs, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "program did not build: %s", log);
+    if (!prog)
+        return;
+
+    for (int i = 0; i < (int)sizeof in; i++)
+        in[i] = (GLubyte)(i * 7 + 1);
+
+    MGLTestTarget target;
+    GLuint vbo = 0, vao;
+
+    CHECK(mgl_target_create(&target, E, E, GL_RGBA8, 0));
+    mgl_target_bind(&target);
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+
+    for (int t = 0; t < 3; t++)
+    {
+        GLuint tex[2];
+
+        glGenTextures(2, tex);
+        for (int k = 0; k < 2; k++)
+        {
+            glBindTexture(targets[t], tex[k]);
+            glTexImage3D(targets[t], 0, GL_RGBA8, E, E, L, 0, GL_RGBA, GL_UNSIGNED_BYTE, k ? NULL : in);
+        }
+
+        for (int layer = 0; layer < L; layer++)
+        {
+            glBindImageTexture(1, tex[0], 0, GL_FALSE, layer, GL_READ_WRITE, GL_RGBA8);
+            glBindImageTexture(0, tex[1], 0, GL_FALSE, layer, GL_READ_WRITE, GL_RGBA8);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+
+        memset(out, 0, sizeof out);
+        glBindTexture(targets[t], tex[1]);
+        glGetTexImage(targets[t], 0, GL_RGBA, GL_UNSIGNED_BYTE, out);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+        int bad = -1;
+
+        for (int i = 0; i < (int)sizeof out && bad < 0; i++)
+            if (out[i] != in[i])
+                bad = i;
+
+        CHECK_MSG(bad < 0, "target %d: byte %d (layer %d) is %d, want %d", t, bad,
+                  bad / (E * E * 4), bad >= 0 ? out[bad] : 0, bad >= 0 ? in[bad] : 0);
+        glDeleteTextures(2, tex);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&target);
+}
+
+// Two separable fragment programs write image arrays whose elements point at
+// alternate layers of one 2D array.
+GPU_TEST(image_store, separable_image_arrays_write_their_own_layers)
+{
+    static const char *vs =
+        "#version 420 core\n"
+        "out gl_PerVertex { vec4 gl_Position; };\n"
+        "void main() { gl_Position = vec4(float(gl_VertexID & 1) * 4.0 - 1.0, float(gl_VertexID >> 1) * 4.0 - 1.0, 0.0, 1.0); }\n";
+    static const char *fs0 =
+        "#version 420 core\n"
+        "layout(rgba32f) uniform image2D g_image[4];\n"
+        "void main() { for (int i = 0; i < g_image.length(); ++i) imageStore(g_image[i], ivec2(gl_FragCoord), vec4(1.0)); discard; }\n";
+    static const char *fs1 =
+        "#version 420 core\n"
+        "writeonly uniform image2D g_image[4];\n"
+        "void main() { for (int i = 0; i < g_image.length(); ++i) imageStore(g_image[i], ivec2(gl_FragCoord), vec4(2.0)); discard; }\n";
+    GLuint vsp = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &vs);
+    GLuint fsp[2] = { glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &fs0),
+                      glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &fs1) };
+    GLuint pipe[2], tex, vao;
+    static GLfloat data[4 * 4 * 8 * 4];
+    MGLTestTarget target;
+    char name[16];
+
+    CHECK(mgl_target_create(&target, 4, 4, GL_RGBA8, 0));
+    mgl_target_bind(&target);
+
+    for (int i = 0; i < 4; i++)
+    {
+        snprintf(name, sizeof name, "g_image[%d]", i);
+        glProgramUniform1i(fsp[0], glGetUniformLocation(fsp[0], name), 2 * i);
+        glProgramUniform1i(fsp[1], glGetUniformLocation(fsp[1], name), 2 * i + 1);
+    }
+
+    glGenProgramPipelines(2, pipe);
+    for (int i = 0; i < 2; i++)
+    {
+        glUseProgramStages(pipe[i], GL_VERTEX_SHADER_BIT, vsp);
+        glUseProgramStages(pipe[i], GL_FRAGMENT_SHADER_BIT, fsp[i]);
+    }
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, 4, 4, 8, 0, GL_RGBA, GL_FLOAT, NULL);
+    for (int i = 0; i < 8; i++)
+        glBindImageTexture((GLuint)i, tex, 0, GL_FALSE, i, GL_READ_WRITE, GL_RGBA32F);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glViewport(0, 0, 4, 4);
+    glBindProgramPipeline(pipe[0]);
+    glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, 1, 0);
+    glBindProgramPipeline(pipe[1]);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+
+    glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, GL_FLOAT, data);
+    for (int layer = 0; layer < 8; layer++)
+    {
+        GLfloat want = layer % 2 ? 2.0f : 1.0f, got = data[layer * 64];
+        CHECK_MSG(got == want, "layer %d read %g, want %g", layer, got, want);
+    }
+
+    glBindProgramPipeline(0);
+    glDeleteProgramPipelines(2, pipe);
+    glDeleteProgram(vsp);
+    glDeleteProgram(fsp[0]);
+    glDeleteProgram(fsp[1]);
+    glDeleteTextures(1, &tex);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&target);
+}
+
+// A multisampled image unit stores and loads each sample on its own, and what
+// it stored is what sampling the texture then sees
+GPU_TEST(image_store, multisampled_images_keep_each_sample)
+{
+    static const char *store =
+        "#version 450\nlayout(local_size_x = 4, local_size_y = 4) in;\n"
+        "layout(binding = 0, rgba8) uniform writeonly image2DMS img;\n"
+        "void main() { ivec2 p = ivec2(gl_GlobalInvocationID.xy);\n"
+        "  for (int s = 0; s < imageSamples(img); s++) imageStore(img, p, s, vec4(float(s + 1) / 8.0, 0.0, 0.0, 1.0)); }\n";
+    static const char *load =
+        "#version 450\nlayout(local_size_x = 1) in;\n"
+        "layout(binding = 0, rgba8) uniform readonly image2DMS img;\n"
+        "uniform sampler2DMS tex;\n"
+        "layout(std430, binding = 0) buffer O { vec4 o[9]; };\n"
+        "void main() { for (int s = 0; s < 4; s++) { o[s] = imageLoad(img, ivec2(2, 1), s); o[4 + s] = texelFetch(tex, ivec2(2, 1), s); }\n"
+        "  o[8] = vec4(imageSamples(img), imageSize(img), 0.0); }\n";
+    char log[2048] = "";
+    GLuint ps = mgl_build_compute_program(store, log, sizeof log);
+    GLuint pl = mgl_build_compute_program(load, log, sizeof log);
+    GLuint tex, buf;
+    GLfloat out[36] = { 0 };
+    GLint max_samples = 0;
+
+    CHECK_MSG(ps && pl, "did not build: %s", log);
+    if (!ps || !pl)
+        return;
+
+    glGetIntegerv(GL_MAX_IMAGE_SAMPLES, &max_samples);
+    CHECK(max_samples >= 4);
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, tex);
+    glTexStorage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8, 4, 4, GL_TRUE);
+    glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA8);
+
+    glUseProgram(ps);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+
+    glGenBuffers(1, &buf);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof out, out, GL_DYNAMIC_DRAW);
+    glUseProgram(pl);
+    glUniform1i(glGetUniformLocation(pl, "tex"), 0);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+
+    for (int s = 0; s < 4; s++)
+    {
+        GLfloat want = (GLfloat)(s + 1) / 8.0f;
+
+        CHECK_MSG(fabsf(out[s * 4] - want) < 0.01f, "sample %d loaded %g, want %g", s, out[s * 4], want);
+        CHECK_MSG(fabsf(out[16 + s * 4] - want) < 0.01f, "sample %d fetched %g, want %g", s, out[16 + s * 4], want);
+    }
+    CHECK_MSG(out[32] == 4.0f && out[33] == 4.0f && out[34] == 4.0f, "samples and size read %g %g %g, want 4 4 4",
+              out[32], out[33], out[34]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(ps);
+    glDeleteProgram(pl);
+}
+
+// imageSize from a helper function, on one layer of a multisampled array and
+// on a whole one
+GPU_TEST(image_store, multisampled_array_image_sizes)
+{
+    static const char *cs =
+        "#version 450\nlayout(local_size_x = 1) in;\n"
+        "layout(binding = 0, rgba32i) uniform readonly iimage2DMS one;\n"
+        "layout(binding = 1, rgba32i) uniform readonly iimage2DMSArray all;\n"
+        "layout(std430, binding = 0) buffer O { ivec4 o[2]; };\n"
+        "void sizes() { o[0] = ivec4(imageSize(one), imageSamples(one), 0); o[1] = ivec4(imageSize(all), imageSamples(all)); }\n"
+        "void main() { sizes(); }\n";
+    char log[2048] = "";
+    GLuint prog = mgl_build_compute_program(cs, log, sizeof log);
+    GLuint tex[2], buf;
+    GLint out[8] = { 0 };
+
+    CHECK_MSG(prog, "did not build: %s", log);
+    if (!prog)
+        return;
+
+    glGenTextures(2, tex);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, tex[0]);
+    glTexImage3DMultisample(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, 4, GL_RGBA32I, 7, 9, 3, GL_FALSE);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, tex[1]);
+    glTexImage3DMultisample(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, 4, GL_RGBA32I, 5, 6, 3, GL_FALSE);
+    glBindImageTexture(0, tex[0], 0, GL_FALSE, 1, GL_READ_ONLY, GL_RGBA32I);
+    glBindImageTexture(1, tex[1], 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32I);
+
+    glGenBuffers(1, &buf);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof out, out, GL_DYNAMIC_DRAW);
+    glUseProgram(prog);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+
+    CHECK_MSG(out[0] == 7 && out[1] == 9 && out[2] == 4, "one layer read %d %d, %d samples, want 7 9, 4",
+              out[0], out[1], out[2]);
+    CHECK_MSG(out[4] == 5 && out[5] == 6 && out[6] == 3 && out[7] == 4,
+              "whole array read %d %d %d, %d samples, want 5 6 3, 4", out[4], out[5], out[6], out[7]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteTextures(2, tex);
+    glDeleteProgram(prog);
+}
+
+// A fragment shader loads every sample of a cleared multisampled texture and
+// of both layers of a multisampled array bound whole
+GPU_TEST(image_store, fragment_loads_multisampled_images)
+{
+    static const char *vs =
+        "#version 420 core\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 420 core\nlayout(location = 0) out vec4 o;\n"
+        "layout(rgba32f) readonly uniform image2DMS a;\n"
+        "layout(rgba32f) readonly uniform image2DMSArray b;\n"
+        "void main() { ivec2 c = ivec2(gl_FragCoord.xy); vec4 want = vec4(-1.0, 10.0, -200.0, 3000.0); o = vec4(0, 1, 0, 1);\n"
+        "  for (int s = 0; s < 4; s++) {\n"
+        "    if (imageLoad(a, c, s) != want) o = vec4(1, 0, 0, 1);\n"
+        "    if (imageLoad(b, ivec3(c, 0), s) != want) o = vec4(1, 0, 1, 1);\n"
+        "    if (imageLoad(b, ivec3(c, 1), s) != want) o = vec4(1, 1, 0, 1); } }\n";
+    static const GLfloat value[4] = { -1.0f, 10.0f, -200.0f, 3000.0f };
+    static const GLenum bufs[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+    char log[1024] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log), tex[2], fbo, vao, vbo;
+    MGLTestTarget target;
+    GLubyte px[4];
+    unsigned char *img;
+
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&target, 8, 8, GL_RGBA8, 0))
+        return;
+
+    glGenTextures(2, tex);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, tex[0]);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA32F, 8, 8, GL_FALSE);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, tex[1]);
+    glTexImage3DMultisample(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, 4, GL_RGBA32F, 8, 8, 2, GL_FALSE);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, tex[0], 0);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, tex[1], 0, 0);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, tex[1], 0, 1);
+    glDrawBuffers(3, bufs);
+    for (int i = 0; i < 3; i++)
+        glClearBufferfv(GL_COLOR, i, value);
+    glDeleteFramebuffers(1, &fbo);
+
+    glBindImageTexture(1, tex[0], 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA32F);
+    glBindImageTexture(4, tex[1], 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 8, 8);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "a"), 1);
+    glUniform1i(glGetUniformLocation(prog, "b"), 4);
+    vao = mgl_fullscreen_quad(&vbo);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    glReadPixels(3, 3, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    (void)img;
+    CHECK_MSG(px[0] == 0 && px[1] == 255 && px[2] == 0, "read %u %u %u, want green", px[0], px[1], px[2]);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteTextures(2, tex);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&target);
+}

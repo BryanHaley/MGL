@@ -1092,6 +1092,73 @@ static char *rewriteNumSamples(const char *src)
 // first vertex instead, so every read is multiplied by a driver uniform that
 // is 1 for an element draw and 0 for an array draw.
 // Returns a new string when something changed, NULL when nothing did.
+// The text rewriters read array sizes like "[gl_MaxTessEvaluationOutputComponents / 4]".
+static char *rewriteLimitNames(const char *src, const glslang_resource_t *r)
+{
+    static const struct { const char *name; size_t at; } names[] = {
+        { "gl_MaxVertexOutputComponents", offsetof(glslang_resource_t, max_vertex_output_components) },
+        { "gl_MaxTessControlInputComponents", offsetof(glslang_resource_t, max_tess_control_input_components) },
+        { "gl_MaxTessControlOutputComponents", offsetof(glslang_resource_t, max_tess_control_output_components) },
+        { "gl_MaxTessEvaluationInputComponents", offsetof(glslang_resource_t, max_tess_evaluation_input_components) },
+        { "gl_MaxTessEvaluationOutputComponents", offsetof(glslang_resource_t, max_tess_evaluation_output_components) },
+        { "gl_MaxTessPatchComponents", offsetof(glslang_resource_t, max_tess_patch_components) },
+        { "gl_MaxGeometryInputComponents", offsetof(glslang_resource_t, max_geometry_input_components) },
+        { "gl_MaxGeometryOutputComponents", offsetof(glslang_resource_t, max_geometry_output_components) },
+        { "gl_MaxFragmentInputComponents", offsetof(glslang_resource_t, max_fragment_input_components) },
+        { "gl_MaxPatchVertices", offsetof(glslang_resource_t, max_patch_vertices) },
+    };
+    size_t cap = strlen(src) + 1, n = 0;
+    char *out = NULL;
+    bool hit = false;
+
+    if (r == NULL || strstr(src, "gl_Max") == NULL)
+        return NULL;
+
+    out = malloc(cap);
+
+    if (out == NULL)
+        return NULL;
+
+    for (const char *p = src; *p;)
+    {
+        size_t k = 0;
+
+        if (p == src || !(isalnum((unsigned char)p[-1]) || p[-1] == '_'))
+        {
+            for (k = 0; k < sizeof(names) / sizeof(names[0]); k++)
+            {
+                size_t len = strlen(names[k].name);
+
+                if (!strncmp(p, names[k].name, len) && !(isalnum((unsigned char)p[len]) || p[len] == '_'))
+                    break;
+            }
+        }
+        else
+            k = sizeof(names) / sizeof(names[0]);
+
+        if (k == sizeof(names) / sizeof(names[0]))
+        {
+            out[n++] = *p++;
+            continue;
+        }
+
+        // a number is never longer than the name it replaces
+        n += sprintf(out + n, "%d", *(const int *)((const char *)r + names[k].at));
+        p += strlen(names[k].name);
+        hit = true;
+    }
+
+    out[n] = 0;
+
+    if (!hit)
+    {
+        free(out);
+        return NULL;
+    }
+
+    return out;
+}
+
 static char *rewriteBaseVertex(const char *src)
 {
     // each name is kept, since the ARB one may be the only one declared
@@ -1986,6 +2053,14 @@ static void compileShaderObject(GLMContext ctx, Shader *ptr)
             if (fixed)
             {
                 rewriteBlockLayouts(fixed);
+
+                char *limited = rewriteLimitNames(fixed, glsl_input.resource);
+
+                if (limited)
+                {
+                    free(fixed);
+                    fixed = limited;
+                }
 
                 if (ptr->glm_type == _FRAGMENT_SHADER)
                 {

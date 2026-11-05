@@ -58,6 +58,24 @@ enum {
                              count: (NSUInteger) count
                            keepFF: (bool) mapSentinel;
 
+- (bool) encodeSamplesToLayers: (id<MTLComputeCommandEncoder>) enc
+                          from: (id<MTLTexture>) src
+                    firstLayer: (NSUInteger) first
+                            to: (id<MTLTexture>) dst
+                        layers: (NSUInteger) layers
+                          kind: (int) kind;
+
+- (bool) encodeSample0: (id<MTLComputeCommandEncoder>) enc
+                  from: (id<MTLTexture>) src
+                    to: (id<MTLTexture>) dst
+              unsigned: (bool) is_unsigned;
+
+- (bool) encodeWidenUint16Indices: (id<MTLComputeCommandEncoder>) enc
+                           source: (id<MTLBuffer>) src
+                     sourceOffset: (NSUInteger) srcOffset
+                      destination: (id<MTLBuffer>) dst
+                            count: (NSUInteger) count;
+
 - (bool) encodeRemapRestartIndex: (id<MTLComputeCommandEncoder>) enc
                           buffer: (id<MTLBuffer>) buf
                           offset: (NSUInteger) offset

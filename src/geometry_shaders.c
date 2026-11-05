@@ -85,6 +85,61 @@ static size_t readIdent(const char *s, size_t i, char *dst, size_t dstlen)
     return i;
 }
 
+// integer + - * / and brackets, as in "[(124 - 4) / 4]"
+static long sizeExpr(const char **p, int level)
+{
+    long v;
+
+    while (isspace((unsigned char)**p)) (*p)++;
+
+    if (level == 2)
+    {
+        if (**p == '(')
+        {
+            (*p)++;
+            v = sizeExpr(p, 0);
+            while (isspace((unsigned char)**p)) (*p)++;
+            if (**p != ')') return -1;
+            (*p)++;
+        }
+        else if (isdigit((unsigned char)**p))
+        {
+            v = strtol(*p, (char **)p, 0);
+            if (**p == 'u' || **p == 'U') (*p)++;
+        }
+        else
+            return -1;
+
+        while (isspace((unsigned char)**p)) (*p)++;
+        return v;
+    }
+
+    v = sizeExpr(p, level + 1);
+
+    for (;;)
+    {
+        char op = **p;
+
+        if (v < 0 || !(level == 0 ? (op == '+' || op == '-') : (op == '*' || op == '/')))
+            return v;
+
+        (*p)++;
+        long r = sizeExpr(p, level + 1);
+
+        if (r < 0 || (op == '/' && r == 0))
+            return -1;
+
+        v = op == '+' ? v + r : op == '-' ? v - r : op == '*' ? v * r : v / r;
+    }
+}
+
+static int arraySizeAt(const char *s)
+{
+    long v = sizeExpr(&s, 0);
+
+    return v > 0 && *s == ']' ? (int)v : 0;
+}
+
 static size_t matchBracket(const char *s, size_t i)
 {
     int depth = 0;
@@ -389,8 +444,7 @@ static size_t readVarying(const char *s, size_t i, bool want_out, GsVarying *v, 
         {
             if (s[i] == '[')
             {
-                size_t n = skipSpace(s, i + 1);
-                int size = isdigit((unsigned char)s[n]) ? atoi(s + n) : 0;
+                int size = arraySizeAt(s + i + 1);
 
                 if (dims++ == 0)
                     v->array = size;
@@ -497,10 +551,10 @@ static size_t readBlockMember(const char *s, size_t i, GsVarying *v)
         {
             if (s[i] == '[')
             {
-                size_t n = skipSpace(s, i + 1);
+                int size = arraySizeAt(s + i + 1);
 
-                if (isdigit((unsigned char)s[n]))
-                    v->array = atoi(s + n);
+                if (size)
+                    v->array = size;
 
                 i = matchBracket(s, i);
                 continue;
@@ -1461,6 +1515,22 @@ static bool rewriteBody(const char *src, GsScan *sc, Buf *out)
                     !bufAdd(out, MGL_GS_PROLOGUE))
                     return false;
 
+                // distances the shader leaves unwritten would reach Metal's
+                // clipper as whatever the register held
+                for (int k = 0; k < sc->out_count; k++)
+                {
+                    char line[160];
+
+                    if (strcmp(sc->out[k].builtin, "gl_ClipDistance") && strcmp(sc->out[k].builtin, "gl_CullDistance"))
+                        continue;
+
+                    snprintf(line, sizeof line, "  for (int mglK = 0; mglK < %d; mglK++) mglCur.%s[mglK] = 0.0;\n",
+                             sc->out[k].array > 0 ? sc->out[k].array : 1, sc->out[k].name);
+
+                    if (!bufAdd(out, line))
+                        return false;
+                }
+
                 i = b + 1;
                 copied = i;
                 continue;
@@ -1564,6 +1634,44 @@ static void addReadBuiltins(const char *src, GsScan *sc)
     }
 }
 
+// gl_ClipDistance written without a redeclaration, so the scan saw no output
+static void addWrittenBuiltins(const char *src, GsScan *sc)
+{
+    static const char *names[] = { "gl_ClipDistance", "gl_CullDistance" };
+
+    for (int n = 0; n < 2; n++)
+    {
+        size_t len = strlen(names[n]);
+        bool bare = false;
+
+        for (const char *p = src; !bare && (p = strstr(p, names[n])) != NULL; p += len)
+        {
+            const char *b = p;
+
+            if ((p != src && identChar(p[-1])) || identChar(p[len]))
+                continue;
+
+            while (b > src && (b[-1] == ' ' || b[-1] == '\t' || b[-1] == '\n'))
+                b--;
+
+            bare = b == src || b[-1] != '.';
+        }
+
+        if (!bare || builtinVarying(sc->out, sc->out_count, names[n]) || sc->out_count >= MAX_GS_VARYINGS)
+            continue;
+
+        GsVarying v;
+
+        memset(&v, 0, sizeof(v));
+        snprintf(v.type, sizeof(v.type), "float");
+        snprintf(v.builtin, sizeof(v.builtin), "%s", names[n]);
+        snprintf(v.name, sizeof(v.name), "mgl%s", names[n] + 3);
+        v.array = MAX_CLIP_DISTANCES;
+
+        sc->out[sc->out_count++] = v;
+    }
+}
+
 bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 {
     GsScan sc;
@@ -1579,6 +1687,7 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
         goto done;
 
     addReadBuiltins(src, &sc);
+    addWrittenBuiltins(stripped.s ? stripped.s : "", &sc);
 
     if (!rewriteBody(stripped.s ? stripped.s : "", &sc, &body))
         goto done;
@@ -1976,6 +2085,19 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
 
         // SPIRV-Cross has no lowering for a whole-array copy between a
         // built-in and a struct member, so arrays move one element at a time
+        if (sc.out[i].array && sc.out[i].builtin[0])
+        {
+            for (int e = 0; e < sc.out[i].array; e++)
+            {
+                snprintf(line, sizeof(line), "  %s[%d] = v.%s[%d];\n", dst, e, sc.out[i].name, e);
+
+                if (!bufAdd(&pass, line))
+                    goto done;
+            }
+
+            continue;
+        }
+
         if (sc.out[i].array)
             snprintf(line, sizeof(line),
                      "  for (int mglI = 0; mglI < %d; mglI++) %s[mglI] = v.%s[mglI];\n",
@@ -2042,10 +2164,29 @@ bool mglRewriteGeometryShader(const char *src, GeometryInfo *gi)
             src_name = sc.in[i].builtin[0] ? sc.in[i].builtin : sc.in[i].name;
         }
 
+        // an unsized built-in like gl_ClipDistance takes only constant indices
+        if (sc.in[i].array && sc.in[i].builtin[0] && !sc.in[i].block[0])
+        {
+            for (int e = 0; e < sc.in[i].array; e++)
+            {
+                snprintf(line, sizeof(line), "  mglGsIn[gl_VertexID].%s[%d] = %s[%d];\n",
+                         sc.in[i].name, e, src_name, e);
+
+                if (!bufAdd(&decl, line))
+                    goto done;
+            }
+
+            continue;
+        }
+
         if (sc.in[i].array)
             snprintf(line, sizeof(line),
                      "  for (int mglI = 0; mglI < %d; mglI++) mglGsIn[gl_VertexID].%s[mglI] = %s[mglI];\n",
                      sc.in[i].array, sc.in[i].name, src_name);
+        // the location goes along, for a writer whose output has another name
+        else if (sc.in[i].loc >= 0 && !sc.in[i].block[0] && !sc.in[i].builtin[0])
+            snprintf(line, sizeof(line), "  mglGsIn[gl_VertexID].%s = %s; //@loc %d\n",
+                     sc.in[i].name, src_name, sc.in[i].loc);
         else
             snprintf(line, sizeof(line), "  mglGsIn[gl_VertexID].%s = %s;\n",
                      sc.in[i].name, src_name);
@@ -2280,6 +2421,123 @@ static char *dropUnwrittenInputs(char *capture, const char *writer_src)
 // The capture was written against the geometry stage's own spelling of each
 // input block; the stage writing it may name the instance differently, or
 // not at all.
+// The name of the writer's plain output at a location, if it has one
+static bool writerOutputAt(const char *src, int loc, char *name, size_t size)
+{
+    for (const char *p = src; (p = strstr(p, "layout")) != NULL; p++)
+    {
+        const char *open = strchr(p, '('), *close = open ? strchr(open, ')') : NULL;
+        const char *at = open && close ? strstr(open, "location") : NULL;
+
+        if (!at || at > close || atoi(strchr(at, '=') ? strchr(at, '=') + 1 : "-1") != loc)
+            continue;
+
+        // "out <type> <name>" after the qualifier list, nothing else between
+        const char *q = close + 1, *end = strchr(q, ';');
+        char words[3][64];
+        int n = 0;
+
+        if (!end)
+            continue;
+
+        while (q < end && n < 3)
+        {
+            while (q < end && !identChar(*q)) q++;
+
+            size_t k = 0;
+
+            while (q < end && identChar(*q) && k + 1 < sizeof words[0])
+                words[n][k++] = *q++;
+
+            words[n][k] = 0;
+
+            if (k)
+                n++;
+        }
+
+        if (n == 3 && !strcmp(words[0], "out") && strlen(words[2]) < size)
+        {
+            snprintf(name, size, "%s", words[2]);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Whether the writer declares an output by this name
+static bool writerHasOutput(const char *src, const char *name)
+{
+    const char *start = src;
+
+    for (const char *semi; (semi = strchr(start, ';')) != NULL; start = semi + 1)
+    {
+        const char *e = semi;
+        size_t len = strlen(name);
+
+        while (e > start && (e[-1] == ' ' || e[-1] == ']' || e[-1] == '[' || isdigit((unsigned char)e[-1])))
+            e--;
+
+        if ((size_t)(e - start) < len || strncmp(e - len, name, len) || (e - len > start && identChar(e[-len - 1])))
+            continue;
+
+        for (const char *w = start; w + 3 <= e - len; w++)
+            if (!strncmp(w, "out", 3) && (w == start || !identChar(w[-1])) && !identChar(w[3]))
+                return true;
+    }
+
+    return false;
+}
+
+// Points each capture line marked with a location at the writer's output
+// there, when the writer has none by the geometry stage's name
+static char *matchCaptureLocations(char *capture, const char *writer_src)
+{
+    Buf b = {0};
+    const char *line = capture;
+
+    while (*line)
+    {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line + 1) : strlen(line);
+        const char *mark = strstr(line, "//@loc ");
+        char out_name[64];
+
+        if (mark && mark < line + len && writerOutputAt(writer_src, atoi(mark + 7), out_name, sizeof out_name))
+        {
+            const char *eq = strstr(line, "= ");
+            const char *semi = eq ? strchr(eq, ';') : NULL;
+            char rhs[64] = "";
+
+            if (eq && semi && semi < mark && (size_t)(semi - eq - 2) < sizeof rhs)
+                memcpy(rhs, eq + 2, (size_t)(semi - eq - 2));
+
+            if (eq && semi && semi < mark && !writerHasOutput(writer_src, rhs))
+            {
+                if (!bufAddN(&b, line, (size_t)(eq + 2 - line)) || !bufAdd(&b, out_name) || !bufAdd(&b, ";\n"))
+                {
+                    free(b.s);
+                    return capture;
+                }
+
+                line += len;
+                continue;
+            }
+        }
+
+        if (!bufAddN(&b, line, len))
+        {
+            free(b.s);
+            return capture;
+        }
+
+        line += len;
+    }
+
+    free(capture);
+    return b.s ? b.s : strdup("");
+}
+
 static char *captureForWriter(const GeometryInfo *gi, const char *writer_src)
 {
     char *capture = strdup(gi->capture_decl ? gi->capture_decl : "");
@@ -2301,6 +2559,9 @@ static char *captureForWriter(const GeometryInfo *gi, const char *writer_src)
         free(capture);
         capture = next;
     }
+
+    if (capture)
+        capture = matchCaptureLocations(capture, writer_src);
 
     return capture ? dropUnwrittenInputs(capture, writer_src) : NULL;
 }

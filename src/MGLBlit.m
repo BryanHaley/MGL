@@ -87,7 +87,7 @@ void mtlCopyTexSubImage(GLMContext glm_ctx, Texture *tex, GLint level,
         // already rasterised flipped (renderTargetIsFlipped) so their Metal
         // pixels are in GL order and need no adjustment.  The default
         // framebuffer is Metal-native and must be flipped.
-        bool srcFlipped = (glm_ctx->state.readbuffer != NULL);
+        bool srcFlipped = true;
         NSUInteger srcY = srcFlipped
             ? (NSUInteger)y
             : srcTex.height - (NSUInteger)y - (NSUInteger)height;

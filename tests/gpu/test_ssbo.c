@@ -481,3 +481,145 @@ GPU_TEST(ssbo, block_size_limits_read_as_positive_ints)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
     glDeleteBuffers(1, &buf);
 }
+
+// Matrices in a coherent buffer, as in the CTS advanced-matrix case
+static const char *COHERENT_MAT_CS =
+"#version 460 core\n"
+"layout(local_size_x = 1) in;\n"
+"layout(std430, binding = 0) coherent buffer B { mat3x4 t[2]; mat4x3 c; vec4 r; };\n"
+"void main() {\n"
+"    c[1] = vec3(7.0, 8.0, 9.0);\n"
+"    r = vec4(transpose(t[1]) * vec4(1.0, 0.0, 0.0, 0.0), c[1].y);\n"
+"}\n";
+
+GPU_TEST(ssbo, coherent_matrices_index_and_transpose)
+{
+    char log[2048] = "";
+    GLuint prog = mgl_build_compute_program(COHERENT_MAT_CS, log, sizeof log);
+    GLuint buf = 0;
+    GLfloat data[44] = { 0 };   /* t @ 0 (24 floats), c @ 24 (16), r @ 40 */
+
+    CHECK_MSG(prog != 0, "coherent matrix kernel did not build: %s", log);
+    if (!prog)
+        return;
+
+    for (int k = 0; k < 12; k++)
+        data[12 + k] = (GLfloat)(k + 1);     /* t[1], three columns of four */
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof data, data, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+
+    CHECK(run_compute(prog, 1, 1, 1));
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof data, data);
+
+    /* the first row of t[1] is element 0 of each column */
+    CHECK_NEAR(data[40], 1.0, 0.001);
+    CHECK_NEAR(data[41], 5.0, 0.001);
+    CHECK_NEAR(data[42], 9.0, 0.001);
+    CHECK_NEAR(data[43], 8.0, 0.001);
+    CHECK_NEAR(data[28], 7.0, 0.001);
+
+    glDeleteBuffers(1, &buf);
+    glDeleteProgram(prog);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// one quad per draw, each read from a different buffer or range
+GPU_TEST(ssbo, switching_buffers_between_draws)
+{
+    static const char *VS =
+        "#version 430 core\n"
+        "struct V { vec2 p; vec3 c; };\n"
+        "layout(binding = 0, std430) buffer In { V v[]; };\n"
+        "out vec3 col;\n"
+        "void main() { gl_Position = vec4(v[gl_VertexID].p, 0, 1); col = v[gl_VertexID].c; }\n";
+    static const char *FS =
+        "#version 430 core\n"
+        "in vec3 col;\n"
+        "layout(location = 0) out vec4 o;\n"
+        "void main() { o = vec4(col, 1); }\n";
+    static const float off[4][2] = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { -0.5f, 0.5f }, { 0.5f, 0.5f } };
+    static const float col[4][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 1, 0 } };
+    MGLTestTarget t;
+    GLuint bufs[5], vao;
+    char log[1024];
+
+    if (!mgl_target_create(&t, 16, 16, GL_RGBA8, 0)) { CHECK(0); return; }
+
+    GLuint p = mgl_build_program(VS, FS, log, sizeof log);
+    CHECK_MSG(p != 0, "did not build: %s", log);
+    if (!p) { mgl_target_destroy(&t); return; }
+
+    glGenBuffers(5, bufs);
+    for (int q = 0; q < 4; q++)
+    {
+        float d[32] = { 0 };
+
+        for (int k = 0; k < 4; k++)
+        {
+            d[k * 8 + 0] = off[q][0] + ((k & 1) ? 0.4f : -0.4f);
+            d[k * 8 + 1] = off[q][1] + ((k & 2) ? 0.4f : -0.4f);
+            memcpy(&d[k * 8 + 4], col[q], sizeof col[q]);
+        }
+
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufs[q]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof d, d, GL_STATIC_DRAW);
+    }
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufs[4]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 4 * 32 * sizeof(float), NULL, GL_STATIC_DRAW);
+    for (int q = 0; q < 4; q++)
+    {
+        glBindBuffer(GL_COPY_READ_BUFFER, bufs[q]);
+        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_SHADER_STORAGE_BUFFER, 0, q * 32 * sizeof(float), 32 * sizeof(float));
+    }
+
+    {
+        float all[128] = { 0 };
+
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof all, all);
+        for (int q = 0; q < 4; q++)
+            CHECK_MSG(all[q * 32 + 4] == col[q][0] && all[q * 32 + 5] == col[q][1],
+                      "copy %d landed as %g %g", q, all[q * 32 + 4], all[q * 32 + 5]);
+    }
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(p);
+
+    for (int pass = 0; pass < 2; pass++)
+    {
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        for (int q = 0; q < 4; q++)
+        {
+            if (pass == 0)
+                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, bufs[q]);
+            else
+                glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, bufs[4], q * 32 * sizeof(float), 32 * sizeof(float));
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        }
+
+        unsigned char *px = mgl_read_rgba8(&t);
+
+        for (int q = 0; q < 4; q++)
+        {
+            unsigned char c[4] = { 0 };
+            int x = off[q][0] < 0 ? 4 : 12, y = off[q][1] < 0 ? 4 : 12;
+
+            mgl_pixel_at(px, &t, x, y, c);
+            CHECK_MSG(c[0] == col[q][0] * 255 && c[1] == col[q][1] * 255 && c[2] == col[q][2] * 255,
+                      "pass %d quad %d drew %d %d %d", pass, q, c[0], c[1], c[2]);
+        }
+
+        free(px);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(p);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(5, bufs);
+    mgl_target_destroy(&t);
+}

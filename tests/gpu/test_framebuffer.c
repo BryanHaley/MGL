@@ -829,3 +829,321 @@ GPU_TEST(framebuffer, a_blit_without_colour_images_ignores_the_colour_bit)
     glDeleteFramebuffers(2, fbo);
     glDeleteRenderbuffers(2, rbo);
 }
+
+// A blit obeys the scissor test, GL 4.6 18.3.1
+GPU_TEST(framebuffer, a_blit_obeys_the_scissor)
+{
+    GLuint fbo[2], tex[2];
+    GLubyte inside[4] = { 0 }, outside[4] = { 0 };
+
+    glGenFramebuffers(2, fbo);
+    glGenTextures(2, tex);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 8);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[i], 0);
+        glClearColor(0.0f, i == 0 ? 1.0f : 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[1]);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 0, 4, 4);
+    glBlitFramebuffer(0, 0, 8, 8, 0, 0, 8, 8, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glDisable(GL_SCISSOR_TEST);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[1]);
+    glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, inside);
+    glReadPixels(6, 6, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, outside);
+    CHECK_MSG(inside[1] == 255, "inside the scissor green is %d, want 255", inside[1]);
+    CHECK_MSG(outside[1] == 0, "outside the scissor green is %d, want 0", outside[1]);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glClearColor(0, 0, 0, 0);
+    glDeleteFramebuffers(2, fbo);
+    glDeleteTextures(2, tex);
+}
+
+// GL_CLAMP_READ_COLOR starts as GL_FIXED_ONLY, which clamps a signed
+// normalised buffer's colours to [0, 1] when read as floats
+GPU_TEST(framebuffer, reads_from_snorm_clamp_by_default)
+{
+    GLuint fbo, tex;
+    GLint mode = 0;
+    GLfloat v = 99.0f;
+
+    glGetIntegerv(GL_CLAMP_READ_COLOR, &mode);
+    CHECK_EQ_INT(mode, GL_FIXED_ONLY);
+
+    glGenFramebuffers(1, &fbo);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_R8_SNORM, 4, 4);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glClearColor(-0.5f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glReadPixels(1, 1, 1, 1, GL_RED, GL_FLOAT, &v);
+    CHECK_MSG(v == 0.0f, "clamped read gave %g, want 0", v);
+
+    glClampColor(GL_CLAMP_READ_COLOR, GL_FALSE);
+    glReadPixels(1, 1, 1, 1, GL_RED, GL_FLOAT, &v);
+    CHECK_MSG(v < -0.49f && v > -0.51f, "unclamped read gave %g, want -0.5", v);
+    glClampColor(GL_CLAMP_READ_COLOR, GL_FIXED_ONLY);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glClearColor(0, 0, 0, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+}
+
+// Clearing one level and layer of a mipmapped depth-stencil array must reach
+// the texture itself, not just a view of it.
+GPU_TEST(framebuffer, depth_stencil_array_layers_clear_into_the_texture)
+{
+    static const GLint picks[2][2] = { { 0, 0 }, { 1, 0 } };
+    static GLuint texels[256 * 256];
+    GLuint tex, fbo;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 8, GL_DEPTH24_STENCIL8, 256, 256, 1);
+    glCreateFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    for (int k = 0; k < 2; k++)
+    {
+        GLint level = picks[k][0], layer = picks[k][1], size = 256 >> level, st = -1;
+        GLfloat d = -1;
+
+        glNamedFramebufferTextureLayer(fbo, GL_DEPTH_STENCIL_ATTACHMENT, tex, level, layer);
+        glClearDepth(0.5);
+        glClearStencil(7 + k);
+        glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
+        glReadPixels(0, 0, 1, 1, GL_STENCIL_INDEX, GL_INT, &st);
+        CHECK_MSG(st == 7 + k && fabsf(d - 0.5f) < 0.01f, "level %d layer %d read depth %g stencil %d, want 0.5 and %d",
+                  level, layer, d, st, 7 + k);
+
+        glGetTexImage(GL_TEXTURE_2D_ARRAY, level, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, texels);
+        CHECK_MSG((texels[layer * size * size] & 0xff) == (GLuint)(7 + k),
+                  "level %d layer %d holds stencil %u, want %d", level, layer, texels[layer * size * size] & 0xff, 7 + k);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+}
+
+// Blits into and out of the default framebuffer, from a multisampled image
+// too, keep the picture the right way up
+GPU_TEST(framebuffer, blits_reach_the_default_framebuffer)
+{
+    for (int ms = 0; ms < 2; ms++)
+    {
+        GLenum target = ms ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D;
+        GLuint tex[2], fbo[2];
+        GLubyte low[4] = { 0 }, high[4] = { 0 };
+
+        glGenTextures(2, tex);
+        glGenFramebuffers(2, fbo);
+        glBindTexture(target, tex[0]);
+        if (ms)
+            glTexStorage2DMultisample(target, 2, GL_RGBA8, 32, 32, GL_TRUE);
+        else
+            glTexStorage2D(target, 1, GL_RGBA8, 32, 32);
+        glBindTexture(GL_TEXTURE_2D, tex[1]);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 32, 32);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, tex[0], 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[1]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[1], 0);
+
+        // red below the middle, green above
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, 0, 32, 16);
+        glClearColor(1, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glScissor(0, 16, 32, 16);
+        glClearColor(0, 1, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, 32, 32, 0, 0, 32, 32, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glReadPixels(8, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, low);
+        glReadPixels(8, 28, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, high);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+        CHECK_MSG(low[0] == 255 && low[1] == 0 && high[0] == 0 && high[1] == 255,
+                  "samples %d: window read %u,%u low and %u,%u high", ms ? 2 : 1, low[0], low[1], high[0], high[1]);
+
+        // and back out into a texture
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[1]);
+        glBlitFramebuffer(0, 0, 32, 32, 0, 0, 32, 32, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[1]);
+        glReadPixels(8, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, low);
+        glReadPixels(8, 28, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, high);
+        CHECK_MSG(low[0] == 255 && high[1] == 255, "samples %d: copied back %u low and %u high",
+                  ms ? 2 : 1, low[0], high[1]);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(2, fbo);
+        glDeleteTextures(2, tex);
+    }
+    glClearColor(0, 0, 0, 0);
+}
+
+// A stretched blit into another format keeps the bottom row at the bottom
+GPU_TEST(framebuffer, stretched_blits_keep_rows_in_order)
+{
+    GLuint tex[2], fbo[2];
+    GLubyte low[4] = { 0 }, high[4] = { 0 };
+
+    glGenTextures(2, tex);
+    glGenFramebuffers(2, fbo);
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 32, 32);
+    glBindTexture(GL_TEXTURE_2D, tex[1]);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA16F, 64, 64);
+    for (int i = 0; i < 2; i++)
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[i], 0);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 0, 32, 16);
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glScissor(0, 16, 32, 16);
+    glClearColor(0, 1, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_SCISSOR_TEST);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[1]);
+    glBlitFramebuffer(0, 0, 32, 32, 0, 0, 64, 64, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo[1]);
+    glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, low);
+    glReadPixels(8, 56, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, high);
+    CHECK_MSG(low[0] == 255 && low[1] == 0 && high[0] == 0 && high[1] == 255,
+              "read %u,%u at the bottom and %u,%u at the top", low[0], low[1], high[0], high[1]);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(2, fbo);
+    glDeleteTextures(2, tex);
+    glClearColor(0, 0, 0, 0);
+}
+
+// Each sample of a multisampled stencil texture keeps the value its own
+// draw wrote, through the sample mask, and texelFetch reads it back
+GPU_TEST(framebuffer, multisampled_stencil_keeps_each_sample)
+{
+    static const char *vs =
+        "#version 330 core\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs_any = "#version 330 core\nout vec4 o;\nvoid main() { o = vec4(1.0); }\n";
+    static const char *fs_check =
+        "#version 330 core\nuniform usampler2DMS s;\nout vec4 o;\n"
+        "void main() { o = vec4(float(texelFetch(s, ivec2(0), 0).r), float(texelFetch(s, ivec2(0), 1).r),\n"
+        "                       float(texelFetch(s, ivec2(0), 2).r), float(texelFetch(s, ivec2(0), 3).r)) / 255.0; }\n";
+    static const GLubyte ref[4] = { 0, 64, 128, 255 };
+    char log[1024] = "";
+    GLuint draw = mgl_build_program(vs, fs_any, log, sizeof log);
+    GLuint check = mgl_build_program(vs, fs_check, log, sizeof log);
+    GLuint tex, fbo, vao, vbo;
+    MGLTestTarget target;
+    GLubyte px[4];
+    unsigned char *img;
+
+    CHECK_MSG(draw && check, "did not build: %s", log);
+    if (!draw || !check || !mgl_target_create(&target, 2, 2, GL_RGBA8, 0))
+        return;
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, tex);
+    glTexStorage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_STENCIL_INDEX8, 2, 2, GL_TRUE);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D_MULTISAMPLE, tex, 0);
+    CHECK_EQ_UINT(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glUseProgram(draw);
+    glViewport(0, 0, 2, 2);
+    glStencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
+    glEnable(GL_STENCIL_TEST);
+    glClearStencil(1);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    glEnable(GL_SAMPLE_MASK);
+    for (int s = 0; s < 4; s++)
+    {
+        glSampleMaski(0, 1u << s);
+        glStencilFunc(GL_ALWAYS, ref[s], ~0u);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+    glDisable(GL_SAMPLE_MASK);
+    glDisable(GL_STENCIL_TEST);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    glClearStencil(0);
+
+    mgl_target_bind(&target);
+    glUseProgram(check);
+    glUniform1i(glGetUniformLocation(check, "s"), 0);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    img = mgl_read_rgba8(&target);
+    mgl_pixel_at(img, &target, 0, 0, px);
+    free(img);
+    CHECK_MSG(px[0] == 0 && px[1] == 64 && px[2] == 128 && px[3] == 255,
+              "samples read %u %u %u %u, want 0 64 128 255", px[0], px[1], px[2], px[3]);
+
+    glUseProgram(0);
+    glSampleMaski(0, ~0u);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(draw);
+    glDeleteProgram(check);
+    mgl_target_destroy(&target);
+}
+
+// gl_FragCoord counts from the bottom left on the default framebuffer too
+GPU_TEST(framebuffer, default_framebuffer_frag_coord_from_bottom)
+{
+    static const char *vs =
+        "#version 420 core\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 420 core\nout vec4 o;\nvoid main() { o = vec4(gl_FragCoord.xy / 255.0, 0.0, 1.0); }\n";
+    char log[512] = "";
+    GLuint prog = mgl_build_program(vs, fs, log, sizeof log), vao, vbo;
+    GLubyte px[4] = { 0 };
+
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog)
+        return;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 8, 8);
+    glUseProgram(prog);
+    vao = mgl_fullscreen_quad(&vbo);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glReadPixels(3, 5, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK_MSG(px[0] == 4 && px[1] == 6, "pixel (3, 5) saw gl_FragCoord %u, %u, want 3.5, 5.5", px[0], px[1]);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+}

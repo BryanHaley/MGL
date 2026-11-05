@@ -223,8 +223,10 @@ void addVariables(Kind &kind, glslang::TProgram &prog, bool storage, int stage,
                     // a runtime-sized array has no size of its own; in an
                     // array of arrays only the outermost can be, and what is
                     // listed is the innermost
+                    // glslang also calls the innermost of a sized array of
+                    // arrays implicitly sized, while giving its real size
                     if (type->isArray() && type->getArraySizes()->getNumDims() == 1 &&
-                        (type->isUnsizedArray() || type->isImplicitlySizedArray()))
+                        (type->isUnsizedArray() || (type->isImplicitlySizedArray() && o.size <= 1)))
                         r.array_size = 0;
                 }
             }

@@ -128,6 +128,73 @@ static inline NSUInteger clampThreads(NSUInteger count, NSUInteger max)
     return true;
 }
 
+// Every sample of a multisampled image into a layer of its own, the layout a
+// multisampled image unit reads and writes. kind is 0 float, 1 int, 2 uint.
+- (bool) encodeSamplesToLayers: (id<MTLComputeCommandEncoder>) enc
+                          from: (id<MTLTexture>) src
+                    firstLayer: (NSUInteger) first
+                            to: (id<MTLTexture>) dst
+                        layers: (NSUInteger) layers
+                          kind: (int) kind
+{
+    static const char *names[3] = { "msToLayersFloat", "msToLayersInt", "msToLayersUint" };
+    id<MTLComputePipelineState> pso = [self pipelineNamed: names[kind < 0 || kind > 2 ? 0 : kind]];
+    uint32_t cfg[2] = { (uint32_t)first, 0 };
+
+    if (pso == nil)
+        return false;
+
+    [enc setComputePipelineState: pso];
+    [enc setTexture: src atIndex: 0];
+    [enc setTexture: dst atIndex: 1];
+    [enc setBytes: cfg length: sizeof cfg atIndex: 0];
+    [enc dispatchThreads: MTLSizeMake(dst.width, dst.height, layers)
+  threadsPerThreadgroup: MTLSizeMake(8, 8, 1)];
+
+    return true;
+}
+
+// Sample 0 of every texel, for the integer formats Metal cannot resolve.
+// Both textures are viewed as arrays.
+- (bool) encodeSample0: (id<MTLComputeCommandEncoder>) enc
+                  from: (id<MTLTexture>) src
+                    to: (id<MTLTexture>) dst
+              unsigned: (bool) is_unsigned
+{
+    id<MTLComputePipelineState> pso = [self pipelineNamed: is_unsigned ? "sample0Uint" : "sample0Int"];
+
+    if (pso == nil)
+        return false;
+
+    [enc setComputePipelineState: pso];
+    [enc setTexture: src atIndex: 0];
+    [enc setTexture: dst atIndex: 1];
+    [enc dispatchThreads: MTLSizeMake(dst.width, dst.height, dst.arrayLength)
+  threadsPerThreadgroup: MTLSizeMake(8, 8, 1)];
+
+    return true;
+}
+
+- (bool) encodeWidenUint16Indices: (id<MTLComputeCommandEncoder>) enc
+                           source: (id<MTLBuffer>) src
+                     sourceOffset: (NSUInteger) srcOffset
+                      destination: (id<MTLBuffer>) dst
+                            count: (NSUInteger) count
+{
+    id<MTLComputePipelineState> pso = [self pipelineNamed: "widenUint16Indices"];
+
+    if (pso == nil)
+        return false;
+
+    [enc setComputePipelineState: pso];
+    [enc setBuffer: src offset: srcOffset atIndex: 0];
+    [enc setBuffer: dst offset: 0 atIndex: 1];
+    [enc dispatchThreads: MTLSizeMake(count, 1, 1)
+  threadsPerThreadgroup: MTLSizeMake(clampThreads(count, pso.maxTotalThreadsPerThreadgroup), 1, 1)];
+
+    return true;
+}
+
 - (bool) encodeRemapRestartIndex: (id<MTLComputeCommandEncoder>) enc
                           buffer: (id<MTLBuffer>) buf
                           offset: (NSUInteger) offset

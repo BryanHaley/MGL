@@ -905,7 +905,8 @@ void mglBindImageTextures(GLMContext ctx, GLuint first, GLsizei count, const GLu
         // a bad entry is an error for its own unit only; the rest still bind
         tex = findTexture(ctx, name);
 
-        if (tex == NULL || tex->mipmap_levels == 0)
+        // no level 0 means no format to bind; a buffer texture has no levels
+        if (tex == NULL || (tex->mipmap_levels == 0 && tex->target != GL_TEXTURE_BUFFER))
         {
             ctx->error_func(ctx, __FUNCTION__, GL_INVALID_OPERATION);
             continue;
@@ -1221,8 +1222,12 @@ void invalidateTexture(GLMContext ctx, Texture *tex)
     Texture *view_of = tex->view_of;
     GLuint view_count = tex->view_count;
     GLboolean deleted = tex->deleted;
+    // a multisample texture's new image was given its sample count first
+    GLsizei samples = tex->samples;
 
     bzero(tex, sizeof(Texture));
+
+    tex->samples = samples;
 
     tex->view_of = view_of;
     tex->view_count = view_count;
@@ -2102,7 +2107,8 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
             // uninitialized tex
             initBaseTexLevel(ctx, tex, internalformat, width, height, depth);
         }
-        else if (width != tex->width || height != tex->height || internalformat != tex->internalformat)
+        else if (width != tex->width || height != tex->height || internalformat != tex->internalformat ||
+                 (GLuint)depth != tex->depth)
         {
             // invalidate texture because the base level width / height / internal format are being changed...
             invalidateTexture(ctx, tex);

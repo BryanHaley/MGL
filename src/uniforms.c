@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include <stdlib.h>
 #include "spirv_cross_c.h"
 
@@ -329,6 +330,14 @@ static SpirvResource *plainUniformAt(Program *ptr, int stage, GLuint index)
     return NULL;
 }
 
+static int uniformCount(Program *ptr);
+
+// what GL_ACTIVE_UNIFORMS reports, the same set glGetActiveUniform walks
+int mglActiveUniformCount(Program *ptr)
+{
+    return uniformCount(ptr);
+}
+
 static int uniformCount(Program *ptr)
 {
     int n = 0;
@@ -582,6 +591,7 @@ GLboolean isShader(GLMContext ctx, GLuint shader);
 static SpirvResource *plainUniformByLocation(Program *ptr, GLint location, GLint *element);
 static GLsizei glTypeSizeBytes(GLenum type);
 static size_t storedElementSize(Program *pp, SpirvResource *res);
+static GLuint boolComponentsFor(GLenum gl_type);
 
 void mglGetUniformfv(GLMContext ctx, GLuint program, GLint location, GLfloat *params)
 {
@@ -1125,7 +1135,8 @@ static SpirvResource *plainUniformByLocation(Program *ptr, GLint location, GLint
             GLint base = (GLint)list->list[i].location;
             GLint n = list->list[i].array_size > 1 ? list->list[i].array_size : 1;
 
-            if (list->list[i].location == MGL_NO_LOCATION)
+            // a struct's own entry holds no value; its members have the locations
+            if (list->list[i].location == MGL_NO_LOCATION || uniformIsStructOwner(&list->list[i]))
                 continue;
 
             if (location >= base && location < base + n)
@@ -1459,6 +1470,11 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
         SpirvResource *plain = plainUniformByLocation(pptr, location, NULL);
 
         if (plain && !setterMatches(ctx, plain->gl_type))
+            ERROR_RETURN(GL_INVALID_OPERATION);
+
+        // a count past 1 is only for an array; past an array's end it is ignored
+        if (plain && plain->array_size <= 1 && glTypeSizeBytes(plain->gl_type) &&
+            size > glTypeSizeBytes(plain->gl_type))
             ERROR_RETURN(GL_INVALID_OPERATION);
 
         ctx->uniform_setter = 0;
@@ -1922,11 +1938,15 @@ typedef struct { \
 } _name_;
 
 // Macro to define transpose functions
+// MatCxR: C columns of R rows. The source is row major (R rows of C), the
+// result column major (C columns of R).
 #define DEFINE_TRANSPOSE_FUNC(_type_, _rows_, _cols_, _name_, _transposed_name_) \
 void _name_##Transpose (const _name_ *matrix, _transposed_name_ *result) { \
-    for (int i = 0; i < _rows_; i++) { \
-        for (int j = 0; j < _cols_; j++) { \
-            result->d[j][i] = matrix->d[i][j]; \
+    const _type_ *s = &matrix->d[0][0]; \
+    _type_ *t = &result->d[0][0]; \
+    for (int c = 0; c < _rows_; c++) { \
+        for (int r = 0; r < _cols_; r++) { \
+            t[c * _cols_ + r] = s[r * _rows_ + c]; \
         } \
     } \
 }
@@ -2264,13 +2284,8 @@ static void puVf(GLMContext ctx, GLuint program, GLint location, GLsizei count, 
     puV(ctx, program, location, count, value, comps, sizeof(GLfloat));
 }
 
-// Metal has no double, so the d forms narrow to float on the way in
 static void puVd(GLMContext ctx, GLuint program, GLint location, GLsizei count, const GLdouble *value, int comps)
 {
-    GLsizei n;
-    GLfloat stack[64];
-    GLfloat *buf;
-
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
 
     if (count == 0)
@@ -2278,25 +2293,12 @@ static void puVd(GLMContext ctx, GLuint program, GLint location, GLsizei count, 
 
     ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
 
-    n = count * comps;
+    Program *pptr = programForUniform(ctx, program);
 
-    if (n <= 64)
-    {
-        buf = stack;
-    }
-    else
-    {
-        buf = (GLfloat *)malloc((size_t)n * sizeof(GLfloat));
-        ERROR_CHECK_RETURN(buf, GL_OUT_OF_MEMORY);
-    }
+    if (pptr == NULL)
+        return;
 
-    for (GLsizei i = 0; i < n; i++)
-        buf[i] = (GLfloat)value[i];
-
-    puWrite(ctx, program, location, buf, n * (GLsizei)sizeof(GLfloat));
-
-    if (buf != stack)
-        free(buf);
+    programUniformWriteD(ctx, pptr, location, value, count * comps * (GLsizei)sizeof(GLdouble));
 }
 
 // R columns of C rows, column major. Each matrix in the array transposes on
@@ -2309,7 +2311,7 @@ static void puTranspose(GLfloat *dst, const GLfloat *src, GLsizei count, int R, 
         GLfloat *d = dst + (size_t)m * R * C;
 
         for (int i = 0; i < R * C; i++)
-            d[i] = s[(i % R) * C + (i / R)];
+            d[i] = s[(i % C) * R + (i / C)];
     }
 }
 
@@ -2354,10 +2356,6 @@ static void puMatrixfv(GLMContext ctx, GLuint program, GLint location, GLsizei c
 
 static void puMatrixdv(GLMContext ctx, GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble *value, int R, int C)
 {
-    GLsizei n;
-    GLfloat stack[64], tmp[64];
-    GLfloat *buf, *narrowed;
-
     ERROR_CHECK_RETURN(count >= 0, GL_INVALID_VALUE);
 
     if (count == 0)
@@ -2365,42 +2363,30 @@ static void puMatrixdv(GLMContext ctx, GLuint program, GLint location, GLsizei c
 
     ERROR_CHECK_RETURN(value, GL_INVALID_VALUE);
 
-    n = count * R * C;
+    Program *pptr = programForUniform(ctx, program);
 
-    if (n <= 64)
+    if (pptr == NULL)
+        return;
+
+    GLsizei n = count * R * C;
+    GLdouble stack[64];
+    GLdouble *buf = n <= 64 ? stack : (GLdouble *)malloc((size_t)n * sizeof(GLdouble));
+
+    ERROR_CHECK_RETURN(buf, GL_OUT_OF_MEMORY);
+
+    // each matrix in the array transposes on its own, as puTranspose does
+    for (GLsizei m = 0; m < count; m++)
     {
-        narrowed = tmp;
-        buf = stack;
-    }
-    else
-    {
-        narrowed = (GLfloat *)malloc((size_t)n * sizeof(GLfloat));
-        ERROR_CHECK_RETURN(narrowed, GL_OUT_OF_MEMORY);
+        const GLdouble *src = value + (size_t)m * R * C;
 
-        buf = (GLfloat *)malloc((size_t)n * sizeof(GLfloat));
-
-        if (buf == NULL)
-        {
-            free(narrowed);
-            ERROR_RETURN(GL_OUT_OF_MEMORY);
-        }
+        for (int i = 0; i < R * C; i++)
+            buf[(size_t)m * R * C + i] = transpose ? src[(i % C) * R + (i / C)] : src[i];
     }
 
-    for (GLsizei i = 0; i < n; i++)
-        narrowed[i] = (GLfloat)value[i];
-
-    if (transpose)
-        puTranspose(buf, narrowed, count, R, C);
-    else
-        memcpy(buf, narrowed, (size_t)n * sizeof(GLfloat));
-
-    puWrite(ctx, program, location, buf, n * (GLsizei)sizeof(GLfloat));
+    programUniformWriteD(ctx, pptr, location, buf, n * (GLsizei)sizeof(GLdouble));
 
     if (buf != stack)
-    {
         free(buf);
-        free(narrowed);
-    }
 }
 
 void mglProgramUniform1f(GLMContext ctx, GLuint program, GLint location, GLfloat v0)
@@ -2778,13 +2764,55 @@ static void getUniformFrom(GLMContext ctx, Program *pp, GLint location,
 
     ERROR_CHECK_RETURN(res || have, GL_INVALID_OPERATION);
 
-    // a double uniform written through the float path is still sized as doubles
-    if (per == 0)
-        per = have;
+    // bools are kept as Metal's one-byte bools, packed as packBoolUniform lays them
+    if (res && boolComponentsFor(res->gl_type))
+    {
+        GLuint comps = boolComponentsFor(res->gl_type);
+        size_t stride = comps == 1 ? 1 : comps == 2 ? 2 : 4;
+        size_t at = (size_t)element * stride;
 
-    size_t offset = (size_t)element * per;
+        if (bufSize >= 0)
+            ERROR_CHECK_RETURN((size_t)comps * (dst_type == GL_DOUBLE ? 8 : 4) <= (size_t)bufSize,
+                               GL_INVALID_OPERATION);
+
+        for (GLuint c = 0; c < comps; c++)
+        {
+            bool on = have > at + c && ((const GLubyte *)buf->data.buffer_data)[at + c] != 0;
+
+            if (dst_type == GL_FLOAT)
+                ((GLfloat *)params)[c] = on ? 1.0f : 0.0f;
+            else if (dst_type == GL_DOUBLE)
+                ((GLdouble *)params)[c] = on ? 1.0 : 0.0;
+            else
+                ((GLint *)params)[c] = on ? 1 : 0;
+        }
+
+        return;
+    }
+
+    size_t offset;
+
+    // a member of a plain struct lives in the struct's buffer, at its offset
+    if (res && res->offset >= 0 && res->block_size > 0 && res->block_index == -1 && glTypeSizeBytes(res->gl_type))
+    {
+        GLint owner = (GLint)res->binding;
+
+        buf = (owner >= 0 && owner < MAX_UNIFORM_LOCATIONS) ? pp->uniform_constants.buffers[owner].buf : NULL;
+        have = (buf && buf->data.buffer_data) ? (size_t)buf->size : 0;
+        per = (size_t)glTypeSizeBytes(res->gl_type);
+        offset = (size_t)res->offset + (size_t)element * (size_t)res->array_stride;
+        stored = isDoubleType(res->gl_type) ? sizeof(GLdouble) : sizeof(GLfloat);
+    }
+    else
+    {
+        // a double uniform written through the float path is still sized as doubles
+        if (per == 0)
+            per = have;
+
+        offset = (size_t)element * per;
+    }
+
     GLsizei n = (GLsizei)(per / stored);
-    bool src_is_double = (stored == sizeof(GLdouble));
     GLubyte value[128] = {0};
 
     if (n <= 0 || per > sizeof(value))
@@ -2795,8 +2823,6 @@ static void getUniformFrom(GLMContext ctx, Program *pp, GLint location,
         memcpy(value, (const GLubyte *)buf->data.buffer_data + offset,
                have - offset < per ? have - offset : per);
 
-    const GLubyte *from = value;
-
     // the cap counts the bytes this call would write, not the bytes stored
     if (bufSize >= 0)
     {
@@ -2805,31 +2831,49 @@ static void getUniformFrom(GLMContext ctx, Program *pp, GLint location,
         ERROR_CHECK_RETURN((size_t)n * elem <= (size_t)bufSize, GL_INVALID_OPERATION);
     }
 
-    const GLfloat *src = (const GLfloat *)from;
+    // what the stored values are: doubles, floats, or signed or unsigned ints
+    char kind = stored == sizeof(GLdouble) ? 'd' : 'f';
 
-    switch (dst_type)
+    if (res && kind == 'f')
     {
-        case GL_FLOAT:
-            if (src_is_double)
-                for (GLsizei i = 0; i < n; i++)
-                    ((GLfloat *)params)[i] = (GLfloat)((const GLdouble *)src)[i];
-            else
-                memcpy(params, src, (size_t)n * sizeof(GLfloat));
-            break;
+        switch (res->gl_type)
+        {
+            case GL_INT: case GL_INT_VEC2: case GL_INT_VEC3: case GL_INT_VEC4: kind = 'i'; break;
+            case GL_UNSIGNED_INT: case GL_UNSIGNED_INT_VEC2: case GL_UNSIGNED_INT_VEC3:
+            case GL_UNSIGNED_INT_VEC4: kind = 'u'; break;
+            default: break;
+        }
+    }
 
-        case GL_DOUBLE:
-            if (src_is_double)
-                memcpy(params, src, (size_t)n * sizeof(GLdouble));
-            else
-                for (GLsizei i = 0; i < n; i++)
-                    ((GLdouble *)params)[i] = (GLdouble)src[i];
-            break;
+    for (GLsizei i = 0; i < n; i++)
+    {
+        GLdouble v;
+        GLuint bits;
 
-        // integer uniforms were stored as integers, so copy the bits straight
-        case GL_INT:
-        case GL_UNSIGNED_INT:
-            memcpy(params, src, (size_t)n * sizeof(GLint));
-            break;
+        memcpy(&bits, value + (size_t)i * sizeof(GLuint), sizeof bits);
+
+        switch (kind)
+        {
+            case 'd': v = ((const GLdouble *)value)[i]; break;
+            case 'i': v = (GLdouble)(GLint)bits; break;
+            case 'u': v = (GLdouble)bits; break;
+            default:  v = (GLdouble)((const GLfloat *)value)[i]; break;
+        }
+
+        switch (dst_type)
+        {
+            case GL_FLOAT:  ((GLfloat *)params)[i] = (GLfloat)v; break;
+            case GL_DOUBLE: ((GLdouble *)params)[i] = v; break;
+
+            // integers keep their bits; floats round to the nearest, and an
+            // unsigned query of a negative value is zero
+            case GL_INT:
+                ((GLint *)params)[i] = (kind == 'i' || kind == 'u') ? (GLint)bits : (GLint)lrint(v);
+                break;
+            case GL_UNSIGNED_INT:
+                ((GLuint *)params)[i] = (kind == 'i' || kind == 'u') ? bits : (v <= 0.0 ? 0u : (GLuint)llrint(v));
+                break;
+        }
     }
 }
 

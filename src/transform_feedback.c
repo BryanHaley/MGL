@@ -212,6 +212,7 @@ static void bindXfbBuffer(GLMContext ctx, GLuint xfb, GLuint index, GLuint buffe
     t->buffers[index].offset = offset;
     t->buffers[index].size = size;
     t->buffers[index].buf = buf;
+    buf->data.gpu_written = GL_TRUE;
     t->buffers[index].whole = ranged ? GL_FALSE : GL_TRUE;
 
     // the bound object's bindings are the ones glGetIntegeri_v reads

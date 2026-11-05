@@ -1075,6 +1075,36 @@ GPU_TEST(spirv, a_module_links_but_not_beside_glsl)
     glDeleteShader(f);
 }
 
+// ARB_gl_spirv: a SPIR-V program has no names, so each longest name is 1
+GPU_TEST(spirv, name_lengths_are_one)
+{
+    static const GLenum pnames[4] = { GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, GL_ACTIVE_UNIFORM_MAX_LENGTH,
+                                      GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH,
+                                      GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH };
+    GLuint v = glCreateShader(GL_VERTEX_SHADER);
+    GLuint p = glCreateProgram();
+    GLint ok = -1;
+
+    glShaderBinary(1, &v, GL_SHADER_BINARY_FORMAT_SPIR_V, SPIRV_STUB, sizeof SPIRV_STUB);
+    glSpecializeShader(v, "main", 0, NULL, NULL);
+    glAttachShader(p, v);
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK_EQ_INT(ok, GL_TRUE);
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLint len = -1;
+
+        glGetProgramiv(p, pnames[i], &len);
+        CHECK_MSG(len == 1, "query %d gave %d", i, len);
+    }
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glDeleteProgram(p);
+    glDeleteShader(v);
+}
+
 GPU_TEST(spirv, specialize_checks_the_constant_arrays)
 {
     GLuint s = glCreateShader(GL_VERTEX_SHADER);

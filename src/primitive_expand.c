@@ -128,6 +128,12 @@ static GLsizei expanded_count(GLenum mode, GLsizei inCount)
     case GL_TRIANGLE_FAN:
         return inCount >= 3 ? 3 * (inCount - 2) : 0;
 
+    case GL_LINES:
+        return (inCount / 2) * 2;
+
+    case GL_TRIANGLES:
+        return (inCount / 3) * 3;
+
     case GL_LINE_LOOP:
         /* a line list, so several loops can share one draw */
         return inCount >= 2 ? inCount * 2 : 0;
@@ -156,6 +162,8 @@ static unsigned expanded_mtl_type(GLenum mode)
 {
     switch (mode) {
     case GL_TRIANGLE_FAN:            return PEX_MTLTriangle;
+    case GL_LINES:                   return PEX_MTLLine;
+    case GL_TRIANGLES:               return PEX_MTLTriangle;
     case GL_LINE_LOOP:               return PEX_MTLLine;
     case GL_LINES_ADJACENCY:         return PEX_MTLLine;
     case GL_LINE_STRIP_ADJACENCY:    return PEX_MTLLineStrip;
@@ -174,6 +182,16 @@ static bool expands_to_strip(GLenum mode)
 /* ------------------------------------------------------------------ */
 /*  public predicate                                                  */
 /* ------------------------------------------------------------------ */
+// Metal restarts strips only, so lists are cut into runs here
+bool primitive_mode_needs_expand_ctx(GLMContext ctx, GLenum mode)
+{
+    if ((mode == GL_LINES || mode == GL_TRIANGLES) &&
+        (ctx->state.caps.primitive_restart || ctx->state.caps.primitive_restart_fixed_index))
+        return true;
+
+    return primitive_mode_needs_expand(mode);
+}
+
 bool primitive_mode_needs_expand(GLenum mode)
 {
     switch (mode) {
@@ -221,6 +239,15 @@ static GLsizei expand_run(GLenum mode, const RunSource *r, GLsizei count,
             write_index(buf, it, k++, run_get(r, i));
             write_index(buf, it, k++, run_get(r, i + 1));
         }
+        break;
+    }
+
+    case GL_LINES:
+    case GL_TRIANGLES: {
+        /* whole primitives only, so a run's leftovers are dropped */
+        GLsizei n = expanded_count(mode, count);
+        for (GLsizei i = 0; i < n; i++)
+            write_index(buf, it, k++, run_get(r, i));
         break;
     }
 

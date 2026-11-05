@@ -917,3 +917,198 @@ GPU_TEST(compute, every_uniform_shape_arrives)
     glDeleteBuffers(1, &out);
     glDeleteProgram(prog);
 }
+
+// A program can be built from several compilation units of one stage; only
+// one of them has main
+GPU_TEST(compute, three_compilation_units_link)
+{
+    static const char *cs1 =
+        "#version 430 core\nlayout(local_size_x = 1) in;\nvoid Run();\nvoid main() { Run(); }\n";
+    static const char *cs2 =
+        "#version 430 core\nlayout(binding = 0, std430) buffer Output { vec4 g_output; };\n"
+        "vec4 CalculateOutput();\nvoid Run() { g_output = CalculateOutput(); }\n";
+    static const char *cs3 =
+        "#version 430 core\nlayout(local_size_x = 1) in;\nlayout(binding = 0, std430) buffer Output { vec4 g_output; };\n"
+        "vec4 CalculateOutput() { g_output = vec4(0); return vec4(1, 2, 3, 4); }\n";
+    const char *srcs[3] = { cs1, cs2, cs3 };
+    GLuint p = glCreateProgram(), buf;
+    GLint ok = 0, attached = 0;
+    GLfloat got[4] = { 0 };
+    char log[1024] = "";
+
+    for (int i = 0; i < 3; i++)
+    {
+        GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
+
+        glShaderSource(sh, 1, &srcs[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(p, sh);
+        glDeleteShader(sh);
+    }
+
+    glGetProgramiv(p, GL_ATTACHED_SHADERS, &attached);
+    CHECK_EQ_INT(attached, 3);
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glGetProgramInfoLog(p, sizeof log, NULL, log);
+    CHECK_MSG(ok, "did not link: %s", log);
+    if (!ok)
+    {
+        glDeleteProgram(p);
+        return;
+    }
+
+    glGenBuffers(1, &buf);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof got, got, GL_DYNAMIC_DRAW);
+    glUseProgram(p);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof got, got);
+    CHECK_MSG(got[0] == 1 && got[3] == 4, "wrote %g %g %g %g", got[0], got[1], got[2], got[3]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteProgram(p);
+}
+
+// Compute units that never give a work group size, or give two different
+// ones, do not link
+GPU_TEST(compute, unit_local_sizes_must_be_given_and_agree)
+{
+    static const char *main_unsized = "#version 430 core\nvoid Run();\nvoid main() { Run(); }\n";
+    static const char *main_two = "#version 430 core\nlayout(local_size_x = 2) in;\nvoid Run();\nvoid main() { Run(); }\n";
+    static const char *run_unsized =
+        "#version 430 core\nlayout(std430) buffer Output { uint g_output[]; };\n"
+        "void Run() { g_output[gl_GlobalInvocationID.x] = 0; }\n";
+    static const char *run_one =
+        "#version 430 core\nlayout(local_size_x = 1) in;\nlayout(std430) buffer Output { uint g_output[]; };\n"
+        "void Run() { g_output[gl_GlobalInvocationID.x] = 0; }\n";
+    const char *pairs[2][2] = { { main_unsized, run_unsized }, { main_two, run_one } };
+
+    for (int t = 0; t < 2; t++)
+    {
+        GLuint p = glCreateProgram();
+        GLint ok = -1;
+
+        for (int i = 0; i < 2; i++)
+        {
+            GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
+
+            glShaderSource(sh, 1, &pairs[t][i], NULL);
+            glCompileShader(sh);
+            glAttachShader(p, sh);
+            glDeleteShader(sh);
+        }
+
+        glLinkProgram(p);
+        glGetProgramiv(p, GL_LINK_STATUS, &ok);
+        CHECK_MSG(ok == GL_FALSE, "pair %d linked", t);
+        glDeleteProgram(p);
+    }
+
+    mgl_drain_errors();
+}
+
+// A texture given a new image keeps working: a multisample array at a new
+// size or sample count, and an array with more layers
+GPU_TEST(compute, respecified_textures_are_rebuilt)
+{
+    static const char *cs =
+        "#version 430 core\nlayout(local_size_x = 1) in;\n"
+        "uniform sampler2DMSArray s;\nuniform sampler2DArray a;\n"
+        "layout(std430, binding = 0) buffer O { vec4 o[3]; };\n"
+        "void main() { o[0] = texelFetch(s, ivec3(3, 15, 1), 1); o[1] = texelFetch(a, ivec3(1, 1, 5), 0); }\n";
+    static const int dims[3][4] = { { 8, 4, 2, 4 }, { 4, 16, 2, 4 }, { 4, 16, 2, 2 } };
+    static GLfloat layer_data[2 * 2 * 6 * 4];
+    char log[1024] = "";
+    GLuint p = mgl_build_compute_program(cs, log, sizeof log), buf, tex[2];
+    GLfloat out[12] = { 0 };
+    const GLfloat c[4] = { 123, 123, 123, 123 };
+
+    CHECK_MSG(p != 0, "did not build: %s", log);
+    if (!p)
+        return;
+
+    for (int i = 0; i < 2 * 2 * 6 * 4; i++)
+        layer_data[i] = 7.0f;
+
+    glGenTextures(2, tex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex[1]);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, 2, 2, 4, 0, GL_RGBA, GL_FLOAT, layer_data);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, 2, 2, 6, 0, GL_RGBA, GL_FLOAT, layer_data);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, tex[0]);
+
+    for (int it = 0; it < 3; it++)
+    {
+        GLuint fbo;
+
+        glTexImage3DMultisample(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, dims[it][3], GL_RGBA32F,
+                                dims[it][0], dims[it][1], dims[it][2], GL_FALSE);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex[0], 0);
+        glClearBufferfv(GL_COLOR, 0, c);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &fbo);
+    }
+
+    glGenBuffers(1, &buf);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof out, out, GL_DYNAMIC_DRAW);
+    glUseProgram(p);
+    glUniform1i(glGetUniformLocation(p, "s"), 0);
+    glUniform1i(glGetUniformLocation(p, "a"), 1);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+    CHECK_MSG(out[0] == 123.0f, "multisample array read %g, want 123", out[0]);
+    CHECK_MSG(out[4] == 7.0f, "layer 5 of the grown array read %g, want 7", out[4]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteTextures(2, tex);
+}
+
+GPU_TEST(compute, unused_storage_blocks_leave_uniforms_alone)
+{
+    static const char *cs =
+        "#version 430 core\nlayout(local_size_x = 1) in;\n"
+        "layout(std430, binding = 0) buffer O { vec4 o; };\n"
+        "layout(std430, binding = 1) buffer U1 { vec4 u1; };\n"
+        "layout(std430, binding = 2) buffer U2 { vec4 u2; };\n"
+        "layout(std430, binding = 3) buffer U3 { vec4 u3; };\n"
+        "layout(std430, binding = 4) buffer U4 { vec4 u4; };\n"
+        "uniform float a = 1.0;\nuniform float b = 2.0;\nuniform float c = 3.0;\nuniform vec4 d = vec4(4.0);\n"
+        "void main() { o = vec4(a, b, c, d.x); }\n";
+    char log[1024] = "";
+    GLuint p = mgl_build_compute_program(cs, log, sizeof log), buf[5];
+    static const GLfloat zeros[4] = { 0 };
+    GLfloat out[4] = { 0 };
+
+    CHECK_MSG(p != 0, "did not build: %s", log);
+    if (!p)
+        return;
+
+    glGenBuffers(5, buf);
+    for (int i = 0; i < 5; i++)
+    {
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, (GLuint)i, buf[i]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof zeros, zeros, GL_DYNAMIC_DRAW);
+    }
+
+    glUseProgram(p);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf[0]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+    CHECK_MSG(out[0] == 1.0f && out[1] == 2.0f && out[2] == 3.0f && out[3] == 4.0f,
+              "uniforms read %g %g %g %g, want 1 2 3 4", out[0], out[1], out[2], out[3]);
+
+    glUseProgram(0);
+    glDeleteBuffers(5, buf);
+}

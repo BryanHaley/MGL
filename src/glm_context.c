@@ -168,6 +168,7 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     STATE(caps.rasterizer_discard) = false;
     STATE(caps.framebuffer_srgb) = false;
     STATE(caps.primitive_restart) = false;
+    ctx->state.var.clamp_read_color = GL_FIXED_ONLY;
     STATE(caps.depth_clamp) = false;
     STATE(caps.texture_cube_map_seamless) = false;
     STATE(caps.sample_mask) = false;
@@ -186,6 +187,8 @@ GLMContext createGLMContext(GLenum format, GLenum type,
 
     STATE(var.line_width) = 1.0f;
     STATE(var.point_size) = 1.0f;
+    STATE(var.point_fade_threshold_size) = 1.0f;
+    STATE(var.point_sprite_coord_origin) = GL_UPPER_LEFT;
     STATE(var.polygon_mode) = GL_FILL;
 
     for(int i=0; i<MAX_VIEWPORTS; i++)

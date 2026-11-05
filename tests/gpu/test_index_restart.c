@@ -320,3 +320,32 @@ GPU_TEST(index_restart, restart_does_not_apply_to_draw_arrays)
     scene_check(&s, 0, 0, 1);
     scene_end(&s);
 }
+
+/* ---------- restart on lists, which Metal does not restart ---------- */
+
+GPU_TEST(index_restart, triangle_list_restarts_mid_triangle)
+{
+    /* the lone 0 before the restart is dropped, so the next run starts a
+       fresh triangle instead of taking 0 as its first corner */
+    static const GLushort idx[] = { 0,  99,  4, 5, 6,  4, 6, 7 };
+    Scene s;
+
+    if (!scene_begin(&s, idx, sizeof idx)) SKIP("no target or pipeline");
+
+    glEnable(GL_PRIMITIVE_RESTART);
+    glPrimitiveRestartIndex(99);
+    glDrawElements(GL_TRIANGLES, 8, GL_UNSIGNED_SHORT, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    /* inside 4 6 7 only: the upper left of the right quad */
+    unsigned char *px = mgl_read_rgba8(&s.t), c[4] = { 0 };
+
+    if (px)
+    {
+        mgl_pixel_at(px, &s.t, (int)(W * 0.65f), (int)(H * 0.75f), c);
+        CHECK_MSG(c[1] > 200, "second triangle of the run missing: green %d", c[1]);
+        free(px);
+    }
+
+    scene_end(&s);
+}

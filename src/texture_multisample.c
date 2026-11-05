@@ -218,6 +218,8 @@ void mglTexStorage3DMultisample(GLMContext ctx, GLenum target, GLsizei samples,
 // ===========================================================================
 //  glTexImage2DMultisample
 // ===========================================================================
+void invalidateTexture(GLMContext ctx, Texture *tex);
+
 void mglTexImage2DMultisample(GLMContext ctx, GLenum target, GLsizei samples,
                               GLenum internalformat, GLsizei width,
                               GLsizei height, GLboolean fixedsamplelocations)
@@ -235,6 +237,10 @@ void mglTexImage2DMultisample(GLMContext ctx, GLenum target, GLsizei samples,
     if (tex->immutable_storage) {
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
+
+    // a new sample count needs a new texture, whatever the size
+    if (tex->mipmap_levels && tex->samples != mglRoundSamples(samples))
+        invalidateTexture(ctx, tex);
 
     tex->samples = mglRoundSamples(samples);
     (void)fixedsamplelocations;
@@ -271,6 +277,10 @@ void mglTexImage3DMultisample(GLMContext ctx, GLenum target, GLsizei samples,
     if (tex->immutable_storage) {
         ERROR_RETURN(GL_INVALID_OPERATION);
     }
+
+    // a new sample count needs a new texture, whatever the size
+    if (tex->mipmap_levels && tex->samples != mglRoundSamples(samples))
+        invalidateTexture(ctx, tex);
 
     tex->samples = mglRoundSamples(samples);
     (void)fixedsamplelocations;

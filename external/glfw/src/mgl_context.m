@@ -10,6 +10,8 @@
 
 #include "MGLContext.h"
 #include "internal.h"
+
+#include <dlfcn.h>
 #include "MGLRenderer.h"
 
 #include <unistd.h>
@@ -160,8 +162,15 @@ GLFWbool _glfwInitMGL(void)
     if (_glfw.mgl.handle)
         return GLFW_TRUE;
 
-    _glfw.mgl.handle = _glfwPlatformLoadModule("libmgl.dylib");
-    assert(_glfw.mgl.handle);
+    // the copy this library is linked against; a second copy found by name
+    // would have its own current context
+    Dl_info info;
+
+    if (dladdr((const void *)createGLMContext, &info) && info.dli_fname)
+        _glfw.mgl.handle = dlopen(info.dli_fname, RTLD_LAZY | RTLD_LOCAL);
+
+    if (_glfw.mgl.handle == NULL)
+        _glfw.mgl.handle = _glfwPlatformLoadModule("libmgl.dylib");
 
     if (_glfw.mgl.handle == NULL)
     {

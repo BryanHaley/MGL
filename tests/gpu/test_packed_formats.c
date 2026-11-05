@@ -603,3 +603,29 @@ GPU_TEST(packed_formats, stencil_reads_back_as_float_and_half)
     GLuint t[2] = {tex, color};
     glDeleteTextures(2, t);
 }
+
+// Between-endpoint RGTC values read back rounded, as sampling gives them
+GPU_TEST(packed_formats, rgtc_readback_rounds_between_endpoints)
+{
+    // endpoints 100 and 0, every selector 2: (6 * 100 + 0) / 7 = 85.7
+    static const GLubyte block[8] = { 100, 0, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49 };
+    static const GLubyte sblock[8] = { 100, 0, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49 };
+    GLubyte u[16] = { 0 };
+    GLbyte sg[16] = { 0 };
+    GLuint tex[2];
+
+    glGenTextures(2, tex);
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RED_RGTC1, 4, 4, 0, 8, block);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, u);
+    CHECK_MSG(u[0] == 86 && u[15] == 86, "unsigned read %u and %u, want 86", u[0], u[15]);
+
+    glBindTexture(GL_TEXTURE_2D, tex[1]);
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_SIGNED_RED_RGTC1, 4, 4, 0, 8, sblock);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_BYTE, sg);
+    CHECK_MSG(sg[0] == 86, "signed read %d, want 86", sg[0]);
+
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glDeleteTextures(2, tex);
+}

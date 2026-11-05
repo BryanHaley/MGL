@@ -301,6 +301,56 @@ static bool blockMemberType(const char *src, const char *block, const char *memb
 // Turns a name as glTransformFeedbackVaryings gave it into what the shader
 // calls it, and the type of the one thing it picks out. "a[2]" is an element
 // of an array and "Block.m" a block member, and both can be combined.
+// A member of an output block with no instance name, "out B { dvec2 v; };",
+// which feedback names bare
+static bool anonymousMemberType(const char *src, const char *name, char *type, size_t typelen)
+{
+    for (size_t i = 0; src[i]; i++)
+    {
+        if (!wordAt(src, i, "out"))
+            continue;
+
+        size_t j = skipSpace(src, i + 3);
+
+        while (identChar(src[j])) j++;
+
+        j = skipSpace(src, j);
+
+        if (src[j] != '{')
+            continue;
+
+        size_t close = j;
+
+        while (src[close] && src[close] != '}') close++;
+
+        if (src[close] != '}' || src[skipSpace(src, close + 1)] != ';')
+            continue;
+
+        for (size_t k = j + 1; k < close; k++)
+        {
+            if (!wordAt(src, k, name))
+                continue;
+
+            // the type is the word just before the name
+            size_t e = k;
+
+            while (e > j && isspace((unsigned char)src[e - 1])) e--;
+
+            size_t b = e;
+
+            while (b > j && identChar(src[b - 1])) b--;
+
+            if (b == e)
+                continue;
+
+            snprintf(type, typelen, "%.*s", (int)(e - b), src + b);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static bool resolveVarying(const char *src, const char *name, char *expr, size_t exprlen,
                            char *type, size_t typelen)
 {
@@ -325,7 +375,7 @@ static bool resolveVarying(const char *src, const char *name, char *expr, size_t
         return true;
     }
 
-    if (!varyingType(src, base, type, typelen))
+    if (!varyingType(src, base, type, typelen) && !anonymousMemberType(src, base, type, typelen))
         return false;
 
     snprintf(expr, exprlen, "%s%s", base, index ? index : "");

@@ -774,3 +774,40 @@ GPU_TEST(subroutines, geometry_stage_starts_on_a_compatible_function)
         glDeleteShader(s[i]);
     glDeleteProgram(prog);
 }
+
+// A subroutine uniform at an explicit location leaves lower locations unused,
+// and the values given for those only have to be under GL_ACTIVE_SUBROUTINES
+GPU_TEST(subroutines, unused_locations_take_any_index_in_range)
+{
+    static const char *fs =
+        "#version 430\n"
+        "subroutine vec4 pick();\n"
+        "layout(index = 1) subroutine(pick) vec4 red()   { return vec4(1, 0, 0, 1); }\n"
+        "layout(index = 2) subroutine(pick) vec4 green() { return vec4(0, 1, 0, 1); }\n"
+        "layout(location = 3) subroutine uniform pick which;\n"
+        "out vec4 o;\n"
+        "void main() { o = which(); }\n";
+    char log[1024] = "";
+    GLuint p = mgl_build_program(VS, fs, log, sizeof log);
+    GLint locs = 0;
+    const GLuint indices[4] = { 0, 0, 0, 2 };
+
+    CHECK_MSG(p != 0, "did not build: %s", log);
+    if (!p)
+        return;
+
+    glUseProgram(p);
+    glGetProgramStageiv(p, GL_FRAGMENT_SHADER, GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS, &locs);
+    CHECK_EQ_INT(locs, 4);
+    glUniformSubroutinesuiv(GL_FRAGMENT_SHADER, 4, indices);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    GLuint got = 99;
+
+    glGetUniformSubroutineuiv(GL_FRAGMENT_SHADER, 3, &got);
+    CHECK_EQ_UINT(got, 2);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(p);
+}

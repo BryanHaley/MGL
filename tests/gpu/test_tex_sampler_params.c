@@ -398,33 +398,22 @@ GPU_TEST(tex_sampler_params, texture_parameter_dsa_iiv_and_iuiv)
     glGenTextures(1, &t);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
-    // set via glTextureParameterIiv
-    glTextureParameterIiv(t, GL_TEXTURE_BORDER_COLOR, iiv);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-
-    // set via glTextureParameterIuiv
-    glTextureParameterIuiv(t, GL_TEXTURE_BORDER_COLOR, iuiv);
-    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-
     glBindTexture(GL_TEXTURE_2D, t);
 
-    // Verify via glGetTexParameterIiv
+    // one border colour, whichever call set it last
     {
         GLint got[4] = { 0 };
+        glTextureParameterIiv(t, GL_TEXTURE_BORDER_COLOR, iiv);
         glGetTexParameterIiv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, got);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        // SPEC: should read back -10, -20, -30, -40
-        // MGL's getTexParameterIiv is a stub that returns 0 -> will FAIL
         CHECK_EQ_INT(got[0], -10);
     }
 
-    // Verify via glGetTexParameterIuiv
     {
         GLuint got[4] = { 0 };
+        glTextureParameterIuiv(t, GL_TEXTURE_BORDER_COLOR, iuiv);
         glGetTexParameterIuiv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, got);
         CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
-        // SPEC: should read back 100, 200, 300, 400
-        // MGL's getTexParameterIuiv is a stub that returns 0 -> will FAIL
         CHECK_EQ_UINT(got[0], 100u);
     }
 
@@ -668,6 +657,128 @@ GPU_TEST(tex_sampler_params, integer_border_colour_reaches_the_shader)
     glDeleteTextures(1, &tex);
     glDeleteProgram(prog);
     mgl_target_destroy(&target);
+}
+
+// A sampler handed down through two helper functions keeps its border colour
+GPU_TEST(tex_sampler_params, border_survives_nested_helper_calls)
+{
+    static const char *cs =
+        "#version 450\nlayout(local_size_x = 1) in;\n"
+        "layout(binding = 0) uniform sampler3D vox;\n"
+        "layout(std430, binding = 0) buffer O { vec4 o; };\n"
+        "vec4 inner(sampler3D s, vec3 p) { return textureLod(s, p, 0.0); }\n"
+        "vec4 outer(sampler3D s, vec3 p) { return inner(s, p) + inner(s, p * 0.5); }\n"
+        "void main() { o = outer(vox, vec3(-1.0)); }\n";
+    static const GLfloat border[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+    GLubyte white[4] = { 255, 255, 255, 255 };
+    char log[2048] = "";
+    GLuint prog = mgl_build_compute_program(cs, log, sizeof log);
+    GLuint tex, buf;
+    GLfloat out[4] = { 0 };
+
+    CHECK_MSG(prog, "did not build: %s", log);
+    if (!prog)
+        return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_3D, tex);
+    glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA8, 1, 1, 1);
+    glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, white);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    glTexParameterfv(GL_TEXTURE_3D, GL_TEXTURE_BORDER_COLOR, border);
+
+    glGenBuffers(1, &buf);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof out, out, GL_DYNAMIC_DRAW);
+    glUseProgram(prog);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+
+    CHECK_MSG(fabsf(out[0] - 0.5f) < 0.02f && fabsf(out[1] - 1.0f) < 0.02f && fabsf(out[2] - 1.5f) < 0.02f,
+              "read %g %g %g, want twice the border 0.5 1 1.5", out[0], out[1], out[2]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(prog);
+}
+
+// Each texel a gather reads past a clamp-to-border edge is the border colour
+GPU_TEST(tex_sampler_params, gather_texels_outside_take_the_border)
+{
+    static const char *cs =
+        "#version 430\nlayout(local_size_x = 1) in;\n"
+        "uniform isampler2D t;\n"
+        "layout(std430, binding = 0) buffer O { ivec4 o[3]; };\n"
+        "void main() { o[0] = textureGather(t, vec2(0.0), 0); o[1] = textureGatherOffset(t, vec2(0.0), ivec2(1, 1), 0);\n"
+        "  o[2] = textureGatherOffsets(t, vec2(0.0), ivec2[4](ivec2(0), ivec2(1, 1), ivec2(-1, 0), ivec2(1, 0)), 1); }\n";
+    static const GLfloat border[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+    static const GLint want[12] = { -1, 0, -1, -1,  0, 1, 1, 0,  -1, 0, -1, -1 };
+    GLint texels[4 * 4 * 4], out[12] = { 0 };
+    char log[1024] = "";
+    GLuint p = mgl_build_compute_program(cs, log, sizeof log), tex, smp, buf;
+
+    CHECK_MSG(p != 0, "did not build: %s", log);
+    if (!p)
+        return;
+
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++)
+        {
+            GLint *t = &texels[(y * 4 + x) * 4];
+            t[0] = x; t[1] = y; t[2] = t[3] = 0;
+        }
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32I, 4, 4, 0, GL_RGBA_INTEGER, GL_INT, texels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenSamplers(1, &smp);
+    glBindSampler(0, smp);
+    glSamplerParameteri(smp, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glSamplerParameteri(smp, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glSamplerParameteri(smp, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glSamplerParameteri(smp, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glSamplerParameterfv(smp, GL_TEXTURE_BORDER_COLOR, border);
+
+    glGenBuffers(1, &buf);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof out, out, GL_DYNAMIC_DRAW);
+    glUseProgram(p);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+
+    for (int g = 0; g < 3; g++)
+        CHECK_MSG(!memcmp(&out[g * 4], &want[g * 4], 4 * sizeof(GLint)), "gather %d read %d %d %d %d, want %d %d %d %d", g,
+                  out[g * 4], out[g * 4 + 1], out[g * 4 + 2], out[g * 4 + 3],
+                  want[g * 4], want[g * 4 + 1], want[g * 4 + 2], want[g * 4 + 3]);
+
+    // the same border, set on the texture
+    glBindSampler(0, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+    CHECK_MSG(!memcmp(out, want, 4 * sizeof(GLint)), "texture border gather read %d %d %d %d, want -1 0 -1 -1",
+              out[0], out[1], out[2], out[3]);
+
+    glUseProgram(0);
+    glBindSampler(0, 0);
+    glDeleteSamplers(1, &smp);
+    glDeleteBuffers(1, &buf);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(p);
 }
 
 // GL_TEXTURE_LOD_BIAS moves an implicit level of detail; a draw at one texel

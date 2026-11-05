@@ -955,3 +955,114 @@ GPU_TEST(transform_feedback_gs, each_vertex_stream_records_on_its_own)
     glDeleteVertexArrays(1, &vao);
     glDeleteTransformFeedbacks(1, &xfb);
 }
+
+// Geometry writes gl_Position to stream 0 and its own vec4 to stream 1, from a
+// vertex stage that writes nothing; a second program draws each stream back
+// as a triangle.
+GPU_TEST(transform_feedback_gs, streams_draw_back_as_triangles)
+{
+    static const char *vs_blank = "#version 130\nvoid main() { }\n";
+    static const char *vs_pass =
+        "#version 130\nin vec4 position;\nvoid main() { gl_Position = position; }\n";
+    static const char *gs =
+        "#version 400\n"
+        "layout(points) in;\n"
+        "layout(points, max_vertices = 6) out;\n"
+        "layout(stream = 1) out vec4 position;\n"
+        "void main() {\n"
+        "    gl_Position = vec4(-1.0, -1.0, 0.0, 1.0); EmitStreamVertex(0);\n"
+        "    gl_Position = vec4( 1.0, -1.0, 0.0, 1.0); EmitStreamVertex(0);\n"
+        "    gl_Position = vec4(-1.0,  1.0, 0.0, 1.0); EmitStreamVertex(0);\n"
+        "    position = vec4( 1.0, -1.0, 0.0, 1.0); EmitStreamVertex(1);\n"
+        "    position = vec4(-1.0,  1.0, 0.0, 1.0); EmitStreamVertex(1);\n"
+        "    position = vec4( 1.0,  1.0, 0.0, 1.0); EmitStreamVertex(1);\n"
+        "}\n";
+    static const char *fs = "#version 130\nout vec4 pixel;\nvoid main() { pixel = vec4(1.0); }\n";
+    static const char *varyings[] = { "gl_Position", "gl_NextBuffer", "position" };
+    char log[2048] = "";
+    GLuint gen = linkRecording(vs_blank, gs, fs, varyings, 3, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    GLuint draw = mgl_build_program(vs_pass, fs, log, sizeof log);
+    GLuint xfb, vao, bo[2], q[4], fbo, rbo, got[4] = { 0 };
+    GLfloat px[4] = { 0 }, rec[2][12] = { { 0 } };
+
+    CHECK_MSG(gen && draw, "programs did not link: %s", log);
+    if (!gen || !draw)
+        return;
+
+    glGenTransformFeedbacks(1, &xfb);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, xfb);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(2, bo);
+    for (GLuint i = 0; i < 2; i++)
+    {
+        glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, bo[i]);
+        glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof rec[0], NULL, GL_DYNAMIC_COPY);
+        glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, i, bo[i]);
+    }
+    glGenQueries(4, q);
+
+    glGenFramebuffers(1, &fbo);
+    glGenRenderbuffers(1, &rbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_R8, 2, 2);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
+    glViewport(0, 0, 2, 2);
+    glClearColor(0, 0, 0, 1);
+
+    glUseProgram(gen);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glBeginQueryIndexed(GL_PRIMITIVES_GENERATED, 0, q[0]);
+    glBeginQueryIndexed(GL_PRIMITIVES_GENERATED, 1, q[1]);
+    glBeginQueryIndexed(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, 0, q[2]);
+    glBeginQueryIndexed(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, 1, q[3]);
+    glDrawArrays(GL_POINTS, 0, 1);
+    glEndQueryIndexed(GL_PRIMITIVES_GENERATED, 0);
+    glEndQueryIndexed(GL_PRIMITIVES_GENERATED, 1);
+    glEndQueryIndexed(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, 0);
+    glEndQueryIndexed(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, 1);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+
+    for (int i = 0; i < 4; i++)
+        glGetQueryObjectuiv(q[i], GL_QUERY_RESULT, &got[i]);
+    CHECK_MSG(got[0] == 3 && got[1] == 3 && got[2] == 3 && got[3] == 3,
+              "generated %u %u and written %u %u, want 3 each", got[0], got[1], got[2], got[3]);
+
+    for (int i = 0; i < 2; i++)
+    {
+        glBindBuffer(GL_ARRAY_BUFFER, bo[i]);
+        glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof rec[i], rec[i]);
+    }
+    CHECK_MSG(rec[0][0] == -1.0f && rec[0][4] == 1.0f && rec[1][0] == 1.0f && rec[1][8] == 1.0f,
+              "recorded x %g %g and %g %g", rec[0][0], rec[0][4], rec[1][0], rec[1][8]);
+
+    glUseProgram(draw);
+    glClear(GL_COLOR_BUFFER_BIT);
+    for (GLuint s = 0; s < 2; s++)
+    {
+        GLint loc = glGetAttribLocation(draw, "position");
+
+        glBindBuffer(GL_ARRAY_BUFFER, bo[s]);
+        glVertexAttribPointer((GLuint)loc, 4, GL_FLOAT, GL_FALSE, 0, NULL);
+        glEnableVertexAttribArray((GLuint)loc);
+        glDrawTransformFeedbackStream(GL_TRIANGLES, xfb, s);
+    }
+    glReadPixels(0, 0, 2, 2, GL_RED, GL_FLOAT, px);
+    CHECK_MSG(px[0] == 1.0f && px[1] == 1.0f && px[2] == 1.0f && px[3] == 1.0f,
+              "framebuffer read %g %g %g %g, want all 1", px[0], px[1], px[2], px[3]);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+    glUseProgram(0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteRenderbuffers(1, &rbo);
+    glDeleteQueries(4, q);
+    glDeleteProgram(gen);
+    glDeleteProgram(draw);
+    glDeleteBuffers(2, bo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTransformFeedbacks(1, &xfb);
+}

@@ -209,3 +209,63 @@ GPU_TEST(program_query, subroutine_uniform_keeps_its_declared_location)
 
     glDeleteProgram(prog);
 }
+
+// A buffer variable in an array of arrays reports the innermost array's
+// size, and the outermost as its top level
+GPU_TEST(program_query, buffer_variable_in_an_array_of_arrays)
+{
+    static const char *cs =
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "buffer Block { vec4 a[5][4][3]; };\n"
+        "void main() { a[0][0][0] = vec4(1); }\n";
+    char log[1024] = "";
+    GLuint p = mgl_build_compute_program(cs, log, sizeof log);
+    const GLenum props[2] = { GL_ARRAY_SIZE, GL_TOP_LEVEL_ARRAY_SIZE };
+    GLint got[2] = { -1, -1 };
+
+    CHECK_MSG(p != 0, "did not build: %s", log);
+    if (!p)
+        return;
+
+    GLuint idx = glGetProgramResourceIndex(p, GL_BUFFER_VARIABLE, "a[0][0]");
+
+    CHECK(idx != GL_INVALID_INDEX);
+    glGetProgramResourceiv(p, GL_BUFFER_VARIABLE, idx, 2, props, 2, NULL, got);
+    CHECK_EQ_INT(got[0], 3);
+    CHECK_EQ_INT(got[1], 5);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(p);
+}
+
+// An element of a block array no stage reads is listed, but referenced by none
+GPU_TEST(program_query, unread_block_array_element_is_unreferenced)
+{
+    static const char *vs = "#version 430\nin vec4 p;\nvoid main() { gl_Position = p; }\n";
+    static const char *fs =
+        "#version 430\n"
+        "uniform TrickyBlock { vec4 a; uint c; } e[2];\n"
+        "out vec4 color;\n"
+        "void main() { color = e[0].a; }\n";
+    static const GLenum props[2] = { GL_REFERENCED_BY_FRAGMENT_SHADER, GL_REFERENCED_BY_VERTEX_SHADER };
+    char log[1024] = "";
+    GLuint p = mgl_build_program(vs, fs, log, sizeof log);
+    GLint r0[2] = { -1, -1 }, r1[2] = { -1, -1 }, n = 0;
+
+    CHECK_MSG(p != 0, "did not build: %s", log);
+    if (!p)
+        return;
+
+    glGetProgramInterfaceiv(p, GL_UNIFORM_BLOCK, GL_ACTIVE_RESOURCES, &n);
+    CHECK_EQ_INT(n, 2);
+    glGetProgramResourceiv(p, GL_UNIFORM_BLOCK, glGetProgramResourceIndex(p, GL_UNIFORM_BLOCK, "TrickyBlock[0]"),
+                           2, props, 2, NULL, r0);
+    glGetProgramResourceiv(p, GL_UNIFORM_BLOCK, glGetProgramResourceIndex(p, GL_UNIFORM_BLOCK, "TrickyBlock[1]"),
+                           2, props, 2, NULL, r1);
+    CHECK_MSG(r0[0] == 1 && r0[1] == 0, "element 0 referenced by fs %d vs %d", r0[0], r0[1]);
+    CHECK_MSG(r1[0] == 0 && r1[1] == 0, "element 1 referenced by fs %d vs %d", r1[0], r1[1]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(p);
+}

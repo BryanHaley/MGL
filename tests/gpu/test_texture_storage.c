@@ -479,6 +479,27 @@ GPU_TEST(texture_storage, bind_image_textures_batch)
     glDeleteTextures(2, t);
 }
 
+GPU_TEST(texture_storage, bind_image_textures_takes_buffer_textures)
+{
+    GLuint t, b, got = 0;
+
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_TEXTURE_BUFFER, b);
+    glBufferData(GL_TEXTURE_BUFFER, 64, NULL, GL_STATIC_DRAW);
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_BUFFER, t);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA8, b);
+
+    glBindImageTextures(0, 1, &t);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glGetIntegeri_v(GL_IMAGE_BINDING_NAME, 0, (GLint *)&got);
+    CHECK_EQ_UINT(got, t);
+
+    glBindImageTextures(0, 1, NULL);
+    glDeleteTextures(1, &t);
+    glDeleteBuffers(1, &b);
+}
+
 /* ---------- batch texture binding ---------- */
 
 GPU_TEST(texture_storage, bind_textures_batch)

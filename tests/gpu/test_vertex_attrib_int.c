@@ -698,3 +698,105 @@ GPU_TEST(vertex_attrib_int, get_non_current_needs_vao)
     glGetVertexAttribLdv(2, GL_VERTEX_ATTRIB_ARRAY_SIZE, (GLdouble *)&v);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
 }
+
+// Float, double and int attributes interleaved in one binding, the double at
+// an offset that is not a multiple of 8, as the CTS bindingUpdate case has
+GPU_TEST(vertex_attrib_int, mixed_formats_share_one_binding)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec4 pos;\n"
+        "layout(location = 1) in vec2 rg;\n"
+        "layout(location = 3) in dvec3 d0;\n"
+        "layout(location = 4) in ivec2 d1;\n"
+        "out S { vec2 c; flat dvec3 o0; flat ivec2 o1; } so;\n"
+        "out gl_PerVertex { vec4 gl_Position; };\n"
+        "void main() { so.c = rg; so.o0 = d0; so.o1 = d1; gl_Position = pos; }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "in S { vec2 c; flat dvec3 o0; flat ivec2 o1; } si;\n"
+        "uniform dvec3 e0;\nuniform ivec2 e1;\nout vec4 o;\n"
+        "void main() { o = vec4(si.c, 0, 1); if (si.o0 != e0) o = vec4(1); if (si.o1 != e1) o = vec4(1, 0, 1, 1); }\n";
+    enum { STRIDE = 52 };
+    GLubyte data[4 * STRIDE] = { 0 };
+    static const float corner[4][2] = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } };
+    static const GLushort idx[4] = { 0, 1, 3, 2 };
+    char log[1024] = "";
+    MGLTestTarget t;
+    GLuint prog, vao, vbo, ebo;
+    unsigned char c[4] = { 0 };
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLdouble u[3] = { 1, 2, 3 };
+        GLint s[2] = { 1, 2 };
+        float g[2] = { 0.0f, 1.0f };
+
+        memcpy(&data[i * STRIDE], corner[i], 8);
+        memcpy(&data[i * STRIDE + 8], g, 8);
+        memcpy(&data[i * STRIDE + 20], u, 24);
+        memcpy(&data[i * STRIDE + 44], s, 8);
+    }
+
+    // separate programs in a pipeline, each stage compiled on its own
+    GLuint vp = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &vs);
+    prog = glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &fs);
+    GLuint pipe;
+    GLint ok = 0;
+
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "did not link: %s", log);
+    if (!ok || !mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+        return;
+    glGenProgramPipelines(1, &pipe);
+    glUseProgramStages(pipe, GL_VERTEX_SHADER_BIT, vp);
+    glUseProgramStages(pipe, GL_FRAGMENT_SHADER_BIT, prog);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof data, data, GL_STATIC_DRAW);
+    glGenBuffers(1, &ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx, idx, GL_STATIC_DRAW);
+    glVertexAttribFormat(0, 2, GL_FLOAT, GL_FALSE, 0);
+    glVertexAttribFormat(1, 2, GL_FLOAT, GL_FALSE, 8);
+    glVertexAttribLFormat(3, 3, GL_DOUBLE, 20);
+    glVertexAttribIFormat(4, 2, GL_INT, 44);
+    for (GLuint a = 0; a < 5; a++)
+    {
+        if (a == 2) continue;
+        glVertexAttribBinding(a, 0);
+        glEnableVertexAttribArray(a);
+    }
+    glBindVertexBuffer(0, vbo, 0, STRIDE);
+
+    mgl_target_bind(&t);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindProgramPipeline(pipe);
+    glProgramUniform3d(prog, glGetUniformLocation(prog, "e0"), 1.0, 2.0, 3.0);
+    glProgramUniform2i(prog, glGetUniformLocation(prog, "e1"), 1, 2);
+    glDrawElementsInstanced(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_SHORT, 0, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    unsigned char *px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 4, 4, c);
+        free(px);
+    }
+    CHECK_MSG(c[0] == 0 && c[1] == 255 && c[2] == 0, "drew %d %d %d, want green", c[0], c[1], c[2]);
+
+    glBindProgramPipeline(0);
+    glDeleteProgramPipelines(1, &pipe);
+    glDeleteProgram(vp);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ebo);
+    mgl_target_destroy(&t);
+}

@@ -2266,12 +2266,12 @@ static void decodeRGTCBlockUnsigned(const GLubyte *blk, GLubyte out[16])
     if (pal[0] > pal[1])
     {
         for (i = 2; i < 8; i++)
-            pal[i] = (GLubyte)(((8 - i) * pal[0] + (i - 1) * pal[1]) / 7);
+            pal[i] = (GLubyte)(((8 - i) * pal[0] + (i - 1) * pal[1] + 3) / 7);
     }
     else
     {
         for (i = 2; i < 6; i++)
-            pal[i] = (GLubyte)(((6 - i) * pal[0] + (i - 1) * pal[1]) / 5);
+            pal[i] = (GLubyte)(((6 - i) * pal[0] + (i - 1) * pal[1] + 2) / 5);
 
         pal[6] = 0;
         pal[7] = 255;
@@ -2282,6 +2282,11 @@ static void decodeRGTCBlockUnsigned(const GLubyte *blk, GLubyte out[16])
 
     for (i = 0; i < 16; i++)
         out[i] = pal[(bits >> (3 * i)) & 0x7u];
+}
+
+static int roundDiv(int n, int d)
+{
+    return n >= 0 ? (n + d / 2) / d : -((-n + d / 2) / d);
 }
 
 static void decodeRGTCBlockSigned(const GLubyte *blk, GLbyte out[16])
@@ -2302,12 +2307,12 @@ static void decodeRGTCBlockSigned(const GLubyte *blk, GLbyte out[16])
     if (e0 > e1)
     {
         for (i = 2; i < 8; i++)
-            pal[i] = (GLbyte)(((8 - i) * e0 + (i - 1) * e1) / 7);
+            pal[i] = (GLbyte)roundDiv((8 - i) * e0 + (i - 1) * e1, 7);
     }
     else
     {
         for (i = 2; i < 6; i++)
-            pal[i] = (GLbyte)(((6 - i) * e0 + (i - 1) * e1) / 5);
+            pal[i] = (GLbyte)roundDiv((6 - i) * e0 + (i - 1) * e1, 5);
 
         pal[6] = -127;
         pal[7] = 127;

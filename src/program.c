@@ -402,9 +402,13 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
 
         freeResourceList(&ptr->block_uniforms[i]);
         
-        if (ptr->shader_slots[i])
+        for (int k = -1; k < MGL_STAGE_EXTRA_UNITS; k++)
         {
-            Shader *sptr = ptr->shader_slots[i];
+            Shader *sptr = k < 0 ? ptr->shader_slots[i] : ptr->also_attached[i][k];
+
+            if (sptr == NULL)
+                continue;
+
             sptr->refcount--;
             if (sptr->refcount == 0 && sptr->delete_status)
             {
@@ -461,6 +465,42 @@ GLboolean mglIsProgram(GLMContext ctx, GLuint program)
     return GL_FALSE;
 }
 
+static bool shaderAttached(Program *pptr, Shader *sptr)
+{
+    int t = sptr->glm_type;
+
+    if (pptr->shader_slots[t] == sptr)
+        return true;
+
+    for (int k = 0; k < MGL_STAGE_EXTRA_UNITS; k++)
+        if (pptr->also_attached[t][k] == sptr)
+            return true;
+
+    return false;
+}
+
+// whether the source defines main, as a word followed by "("
+static bool shaderHasMain(const Shader *sh)
+{
+    const char *src = sh->src;
+
+    for (const char *p = src; p && (p = strstr(p, "main")) != NULL; p += 4)
+    {
+        const char *q = p + 4;
+
+        if (p > src && (isalnum((unsigned char)p[-1]) || p[-1] == '_'))
+            continue;
+
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
+            q++;
+
+        if (*q == '(')
+            return true;
+    }
+
+    return src == NULL;
+}
+
 void mglAttachShader(GLMContext ctx, GLuint program, GLuint shader)
 {
     Program *pptr;
@@ -490,10 +530,32 @@ void mglAttachShader(GLMContext ctx, GLuint program, GLuint shader)
 
     index = sptr->glm_type;
 
-    if (pptr->shader_slots[index] && pptr->shader_slots[index] != sptr && pptr->also_attached[index] == NULL)
-        pptr->also_attached[index] = pptr->shader_slots[index];
+    ERROR_CHECK_RETURN(!shaderAttached(pptr, sptr), GL_INVALID_OPERATION);
 
-    pptr->shader_slots[index] = sptr;
+    // A stage can be several compilation units. The one with main sits in the
+    // slot, where the source rewrites look; the others are linked beside it.
+    if (pptr->shader_slots[index] == NULL)
+    {
+        pptr->shader_slots[index] = sptr;
+    }
+    else
+    {
+        int k = 0;
+
+        while (k < MGL_STAGE_EXTRA_UNITS && pptr->also_attached[index][k])
+            k++;
+
+        ERROR_CHECK_RETURN(k < MGL_STAGE_EXTRA_UNITS, GL_OUT_OF_MEMORY);
+
+        if (shaderHasMain(sptr))
+        {
+            pptr->also_attached[index][k] = pptr->shader_slots[index];
+            pptr->shader_slots[index] = sptr;
+        }
+        else
+            pptr->also_attached[index][k] = sptr;
+    }
+
     sptr->refcount++;
     pptr->dirty_bits |= DIRTY_PROGRAM;
 }
@@ -536,18 +598,41 @@ void mglDetachShader(GLMContext ctx, GLuint program, GLuint shader)
 
     index = sptr->glm_type;
 
-    if (pptr->also_attached[index] == sptr)
     {
-        pptr->also_attached[index] = NULL;
-        return;
+        int k = 0;
+
+        while (k < MGL_STAGE_EXTRA_UNITS && pptr->also_attached[index][k] != sptr)
+            k++;
+
+        if (k < MGL_STAGE_EXTRA_UNITS)
+        {
+            for (; k + 1 < MGL_STAGE_EXTRA_UNITS; k++)
+                pptr->also_attached[index][k] = pptr->also_attached[index][k + 1];
+
+            pptr->also_attached[index][MGL_STAGE_EXTRA_UNITS - 1] = NULL;
+        }
+        else if (pptr->shader_slots[index] == sptr)
+        {
+            // another unit takes the slot, one with main if there is one
+            int pick = 0;
+
+            for (int j = 0; j < MGL_STAGE_EXTRA_UNITS && pptr->also_attached[index][j]; j++)
+                if (shaderHasMain(pptr->also_attached[index][j]))
+                    pick = j;
+
+            pptr->shader_slots[index] = pptr->also_attached[index][pick];
+
+            for (int j = pick; j + 1 < MGL_STAGE_EXTRA_UNITS; j++)
+                pptr->also_attached[index][j] = pptr->also_attached[index][j + 1];
+
+            pptr->also_attached[index][MGL_STAGE_EXTRA_UNITS - 1] = NULL;
+        }
+        else
+        {
+            return;
+        }
     }
 
-    if (pptr->shader_slots[index] != sptr)
-    {
-        return;
-    }
-
-    pptr->shader_slots[index] = NULL;
     sptr->refcount--;
     
     if (sptr->refcount == 0 && sptr->delete_status)
@@ -595,6 +680,16 @@ bool addShadersToProgram(GLMContext ctx, Program *pptr, glslang_program_t *glsl_
         if(ptr && ptr->compiled_glsl_shader)
         {
             glslang_program_add_shader(glsl_program, ptr->compiled_glsl_shader);
+
+            for (int k = 0; k < MGL_STAGE_EXTRA_UNITS && pptr->also_attached[i][k]; k++)
+            {
+                Shader *unit = pptr->also_attached[i][k];
+
+                if (unit->log || unit->compiled_glsl_shader == NULL)
+                    return false;
+
+                glslang_program_add_shader(glsl_program, unit->compiled_glsl_shader);
+            }
         }
         else if(ptr)
         {
@@ -1790,15 +1885,25 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     if (stage == _TESS_CONTROL_SHADER && ptr && ptr->tess.general)
         spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_FLOAT_TESS_FACTORS, SPVC_TRUE);
 
-    // texture state Metal samplers cannot hold. A vertex stage that runs as
-    // compute, ahead of tessellation or a geometry stage, goes without.
-    if (stage == _FRAGMENT_SHADER ||
-        (stage == _VERTEX_SHADER && ptr && !ptr->tess.active && !ptr->geom_shader && !ptr->cull.building))
+    // texture state Metal samplers cannot hold
+    if (!(ptr && ptr->cull.building))
     {
+        bool own_slot = stage == _FRAGMENT_SHADER || stage == _COMPUTE_SHADER;
+
         spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_PARAMS, SPVC_TRUE);
         spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_PARAMS_BUFFER_INDEX,
-                                       stage == _FRAGMENT_SHADER ? MGL_TEX_PARAM_MSL_SLOT : MGL_VERTEX_TEX_PARAM_MSL_SLOT);
+                                       own_slot ? MGL_TEX_PARAM_MSL_SLOT : MGL_VERTEX_TEX_PARAM_MSL_SLOT);
     }
+
+    if (stage == _FRAGMENT_SHADER)
+    {
+        spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_POINT_COORD_FLIP_BUFFER_INDEX,
+                                       MGL_POINT_COORD_FLIP_MSL_SLOT);
+        spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SAMPLE_MASK_BUFFER_INDEX,
+                                       MGL_SAMPLE_MASK_MSL_SLOT);
+    }
+
+    spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_MS_STORAGE_IMAGE_LAYERS, SPVC_TRUE);
 
     if (stage == _FRAGMENT_SHADER && ptr && ptr->building_fs_sample_rate)
         spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_FORCE_SAMPLE_RATE_SHADING, SPVC_TRUE);
@@ -1820,8 +1925,8 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
 
-    // ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(3,1,0)) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
-    if (spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(3,1,0)) != SPVC_SUCCESS) {
+    // ERROR_CHECK_RETURN_VALUE(spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(3,2,0)) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
+    if (spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(3,2,0)) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_options_set_uint(SPVC_COMPILER_OPTION_MSL_VERSION) failed\n");
         { spvc_context_destroy(context); ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL); }
     }
@@ -1971,6 +2076,9 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
                 spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_VERTEX_FOR_TESSELLATION, SPVC_TRUE);
                 spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_CAPTURE_OUTPUT_TO_BUFFER, SPVC_TRUE);
                 spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_OUTPUT_BUFFER_INDEX, MGL_TESS_VERTEX_OUT_INDEX);
+                // gl_VertexID comes from the element buffer, or from a run of 0, 1, 2... when unindexed
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_VERTEX_INDEX_TYPE, SPVC_MSL_INDEX_TYPE_UINT32);
+                spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_SHADER_INDEX_BUFFER_INDEX, MGL_TESS_INDEX_INDEX);
                 break;
 
             case _TESS_CONTROL_SHADER:
@@ -2062,6 +2170,32 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
             spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS_TIER, 1);
             spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 0);
             spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 1);
+        }
+    }
+
+    // Metal gives a stage 31 buffer slots. Past a handful of plain uniforms
+    // they share one, as a table of pointers to them.
+    sp->plain_table = GL_FALSE;
+    {
+        spvc_resources pr = NULL;
+        const spvc_reflected_resource *pl = NULL;
+        size_t plain = 0, blocks = 0, n = 0;
+
+        if (spvc_compiler_create_shader_resources(compiler_msl, &pr) == SPVC_SUCCESS)
+        {
+            if (spvc_resources_get_resource_list_for_type(pr, SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT, &pl, &n) == SPVC_SUCCESS)
+                plain = n;
+            if (spvc_resources_get_resource_list_for_type(pr, SPVC_RESOURCE_TYPE_UNIFORM_BUFFER, &pl, &n) == SPVC_SUCCESS)
+                blocks += n;
+            if (spvc_resources_get_resource_list_for_type(pr, SPVC_RESOURCE_TYPE_STORAGE_BUFFER, &pl, &n) == SPVC_SUCCESS)
+                blocks += n;
+        }
+
+        if (plain > 8 && plain + blocks > 16)
+        {
+            spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_PLAIN_UNIFORM_TABLE_INDEX,
+                                           MGL_PLAIN_TABLE_MSL_SLOT);
+            sp->plain_table = GL_TRUE;
         }
     }
 
@@ -2726,7 +2860,16 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     if (getenv("MGL_DEBUG_MSL"))
         MGL_INFO("---- MSL stage %d ----\n%s\n", stage, result);
 
-    str_ret = strdup(result);
+    // a fragment function that ends in discard has no return, an error since macOS 27
+    static const char pragma[] = "#pragma clang diagnostic ignored \"-Wmtl-shader-return-type\"\n";
+
+    str_ret = malloc(sizeof pragma + strlen(result));
+
+    if (str_ret)
+    {
+        memcpy(str_ret, pragma, sizeof pragma - 1);
+        strcpy(str_ret + sizeof pragma - 1, result);
+    }
 
     // Frees all memory we allocated so far.
     spvc_context_destroy(context);
@@ -3685,8 +3828,22 @@ static bool linkTessGeometryProgram(GLMContext ctx, Program *pptr)
     // draws are refused
     pptr->tess_geom_mismatch = pptr->geom.in_primitive != wants;
 
+    // nothing will draw, but the stages are still built so their uniforms
+    // are active; one that will not build changes nothing
     if (pptr->tess_geom_mismatch)
+    {
+        char e[128];
+
+        linkAndCompileProgramToMetal(ctx, pptr, _VERTEX_SHADER, false);
+
+        if (pptr->tess.has_control)
+            linkStageToMetal(ctx, pptr, _TESS_CONTROL_SHADER);
+
+        linkStageToMetal(ctx, pptr, _TESS_EVALUATION_SHADER);
+        snprintf(e, sizeof e, "geometry_%d", pptr->geom_shader->name);
+        buildGeneratedStage(ctx, pptr, GL_COMPUTE_SHADER, _GEOMETRY_SHADER, pptr->geom.compute_src, e);
         return true;
+    }
 
     bool general = domain >= 0;
 
@@ -4199,6 +4356,137 @@ static void listAtomicUniforms(Program *pptr)
     }
 }
 
+// Which elements of the block array whose block type is `name` a stage's
+// SPIR-V indexes. Bit k for element k; all bits when an index is not a
+// constant. Returns false when the stage has no such array.
+static bool blockElementsUsed(const Spirv *sp, const char *name, uint64_t *used)
+{
+    const uint32_t *w = sp->ir;
+    size_t n = sp->size;
+    uint32_t type_id = 0, array_id = 0, ptr_id = 0, var_id = 0;
+
+    *used = 0;
+
+    if (w == NULL || n < 5)
+        return false;
+
+    // the block's struct type, by name
+    for (size_t i = 5; i < n && type_id == 0; i += w[i] >> 16 ? w[i] >> 16 : 1)
+        if ((w[i] & 0xFFFF) == 5 && (w[i] >> 16) > 2 && !strcmp((const char *)&w[i + 2], name))
+            type_id = w[i + 1];
+
+    for (size_t i = 5; i < n && type_id; i += w[i] >> 16 ? w[i] >> 16 : 1)
+    {
+        uint32_t op = w[i] & 0xFFFF;
+
+        if (op == 28 && w[i + 2] == type_id)
+            array_id = w[i + 1];
+        else if (op == 32 && array_id && w[i + 3] == array_id)
+            ptr_id = w[i + 1];
+        else if (op == 59 && ptr_id && w[i + 1] == ptr_id)
+            var_id = w[i + 2];
+    }
+
+    if (var_id == 0)
+        return false;
+
+    for (size_t i = 5; i < n; i += w[i] >> 16 ? w[i] >> 16 : 1)
+    {
+        uint32_t op = w[i] & 0xFFFF;
+
+        if ((op != 65 && op != 66) || (w[i] >> 16) < 5 || w[i + 3] != var_id)
+            continue;
+
+        uint32_t index = w[i + 4];
+        bool constant = false;
+
+        for (size_t j = 5; j < n; j += w[j] >> 16 ? w[j] >> 16 : 1)
+            if ((w[j] & 0xFFFF) == 43 && w[j + 2] == index)
+            {
+                if (w[j + 3] < 64)
+                    *used |= 1ull << w[j + 3];
+                constant = true;
+                break;
+            }
+
+        if (!constant)
+            *used = ~0ull;
+    }
+
+    return true;
+}
+
+// glslang marks every element of a block array as used by a stage that uses
+// any of them; GL asks which elements that stage actually reads
+static void markBlockElementUse(Program *pptr, int kind)
+{
+    for (GLint b = 0; b < pptr->resources.count[kind]; b++)
+    {
+        MglResource *r = &pptr->resources.list[kind][b];
+        const char *open = r->name ? strrchr(r->name, '[') : NULL;
+        char base[128];
+
+        if (open == NULL || open == r->name || (size_t)(open - r->name) >= sizeof base)
+            continue;
+
+        int element = atoi(open + 1);
+
+        snprintf(base, sizeof base, "%.*s", (int)(open - r->name), r->name);
+
+        for (int st = 0; st < _MAX_SHADER_TYPES; st++)
+        {
+            uint64_t used;
+
+            if (!(r->stages & (1u << st)) || !blockElementsUsed(&pptr->spirv[st], base, &used))
+                continue;
+
+            if (element >= 64 || !(used & (1ull << element)))
+                r->stages &= ~(1u << st);
+        }
+    }
+}
+
+// GL counts only the struct members a shader uses as active uniforms. Each
+// member of a plain struct uniform was listed; those glslang's reflection
+// does not name are dropped, and so have no location.
+static void dropInactiveStructMembers(Program *pptr)
+{
+    const MglResource *active = pptr->resources.list[MGL_RES_UNIFORM];
+    GLint n_active = pptr->resources.count[MGL_RES_UNIFORM];
+
+    if (n_active <= 0)
+        return;
+
+    for (int stage = 0; stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *list = &pptr->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT];
+        GLuint kept = 0;
+
+        for (GLuint i = 0; i < list->count; i++)
+        {
+            SpirvResource *r = &list->list[i];
+            bool member = r->name && strchr(r->name, '.') && r->block_index == -1 && r->block_size > 0;
+            bool used = !member;
+
+            for (GLint a = 0; !used && a < n_active; a++)
+            {
+                const char *an = active[a].name;
+                size_t len = strlen(r->name);
+
+                // reflection names an array "d[0]"
+                used = an && !strncmp(an, r->name, len) && (an[len] == 0 || !strcmp(an + len, "[0]"));
+            }
+
+            if (used)
+                list->list[kept++] = *r;
+            else
+                free(r->name);
+        }
+
+        list->count = kept;
+    }
+}
+
 // What the program interface queries answer from, worked out once the link
 // has succeeded.
 static void reflectProgram(GLMContext ctx, Program *pptr)
@@ -4223,6 +4511,9 @@ static void reflectProgram(GLMContext ctx, Program *pptr)
     }
 
     mglReflectProgram(shaders, sources, _MAX_SHADER_TYPES, &pptr->resources);
+    markBlockElementUse(pptr, MGL_RES_UNIFORM_BLOCK);
+    markBlockElementUse(pptr, MGL_RES_STORAGE_BLOCK);
+    dropInactiveStructMembers(pptr);
     listAtomicUniforms(pptr);
     applyUniformInitializers(ctx, pptr);
 }
@@ -4438,6 +4729,8 @@ static bool perVertexMembers(const char *src, const char *dir, char *out, size_t
     return false;
 }
 
+static bool linkedFromSpirv(Program *ptr);
+
 void mglLinkProgram(GLMContext ctx, GLuint program)
 {
     Program *pptr;
@@ -4463,6 +4756,29 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         pptr->log = NULL;
     }
 
+    // a failed relink keeps the executable the program already has, so a
+    // link glslang will refuse is caught before anything is torn down
+    if (pptr->executable && !linkedFromSpirv(pptr))
+    {
+        glslang_program_t *trial = glslang_program_create();
+        bool ok = trial && addShadersToProgram(ctx, pptr, trial) &&
+                  glslang_program_link(trial, GLSLANG_MSG_DEFAULT_BIT);
+
+        if (!ok)
+        {
+            pptr->link_status = GL_FALSE;
+            pptr->validate_status = GL_FALSE;
+            pptr->log = strdup(trial && glslang_program_get_info_log(trial) ?
+                               glslang_program_get_info_log(trial) : "link failed");
+        }
+
+        if (trial)
+            glslang_program_delete(trial);
+
+        if (!ok)
+            return;
+    }
+
     pptr->link_status = GL_TRUE;
     pptr->tess_geom_mismatch = GL_FALSE;
     pptr->validate_status = GL_FALSE;
@@ -4472,6 +4788,7 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     static GLuint serial;
     pptr->link_serial = ++serial;
     pptr->uses_draw_id = -1;
+    pptr->uses_point_coord = -1;
     // a new link means a new fragment stage to run per sample
     free(pptr->fs_sample_rate.msl_str);
     pptr->fs_sample_rate.msl_str = NULL;
@@ -4501,6 +4818,27 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
                 return;
             }
         }
+
+        // some unit of the stage has to give the work group size
+        bool sized = false;
+
+        for (int k = -1; k < MGL_STAGE_EXTRA_UNITS && !sized; k++)
+        {
+            Shader *sh = k < 0 ? pptr->shader_slots[_COMPUTE_SHADER] : pptr->also_attached[_COMPUTE_SHADER][k];
+            const char *src = sh ? (sh->pp_src ? sh->pp_src : sh->src) : NULL;
+
+            sized = sh && (sh->spirv_binary || (src && strstr(src, "local_size_")));
+        }
+
+        if (!sized)
+        {
+            pptr->link_status = GL_FALSE;
+            pptr->validate_status = GL_FALSE;
+            free(pptr->log);
+            pptr->log = strdup("link failed: no compute shader gives a work group size");
+
+            return;
+        }
     }
 
     // GL 4.6 section 7.3: the shaders of one program are all SPIR-V or none are
@@ -4508,9 +4846,9 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         int spirv = 0, glsl = 0;
 
         for (int st = 0; st < _MAX_SHADER_TYPES; st++)
-            for (int k = 0; k < 2; k++)
+            for (int k = 0; k <= MGL_STAGE_EXTRA_UNITS; k++)
             {
-                Shader *sh = k ? pptr->also_attached[st] : pptr->shader_slots[st];
+                Shader *sh = k ? pptr->also_attached[st][k - 1] : pptr->shader_slots[st];
 
                 if (sh && sh->spirv_binary)
                     spirv++;
@@ -5063,15 +5401,18 @@ void mglGetAttachedShaders(GLMContext ctx, GLuint program, GLsizei maxCount, GLs
     ERROR_CHECK_RETURN(maxCount >= 0, GL_INVALID_VALUE);
 
     for (int i = 0; i < _MAX_SHADER_TYPES && n < maxCount; i++)
-    {
-        if (pptr->shader_slots[i] == NULL)
-            continue;
+        for (int k = -1; k < MGL_STAGE_EXTRA_UNITS && n < maxCount; k++)
+        {
+            Shader *sh = k < 0 ? pptr->shader_slots[i] : pptr->also_attached[i][k];
 
-        if (shaders)
-            shaders[n] = pptr->shader_slots[i]->name;
+            if (sh == NULL)
+                continue;
 
-        n++;
-    }
+            if (shaders)
+                shaders[n] = sh->name;
+
+            n++;
+        }
 
     if (count)
         *count = n;
@@ -5199,21 +5540,15 @@ static int programResourceCount(Program *ptr, int res_type)
     return n;
 }
 
-static int programUniformCount(Program *ptr)
+int mglActiveUniformCount(Program *ptr);
+
+static bool linkedFromSpirv(Program *ptr)
 {
-    int block_members = 0;
+    for (int st = 0; st < _MAX_SHADER_TYPES; st++)
+        if (ptr->shader_slots[st] && ptr->shader_slots[st]->spirv_binary)
+            return true;
 
-    for (int stage = _VERTEX_SHADER; stage < _MAX_SHADER_TYPES; stage++)
-        block_members += ptr->block_uniforms[stage].count;
-
-    // samplers, images and block members are all active uniforms too
-    return block_members +
-           programResourceCount(ptr, SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT) +
-           programResourceCount(ptr, SPVC_RESOURCE_TYPE_SAMPLED_IMAGE) +
-           programResourceCount(ptr, SPVC_RESOURCE_TYPE_SEPARATE_IMAGE) +
-           programResourceCount(ptr, SPVC_RESOURCE_TYPE_STORAGE_IMAGE) +
-           programResourceCount(ptr, SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS) +
-           (int)ptr->atomic_uniforms.count;
+    return false;
 }
 
 static int programLongestName(Program *ptr, int res_type)
@@ -5267,15 +5602,19 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
                 int count = 0;
                 for (int i = 0; i < _MAX_SHADER_TYPES; i++) {
                     if (pptr->shader_slots[i]) count++;
+                    for (int k = 0; k < MGL_STAGE_EXTRA_UNITS; k++)
+                        if (pptr->also_attached[i][k]) count++;
                 }
                 *params = count;
             }
             break;
         case GL_ACTIVE_UNIFORMS:
-            *params = programUniformCount(pptr);
+            *params = mglActiveUniformCount(pptr);
             break;
 
         case GL_ACTIVE_UNIFORM_MAX_LENGTH:
+            // ARB_gl_spirv: a SPIR-V program has no names, only the null
+            if (linkedFromSpirv(pptr)) { *params = 1; break; }
             *params = programLongestName(pptr, SPVC_RESOURCE_TYPE_UNIFORM_CONSTANT);
             break;
 
@@ -5284,6 +5623,7 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
             break;
 
         case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH:
+            if (linkedFromSpirv(pptr)) { *params = 1; break; }
             *params = programLongestName(pptr, SPVC_RESOURCE_TYPE_STAGE_INPUT);
             break;
 
@@ -5292,6 +5632,7 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
             break;
 
         case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
+            if (linkedFromSpirv(pptr)) { *params = 1; break; }
             *params = programLongestName(pptr, SPVC_RESOURCE_TYPE_UNIFORM_BUFFER);
             break;
 
@@ -5304,6 +5645,7 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
             break;
 
         case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH:
+            if (linkedFromSpirv(pptr)) { *params = 1; break; }
             *params = 0;
 
             for (GLsizei v = 0; pptr->link_status == GL_TRUE && v < pptr->xfb_varying_count; v++)
@@ -5908,8 +6250,15 @@ void mglUniformSubroutinesuiv(GLMContext ctx, GLenum shadertype, GLsizei count, 
 
     ERROR_CHECK_RETURN(indices, GL_INVALID_VALUE);
 
+    // a location no uniform uses only has to be under GL_ACTIVE_SUBROUTINES
     for (GLsizei i = 0; i < count; i++)
-        ERROR_CHECK_RETURN(mglSubroutineSlot(si, indices[i]) >= 0, GL_INVALID_VALUE);
+    {
+        GLuint element = 0;
+        bool used = subroutineUniformAt(si, (GLuint)i, &element) >= 0;
+
+        ERROR_CHECK_RETURN(mglSubroutineSlot(si, indices[i]) >= 0 || (!used && indices[i] < si->fn_count),
+                           GL_INVALID_VALUE);
+    }
 
     // each function has to be one of the uniform's own subroutine type
     for (GLsizei i = 0; i < count; i++)

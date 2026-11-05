@@ -140,7 +140,7 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_compute_uniform_components, 1024);
     at_least(&v->max_compute_uniform_blocks, 14);
     at_least(&v->max_compute_texture_image_units, 16);
-    at_least(&v->max_compute_image_uniforms, 8);
+    at_least(&v->max_compute_image_uniforms, 16);
     at_least(&v->max_compute_atomic_counters, 8);
     at_least(&v->max_compute_atomic_counter_buffers, 8);
     at_least(&v->max_compute_shared_memory_size, 32768);
@@ -150,19 +150,20 @@ void mglInitLimits(GLMContext ctx)
     at_least(&v->max_combined_uniform_blocks, 70);
     at_least(&v->max_combined_atomic_counters, 8);
     at_least(&v->max_combined_atomic_counter_buffers, 8);
-    // every graphics stage may use its own 8
-    at_least(&v->max_combined_image_uniforms, 40);
-    at_least(&v->max_combined_image_units_and_fragment_outputs, 8);
-    at_least(&v->max_combined_shader_output_resources, 16);
+    // Metal takes 8 read-write textures a function; compute keeps 16 since
+    // write-only images do not count against that
+    at_least(&v->max_combined_image_uniforms, 48);
+    at_least(&v->max_combined_image_units_and_fragment_outputs, 24);
+    at_least(&v->max_combined_shader_output_resources, 48);
 
     at_least(&v->max_clip_distances, 8);
     at_least(&v->max_clip_planes, 8);
     at_least(&v->max_cull_distances, 8);
     at_least(&v->max_combined_clip_and_cull_distances, 8);
 
-    at_least(&v->max_image_units, 8);
-    // Metal cannot write a multisample texture, so no multisample images
-    at_least(&v->max_image_samples, 0);
+    at_least(&v->max_image_units, 16);
+    // a multisampled image unit works on a layer per sample
+    at_least(&v->max_image_samples, 4);
     at_least(&v->max_atomic_counter_buffer_bindings, 8);
     at_least(&v->max_atomic_counter_buffer_size, 32768);
 

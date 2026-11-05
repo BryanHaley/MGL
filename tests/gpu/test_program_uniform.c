@@ -669,9 +669,10 @@ GPU_TEST(program_uniform, matrix_transpose)
     GLint loc;
     GLfloat got[16] = {0};
 
-    /* Row-major input for a 2x3 matrix:
-       [ 1  2  3 ]
-       [ 4  5  6 ]
+    /* mat2x3 is 2 columns of 3 rows, so row-major input is
+       [ 1  2 ]
+       [ 3  4 ]
+       [ 5  6 ]
        stored as [1,2,3,4,5,6] */
     const GLfloat row_major[6] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f };
     CHECK_MSG(p != 0, "link: %s", err);
@@ -685,12 +686,12 @@ GPU_TEST(program_uniform, matrix_transpose)
     glProgramUniformMatrix2x3fv(p, loc, 1, GL_TRUE, row_major);
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
     glGetUniformfv(p, loc, got);
-    /* After transposition: col0=[1,4], col1=[2,5], col2=[3,6] */
+    /* After transposition: col0=[1,3,5], col1=[2,4,6] */
     CHECK_NEAR(got[0], 1.0f, 1e-5f);
-    CHECK_NEAR(got[1], 4.0f, 1e-5f);
-    CHECK_NEAR(got[2], 2.0f, 1e-5f);
-    CHECK_NEAR(got[3], 5.0f, 1e-5f);
-    CHECK_NEAR(got[4], 3.0f, 1e-5f);
+    CHECK_NEAR(got[1], 3.0f, 1e-5f);
+    CHECK_NEAR(got[2], 5.0f, 1e-5f);
+    CHECK_NEAR(got[3], 2.0f, 1e-5f);
+    CHECK_NEAR(got[4], 4.0f, 1e-5f);
     CHECK_NEAR(got[5], 6.0f, 1e-5f);
 
     /* Same with 4x4 and GL_TRUE. */
@@ -1203,4 +1204,336 @@ GPU_TEST(program_uniform, a_failed_call_does_not_break_the_next_draw)
     glDeleteVertexArrays(1, &vao);
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
+}
+
+// Bools are stored as one-byte Metal bools; reading them back gives 1 or 0
+// in whatever type is asked for, however they were set
+GPU_TEST(program_uniform, bool_vectors_read_back)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "uniform bool b1;\nuniform bvec2 b2;\nuniform bvec3 b3;\n"
+        "void main() { gl_Position = vec4(b1 && b2.y && b3.z ? 1.0 : 0.0); }\n";
+    static const char *fs = "#version 460 core\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    char err[1024] = "";
+    GLuint p = mgl_build_program(vs, fs, err, sizeof err);
+    GLfloat f[3] = { -1, -1, -1 };
+    GLint i[3] = { -1, -1, -1 };
+
+    CHECK_MSG(p != 0, "did not build: %s", err);
+    if (!p)
+        return;
+
+    glUseProgram(p);
+    glUniform1i(glGetUniformLocation(p, "b1"), 7);
+    glUniform2f(glGetUniformLocation(p, "b2"), 0.0f, 1.0f);
+    glUniform3i(glGetUniformLocation(p, "b3"), 0, 5, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetUniformfv(p, glGetUniformLocation(p, "b1"), f);
+    CHECK_MSG(f[0] == 1.0f, "b1 read %g", f[0]);
+    glGetUniformfv(p, glGetUniformLocation(p, "b2"), f);
+    CHECK_MSG(f[0] == 0.0f && f[1] == 1.0f, "b2 read %g %g", f[0], f[1]);
+    glGetUniformiv(p, glGetUniformLocation(p, "b3"), i);
+    CHECK_MSG(i[0] == 0 && i[1] == 1 && i[2] == 1, "b3 read %d %d %d", i[0], i[1], i[2]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(p);
+}
+
+// A transposed non-square matrix: rows in, columns stored
+GPU_TEST(program_uniform, non_square_transpose_is_row_major_in)
+{
+    static const char *vs =
+        "#version 460 core\nuniform mat2x3 m;\nuniform mat3x2 k;\n"
+        "void main() { gl_Position = vec4(m[1][2] + k[2][1]); }\n";
+    static const char *fs = "#version 460 core\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    static const GLfloat rows[6] = { 1, 2, 3, 4, 5, 6 };
+    char err[1024] = "";
+    GLuint p = mgl_build_program(vs, fs, err, sizeof err);
+    GLfloat a[6] = { 0 };
+
+    CHECK_MSG(p != 0, "did not build: %s", err);
+    if (!p)
+        return;
+
+    glUseProgram(p);
+    /* mat2x3: 3 rows of 2 in, columns 1 3 5 and 2 4 6 out */
+    glUniformMatrix2x3fv(glGetUniformLocation(p, "m"), 1, GL_TRUE, rows);
+    glGetUniformfv(p, glGetUniformLocation(p, "m"), a);
+    CHECK_MSG(a[0] == 1 && a[1] == 3 && a[2] == 5 && a[3] == 2 && a[4] == 4 && a[5] == 6,
+              "mat2x3 %g %g %g %g %g %g", a[0], a[1], a[2], a[3], a[4], a[5]);
+    /* mat3x2: 2 rows of 3 in, columns 1 4, 2 5, 3 6 out */
+    glProgramUniformMatrix3x2fv(p, glGetUniformLocation(p, "k"), 1, GL_TRUE, rows);
+    glGetUniformfv(p, glGetUniformLocation(p, "k"), a);
+    CHECK_MSG(a[0] == 1 && a[1] == 4 && a[2] == 2 && a[3] == 5 && a[4] == 3 && a[5] == 6,
+              "mat3x2 %g %g %g %g %g %g", a[0], a[1], a[2], a[3], a[4], a[5]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(p);
+}
+
+// glProgramUniform's double forms store doubles, as glUniform's do, and a
+// transposed matrix comes out the same either way
+GPU_TEST(program_uniform, program_double_forms_keep_doubles)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "uniform dvec3 v;\nuniform dmat2x3 m;\nuniform dmat2x3 n;\n"
+        "void main() { gl_Position = vec4(float(v.x + m[1][2] + n[1][2])); }\n";
+    static const char *fs = "#version 460 core\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    static const GLdouble rows[6] = { 1, 2, 3, 4, 5, 6 };   /* 3 rows of 2, to transpose */
+    char err[1024] = "";
+    GLuint p = mgl_build_program(vs, fs, err, sizeof err);
+    GLdouble a[6] = { 0 }, b[6] = { 0 };
+
+    CHECK_MSG(p != 0, "did not build: %s", err);
+    if (!p)
+        return;
+
+    glProgramUniform3d(p, glGetUniformLocation(p, "v"), 1.0 / 3.0, 2.0, 1e-10);
+    glGetUniformdv(p, glGetUniformLocation(p, "v"), a);
+    CHECK_MSG(a[0] == 1.0 / 3.0 && a[1] == 2.0 && a[2] == 1e-10, "v read %.17g %g %g", a[0], a[1], a[2]);
+
+    glProgramUniformMatrix2x3dv(p, glGetUniformLocation(p, "m"), 1, GL_TRUE, rows);
+    glUseProgram(p);
+    glUniformMatrix2x3dv(glGetUniformLocation(p, "n"), 1, GL_TRUE, rows);
+    glUseProgram(0);
+    glGetUniformdv(p, glGetUniformLocation(p, "m"), a);
+    glGetUniformdv(p, glGetUniformLocation(p, "n"), b);
+    CHECK_MSG(!memcmp(a, b, sizeof a), "m %g %g %g %g %g %g, n %g %g %g %g %g %g",
+              a[0], a[1], a[2], a[3], a[4], a[5], b[0], b[1], b[2], b[3], b[4], b[5]);
+    /* 2 columns of 3 rows: column major 1 3 5, 2 4 6 */
+    CHECK_MSG(a[0] == 1 && a[1] == 3 && a[2] == 5 && a[3] == 2 && a[4] == 4 && a[5] == 6,
+              "m %g %g %g %g %g %g, want 1 3 5 2 4 6", a[0], a[1], a[2], a[3], a[4], a[5]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(p);
+}
+
+// Only the struct members a shader reads are active uniforms, and the two
+// ways of counting active uniforms agree
+GPU_TEST(program_uniform, unused_struct_members_are_inactive)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "struct S { vec4 used; vec4 unused; float arr[2]; };\n"
+        "uniform S s;\nuniform S t[2];\nuniform vec4 plain;\n"
+        "void main() { gl_Position = plain + s.used + vec4(t[1].arr[1]); }\n";
+    static const char *fs = "#version 460 core\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    char err[1024] = "";
+    GLuint p = mgl_build_program(vs, fs, err, sizeof err);
+    GLint active = -1, resources = -2;
+
+    CHECK_MSG(p != 0, "did not build: %s", err);
+    if (!p)
+        return;
+
+    glGetProgramiv(p, GL_ACTIVE_UNIFORMS, &active);
+    glGetProgramInterfaceiv(p, GL_UNIFORM, GL_ACTIVE_RESOURCES, &resources);
+    CHECK_EQ_INT(active, resources);
+    CHECK_EQ_INT(active, 3);   /* plain, s.used, t[1].arr */
+    CHECK(glGetUniformLocation(p, "s.used") >= 0);
+    CHECK_EQ_INT(glGetUniformLocation(p, "s.unused"), -1);
+    CHECK(glGetUniformLocation(p, "t[1].arr[1]") >= 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glDeleteProgram(p);
+}
+
+// Plain struct uniforms reach a compute shader, member by member
+GPU_TEST(program_uniform, struct_uniforms_reach_compute)
+{
+    static const char *cs =
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(std430, binding = 1) buffer R { vec4 r[3]; };\n"
+        "struct S { vec4 m0; float m1[2]; mat2 m2; };\n"
+        "layout(location = 1) uniform S u0[2];\n"
+        "void main() {\n"
+        "    r[0] = u0[0].m0;\n"
+        "    r[1] = vec4(u0[0].m1[0], u0[0].m1[1], u0[1].m1[1], u0[1].m2[1][0]);\n"
+        "    r[2] = u0[1].m0;\n"
+        "}\n";
+    char log[1024] = "";
+    GLuint p = mgl_build_compute_program(cs, log, sizeof log), buf;
+    GLfloat r[12] = { 0 };
+    static const GLfloat m0a[4] = { 1, 2, 3, 4 }, m0b[4] = { 11, 12, 13, 14 }, m2[4] = { 17, 18, 19, 20 };
+
+    CHECK_MSG(p != 0, "did not build: %s", log);
+    if (!p)
+        return;
+
+    glUseProgram(p);
+    glUniform4fv(1, 1, m0a);
+    glUniform1f(2, 5.0f);
+    glUniform1f(3, 6.0f);
+    glUniform4fv(5, 1, m0b);
+    glUniform1f(7, 16.0f);
+    glUniformMatrix2fv(8, 1, GL_FALSE, m2);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof r, r, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, buf);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof r, r);
+
+    CHECK_MSG(r[0] == 1 && r[1] == 2 && r[2] == 3 && r[3] == 4, "u0[0].m0 %g %g %g %g", r[0], r[1], r[2], r[3]);
+    CHECK_MSG(r[4] == 5 && r[5] == 6 && r[6] == 16 && r[7] == 19, "members %g %g %g %g", r[4], r[5], r[6], r[7]);
+    CHECK_MSG(r[8] == 11 && r[11] == 14, "u0[1].m0 %g %g %g %g", r[8], r[9], r[10], r[11]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteProgram(p);
+}
+
+// More plain uniforms than Metal has buffer slots, all read by one stage
+GPU_TEST(program_uniform, more_plain_uniforms_than_buffer_slots)
+{
+    enum { N = 40 };
+    static const char *vs =
+        "#version 460 core\n"
+        "void main() {\n"
+        "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;\n"
+        "    gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    char fs[8192], log[2048] = "";
+    size_t at = 0;
+    MGLTestTarget t;
+    GLuint p, vao;
+    unsigned char c[4] = { 0 };
+
+    at += (size_t)snprintf(fs + at, sizeof fs - at, "#version 460 core\nout vec4 o;\n");
+    for (int i = 0; i < N; i++)
+        at += (size_t)snprintf(fs + at, sizeof fs - at, "uniform float u%d;\n", i);
+    at += (size_t)snprintf(fs + at, sizeof fs - at, "uniform dvec2 d;\nuniform bool b;\nuniform mat3 m;\n");
+    at += (size_t)snprintf(fs + at, sizeof fs - at, "void main() {\n    float s = 0.0;\n");
+    for (int i = 0; i < N; i++)
+        at += (size_t)snprintf(fs + at, sizeof fs - at, "    s += u%d;\n", i);
+    at += (size_t)snprintf(fs + at, sizeof fs - at,
+                           "    bool ok = s == %d.0 && d == dvec2(1.0lf / 3.0lf, 2.0lf) && b && m[2][1] == 8.0;\n"
+                           "    o = ok ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1);\n}\n", N * (N + 1) / 2);
+
+    p = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(p != 0, "did not build: %s", log);
+    if (!p || !mgl_target_create(&t, 4, 4, GL_RGBA8, 0))
+        return;
+
+    glUseProgram(p);
+    for (int i = 0; i < N; i++)
+    {
+        char name[16];
+
+        snprintf(name, sizeof name, "u%d", i);
+        glUniform1f(glGetUniformLocation(p, name), (GLfloat)(i + 1));
+    }
+    glUniform2d(glGetUniformLocation(p, "d"), 1.0 / 3.0, 2.0);
+    glUniform1i(glGetUniformLocation(p, "b"), 1);
+    {
+        const GLfloat m[9] = { 0, 1, 2, 3, 4, 5, 6, 8, 7 };
+
+        glUniformMatrix3fv(glGetUniformLocation(p, "m"), 1, GL_FALSE, m);
+    }
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    mgl_target_bind(&t);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    unsigned char *px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 1, 1, c);
+        free(px);
+    }
+    CHECK_MSG(c[1] == 255 && c[0] == 0, "drew %d %d %d, want green", c[0], c[1], c[2]);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(p);
+    mgl_target_destroy(&t);
+}
+
+// A count above 1 is only for an array (GL 4.6 7.6.1); past an array's end
+// the extra values are ignored
+GPU_TEST(program_uniform, count_above_one_needs_an_array)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "uniform dvec2 d;\nuniform float f;\nuniform float a[2];\n"
+        "void main() { gl_Position = vec4(float(d.x) + f + a[1]); }\n";
+    static const char *fs = "#version 460 core\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    static const GLdouble dv[4] = { 1, 2, 3, 4 };
+    static const GLfloat fv[3] = { 1, 2, 3 };
+    char err[1024] = "";
+    GLuint p = mgl_build_program(vs, fs, err, sizeof err);
+
+    CHECK_MSG(p != 0, "did not build: %s", err);
+    if (!p)
+        return;
+
+    glUseProgram(p);
+    glUniform2dv(glGetUniformLocation(p, "d"), 2, dv);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glUniform1fv(glGetUniformLocation(p, "f"), 2, fv);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_INVALID_OPERATION);
+    glUniform1fv(glGetUniformLocation(p, "a"), 3, fv);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glUniform2dv(glGetUniformLocation(p, "d"), 1, dv);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(p);
+}
+
+// Reading a uniform as another type converts its value: floats and doubles
+// round to the nearest integer, a negative one reads as 0 unsigned, and a
+// struct member is read from its struct
+GPU_TEST(program_uniform, readback_converts_by_declared_type)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "uniform double d;\nuniform double n;\nuniform int i;\n"
+        "uniform struct S { float a; double b; } s;\n"
+        "void main() { gl_Position = vec4(float(d + n) + float(i) + s.a + float(s.b)); }\n";
+    static const char *fs = "#version 460 core\nout vec4 o;\nvoid main() { o = vec4(1); }\n";
+    char err[1024] = "";
+    GLuint p = mgl_build_program(vs, fs, err, sizeof err);
+    GLint iv = 0;
+    GLuint uv = 9;
+    GLfloat fv = 0;
+    GLdouble dv = 0;
+
+    CHECK_MSG(p != 0, "did not build: %s", err);
+    if (!p)
+        return;
+
+    glUseProgram(p);
+    glUniform1d(glGetUniformLocation(p, "d"), 11.75);
+    glUniform1d(glGetUniformLocation(p, "n"), -4.25);
+    glUniform1i(glGetUniformLocation(p, "i"), -7);
+    glUniform1d(glGetUniformLocation(p, "s.b"), 6.5);
+
+    glGetUniformiv(p, glGetUniformLocation(p, "d"), &iv);
+    CHECK_EQ_INT(iv, 12);
+    glGetUniformuiv(p, glGetUniformLocation(p, "n"), &uv);
+    CHECK_EQ_UINT(uv, 0);
+    glGetUniformfv(p, glGetUniformLocation(p, "i"), &fv);
+    CHECK_MSG(fv == -7.0f, "int read as float gave %g", fv);
+    glGetUniformdv(p, glGetUniformLocation(p, "s.b"), &dv);
+    CHECK_MSG(dv == 6.5, "struct member read %g", dv);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(p);
 }

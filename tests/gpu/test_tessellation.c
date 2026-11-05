@@ -859,6 +859,138 @@ GPU_TEST(tessellation, a_patch_array_links)
     mgl_drain_errors();
 }
 
+// array sizes written with a gl_Max constant
+GPU_TEST(tessellation, outputs_sized_by_limit_constants_link)
+{
+    static const char *VS =
+        "#version 440\n"
+        "out Vertex { vec4 value[(gl_MaxTessControlInputComponents - 4) / 4]; } o;\n"
+        "void main() { gl_Position = vec4(0); o.value[0] = vec4(1); }\n";
+    static const char *TCS =
+        "#version 440\n"
+        "layout(vertices = 2) out;\n"
+        "in Vertex { vec4 value[(gl_MaxTessControlInputComponents - 4) / 4]; } i[];\n"
+        "out Vertex { vec4 value[(gl_MaxTessControlOutputComponents - 4) / 4]; } o[];\n"
+        "void main() {\n"
+        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0;\n"
+        "    o[gl_InvocationID].value[1] = i[gl_InvocationID].value[0];\n"
+        "}\n";
+    static const char *TES =
+        "#version 440\n"
+        "layout(isolines, point_mode) in;\n"
+        "in Vertex { vec4 value[(gl_MaxTessEvaluationInputComponents - 4) / 4]; } i[];\n"
+        "out Vertex { vec4 value[(gl_MaxTessEvaluationOutputComponents - 4) / 4]; } o;\n"
+        "void main() { gl_Position = gl_in[0].gl_Position; o.value[2] = i[0].value[1]; }\n";
+    static const char *FS = "#version 440\nvoid main() { }\n";
+    const char *src[4] = { VS, TCS, TES, FS };
+    GLenum types[4] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER, GL_FRAGMENT_SHADER };
+    GLuint p = glCreateProgram();
+    GLint ok = -1;
+    char log[512] = "";
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLuint sh = glCreateShader(types[i]);
+        glShaderSource(sh, 1, &src[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(p, sh);
+        glDeleteShader(sh);
+    }
+
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glGetProgramInfoLog(p, sizeof log, NULL, log);
+    CHECK_MSG(ok == GL_TRUE, "did not link: %s", log);
+    glDeleteProgram(p);
+    mgl_drain_errors();
+}
+
+// every element of a full-size patch array reaches the evaluation stage
+GPU_TEST(tessellation, a_full_patch_array_reaches_evaluation)
+{
+    static const char *src[3] = {
+        "#version 440\n"
+        "void main() { gl_Position = vec4(0, 0, 0, 1); }\n",
+        "#version 440\n"
+        "layout(vertices = 2) out;\n"
+        "patch out vec4 value[gl_MaxTessPatchComponents / 4];\n"
+        "void main() {\n"
+        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0;\n"
+        "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "    for (int j = 0; j < gl_MaxTessPatchComponents / 4; j++)\n"
+        "        value[j] = vec4(4 * j, 4 * j + 1, 4 * j + 2, 4 * j + 3);\n"
+        "}\n",
+        "#version 440\n"
+        "layout(isolines, point_mode) in;\n"
+        "patch in vec4 value[gl_MaxTessPatchComponents / 4];\n"
+        "out vec4 r;\n"
+        "void main() {\n"
+        "    gl_Position = gl_in[0].gl_Position;\n"
+        "    r = vec4(0.0);\n"
+        "    for (int i = 0; i < gl_MaxTessPatchComponents / 4; i++) r += value[i];\n"
+        "}\n" };
+    static const GLenum stages[3] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER };
+    const char *names[] = { "r" };
+    GLfloat got[4 * 8] = { 0 };
+    GLuint prog = glCreateProgram(), vao, buf;
+    char log[2048] = "";
+    GLint ok = 0, comps = 0;
+
+    glGetIntegerv(GL_MAX_TESS_PATCH_COMPONENTS, &comps);
+
+    for (int i = 0; i < 3; i++)
+    {
+        GLuint sh = glCreateShader(stages[i]);
+
+        glShaderSource(sh, 1, &src[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(prog, sh);
+        glDeleteShader(sh);
+    }
+
+    glTransformFeedbackVaryings(prog, 1, names, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok)
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "program did not link: %s", log);
+    if (!ok)
+    {
+        glDeleteProgram(prog);
+        return;
+    }
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buf);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof got, got, GL_DYNAMIC_READ);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buf);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 1);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_PATCHES, 0, 1);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+
+    int n = comps / 4;
+    float want = 4.0f * n * (n - 1) / 2;
+
+    CHECK_MSG(got[0] == want && got[1] == want + n && got[2] == want + 2 * n && got[3] == want + 3 * n,
+              "read %g %g %g %g, want %g %g %g %g", got[0], got[1], got[2], got[3],
+              want, want + n, want + 2 * n, want + 3 * n);
+
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &buf);
+    glDeleteVertexArrays(1, &vao);
+}
+
 // the evaluation stage reads back the levels the control stage wrote, not
 // 16-bit roundings of them
 GPU_TEST(tessellation, evaluation_reads_exact_levels)

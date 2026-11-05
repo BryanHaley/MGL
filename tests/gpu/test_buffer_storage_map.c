@@ -633,3 +633,163 @@ GPU_TEST(buffer_storage_map, mapping_nothing_is_an_invalid_operation)
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glDeleteBuffers(1, &b);
 }
+
+// A flush offset counts from the start of the mapped range, not the buffer
+GPU_TEST(buffer_storage_map, flush_offset_is_relative_to_the_mapping)
+{
+    GLuint b = 0, got[16] = { 0 }, zero[16] = { 0 };
+
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_ARRAY_BUFFER, b);
+    glBufferData(GL_ARRAY_BUFFER, sizeof zero, zero, GL_DYNAMIC_DRAW);
+
+    GLuint *p = (GLuint *)glMapBufferRange(GL_ARRAY_BUFFER, 16, 32, GL_MAP_WRITE_BIT | GL_MAP_FLUSH_EXPLICIT_BIT);
+    CHECK(p != NULL);
+    if (p)
+    {
+        for (int i = 0; i < 8; i++)
+            p[i] = 100u + (GLuint)i;
+        glFlushMappedBufferRange(GL_ARRAY_BUFFER, 0, 32);
+        CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+        glUnmapBuffer(GL_ARRAY_BUFFER);
+    }
+
+    glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof got, got);
+    CHECK_MSG(got[3] == 0 && got[4] == 100 && got[11] == 107 && got[12] == 0,
+              "buffer holds %u %u %u %u", got[3], got[4], got[11], got[12]);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDeleteBuffers(1, &b);
+}
+
+// Updates between draws in one frame reach only the draws after them. Each
+// draw fills one quarter with the colour its uniform block held at the time.
+GPU_TEST(buffer_storage_map, updates_between_draws_keep_their_order)
+{
+    static const char *vs =
+        "#version 330 core\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 420 core\nlayout(std140, binding = 0) uniform C { vec4 c; vec4 pad[511]; };\n"
+        "out vec4 o;\nvoid main() { o = c; }\n";
+    static const GLfloat red[4] = { 1, 0, 0, 1 }, green[4] = { 0, 1, 0, 1 }, blue[4] = { 0, 0, 1, 1 };
+    static const GLfloat white[4] = { 1, 1, 1, 1 };
+    static GLfloat big[2][2048];
+    MGLTestTarget t;
+    GLuint prog, vbo, vao, ubo[2];
+    unsigned char *px, q[4][4];
+    char log[1024];
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+        return;
+
+    vao = mgl_fullscreen_quad(&vbo);
+    glCreateBuffers(2, ubo);
+    // big enough to be bound as a buffer rather than copied into the command
+    memcpy(big[0], red, sizeof red);
+    memcpy(big[1], blue, sizeof blue);
+    glNamedBufferStorage(ubo[0], sizeof big[0], big[0], GL_DYNAMIC_STORAGE_BIT);
+    glNamedBufferStorage(ubo[1], sizeof big[1], big[1], GL_DYNAMIC_STORAGE_BIT);
+    glUseProgram(prog);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo[0]);
+    glEnable(GL_SCISSOR_TEST);
+
+    // red, then green by sub-data, then white by clear, then blue by copy
+    glScissor(0, 0, 8, 8);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glNamedBufferSubData(ubo[0], 0, 16, green);
+    glScissor(8, 0, 8, 8);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glClearNamedBufferSubData(ubo[0], GL_RGBA32F, 0, 16, GL_RGBA, GL_FLOAT, white);
+    glScissor(0, 8, 8, 8);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glCopyNamedBufferSubData(ubo[1], ubo[0], 0, 0, 16);
+    glScissor(8, 8, 8, 8);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glDisable(GL_SCISSOR_TEST);
+
+    px = mgl_read_rgba8(&t);
+    mgl_pixel_at(px, &t, 4, 4, q[0]);
+    mgl_pixel_at(px, &t, 12, 4, q[1]);
+    mgl_pixel_at(px, &t, 4, 12, q[2]);
+    mgl_pixel_at(px, &t, 12, 12, q[3]);
+    free(px);
+
+    CHECK_MSG(q[0][0] == 255 && q[0][1] == 0, "first draw read %d %d %d, want red", q[0][0], q[0][1], q[0][2]);
+    CHECK_MSG(q[1][0] == 0 && q[1][1] == 255, "second draw read %d %d %d, want green", q[1][0], q[1][1], q[1][2]);
+    CHECK_MSG(q[2][0] == 255 && q[2][1] == 255 && q[2][2] == 255, "third draw read %d %d %d, want white",
+              q[2][0], q[2][1], q[2][2]);
+    CHECK_MSG(q[3][0] == 0 && q[3][2] == 255, "fourth draw read %d %d %d, want blue", q[3][0], q[3][1], q[3][2]);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(2, ubo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// One vertex and index buffer refilled before each draw, the way UI
+// renderers stream their lists; every draw keeps the geometry it was given
+GPU_TEST(buffer_storage_map, refilled_vertex_and_index_buffers_keep_each_draw)
+{
+    static const char *vs =
+        "#version 330 core\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs = "#version 330 core\nout vec4 o;\nvoid main() { o = vec4(1.0); }\n";
+    MGLTestTarget t;
+    GLuint prog, vao, vbo, ibo;
+    unsigned char *px, q[4][4];
+    char log[1024];
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+        return;
+
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glCreateVertexArrays(1, &vao);
+    glCreateBuffers(1, &vbo);
+    glCreateBuffers(1, &ibo);
+    glNamedBufferData(vbo, 4096, NULL, GL_STREAM_DRAW);
+    glNamedBufferData(ibo, 1024, NULL, GL_STREAM_DRAW);
+    glVertexArrayVertexBuffer(vao, 0, vbo, 0, 2 * sizeof(GLfloat));
+    glVertexArrayElementBuffer(vao, ibo);
+    glEnableVertexArrayAttrib(vao, 0);
+    glVertexArrayAttribFormat(vao, 0, 2, GL_FLOAT, GL_FALSE, 0);
+    glVertexArrayAttribBinding(vao, 0, 0);
+    glBindVertexArray(vao);
+    glUseProgram(prog);
+
+    // a quad in each quarter, in turn; the indices change order each time too
+    for (int k = 0; k < 4; k++)
+    {
+        GLfloat x = (k & 1) ? 0.0f : -1.0f, y = (k & 2) ? 0.0f : -1.0f;
+        GLfloat v[8] = { x, y, x + 1, y, x + 1, y + 1, x, y + 1 };
+        GLushort idx[2][6] = { { 0, 1, 2, 0, 2, 3 }, { 3, 2, 0, 2, 1, 0 } };
+
+        glNamedBufferSubData(vbo, 0, sizeof v, v);
+        glNamedBufferSubData(ibo, 0, sizeof idx[k & 1], idx[k & 1]);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, NULL);
+    }
+
+    px = mgl_read_rgba8(&t);
+    mgl_pixel_at(px, &t, 4, 4, q[0]);
+    mgl_pixel_at(px, &t, 12, 4, q[1]);
+    mgl_pixel_at(px, &t, 4, 12, q[2]);
+    mgl_pixel_at(px, &t, 12, 12, q[3]);
+    free(px);
+
+    for (int k = 0; k < 4; k++)
+        CHECK_MSG(q[k][0] == 255, "quarter %d read %d, want the quad drawn there", k, q[k][0]);
+
+    glUseProgram(0);
+    glBindVertexArray(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ibo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}

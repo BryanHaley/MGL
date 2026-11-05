@@ -285,6 +285,9 @@ bool validate_vao(GLMContext ctx, bool uses_elements)
 
     if (ctx->state.vao->dirty_bits)
     {
+        // the renderer only looks at the context's bits
+        ctx->state.dirty_bits |= DIRTY_VAO;
+
         if (!processVAO(ctx)) {
             MGL_ERR("MGL Error: validate_vao: processVAO failed\n");
             return false;

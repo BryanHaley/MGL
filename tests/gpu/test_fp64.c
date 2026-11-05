@@ -449,6 +449,15 @@ static double run_uniform(const char *expr, double a, double b)
     return got;
 }
 
+// double(bool) and dvec2(bvec2), which a select between 1.0 and 0.0 turns into
+GPU_TEST(fp64, bools_convert_to_doubles)
+{
+    CHECK_NEAR(1.0f, run_uniform("double(u.x > 0.0lf)", 2.0, 0.0), 1e-6);
+    CHECK_NEAR(0.0f, run_uniform("double(u.y > 0.0lf)", 2.0, 0.0), 1e-6);
+    CHECK_NEAR(1.0f, run_uniform("dvec2(greaterThan(u, dvec2(1.0lf))).x + dvec2(greaterThan(u, dvec2(1.0lf))).y",
+                                 2.0, 0.0), 1e-6);
+}
+
 // Values that came back wrong in the conformance suite, which picks fresh
 // random arguments on every run -- so the failures looked like a flake.
 GPU_TEST(fp64, builtins_hold_for_the_values_that_failed)
@@ -681,4 +690,151 @@ GPU_TEST(fp64, long_chains_stay_exact_over_many_dispatches)
     CHECK_EQ_INT(chain_errors("u * u * u * u * u * u", want_pow6), 0);
     CHECK_EQ_INT(chain_errors("1.0LF / u", want_inv), 0);
     CHECK_EQ_INT(chain_errors("sqrt(u)", want_sqrt), 0);
+}
+
+// A vertex stage that runs ahead of tessellation, as a compute pass: its
+// constant double attributes, and a block of doubles it hands on
+GPU_TEST(fp64, constant_double_attributes_reach_tessellation)
+{
+    static const char *src[4] = {
+        "#version 450\n"
+        "layout(location = 0) in double a[2];\n"
+        "layout(location = 2) in dvec3 b;\n"
+        "layout(location = 3) in dvec4 c;\n"
+        "out int vok;\n"
+        "out VD { double v[2]; dvec2 w; };\n"
+        "void main() {\n"
+        "    vok = (a[0] == -1.0lf && a[1] == -5.0lf ? 1 : 0) | (b == dvec3(-2.0lf, 0.5lf, 3.0lf) ? 2 : 0) |\n"
+        "          (c == dvec4(0.25lf, -4.0lf, 1e-12lf, 8.0lf) ? 4 : 0);\n"
+        "    v[0] = a[0] + 2.0lf; v[1] = a[1] + 3.0lf; w = dvec2(7.0lf, 9.0lf);\n"
+        "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;\n"
+        "    gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n",
+        "#version 450\n"
+        "layout(vertices = 3) out;\n"
+        "in int vok[];\n"
+        "out int tok[];\n"
+        "in VD { double v[2]; dvec2 w; } vin[];\n"
+        "out TD { double v[2]; dvec2 w; } tout[];\n"
+        "void main() {\n"
+        "    gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0; gl_TessLevelOuter[2] = 1.0;\n"
+        "    gl_TessLevelInner[0] = 1.0;\n"
+        "    tok[gl_InvocationID] = vok[gl_InvocationID];\n"
+        "    tout[gl_InvocationID].v[0] = vin[0].v[0]; tout[gl_InvocationID].v[1] = vin[0].v[1];\n"
+        "    tout[gl_InvocationID].w = vin[0].w;\n"
+        "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+        "}\n",
+        "#version 450\n"
+        "layout(triangles) in;\n"
+        "in int tok[];\n"
+        "in TD { double v[2]; dvec2 w; } tin[];\n"
+        "flat out int ok;\n"
+        "void main() {\n"
+        "    ok = (tok[0] == 7 ? 1 : 0) | (tin[0].v[0] == 1.0lf ? 2 : 0) | (tin[0].v[1] == -2.0lf ? 4 : 0) | (tin[0].w == dvec2(7.0lf, 9.0lf) ? 8 : 0);\n"
+        "    gl_Position = gl_TessCoord.x * gl_in[0].gl_Position + gl_TessCoord.y * gl_in[1].gl_Position +\n"
+        "                  gl_TessCoord.z * gl_in[2].gl_Position;\n"
+        "}\n",
+        "#version 450\n"
+        "flat in int ok;\n"
+        "out vec4 o;\n"
+        "void main() { o = ok == 15 ? vec4(0, 1, 0, 1) : vec4(1, 0, float(ok) / 255.0, 1); }\n" };
+    static const GLenum stages[4] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER,
+                                      GL_FRAGMENT_SHADER };
+    GLuint prog = glCreateProgram(), vao;
+    GLint ok = 0;
+    MGLTestTarget t;
+    unsigned char c[4] = { 0 };
+    char log[2048] = "";
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLuint sh = glCreateShader(stages[i]);
+
+        glShaderSource(sh, 1, &src[i], NULL);
+        glCompileShader(sh);
+        glAttachShader(prog, sh);
+        glDeleteShader(sh);
+    }
+
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    glGetProgramInfoLog(prog, sizeof log, NULL, log);
+    CHECK_MSG(ok, "did not link: %s", log);
+
+    if (!ok || !mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+    {
+        glDeleteProgram(prog);
+        return;
+    }
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glVertexAttribL1d(0, -1.0);
+    glVertexAttribL1d(1, -5.0);
+    glVertexAttribL3d(2, -2.0, 0.5, 3.0);
+    glVertexAttribL4d(3, 0.25, -4.0, 1e-12, 8.0);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 8, 8);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 3);
+    glDrawArrays(GL_PATCHES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    unsigned char *px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 2, 2, c);
+        CHECK_MSG(c[1] > 200 && c[0] < 50, "drew %d %d %d; blue is the bits that arrived (of 15)", c[0], c[1], c[2]);
+        free(px);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&t);
+}
+
+// Plain double uniform arrays arrive whole, indexed by a value the shader
+// only knows at run time
+GPU_TEST(fp64, plain_double_arrays_index_at_run_time)
+{
+    static const char *cs =
+        "#version 430 core\nlayout(local_size_x = 1) in;\n"
+        "uniform double g_input[4];\nuniform dvec3 v3[2];\nuniform int index;\n"
+        "layout(std430, binding = 0) buffer Output { double g_output[6]; };\n"
+        "void main() { g_output[index] = abs(g_input[index]); g_output[4] = v3[1].z; g_output[5] = v3[0].y; }\n";
+    static const GLdouble data[4] = { -1.0, 2.2, 3.0, 4.1 }, v[6] = { 1, 2, 3, 4, 5, 6 };
+    GLuint p = compute_program(cs), buf;
+    GLdouble out[6] = { 0 };
+
+    CHECK(p != 0);
+    if (!p)
+        return;
+
+    glGenBuffers(1, &buf);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof out, out, GL_DYNAMIC_DRAW);
+    glUseProgram(p);
+    glUniform1dv(glGetUniformLocation(p, "g_input"), 4, data);
+    glUniform3dv(glGetUniformLocation(p, "v3"), 2, v);
+
+    for (int i = 0; i < 4; i++)
+    {
+        glUniform1i(glGetUniformLocation(p, "index"), i);
+        glDispatchCompute(1, 1, 1);
+    }
+
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+    CHECK_MSG(out[0] == 1.0 && out[1] == 2.2 && out[2] == 3.0 && out[3] == 4.1, "array read %g %g %g %g",
+              out[0], out[1], out[2], out[3]);
+    CHECK_MSG(out[4] == 6.0 && out[5] == 2.0, "dvec3 array read %g %g", out[4], out[5]);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteProgram(p);
 }
