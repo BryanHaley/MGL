@@ -182,6 +182,7 @@ static void tex_buffer_impl(GLMContext ctx, Texture *tex, GLenum internalformat,
 
     // an image unit may write it, and the texture holds its storage
     buf->data.gpu_written = GL_TRUE;
+    buf->data.texture_view = GL_TRUE;
 
     /* glTexBufferRange names its size; glTexBuffer takes the whole buffer */
     if (is_range && size <= 0)

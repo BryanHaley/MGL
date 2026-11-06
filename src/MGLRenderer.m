@@ -12651,11 +12651,14 @@ void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
 
 // New storage holding the current contents, for a CPU write that must not
 // reach GPU work already recorded; that work keeps the old storage
-- (void) renameBuffer: (Buffer *) ptr
+- (void) renameBuffer: (Buffer *) ptr keepContents: (bool) keep
 {
     id<MTLBuffer> old = (__bridge id<MTLBuffer>)(ptr->data.mtl_data);
-    id<MTLBuffer> fresh = old ? [_device newBufferWithBytes: old.contents length: old.length
-                                                    options: old.resourceOptions] : nil;
+    id<MTLBuffer> fresh = nil;
+    if (old && keep)
+        fresh = [_device newBufferWithBytes: old.contents length: old.length options: old.resourceOptions];
+    else if (old)
+        fresh = [_device newBufferWithLength: old.length options: old.resourceOptions];
 
     if (fresh == nil)
     {
@@ -12671,10 +12674,10 @@ void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
     ctx->state.dirty_bits |= DIRTY_BUFFER | DIRTY_BUFFER_BASE_STATE;
 }
 
-void mtlRenameBuffer(GLMContext glm_ctx, Buffer *buf)
+void mtlRenameBuffer(GLMContext glm_ctx, Buffer *buf, bool keep_contents)
 {
     @autoreleasepool {
-        [(__bridge id) glm_ctx->mtl_funcs.mtlObj renameBuffer: buf];
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj renameBuffer: buf keepContents: keep_contents];
     }
 }
 
@@ -13320,12 +13323,18 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
     if (tex->mtl_data == NULL || tex->view_of || tex->samples > 1 ||
         (tex->dirty_bits & (DIRTY_TEXTURE_LEVEL | DIRTY_TEXTURE_DATA)) ||
         mglFormatIsCompressed(tex->internalformat) ||
-        (mglFormatCaps(tex->internalformat) & MGL_FMT_CAP_DS_ATT) ||
         tex->faces[face].levels == NULL || w == 0 || h == 0)
         return false;
 
     TextureLevel *lvl = &tex->faces[face].levels[level];
     id<MTLTexture> texture = (__bridge id<MTLTexture>)tex->mtl_data;
+
+    // packed depth-stencil goes through uploadDepthStencil
+    if ((mglFormatCaps(tex->internalformat) & MGL_FMT_CAP_DS_ATT) &&
+        texture.pixelFormat != MTLPixelFormatDepth16Unorm &&
+        texture.pixelFormat != MTLPixelFormatDepth32Float &&
+        texture.pixelFormat != MTLPixelFormatStencil8)
+        return false;
 
     if (lvl->data == 0 || lvl->pitch == 0 || lvl->width == 0 || level >= texture.mipmapLevelCount)
         return false;

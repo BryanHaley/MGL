@@ -212,6 +212,8 @@ typedef struct BufferData_t {
     uint64_t        write_epoch;
     // bound somewhere a shader, copy or clear writes it
     GLboolean       gpu_written;
+    // a buffer texture views this storage
+    GLboolean       texture_view;
 } BufferData;
 
 #define BUFFER_IMMUTABLE_STORAGE_FLAG   0x1
@@ -1556,7 +1558,7 @@ struct GLMMetalFuncs {
 
 
     void (*mtlBufferSubData)(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, const void *ptr);
-    void (*mtlRenameBuffer)(GLMContext glm_ctx, Buffer *buf);
+    void (*mtlRenameBuffer)(GLMContext glm_ctx, Buffer *buf, bool keep_contents);
     void *(*mtlMapUnmapBuffer)(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, GLenum access, bool map);
     void (*mtlFlushBufferRange)(GLMContext glm_ctx, Buffer *buf, GLintptr offset, GLsizeiptr length);
 

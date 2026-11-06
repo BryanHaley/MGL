@@ -730,6 +730,77 @@ GPU_TEST(buffer_storage_map, updates_between_draws_keep_their_order)
     mgl_target_destroy(&t);
 }
 
+// A storage buffer that is also the indirect buffer, rewritten whole before
+// each draw: each draw keeps its own command and colour
+GPU_TEST(buffer_storage_map, whole_rewrites_of_a_storage_buffer_keep_each_draw)
+{
+    static const char *vs =
+        "#version 330 core\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 430 core\nlayout(std430, binding = 0) buffer B { vec4 c; };\n"
+        "out vec4 o;\nvoid main() { o = c; }\n";
+    // larger than the copy-on-write limit
+    enum { SIZE = 512 * 1024 };
+    static const GLfloat colors[4][4] = { { 1, 0, 0, 1 }, { 0, 1, 0, 1 }, { 0, 0, 1, 1 }, { 1, 1, 1, 1 } };
+    MGLTestTarget t;
+    GLuint prog, vbo, vao, buf;
+    unsigned char *px, q[4][4], *data;
+    char log[1024];
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    data = calloc(1, SIZE);
+    if (!prog || !data || !mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+    {
+        free(data);
+        return;
+    }
+
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    vao = mgl_fullscreen_quad(&vbo);
+    glCreateBuffers(1, &buf);
+    glNamedBufferData(buf, SIZE, data, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buf);
+    glUseProgram(prog);
+    glEnable(GL_SCISSOR_TEST);
+
+    // colour at 0, a draw command at 256 that only draws in the last pass
+    for (int k = 0; k < 4; k++)
+    {
+        GLuint cmd[4] = { k == 3 ? 6 : 0, 1, 0, 0 };
+
+        memcpy(data, colors[k], sizeof colors[k]);
+        memcpy(data + 256, cmd, sizeof cmd);
+        glNamedBufferSubData(buf, 0, SIZE, data);
+        glScissor((k & 1) * 8, (k >> 1) * 8, 8, 8);
+        if (k < 3)
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        else
+            glDrawArraysIndirect(GL_TRIANGLES, (const void *)256);
+    }
+    glDisable(GL_SCISSOR_TEST);
+
+    px = mgl_read_rgba8(&t);
+    for (int k = 0; k < 4; k++)
+        mgl_pixel_at(px, &t, (k & 1) * 8 + 4, (k >> 1) * 8 + 4, q[k]);
+    free(px);
+
+    for (int k = 0; k < 4; k++)
+        CHECK_MSG(q[k][0] == (colors[k][0] ? 255 : 0) && q[k][1] == (colors[k][1] ? 255 : 0) &&
+                  q[k][2] == (colors[k][2] ? 255 : 0),
+                  "draw %d read %d %d %d", k, q[k][0], q[k][1], q[k][2]);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &buf);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+    free(data);
+}
+
 // One vertex and index buffer refilled before each draw, the way UI
 // renderers stream their lists; every draw keeps the geometry it was given
 GPU_TEST(buffer_storage_map, refilled_vertex_and_index_buffers_keep_each_draw)

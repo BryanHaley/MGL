@@ -448,14 +448,18 @@ static bool clearTypeKnown(GLenum t)
 
 // GPU work already recorded may still read this buffer, so the CPU writes into
 // fresh storage when it can and waits for the GPU when it cannot
-static void prepareCPUWrite(GLMContext ctx, Buffer *ptr)
+static void prepareCPUWrite(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsizeiptr size)
 {
     if (ptr->data.mtl_data && ptr->data.write_epoch != ctx->gpu_epoch && ctx->idle_epoch != ctx->gpu_epoch)
     {
-        bool own_memory = !(ptr->storage_flags & (GL_CLIENT_STORAGE_BIT | GL_MAP_PERSISTENT_BIT)) && !ptr->mapped;
+        bool own_memory = !(ptr->storage_flags & (GL_CLIENT_STORAGE_BIT | GL_MAP_PERSISTENT_BIT)) &&
+                          !ptr->mapped && !ptr->data.texture_view;
+        bool whole = offset == 0 && size >= ptr->size;
 
-        if (own_memory && !ptr->data.gpu_written && ptr->data.buffer_size <= MGL_RENAME_LIMIT)
-            ctx->mtl_funcs.mtlRenameBuffer(ctx, ptr);
+        if (own_memory && whole)
+            ctx->mtl_funcs.mtlRenameBuffer(ctx, ptr, false);
+        else if (own_memory && !ptr->data.gpu_written && ptr->data.buffer_size <= MGL_RENAME_LIMIT)
+            ctx->mtl_funcs.mtlRenameBuffer(ctx, ptr, true);
         else
             ctx->mtl_funcs.mtlFlush(ctx, true);
     }
@@ -536,7 +540,7 @@ static bool clearBufferData(GLMContext ctx, Buffer *ptr, GLenum internalformat, 
         ERROR_RETURN_VALUE(GL_INVALID_VALUE, false);
     }
 
-    prepareCPUWrite(ctx, ptr);
+    prepareCPUWrite(ctx, ptr, offset, size);
 
     GLubyte *dst = (GLubyte *)ptr->data.buffer_data + offset;
 
@@ -1182,7 +1186,7 @@ void mglBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr
             ERROR_RETURN(GL_INVALID_VALUE);
         }
         
-        prepareCPUWrite(ctx, ptr);
+        prepareCPUWrite(ctx, ptr, offset, size);
         memcpy((char*)ptr->data.buffer_data + offset, data, size);
         ptr->data.dirty_bits |= DIRTY_BUFFER_DATA;
         ctx->state.dirty_bits |= DIRTY_BUFFER;
@@ -1191,7 +1195,7 @@ void mglBufferSubData(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr
     {
         if (ctx->mtl_funcs.mtlBufferSubData)
         {
-            prepareCPUWrite(ctx, ptr);
+            prepareCPUWrite(ctx, ptr, offset, size);
             ctx->mtl_funcs.mtlBufferSubData(ctx, ptr, offset, size, data);
         }
     }
@@ -1249,7 +1253,7 @@ void mglNamedBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GLsiz
             ERROR_RETURN(GL_INVALID_VALUE);
         }
         
-        prepareCPUWrite(ctx, ptr);
+        prepareCPUWrite(ctx, ptr, offset, size);
 
         // copy it to the backing and use processGLState to upload new data
         memcpy((char*)ptr->data.buffer_data + offset, data, size);
@@ -1269,7 +1273,7 @@ void mglNamedBufferSubData(GLMContext ctx, GLuint buffer, GLintptr offset, GLsiz
     }
     else
     {
-        prepareCPUWrite(ctx, ptr);
+        prepareCPUWrite(ctx, ptr, offset, size);
 
         // use use metal to do the subdata call
         ctx->mtl_funcs.mtlBufferSubData(ctx, ptr, offset, size, data);
@@ -1338,7 +1342,7 @@ void copyBufferSubData(GLMContext ctx, Buffer *src_buf, Buffer *dst_buf, GLintpt
         return;
 
     prepareCPURead(ctx, src_buf);
-    prepareCPUWrite(ctx, dst_buf);
+    prepareCPUWrite(ctx, dst_buf, writeOffset, size);
 
     src_data = ctx->mtl_funcs.mtlMapUnmapBuffer(ctx, src_buf, readOffset, size, GL_READ_ONLY, true);
     assert(src_data);
@@ -1533,7 +1537,7 @@ void *mglMapBuffer(GLMContext ctx, GLenum target, GLenum access)
     if (access == GL_READ_ONLY || access == GL_READ_WRITE)
         waitForGPUWrites(ctx);
     else
-        prepareCPUWrite(ctx, ptr);
+        prepareCPUWrite(ctx, ptr, 0, 0);
 
     ptr->mapped = GL_TRUE;
     ptr->access = access;
@@ -1717,8 +1721,10 @@ static void *mapBufferRange(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsize
 
     if ((access_flags & GL_MAP_READ_BIT) && !(access_flags & GL_MAP_UNSYNCHRONIZED_BIT))
         waitForGPUWrites(ctx);
+    else if (!(access_flags & GL_MAP_UNSYNCHRONIZED_BIT) && (access_flags & GL_MAP_INVALIDATE_BUFFER_BIT))
+        prepareCPUWrite(ctx, ptr, 0, ptr->size);
     else if (!(access_flags & GL_MAP_UNSYNCHRONIZED_BIT))
-        prepareCPUWrite(ctx, ptr);
+        prepareCPUWrite(ctx, ptr, offset, 0);
 
     ptr->access_flags = access_flags;
     ptr->mapped = GL_TRUE;

@@ -241,3 +241,72 @@ GPU_TEST(clear_texture, a_generic_compressed_texture_is_refused)
 
     glDeleteTextures(1, &tex);
 }
+
+/* ---------- clearing one cube face keeps what the GPU drew in the others ---------- */
+
+GPU_TEST(clear_texture, clearing_a_depth_cube_face_keeps_the_other_faces)
+{
+    static const char *vs =
+        "#version 330 core\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 330 core\nuniform samplerCube s;\nout vec4 o;\n"
+        "void main() { vec3 d = gl_FragCoord.x < 8.0 ? vec3(1, 0, 0) : vec3(0, 1, 0);\n"
+        "              o = vec4(texture(s, d).r); }\n";
+    MGLTestTarget t;
+    GLuint prog, vbo, vao, cube, fbo;
+    unsigned char *px, left[4], right[4];
+    float one = 1.0f;
+    char log[1024];
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "did not build: %s", log);
+    if (!prog || !mgl_target_create(&t, 16, 16, GL_RGBA8, 0))
+        return;
+
+    glGenTextures(1, &cube);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+    for (int f = 0; f < 6; f++)
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_DEPTH_COMPONENT16, 16, 16, 0,
+                     GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    // the GPU writes +X
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_CUBE_MAP_POSITIVE_X, cube, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    glViewport(0, 0, 16, 16);
+    glClearDepth(0.25);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glClearDepth(1.0);
+
+    // then +Y is cleared through the texture
+    glClearTexSubImage(cube, 0, 0, 0, 2, 16, 16, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &one);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    mgl_target_bind(&t);
+    vao = mgl_fullscreen_quad(&vbo);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "s"), 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    px = mgl_read_rgba8(&t);
+    mgl_pixel_at(px, &t, 4, 8, left);
+    mgl_pixel_at(px, &t, 12, 8, right);
+    free(px);
+
+    CHECK_MSG(left[0] >= 60 && left[0] <= 68, "+X read %d, want about 64 (0.25)", left[0]);
+    CHECK_MSG(right[0] == 255, "+Y read %d, want 255 (1.0)", right[0]);
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &cube);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
