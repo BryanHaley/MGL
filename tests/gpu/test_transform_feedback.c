@@ -968,6 +968,79 @@ GPU_TEST(transform_feedback, interface_reports_the_recorded_layout)
     glDeleteProgram(prog);
 }
 
+// xfb_stride on an array of output blocks in a geometry or evaluation shader
+// is the buffer's stride, whatever the members add up to.
+GPU_TEST(transform_feedback, a_block_stride_survives_later_stages)
+{
+    static const char *block =
+        "layout (xfb_offset = 0, xfb_stride = 128) out Goku { vec4 gohan; vec4 goten; vec4 chichi; } goku[1];\n";
+    static const char *heads[2] = {
+        "#version 460 core\nlayout(points) in;\nlayout(points, max_vertices = 1) out;\n",
+        "#version 460 core\nlayout(isolines, point_mode) in;\n",
+    };
+    static const GLenum stages[2] = { GL_GEOMETRY_SHADER, GL_TESS_EVALUATION_SHADER };
+    static const char *tails[2] = { "EmitVertex(); ", "" };
+
+    for (int i = 0; i < 2; i++)
+    {
+        char src[1024];
+        GLint stride = -1;
+
+        snprintf(src, sizeof src,
+                 "%s%sout gl_PerVertex { vec4 gl_Position; };\n"
+                 "void main() { goku[0].gohan = vec4(1); goku[0].goten = vec4(2); goku[0].chichi = vec4(3); "
+                 "gl_Position = vec4(0); %s}\n", heads[i], block, tails[i]);
+
+        GLuint prog = separableProgram(stages[i], src, NULL, 0);
+
+        CHECK(prog != 0);
+        if (prog)
+            glGetProgramResourceiv(prog, GL_TRANSFORM_FEEDBACK_BUFFER, 0, 1,
+                                   (GLenum[]){ GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE }, 1, NULL, &stride);
+        CHECK_MSG(stride == 128, "stage 0x%x: stride %d", stages[i], stride);
+        glDeleteProgram(prog);
+    }
+
+    // with the stages before it, the evaluation shader's outputs pass through
+    // a generated geometry stage
+    {
+        static const char *vs = "#version 460 core\nvoid main() { gl_Position = vec4(0); }\n";
+        static const char *tcs =
+            "#version 460 core\nlayout(vertices = 1) out;\n"
+            "void main() { gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0; }\n";
+        char tes[1024];
+        const char *srcs[3] = { vs, tcs, tes };
+        GLenum types[3] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER };
+        GLuint prog = glCreateProgram();
+        GLint ok = 0, stride = -1;
+
+        snprintf(tes, sizeof tes,
+                 "%s%svoid main() { goku[0].gohan = vec4(1); goku[0].goten = vec4(2); goku[0].chichi = vec4(3); "
+                 "gl_Position = vec4(0); }\n", heads[1], block);
+
+        for (int i = 0; i < 3; i++)
+        {
+            GLuint sh = glCreateShader(types[i]);
+
+            glShaderSource(sh, 1, &srcs[i], NULL);
+            glCompileShader(sh);
+            glAttachShader(prog, sh);
+            glDeleteShader(sh);
+        }
+
+        glProgramParameteri(prog, GL_PROGRAM_SEPARABLE, GL_TRUE);
+        glLinkProgram(prog);
+        glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        CHECK(ok);
+        glGetProgramResourceiv(prog, GL_TRANSFORM_FEEDBACK_BUFFER, 0, 1,
+                               (GLenum[]){ GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE }, 1, NULL, &stride);
+        CHECK_MSG(stride == 128, "vertex to evaluation: stride %d", stride);
+        glDeleteProgram(prog);
+    }
+
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
 // Indexed strips, loops and fans are recorded as separate primitives in the
 // order GL assembles them. A loop and a fan used to record only the vertices
 // once each, in index order.

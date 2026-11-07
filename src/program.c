@@ -3726,6 +3726,34 @@ static void linkGeometryCapture(Program *pptr)
         return;
     }
 
+    // GLSL 4.60 section 4.4.2.1: one buffer records one stream
+    {
+        int stream_of[MGL_XFB_MAX_BUFFERS];
+
+        for (int b = 0; b < MGL_XFB_MAX_BUFFERS; b++)
+            stream_of[b] = -1;
+
+        for (int i = 0; i < n; i++)
+        {
+            int b = items[i].buffer, st = (int)mglGsItemStream(&pptr->geom, &items[i]);
+
+            if (b < 0 || b >= MGL_XFB_MAX_BUFFERS)
+                continue;
+
+            if (stream_of[b] >= 0 && stream_of[b] != st)
+            {
+                pptr->link_status = GL_FALSE;
+                pptr->validate_status = GL_FALSE;
+                free(pptr->log);
+                pptr->log = strdup("link failed: outputs of different vertex streams are recorded into the "
+                                   "same transform feedback buffer\n");
+                return;
+            }
+
+            stream_of[b] = st;
+        }
+    }
+
     words = mglGsGatherTable(&pptr->geom, items, n, table, 256);
 
     if (words <= 0)

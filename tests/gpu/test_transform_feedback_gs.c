@@ -1066,3 +1066,23 @@ GPU_TEST(transform_feedback_gs, streams_draw_back_as_triangles)
     glDeleteVertexArrays(1, &vao);
     glDeleteTransformFeedbacks(1, &xfb);
 }
+
+// GLSL 4.60 section 4.4.2.1: outputs of different vertex streams recorded
+// into one buffer do not link.
+GPU_TEST(transform_feedback_gs, two_streams_in_one_buffer_do_not_link)
+{
+    static const char *vs = "#version 460 core\nvoid main() { gl_Position = vec4(0); }\n";
+    static const char *gs =
+        "#version 460 core\n"
+        "layout(points) in;\nlayout(points, max_vertices = 1) out;\n"
+        "layout (stream = 0, xfb_buffer = 1, xfb_offset = 16) out vec4 a;\n"
+        "layout (stream = 1, xfb_buffer = 1, xfb_offset = 0) out vec4 b;\n"
+        "void main() { a = vec4(1); b = vec4(2); gl_Position = vec4(0); EmitVertex(); }\n";
+    static const char *fs = "#version 460 core\nin vec4 a;\nout vec4 o;\nvoid main() { o = a; }\n";
+    char log[512];
+    GLuint prog = linkRecording(vs, gs, fs, NULL, 0, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+
+    CHECK_MSG(prog == 0, "linked although buffer 1 records streams 0 and 1");
+    glDeleteProgram(prog);
+    mgl_drain_errors();
+}

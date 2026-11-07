@@ -667,23 +667,51 @@ extern "C" int mglXfbLayout(void *shader, MglXfbItem *items, int max_items, GLin
 
         if (type.getBasicType() == glslang::EbtBlock)
         {
-            if (type.isArray())
+            bool anonymous = name.compare(0, 5, "anon@") == 0;
+            // an array of blocks repeats the members, one block's size apart
+            int elems = type.isArray() ? type.getOuterArraySize() : 1;
+            int block_bytes = 0;
+
+            if (type.isArray() && type.getArraySizes()->getNumDims() > 1)
                 continue;
 
-            bool anonymous = name.compare(0, 5, "anon@") == 0;
-
-            for (const glslang::TTypeLoc &m : *type.getStruct())
+            for (int e = 0; e < elems; e++)
             {
-                const glslang::TQualifier &mq = m.type->getQualifier();
+                std::string inst = name + (type.isArray() ? "[" + std::to_string(e) + "]" : "");
+                size_t first = found.size();
 
-                if (!mq.hasXfbOffset())
-                    continue;
+                for (const glslang::TTypeLoc &m : *type.getStruct())
+                {
+                    const glslang::TQualifier &mq = m.type->getQualifier();
 
-                std::string field = m.type->getFieldName().c_str();
-                int buffer = mq.hasXfbBuffer() ? (int)mq.layoutXfbBuffer
-                           : q.hasXfbBuffer() ? (int)q.layoutXfbBuffer : 0;
+                    if (!mq.hasXfbOffset())
+                        continue;
 
-                flatten(*m.type, anonymous ? field : name + "." + field, (int)mq.layoutXfbOffset, buffer, found);
+                    std::string field = m.type->getFieldName().c_str();
+                    int buffer = mq.hasXfbBuffer() ? (int)mq.layoutXfbBuffer
+                               : q.hasXfbBuffer() ? (int)q.layoutXfbBuffer : 0;
+
+                    flatten(*m.type, anonymous ? field : inst + "." + field,
+                            (int)mq.layoutXfbOffset + e * block_bytes, buffer, found);
+                }
+
+                if (e == 0)
+                {
+                    bool wide = false;
+
+                    for (size_t i = first; i < found.size(); i++)
+                    {
+                        int end = found[i].offset + found[i].components * (found[i].kind == 'd' ? 8 : 4);
+
+                        block_bytes = end > block_bytes ? end : block_bytes;
+                        wide = wide || found[i].kind == 'd';
+                    }
+
+                    if (first < found.size())
+                        block_bytes -= found[first].offset;
+                    if (wide)
+                        block_bytes = (block_bytes + 7) / 8 * 8;
+                }
             }
         }
         else if (q.hasXfbOffset())

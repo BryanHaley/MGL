@@ -417,6 +417,150 @@ GPU_TEST(fp64, double_vertex_attributes_arrive_whole)
     mgl_target_destroy(&t);
 }
 
+// Two double inputs at the same location and component. GL lets vertex
+// inputs alias; each became its own Metal attribute at the same index, which
+// Metal refused. Component 2 is the second double of the location.
+GPU_TEST(fp64, aliased_double_inputs_share_a_location)
+{
+    static const char *vs =
+        "#version 450\n"
+        "layout(location = 1, component = 2) in double gohan;\n"
+        "layout(location = 1, component = 2) in double goten;\n"
+        "layout(location = 0) in vec2 p;\n"
+        "flat out int ok;\n"
+        "void main() {\n"
+        "  ok = gohan == 0.25lf ? 1 : 0;\n"
+        "  gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const char *fs =
+        "#version 450\n"
+        "flat in int ok;\n"
+        "out vec4 o;\n"
+        "void main() { o = ok == 1 ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1); }\n";
+    static const float tri[] = { -1, -1,  3, -1,  -1, 3 };
+    GLdouble d[3][2] = { { 5.0, 0.25 }, { 5.0, 0.25 }, { 5.0, 0.25 } };
+    GLuint prog, vao, bufs[2];
+    MGLTestTarget t;
+    unsigned char c[4] = { 0 };
+    unsigned char *px;
+    char log[2048];
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "aliased double inputs did not build: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(2, bufs);
+
+    glBindBuffer(GL_ARRAY_BUFFER, bufs[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+
+    glBindBuffer(GL_ARRAY_BUFFER, bufs[1]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof d, d, GL_STATIC_DRAW);
+    glVertexAttribLPointer(1, 2, GL_DOUBLE, 0, NULL);
+    glEnableVertexAttribArray(1);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 8, 8);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 4, 4, c);
+        CHECK_MSG(c[1] > 200 && c[0] < 50, "gohan did not read the second double of location 1");
+        free(px);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(2, bufs);
+    mgl_target_destroy(&t);
+}
+
+// A dvec3 or dvec4 input needs a second Metal attribute for its last
+// doubles. That one was 16 + the location, past Metal's 31 for location 15.
+GPU_TEST(fp64, wide_double_inputs_fit_at_the_last_locations)
+{
+    static const char *vs =
+        "#version 450\n"
+        "layout(location = 0) in vec2 p;\n"
+        "layout(location = 14) in dvec3 a;\n"
+        "layout(location = 15) in dvec4 b;\n"
+        "flat out int ok;\n"
+        "void main() {\n"
+        "  ok = a == dvec3(1.5lf, 2.5lf, 3.5lf) && b == dvec4(4.0lf, 5.0lf, 6.0lf, 7.0lf) ? 1 : 0;\n"
+        "  gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const char *fs =
+        "#version 450\n"
+        "flat in int ok;\n"
+        "out vec4 o;\n"
+        "void main() { o = ok == 1 ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1); }\n";
+    static const float tri[] = { -1, -1,  3, -1,  -1, 3 };
+    GLdouble d[3][3] = { { 1.5, 2.5, 3.5 }, { 1.5, 2.5, 3.5 }, { 1.5, 2.5, 3.5 } };
+    GLuint prog, vao, bufs[2];
+    MGLTestTarget t;
+    unsigned char c[4] = { 0 };
+    unsigned char *px;
+    char log[2048];
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "wide double inputs did not build: %s", log);
+
+    if (!prog || !mgl_target_create(&t, 8, 8, GL_RGBA8, 0))
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(2, bufs);
+
+    glBindBuffer(GL_ARRAY_BUFFER, bufs[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+
+    glBindBuffer(GL_ARRAY_BUFFER, bufs[1]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof d, d, GL_STATIC_DRAW);
+    glVertexAttribLPointer(14, 3, GL_DOUBLE, 0, NULL);
+    glEnableVertexAttribArray(14);
+    glVertexAttribL4d(15, 4.0, 5.0, 6.0, 7.0);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 8, 8);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 4, 4, c);
+        CHECK_MSG(c[1] > 200 && c[0] < 50, "the dvec3 at 14 or the dvec4 at 15 read wrong");
+        free(px);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(2, bufs);
+    mgl_target_destroy(&t);
+}
+
 // One double built-in on a dvec2 uniform, read back as a double
 static double run_uniform(const char *expr, double a, double b)
 {

@@ -132,6 +132,19 @@ static GLuint doubleInputRowsAt(Program *program, GLuint location)
     return 0;
 }
 
+// Where the third and fourth doubles of a dvec3 or dvec4 input come in: the
+// k-th such location gets 16 + k, as SPIRV-Cross's fp64_high_attribute() has it.
+static GLuint doubleHighAttribute(Program *program, GLuint location)
+{
+    GLuint at = 16;
+
+    for (GLuint l = 0; l < location; l++)
+        if (doubleInputRowsAt(program, l) > 2)
+            at++;
+
+    return at;
+}
+
 
 typedef struct SyncList_t {
     GLuint count;
@@ -9003,7 +9016,7 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
         si.indexBufferIndex = MGL_TESS_INDEX_INDEX;
     }
 
-    // a double attribute keeps its second half at 16 + i
+    // a double attribute keeps its second half at 16 and up
     for (int i = 0; i < 31; i++)
     {
         if (vd.attributes[i].format == MTLVertexFormatInvalid)
@@ -9114,7 +9127,15 @@ static MTLPrimitiveType cullDrawPrimitive(GLenum mode)
            length: MGL_CONSTANT_ATTRIB_STRIDE
           atIndex: MGL_TESS_CONSTANTS_INDEX];
 
-    [self bindTessBuffers: &ctx->state.vertex_buffer_map_list stage: _VERTEX_SHADER toComputeEncoder: enc];
+    // GL reads instance element baseinstance + instance / divisor; Metal would
+    // divide the base too, so per-instance slots start at the base instead
+    BufferMapList list = ctx->state.vertex_buffer_map_list;
+
+    for (GLuint i = 0; i < list.count; i++)
+        if (list.buffers[i].divisor && !list.buffers[i].constant_step)
+            list.buffers[i].offset += (GLintptr)(_stageBaseInstance * list.buffers[i].layout_stride);
+
+    [self bindTessBuffers: &list stage: _VERTEX_SHADER toComputeEncoder: enc];
 }
 
 // glDrawElements into a tessellating program: the vertex kernel fetches its
@@ -9607,7 +9628,7 @@ static const char *mgl_isoline_levels_msl =
 
     // [[stage_in]] on a kernel fetches nothing until it is told which slice of
     // the vertex buffers to read, which is where the first vertex comes in.
-    [enc setStageInRegion: MTLRegionMake2D((NSUInteger)(first > 0 ? first : 0), _stageBaseInstance,
+    [enc setStageInRegion: MTLRegionMake2D((NSUInteger)(first > 0 ? first : 0), 0,
                                            (NSUInteger)count, (NSUInteger)instances)];
 
     [enc dispatchThreads: MTLSizeMake((NSUInteger)count, (NSUInteger)instances, 1)
@@ -10022,22 +10043,27 @@ static MTLWinding mtlWindingFor(const Program *p)
             vertexDescriptor.attributes[i].format = format;
 
             // a dvec3 or dvec4 is still one GL location; its last doubles
-            // come in at 16 + the location, where the shader looks for them
-            if (is_double && VAO_ATTRIB_STATE(i).size > 2)
+            // come in at doubleHighAttribute(), where the shader looks for them
+            GLuint high = doubleHighAttribute(ctx->state.program, (GLuint)i);
+
+            // past attribute 30 the shader did not compile anyway
+            if (high > 30)
+                ;
+            else if (is_double && doubleInputRowsAt(ctx->state.program, (GLuint)i) > 2 && VAO_ATTRIB_STATE(i).size > 2)
             {
-                vertexDescriptor.attributes[16 + i].bufferIndex = slot->buffer_base_index;
-                vertexDescriptor.attributes[16 + i].offset = attrib_base - slot->offset + 16;
-                vertexDescriptor.attributes[16 + i].format = VAO_ATTRIB_STATE(i).size == 4 ? MTLVertexFormatUInt4
-                                                                                           : MTLVertexFormatUInt2;
+                vertexDescriptor.attributes[high].bufferIndex = slot->buffer_base_index;
+                vertexDescriptor.attributes[high].offset = attrib_base - slot->offset + 16;
+                vertexDescriptor.attributes[high].format = VAO_ATTRIB_STATE(i).size == 4 ? MTLVertexFormatUInt4
+                                                                                         : MTLVertexFormatUInt2;
             }
             // the shader wants more than the array gives: z and w are 0 and 1
             else if (is_double && doubleInputRowsAt(ctx->state.program, (GLuint)i) > 2)
             {
                 GLuint rows = doubleInputRowsAt(ctx->state.program, (GLuint)i);
 
-                vertexDescriptor.attributes[16 + i].bufferIndex = MGL_CONSTANT_ATTRIB_BUFFER_INDEX;
-                vertexDescriptor.attributes[16 + i].offset = MGL_CONSTANT_ATTRIB_DEFAULT_D + 16;
-                vertexDescriptor.attributes[16 + i].format = rows == 4 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
+                vertexDescriptor.attributes[high].bufferIndex = MGL_CONSTANT_ATTRIB_BUFFER_INDEX;
+                vertexDescriptor.attributes[high].offset = MGL_CONSTANT_ATTRIB_DEFAULT_D + 16;
+                vertexDescriptor.attributes[high].format = rows == 4 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
                 vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stride = MGL_CONSTANT_ATTRIB_STRIDE;
                 vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stepRate = 0;
                 vertexDescriptor.layouts[MGL_CONSTANT_ATTRIB_BUFFER_INDEX].stepFunction = MTLVertexStepFunctionConstant;
@@ -10086,11 +10112,13 @@ static MTLWinding mtlWindingFor(const Program *p)
                 vertexDescriptor.attributes[i].offset = MGL_CONSTANT_ATTRIB_FLOATS + i * 32;
                 vertexDescriptor.attributes[i].format = rows >= 2 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
 
-                if (rows > 2)
+                if (rows > 2 && doubleHighAttribute(ctx->state.program, (GLuint)i) <= 30)
                 {
-                    vertexDescriptor.attributes[16 + i].bufferIndex = MGL_CONSTANT_ATTRIB_BUFFER_INDEX;
-                    vertexDescriptor.attributes[16 + i].offset = MGL_CONSTANT_ATTRIB_FLOATS + i * 32 + 16;
-                    vertexDescriptor.attributes[16 + i].format = rows == 4 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
+                    GLuint high = doubleHighAttribute(ctx->state.program, (GLuint)i);
+
+                    vertexDescriptor.attributes[high].bufferIndex = MGL_CONSTANT_ATTRIB_BUFFER_INDEX;
+                    vertexDescriptor.attributes[high].offset = MGL_CONSTANT_ATTRIB_FLOATS + i * 32 + 16;
+                    vertexDescriptor.attributes[high].format = rows == 4 ? MTLVertexFormatUInt4 : MTLVertexFormatUInt2;
                 }
             }
 

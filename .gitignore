@@ -27,3 +27,16 @@ src/gl_es.c
 src/glm_dispatch.c
 include/glm_dispatch.h
 include/mgl.h
+
+# shader, CTS and debugger leftovers
+*.spv
+*.msl
+*.metal
+*.air
+*.metallib
+*.qpa
+*.log
+*.gputrace
+*.dSYM/
+*.o
+.llminal/

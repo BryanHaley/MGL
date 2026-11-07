@@ -257,3 +257,214 @@ GPU_TEST(varying_layouts, a_vertex_stage_that_only_writes_a_buffer_still_runs)
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(1, &ssbo);
 }
+
+/* ---------- arrays of arrays ---------- */
+
+// A plain array of arrays and a block array of arrays, each element one
+// location with the last subscript fastest. Both were refused at link.
+GPU_TEST(varying_layouts, arrays_of_arrays_cross_the_stage_interface)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out float v[2][3];\n"
+        "out B { float f; } b[2][2];\n"
+        "void main() {\n"
+        "  for (int i = 0; i < 2; i++)\n"
+        "    for (int j = 0; j < 3; j++) v[i][j] = float(i * 3 + j) / 10.0;\n"
+        "  b[0][0].f = 0.1; b[0][1].f = 0.2; b[1][0].f = 0.3; b[1][1].f = 0.4;\n"
+        "  gl_Position = vec4(p, 0.0, 1.0);\n"
+        "}\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "in float v[2][3];\n"
+        "in B { float f; } b[2][2];\n"
+        "out vec4 o;\n"
+        "void main() {\n"
+        "  bool ok = true;\n"
+        "  for (int i = 0; i < 2; i++)\n"
+        "    for (int j = 0; j < 3; j++) ok = ok && abs(v[i][j] - float(i * 3 + j) / 10.0) < 0.001;\n"
+        "  bool okb = abs(b[0][1].f - 0.2) < 0.001 && abs(b[1][0].f - 0.3) < 0.001;\n"
+        "  o = vec4(ok ? 1.0 : 0.0, okb ? 1.0 : 0.0, 0.0, 1.0);\n"
+        "}\n";
+    static const float tri[] = { -1.0f, -1.0f,  3.0f, -1.0f,  -1.0f, 3.0f };
+    MGLTestTarget t;
+    GLuint prog, vao = 0, vbo = 0;
+    unsigned char *px, c[4];
+    char log[2048];
+
+    prog = linkVF(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "arrays-of-arrays program did not link: %s", log);
+
+    if (!prog) return;
+
+    if (!mgl_target_create(&t, W, H, GL_RGBA8, 0)) { glDeleteProgram(prog); SKIP("no target"); }
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, W, H);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, W / 2, H / 2, c);
+        CHECK_MSG(c[0] == 255, "plain array of arrays arrived wrong");
+        CHECK_MSG(c[1] == 255, "block array of arrays arrived wrong");
+        free(px);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+}
+
+/* ---------- locations ---------- */
+
+// Draws a covering triangle with the program, or with the bound pipeline when
+// prog is 0, and returns the centre pixel's green.
+static int centreGreen(GLuint prog)
+{
+    static const float tri[] = { -1.0f, -1.0f,  3.0f, -1.0f,  -1.0f, 3.0f };
+    MGLTestTarget t;
+    GLuint vao = 0, vbo = 0;
+    unsigned char *px, c[4] = { 0 };
+
+    if (!mgl_target_create(&t, W, H, GL_RGBA8, 0))
+        return -1;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, W, H);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(prog);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, W / 2, H / 2, c);
+        free(px);
+    }
+
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    mgl_target_destroy(&t);
+
+    return c[1];
+}
+
+// A dvec4 takes two locations. An input with no location was handed the
+// dvec4's second one.
+GPU_TEST(varying_layouts, an_unlocated_varying_skips_both_locations_of_a_dvec4)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "layout(location = 0) flat out dvec4 d;\n"
+        "flat out uint r;\n"
+        "void main() { d = dvec4(1.0, 2.0, 3.0, 4.0); r = 7u; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "layout(location = 0) flat in dvec4 d;\n"
+        "flat in uint r;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(0.0, d == dvec4(1.0, 2.0, 3.0, 4.0) && r == 7u ? 1.0 : 0.0, 0.0, 1.0); }\n";
+    char log[2048];
+    GLuint prog = linkVF(vs, fs, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "did not link: %s", log);
+    if (prog)
+        CHECK_EQ_INT(centreGreen(prog), 255);
+    glDeleteProgram(prog);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// An array of one struct lost its [0] when its members were unpacked, and a
+// struct member's location was not reported.
+GPU_TEST(varying_layouts, an_array_of_one_struct_crosses_and_reports_member_locations)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "struct S { float a; vec2 b; };\n"
+        "layout(location = 0) in vec2 p;\n"
+        "layout(location = 3) out S s[1];\n"
+        "void main() { s[0].a = 0.25; s[0].b = vec2(0.5, 0.75); gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "struct S { float a; vec2 b; };\n"
+        "layout(location = 3) in S s[1];\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(0.0, s[0].a == 0.25 && s[0].b == vec2(0.5, 0.75) ? 1.0 : 0.0, 0.0, 1.0); }\n";
+    char log[2048];
+    GLuint prog = linkVF(vs, fs, log, sizeof log);
+    GLuint sep;
+
+    CHECK_MSG(prog != 0, "did not link: %s", log);
+    if (prog)
+        CHECK_EQ_INT(centreGreen(prog), 255);
+    glDeleteProgram(prog);
+
+    sep = glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &fs);
+    CHECK_EQ_INT(glGetProgramResourceLocation(sep, GL_PROGRAM_INPUT, "s[0].a"), 3);
+    CHECK_EQ_INT(glGetProgramResourceLocation(sep, GL_PROGRAM_INPUT, "s[0].b"), 4);
+    glDeleteProgram(sep);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}
+
+// A block member's own location wins over counting on from the block's.
+// Separate programs match by location, so a miscount reads the wrong value.
+GPU_TEST(varying_layouts, a_block_member_keeps_its_own_location)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "out gl_PerVertex { vec4 gl_Position; };\n"
+        "layout(location = 4) out B { vec4 fifth; layout(location = 2) vec4 third; vec4 fourth; } b;\n"
+        "void main() { b.fifth = vec4(5); b.third = vec4(3); b.fourth = vec4(4); gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "layout(location = 2) in vec4 third;\n"
+        "layout(location = 3) in vec4 fourth;\n"
+        "layout(location = 4) in vec4 fifth;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(0.0, third.x == 3.0 && fourth.x == 4.0 && fifth.x == 5.0 ? 1.0 : 0.0, 0.0, 1.0); }\n";
+    GLuint v = glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &vs);
+    GLuint f = glCreateShaderProgramv(GL_FRAGMENT_SHADER, 1, &fs);
+    GLuint pipe = 0;
+
+    glGenProgramPipelines(1, &pipe);
+    glUseProgramStages(pipe, GL_VERTEX_SHADER_BIT, v);
+    glUseProgramStages(pipe, GL_FRAGMENT_SHADER_BIT, f);
+    glBindProgramPipeline(pipe);
+    CHECK_EQ_INT(centreGreen(0), 255);
+    glBindProgramPipeline(0);
+    glDeleteProgramPipelines(1, &pipe);
+    glDeleteProgram(v);
+    glDeleteProgram(f);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+}

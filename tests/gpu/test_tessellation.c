@@ -1067,3 +1067,140 @@ GPU_TEST(tessellation, evaluation_reads_exact_levels)
     glDeleteBuffers(1, &buf);
     glDeleteVertexArrays(1, &vao);
 }
+
+// GL reads instanced element baseinstance + instance / divisor. The vertex
+// stage that runs ahead of tessellation divided the base instance too.
+GPU_TEST(tessellation, base_instance_is_not_divided)
+{
+    static const char *vs =
+        "#version 460 core\n"
+        "layout(location = 0) in vec2 p;\n"
+        "layout(location = 1) in float inst;\n"
+        "layout(std430, binding = 0) buffer Out { float got[]; };\n"
+        "void main() { got[gl_InstanceID] = inst; gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *tcs =
+        "#version 460 core\n"
+        "layout(vertices = 1) out;\n"
+        "void main() { gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0; }\n";
+    static const char *tes =
+        "#version 460 core\n"
+        "layout(isolines, point_mode) in;\n"
+        "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const GLfloat verts[2] = { 0.0f, 0.0f };
+    static const GLfloat insts[6] = { 10, 11, 12, 13, 14, 15 };
+    GLfloat got[4] = { -1, -1, -1, -1 };
+    MGLTestTarget t;
+    GLuint vao, vbo[2], ssbo;
+    char log[1024];
+    GLuint prog = linkStages(vs, tcs, tes, FS, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "did not link: %s", log);
+    if (!prog)
+        return;
+
+    if (!mgl_target_create(&t, 8, 8, GL_RGBA8, 0)) { glDeleteProgram(prog); SKIP("no target"); }
+
+    mgl_target_bind(&t);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(2, vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof verts, verts, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof insts, insts, GL_STATIC_DRAW);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 0, NULL);
+    glVertexAttribDivisor(1, 2);
+    glEnableVertexAttribArray(1);
+
+    glGenBuffers(1, &ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof got, got, GL_DYNAMIC_COPY);
+
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 1);
+    glDrawArraysInstancedBaseInstance(GL_PATCHES, 0, 1, 4, 2);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof got, got);
+
+    CHECK_MSG(got[0] == 12 && got[1] == 12 && got[2] == 13 && got[3] == 13,
+              "instances read %g %g %g %g, want 12 12 13 13", got[0], got[1], got[2], got[3]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(2, vbo);
+    glDeleteBuffers(1, &ssbo);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&t);
+}
+
+// Point mode draws through a geometry stage MGL writes. It copied a struct
+// output whole without the struct's definition.
+GPU_TEST(tessellation, a_struct_output_passes_through_point_mode)
+{
+    static const char *vs =
+        "#version 460 core\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *tcs =
+        "#version 460 core\n"
+        "layout(vertices = 1) out;\n"
+        "void main() { gl_TessLevelOuter[0] = 1.0; gl_TessLevelOuter[1] = 1.0; }\n";
+    static const char *tes =
+        "#version 460 core\n"
+        "layout(isolines, point_mode) in;\n"
+        "struct Inner { float a; vec2 b; };\n"
+        "struct Outer { Inner i; float c; };\n"
+        "flat out Outer s;\n"
+        "void main() { s.i = Inner(0.25, vec2(0.5, 0.75)); s.c = 1.0; gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+    static const char *fs =
+        "#version 460 core\n"
+        "struct Inner { float a; vec2 b; };\n"
+        "struct Outer { Inner i; float c; };\n"
+        "flat in Outer s;\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(0.0, s.i.a == 0.25 && s.i.b.y == 0.75 && s.c == 1.0 ? 1.0 : 0.0, 0.0, 1.0); }\n";
+    static const GLfloat verts[2] = { 0.0f, 0.0f };
+    MGLTestTarget t;
+    GLuint vao, vbo;
+    unsigned char *px, c[4] = { 0 };
+    char log[1024];
+    GLuint prog = linkStages(vs, tcs, tes, fs, log, sizeof log);
+
+    CHECK_MSG(prog != 0, "did not link: %s", log);
+    if (!prog)
+        return;
+
+    if (!mgl_target_create(&t, 9, 9, GL_RGBA8, 0)) { glDeleteProgram(prog); SKIP("no target"); }
+
+    mgl_target_bind(&t);
+    glViewport(0, 0, 9, 9);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof verts, verts, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray(0);
+    glUseProgram(prog);
+    glPatchParameteri(GL_PATCH_VERTICES, 1);
+    glDrawArrays(GL_PATCHES, 0, 1);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 4, 4, c);
+        CHECK_MSG(c[1] > 200 && c[0] < 60, "centre = %d,%d,%d - want green", c[0], c[1], c[2]);
+        free(px);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    mgl_target_destroy(&t);
+}
