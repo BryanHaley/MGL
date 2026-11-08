@@ -14,6 +14,11 @@
 #include <dlfcn.h>
 #include "MGLRenderer.h"
 
+// Apple's GL headers, which GLFW includes, stop before GL 4.6
+#ifndef GL_CONTEXT_FLAG_NO_ERROR_BIT
+#define GL_CONTEXT_FLAG_NO_ERROR_BIT 0x00000008
+#endif
+
 #include <unistd.h>
 #include <math.h>
 
@@ -21,6 +26,12 @@
 #define GL_UNSIGNED_INT_8_8_8_8_REV       0x8367
 #define GL_DEPTH_COMPONENT                0x1902
 #define GL_FLOAT                          0x1406
+#ifndef GL_STENCIL_INDEX8
+#define GL_STENCIL_INDEX8                 0x8D48
+#endif
+#ifndef GL_UNSIGNED_BYTE
+#define GL_UNSIGNED_BYTE                  0x1401
+#endif
 
 
 GLMContext createGLMContext(GLenum format, GLenum type,
@@ -201,23 +212,28 @@ GLFWbool _glfwCreateContextMGL(_GLFWwindow* window,
         return GLFW_FALSE;
     }
 
-    if (ctxconfig->major < 4)
+    if (ctxconfig->share)
     {
         _glfwInputError(GLFW_VERSION_UNAVAILABLE,
-                        "MGL: OpenGL 4.6 and above supported on MGL");
+                        "MGL: contexts can't share objects yet");
         return GLFW_FALSE;
     }
 
-    if (ctxconfig->minor < 6)
+    // every request up to 4.6 gets 4.6
+    if (ctxconfig->major > 4 || (ctxconfig->major == 4 && ctxconfig->minor > 6))
     {
         _glfwInputError(GLFW_VERSION_UNAVAILABLE,
-                        "MGL: OpenGL 4.6 and above supported on MGL");
+                        "MGL: OpenGL %i.%i is newer than MGL's 4.6",
+                        ctxconfig->major, ctxconfig->minor);
         return GLFW_FALSE;
     }
+
+    const GLFWbool stencil = fbconfig->stencilBits > 0;
 
     window->context.mgl.ctx = createGLMContext(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
                                                GL_DEPTH_COMPONENT, GL_FLOAT,
-                                               0, 0);
+                                               stencil ? GL_STENCIL_INDEX8 : 0,
+                                               stencil ? GL_UNSIGNED_BYTE : 0);
     assert(window->context.mgl.ctx);
 
     if (ctxconfig->noerror || ctxconfig->debug)
@@ -234,6 +250,12 @@ GLFWbool _glfwCreateContextMGL(_GLFWwindow* window,
     // must be a setter: without a layer-backed view the CAMetalLayer below
     // is never composited and the window just stays black
     [window->ns.view setWantsLayer:YES];
+
+    // MGL renders at Retina scale only for a view that asks, as NSGL does
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [window->ns.view setWantsBestResolutionOpenGLSurface:window->ns.retina];
+#pragma clang diagnostic pop
 
     MGLRenderer *renderer = [[MGLRenderer alloc] init];
     assert(renderer);

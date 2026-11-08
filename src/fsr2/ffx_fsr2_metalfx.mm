@@ -17,8 +17,8 @@
  * MGL
  *
  * FidelityFX FSR 2's API, for OpenGL apps on MGL, with Apple's MetalFX
- * temporal scaler doing the upscaling instead of AMD's shaders. Built as
- * ffx_fsr2_api_x64 and ffx_fsr2_api_gl_x64, the names AMD's build uses.
+ * temporal scaler doing the upscaling instead of AMD's shaders. One library,
+ * libffx_fsr2_api, holds the functions AMD splits between its core and GL ones.
  *
  * The jitter, quality-mode, format and RCAS code follows AMD's FSR 2.2
  * (MIT licence, Copyright (c) 2022-2023 Advanced Micro Devices, Inc.).
@@ -328,6 +328,12 @@ FfxErrorCode ffxFsr2ContextDispatch(FfxFsr2Context *context, const FfxFsr2Dispat
             [enc endEncoding];
         }
 
+        // before macOS 14.4 MetalFX has no reactive mask, and it is left out
+        if (@available(macOS 14.4, *)) {
+        } else {
+            reactive = nil;
+        }
+
         MTLPixelFormat mask = reactive ? reactive.pixelFormat : MTLPixelFormatInvalid;
         bool contentScale = rw != mw || rh != mh || (flags & FFX_FSR2_ENABLE_DYNAMIC_RESOLUTION);
 
@@ -352,19 +358,29 @@ FfxErrorCode ffxFsr2ContextDispatch(FfxFsr2Context *context, const FfxFsr2Dispat
 
             if (contentScale) {
                 d.inputContentPropertiesEnabled = YES;
-                d.inputContentMinScale = [MTLFXTemporalScalerDescriptor supportedInputContentMinScaleForDevice:device];
-                d.inputContentMaxScale = [MTLFXTemporalScalerDescriptor supportedInputContentMaxScaleForDevice:device];
+
+                if (@available(macOS 14.0, *)) {
+                    d.inputContentMinScale = [MTLFXTemporalScalerDescriptor supportedInputContentMinScaleForDevice:device];
+                    d.inputContentMaxScale = [MTLFXTemporalScalerDescriptor supportedInputContentMaxScaleForDevice:device];
+                } else {
+                    d.inputContentMinScale = 1.0f;
+                    d.inputContentMaxScale = 3.0f;
+                }
             }
 
             if (reactive) {
-                d.reactiveMaskTextureEnabled = YES;
-                d.reactiveMaskTextureFormat = mask;
+                if (@available(macOS 14.4, *)) {
+                    d.reactiveMaskTextureEnabled = YES;
+                    d.reactiveMaskTextureFormat = mask;
+                }
             }
 
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 270000
             if (@available(macOS 27.0, *)) {
                 d.jitteredMotionVectorsEnabled = (flags & FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION) != 0;
                 d.outputResolutionMotionVectorsEnabled = (flags & FFX_FSR2_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS) != 0;
             }
+#endif
 
             scaler = [d newTemporalScalerWithDevice:device];
 

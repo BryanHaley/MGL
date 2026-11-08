@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * FSR 2's API on MetalFX (libffx_fsr2_api_x64): AMD's helper values and
+ * FSR 2's API on MetalFX (libffx_fsr2_api): AMD's helper values and
  * struct layout, a jittered moving scene upscaled 2x, sharpening, and the
  * reactive mask.
  */

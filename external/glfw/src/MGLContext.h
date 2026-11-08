@@ -48,8 +48,20 @@ void MGLswapBuffers(GLMContext ctx);
 // 0 turns vsync off, anything else on. NULL ctx means the current one.
 void MGLsetSwapInterval(GLMContext ctx, int interval);
 
+// GL_CONTEXT_FLAGS for the context, such as GL_CONTEXT_FLAG_NO_ERROR_BIT,
+// which stops it recording errors. NULL ctx means the current one.
+void MGLsetContextFlags(GLMContext ctx, GLuint flags);
+
 // MGLget can take NULL for the ctx, in this case it will use the current ctx
 void MGLget(GLMContext ctx, GLenum param, GLuint *data);
+
+// Metal interop. NULL ctx means the current one.
+// The id<MTLTexture> behind a GL texture, up to date with the GL work so far,
+// or NULL. It can be remade later, so look it up each time.
+void *MGLgetMetalTexture(GLMContext ctx, GLuint texture);
+// The id<MTLCommandBuffer> GL is recording into, with no encoder open. Work
+// encoded on it runs after earlier GL commands and before later ones.
+void *MGLgetMetalCommandBuffer(GLMContext ctx);
 
 #ifdef __cplusplus
 };

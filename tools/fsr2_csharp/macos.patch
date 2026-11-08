@@ -14,15 +14,31 @@ index 0c2567f..cc82114 100644
 +  </ItemGroup>
 +
  </Project>
+diff --git a/FidelityFX-FSR2-CSharpBindings/Source/FSR2.cs b/FidelityFX-FSR2-CSharpBindings/Source/FSR2.cs
+index 98565ca..b888298 100644
+--- a/FidelityFX-FSR2-CSharpBindings/Source/FSR2.cs
++++ b/FidelityFX-FSR2-CSharpBindings/Source/FSR2.cs
+@@ -7,7 +7,11 @@ namespace FFX_FSR2
+ {
+     public static unsafe partial class FSR2
+     {
++#if FFX_MACOS
++        private const string LIBRARY_NAME = "ffx_fsr2_api";
++#else
+         private const string LIBRARY_NAME = "ffx_fsr2_api_x64";
++#endif
+ 
+         private const int FFX_FSR2_CONTEXT_SIZE = 16536;
+ 
 diff --git a/FidelityFX-FSR2-CSharpBindings/Source/FSR2Types.cs b/FidelityFX-FSR2-CSharpBindings/Source/FSR2Types.cs
-index 3062923..d558bc5 100644
+index 3062923..a8894ec 100644
 --- a/FidelityFX-FSR2-CSharpBindings/Source/FSR2Types.cs
 +++ b/FidelityFX-FSR2-CSharpBindings/Source/FSR2Types.cs
 @@ -130,7 +130,11 @@ namespace FFX_FSR2
          public struct Resource
          {
              public void* _Resource;
-+#if FFX_WCHAR32
++#if FFX_MACOS
 +            public fixed uint Name[64];
 +#else
              public fixed ushort Name[64];
@@ -34,7 +50,7 @@ index 3062923..d558bc5 100644
  
          public struct ResourceBinding
          {
-+#if FFX_WCHAR32
++#if FFX_MACOS
 +            public const int SIZE = 264;
 +#else
              public const int SIZE = 136;
@@ -42,7 +58,7 @@ index 3062923..d558bc5 100644
  
              public uint SlotIndex;
              public uint ResourceIdentifier;
-+#if FFX_WCHAR32
++#if FFX_MACOS
 +            public fixed uint Name[64];
 +#else
              public fixed ushort Name[64];
@@ -54,7 +70,7 @@ index 3062923..d558bc5 100644
              public fixed uint Dimensions[3];
  
              public fixed byte SRVs[ResourceInternal.SIZE * MAX_NUM_SRVS];
-+#if FFX_WCHAR32
++#if FFX_MACOS
 +            public fixed uint SRVNames[MAX_NUM_SRVS * 64];
 +#else
              public fixed ushort SRVNames[MAX_NUM_SRVS * 64];
@@ -62,14 +78,14 @@ index 3062923..d558bc5 100644
  
              public fixed byte UAVs[ResourceInternal.SIZE * MAX_NUM_UAVS];
              public fixed uint UAVMip[MAX_NUM_UAVS];
-+#if FFX_WCHAR32
++#if FFX_MACOS
 +            public fixed uint UAVNames[MAX_NUM_UAVS * 64];
 +#else
              public fixed ushort UAVNames[MAX_NUM_UAVS * 64];
 +#endif
  
              public fixed byte CBs[ConstantBuffer.SIZE * MAX_NUM_CONST_BUFFERS];
-+#if FFX_WCHAR32
++#if FFX_MACOS
 +            public fixed uint CBNames[MAX_NUM_CONST_BUFFERS * 64];
 +#else
              public fixed ushort CBNames[MAX_NUM_CONST_BUFFERS * 64];
@@ -77,3 +93,19 @@ index 3062923..d558bc5 100644
              public fixed uint CBSlotIndex[MAX_NUM_CONST_BUFFERS];
          }
  
+diff --git a/FidelityFX-FSR2-CSharpBindings/Source/GL/GL.cs b/FidelityFX-FSR2-CSharpBindings/Source/GL/GL.cs
+index 6feea70..f70fce4 100644
+--- a/FidelityFX-FSR2-CSharpBindings/Source/GL/GL.cs
++++ b/FidelityFX-FSR2-CSharpBindings/Source/GL/GL.cs
+@@ -6,7 +6,11 @@ namespace FFX_FSR2
+     {
+         public static partial class GL
+         {
++#if FFX_MACOS
++            private const string LIBRARY_NAME = "ffx_fsr2_api";
++#else
+             private const string LIBRARY_NAME = "ffx_fsr2_api_gl_x64";
++#endif
+ 
+             [LibraryImport(LIBRARY_NAME, EntryPoint = "ffxFsr2GetScratchMemorySizeGL")]
+             public static partial nuint GetScratchMemorySize();

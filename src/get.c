@@ -23,6 +23,7 @@
 #include "mgl_log.h"
 #include "pixel_utils.h"
 #include "mgl_format_table.h"
+#include "moogl_version.h"
 
 void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data);
 GLuint textureIndexFromTarget(GLMContext ctx, GLenum target);
@@ -1164,7 +1165,7 @@ const GLubyte *mglGetString(GLMContext ctx, GLenum name)
             return (const GLubyte *)"MGL";
 
         case GL_VERSION:
-            return (const GLubyte *)"4.6.0 MGL";
+            return (const GLubyte *)"4.6.0 MooGL " MOOGL_VERSION;
 
         case GL_SHADING_LANGUAGE_VERSION:
             return (const GLubyte *)"4.60";

@@ -34,7 +34,6 @@ if (GLFW_BUILD_COCOA)
     target_sources(glfw PRIVATE cocoa_platform.h cocoa_joystick.h cocoa_init.m
                                 cocoa_joystick.m cocoa_monitor.m cocoa_window.m
                                 mgl_context.m)
-    target_include_directories(glfw PUBLIC "/usr/local/include/GL")
 endif()
 
 if (GLFW_BUILD_WIN32)
@@ -161,8 +160,7 @@ if (GLFW_BUILD_WIN32)
 endif()
 
 if (GLFW_BUILD_COCOA)
-    target_link_libraries(glfw PRIVATE "-L /usr/local/lib -lmgl"
-                                       "-framework Cocoa"
+    target_link_libraries(glfw PRIVATE "-framework Cocoa"
                                        "-framework IOKit"
                                        "-framework CoreFoundation")
 

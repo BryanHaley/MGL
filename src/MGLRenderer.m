@@ -374,6 +374,7 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
     // the depth format the open pass was made with, and whether it is only
     // there because a shader writes gl_FragDepth into a target without one
     MTLPixelFormat _encoderDepthFormat;
+    MTLPixelFormat _encoderStencilFormat;
     bool          _encoderScratchDepth;
     id<MTLTexture> _scratchDepth;
     // the element type and offset of the last element draw, as GL gave them
@@ -5957,15 +5958,15 @@ static id<MTLFunction> stageFunction(id<MTLLibrary> library, const char *entry)
 {
     id<MTLTexture> texture;
     MTLTextureDescriptor *tex_desc;
-    NSRect frame;
+    CGSize size;
 
+    // in pixels: the layer's frame is in points, half the size on Retina
     assert(_layer);
-    frame = [_layer frame];
+    size = _layer.drawableSize;
 
     tex_desc = [[MTLTextureDescriptor alloc] init];
-    tex_desc.width = frame.size.width;
-    tex_desc.height = frame.size.height;
-    tex_desc.width = frame.size.width;
+    tex_desc.width = size.width;
+    tex_desc.height = size.height;
     tex_desc.pixelFormat = pixelFormat;
     tex_desc.usage = MTLTextureUsageRenderTarget;
 
@@ -6015,7 +6016,7 @@ static id<MTLFunction> stageFunction(id<MTLLibrary> library, const char *entry)
     if (_drawBuffers[index].drawbuffer == nil)
         return true;
 
-    size = [_layer frame].size;
+    size = _layer.drawableSize;
 
     if ((GLuint)size.width != _drawBuffers[index].width)
         return false;
@@ -6095,8 +6096,8 @@ static id<MTLFunction> stageFunction(id<MTLLibrary> library, const char *entry)
 
 - (void) updateCurrentRenderEncoder
 {
-    if (ctx->state.caps.depth_test ||
-        ctx->state.caps.stencil_test)
+    // set even with both tests off, where the defaults pass everything and
+    // write nothing; otherwise the last state set stays in force
     {
         MTLDepthStencilDescriptor *dsDesc = [[MTLDepthStencilDescriptor alloc] init];
 
@@ -6335,17 +6336,6 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
             _drawable = [_layer nextDrawable];
 
         _attachedToWindowSystem = true;
-
-
-        // late init of gl scissor box on attachment to window system
-        NSRect frame;
-        frame = [_layer frame];
-
-        for (int i = 0; i < MAX_VIEWPORTS; i++)
-        {
-            ctx->state.scissor[i].width = frame.size.width;
-            ctx->state.scissor[i].height = frame.size.height;
-        }
     }
 
     _renderPassDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -6533,9 +6523,13 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
 
         _lastDefaultTarget = texture;
 
-        // attach depth
+        // attached for a pass that tests, writes or clears them; a clear with
+        // the test off still has to land
+        GLbitfield pending_clear = ctx->state.clear_framebuffer == NULL ? ctx->state.clear_bitmask : 0;
+
         if (ctx->depth_format.mtl_pixel_format &&
-            (ctx->state.caps.depth_test || fragmentWritesDepth(ctx->state.program)))
+            (ctx->state.caps.depth_test || fragmentWritesDepth(ctx->state.program) ||
+             (pending_clear & GL_DEPTH_BUFFER_BIT)))
         {
             if(_drawBuffers[mgl_drawbuffer].depthbuffer)
             {
@@ -6548,9 +6542,8 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
             }
         }
 
-        // attach stencil
         if (ctx->stencil_format.mtl_pixel_format &&
-            ctx->state.caps.stencil_test)
+            (ctx->state.caps.stencil_test || (pending_clear & GL_STENCIL_BUFFER_BIT)))
         {
             if(_drawBuffers[mgl_drawbuffer].stencilbuffer)
             {
@@ -6558,7 +6551,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
             }
             else
             {
-                stencil_texture = [self newDrawBufferWithCustomSize:ctx->depth_format.mtl_pixel_format isDepthStencil:true customSize: CGSizeMake(texture.width, texture.height) ];
+                stencil_texture = [self newDrawBufferWithCustomSize:ctx->stencil_format.mtl_pixel_format isDepthStencil:true customSize: CGSizeMake(texture.width, texture.height) ];
                 _drawBuffers[mgl_drawbuffer].stencilbuffer = stencil_texture;
             }
         }
@@ -6840,6 +6833,8 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
 
     _encoderDepthFormat = _renderPassDescriptor.depthAttachment.texture
                         ? _renderPassDescriptor.depthAttachment.texture.pixelFormat : MTLPixelFormatInvalid;
+    _encoderStencilFormat = _renderPassDescriptor.stencilAttachment.texture
+                          ? _renderPassDescriptor.stencilAttachment.texture.pixelFormat : MTLPixelFormatInvalid;
 
     // A committed buffer can't take another encoder, so swap in a fresh one
     // rather than refusing to draw for the rest of the context's life.
@@ -10386,13 +10381,20 @@ static MTLWinding mtlWindingFor(const Program *p)
     {
         pipelineStateDescriptor.colorAttachments[0].pixelFormat = ctx->pixel_format.mtl_pixel_format;
 
-        if (ctx->depth_format.format &&
-            ctx->state.caps.depth_test)
-            pipelineStateDescriptor.depthAttachmentPixelFormat = ctx->depth_format.mtl_pixel_format;
+        // whatever the open pass has attached, which a clear can add
+        if (_currentRenderEncoder)
+        {
+            pipelineStateDescriptor.depthAttachmentPixelFormat = _encoderDepthFormat;
+            pipelineStateDescriptor.stencilAttachmentPixelFormat = _encoderStencilFormat;
+        }
+        else
+        {
+            if (ctx->depth_format.format && ctx->state.caps.depth_test)
+                pipelineStateDescriptor.depthAttachmentPixelFormat = ctx->depth_format.mtl_pixel_format;
 
-        if (ctx->stencil_format.format &&
-            ctx->state.caps.stencil_test)
-            pipelineStateDescriptor.stencilAttachmentPixelFormat = ctx->stencil_format.mtl_pixel_format;
+            if (ctx->stencil_format.format && ctx->state.caps.stencil_test)
+                pipelineStateDescriptor.stencilAttachmentPixelFormat = ctx->stencil_format.mtl_pixel_format;
+        }
     }
 
     // Every pipeline in a pass names the pass's depth format, and a shader
@@ -11825,11 +11827,14 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
     if (draw_command && usesBindless(ctx->state.program, _VERTEX_SHADER, _MAX_SHADER_TYPES - 1))
         [self refreshBindless];
 
-    // A pass cannot gain a depth attachment once it is open, so a draw that
-    // needs one where the pass has none starts a new pass
-    if (draw_command && _currentRenderEncoder && _encoderDepthFormat == MTLPixelFormatInvalid &&
-        (fragmentWritesDepth(ctx->state.program) ||
-         (!ctx->state.framebuffer && ctx->state.caps.depth_test && ctx->depth_format.mtl_pixel_format)))
+    // A pass cannot gain a depth or stencil attachment once it is open, so a
+    // draw that needs one where the pass has none starts a new pass
+    if (draw_command && _currentRenderEncoder &&
+        ((_encoderDepthFormat == MTLPixelFormatInvalid &&
+          (fragmentWritesDepth(ctx->state.program) ||
+           (!ctx->state.framebuffer && ctx->state.caps.depth_test && ctx->depth_format.mtl_pixel_format))) ||
+         (_encoderStencilFormat == MTLPixelFormatInvalid &&
+          !ctx->state.framebuffer && ctx->state.caps.stencil_test && ctx->stencil_format.mtl_pixel_format)))
     {
         [self endRenderEncoding];
         ctx->state.dirty_bits |= DIRTY_VAO | DIRTY_TEX | DIRTY_RENDER_STATE;
@@ -15964,6 +15969,21 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     return _view == nil || [_view window] == nil;
 }
 
+// Retina pixels only for a view that asks for them, as with NSOpenGL; SDL
+// sets this from SDL_WINDOW_ALLOW_HIGHDPI and GLFW from its retina hint.
+// A view with no window is headless, where 2x would make GL's pixel
+// coordinates disagree with Metal's.
+static CGFloat viewScale(NSView *view)
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    BOOL retina = [view wantsBestResolutionOpenGLSurface];
+#pragma clang diagnostic pop
+    CGFloat scale = [view window] && retina ? [[view window] backingScaleFactor] : 1.0;
+
+    return scale < 1.0 ? 1.0 : scale;
+}
+
 // setting drawableSize by hand stops CAMetalLayer tracking the view, so do it here
 - (void) syncLayerSize
 {
@@ -15975,10 +15995,7 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     if (bounds.size.width < 1.0 || bounds.size.height < 1.0)
         return;
 
-    CGFloat scale = [_view window] ? [[_view window] backingScaleFactor] : 1.0;
-
-    if (scale < 1.0)
-        scale = 1.0;
+    CGFloat scale = viewScale(_view);
 
     CGSize want = CGSizeMake(bounds.size.width * scale, bounds.size.height * scale);
 
@@ -16176,13 +16193,14 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     }
 
     // Create command queue with virtualization-safe settings
-    MTLCommandQueueDescriptor *queueDescriptor = [[MTLCommandQueueDescriptor alloc] init];
+    // 64 is Metal's default
+    NSUInteger maxCommandBuffers = 64;
     if (isVirtualized) {
         MGL_NSINFO(@"MGL INFO: VIRTUALIZED AGX - Enabling virtualization-safe command queue settings");
-        queueDescriptor.maxCommandBufferCount = 16;  // Limit concurrent buffers for virtualization safety
+        maxCommandBuffers = 16;  // Limit concurrent buffers for virtualization safety
     }
 
-    _commandQueue = [_device newCommandQueueWithDescriptor:queueDescriptor];
+    _commandQueue = [_device newCommandQueueWithMaxCommandBufferCount:maxCommandBuffers];
     _barrierArmed = _renderWaited = _computeWaited = -1;
     if (!_commandQueue) {
         MGL_NSERR(@"MGL ERROR: Failed to create Metal command queue");
@@ -16218,17 +16236,22 @@ void* CppCreateMGLRendererHeadless (void *glm_ctx)
     if (bounds.size.width < 1.0 || bounds.size.height < 1.0)
         bounds = CGRectMake(0, 0, 1, 1);
 
-    // A view with no window is headless: there is no screen to scale for, and
-    // a 2x drawable makes GL's pixel coordinates disagree with Metal's.
-    CGFloat scaleFactor = [view window] ? [[view window] backingScaleFactor] : 1.0;
-
-    if (scaleFactor < 1.0)
-        scaleFactor = 1.0;
+    CGFloat scaleFactor = viewScale(view);
 
     _layer.frame = bounds;
     [_layer setContentsScale: scaleFactor];
     _layer.drawableSize = CGSizeMake(bounds.size.width * scaleFactor,
                                      bounds.size.height * scaleFactor);
+
+    // GL sizes the viewport and scissor box to the window when a context is
+    // first attached to one, in pixels
+    for (int i = 0; i < MAX_VIEWPORTS; i++)
+    {
+        glm_ctx->state.scissor[i].width = _layer.drawableSize.width;
+        glm_ctx->state.scissor[i].height = _layer.drawableSize.height;
+        glm_ctx->state.viewport[i].w = _layer.drawableSize.width;
+        glm_ctx->state.viewport[i].h = _layer.drawableSize.height;
+    }
 
     // host the layer rather than adding a sublayer, so it tracks the view
     [_view setLayer: _layer];

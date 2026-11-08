@@ -1,15 +1,18 @@
 [submodule "submodules/SPIRV-Cross"]
 	path = submodules/SPIRV-Cross
-	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+	url = https://github.com/BryanHaley/SPIRV-Cross.git
+	branch = mgl
 [submodule "submodules/IDKEngine"]
 	path = submodules/IDKEngine
-	url = https://github.com/BoyBaykiller/IDKEngine.git
+	url = https://github.com/BryanHaley/IDKEngine.git
+	branch = mgl
 [submodule "submodules/SPIRV-Headers"]
 	path = submodules/SPIRV-Headers
 	url = https://github.com/KhronosGroup/SPIRV-Headers.git
 [submodule "submodules/VK-GL-CTS"]
 	path = submodules/VK-GL-CTS
-	url = https://github.com/KhronosGroup/VK-GL-CTS.git
+	url = https://github.com/BryanHaley/VK-GL-CTS.git
+	branch = mgl
 [submodule "submodules/OpenCL-CTS"]
 	path = submodules/OpenCL-CTS
 	url = https://github.com/KhronosGroup/OpenCL-CTS.git
@@ -21,4 +24,9 @@
 	url = https://gitlab.freedesktop.org/mesa/glu.git
 [submodule "submodules/glslang"]
 	path = submodules/glslang
-	url = https://github.com/KhronosGroup/glslang.git
+	url = https://github.com/BryanHaley/glslang.git
+	branch = mgl
+[submodule "submodules/SDL2"]
+	path = submodules/SDL2
+	url = https://github.com/BryanHaley/SDL.git
+	branch = mgl

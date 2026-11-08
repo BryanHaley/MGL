@@ -6,7 +6,6 @@ SHELL := /bin/bash
 # on M1 monterey, comment out the following line
 SDK_ROOT = $(shell xcrun --sdk macosx --show-sdk-path)
 
-# lets only install from external, devs complained about brew and we want the latest build from spirv
 # SPIRV-Cross now comes from submodules/ -- current upstream plus the fp64
 # emulation. The old external/ fork still builds: override these three on the
 # make line to point back at it.
@@ -54,11 +53,13 @@ CFLAGS += -I$(spirv_cross_config_include_path)
 CFLAGS += -I$(spirv_tools_include_path)
 CFLAGS += -I$(glslang_include_path)
 
-# lets only install from external, devs complained about brew
-# CFLAGS += $(shell pkg-config --cflags SPIRV-Tools)
-# CFLAGS += $(shell pkg-config --cflags glm)
 
 CFLAGS += -Iinclude
+
+# MooGL's version. Local builds are 0.1.0; a release passes the tag's.
+MOOGL_VERSION ?= 0.1.0
+moogl_version_number := $(shell echo '$(MOOGL_VERSION)' | sed 's/[^0-9.].*//')
+CFLAGS += -I$(build_dir)/include
 CFLAGS += -Iinclude/GL # "glcorearb.h"
 CFLAGS += -DENABLE_OPT=0 -DSPIRV_CROSS_C_API_MSL=1 -DSPIRV_CROSS_C_API_GLSL=1 -DSPIRV_CROSS_C_API_CPP=1 -DSPIRV_CROSS_C_API_REFLECT=1
 
@@ -145,8 +146,6 @@ LIBS += external/SPIRV-Tools/build/source/opt/libSPIRV-Tools-opt.a
 
 default: lib
 
-brew_prefix := $(shell brew --prefix)
-
 # --- generated sources ---------------------------------------------------
 # These five come out of tools/spec_parser and are not checked in. They are
 # listed by hand rather than picked up by the wildcard below, because on a
@@ -221,49 +220,6 @@ $(generated): $(gen_stamp)
 
 generate: $(generated)
 
-# Define the directories and repositories
-# SPIRV-Cross, SPIRV-Headers and glslang are submodules; the repos below are cloned
-EXT_DIRS = ./external/OpenGL-Registry \
-           ./external/SPIRV-Tools \
-           ./external/ezxml
-
-REPOS = https://github.com/KhronosGroup/OpenGL-Registry.git \
-        https://github.com/KhronosGroup/SPIRV-Tools.git \
-        https://github.com/lxfontes/ezxml.git
-
-# Simplified index_of function - find position of directory in EXT_DIRS
-define index_of
-$(strip $(1))
-endef
-
-# Function to get the corresponding repository URL for a directory
-# Simplified mapping for common directories
-define get_repo_url
-$(if $(filter $(1),./external/OpenGL-Registry),https://github.com/KhronosGroup/OpenGL-Registry.git, \
-$(if $(filter $(1),./external/SPIRV-Tools),https://github.com/KhronosGroup/SPIRV-Tools.git, \
-https://github.com/lxfontes/ezxml.git))
-endef
-
-# Function to check if a directory exists, and if not, clone it
-define check_and_clone
-	@echo "Resolving directory $(1)..."; \
-	INDEX=$(call index_of,$(1)); \
-	REPO=$(call get_repo_url,$(1)); \
-	echo "INDEX calculated: $$INDEX"; \
-	echo "REPO resolved: $$REPO"; \
-	if [ ! -d $(1) ]; then \
-		echo "Cloning from $$REPO into $(1)..."; \
-		git clone $$REPO $(1) --depth 1; \
-	else \
-		echo "$(1) already exists, skipping."; \
-	fi
-endef
-
-# Use the `check_and_clone` function for each directory
-$(EXT_DIRS):
-	$(call check_and_clone,$@)
-
-
 # these must match the object lists actually built, or header edits
 # silently leave stale objects with mismatched struct layouts
 deps += $(mgl_core_objs:.o=.d)
@@ -284,10 +240,22 @@ spirv_cross_archives := $(wildcard submodules/SPIRV-Cross/build/libspirv-cross-*
 mgl_toolchain_obj := $(build_dir)/src/mgl_toolchain.o
 mgl_toolchain_lib := $(build_dir)/libmoogl_toolchain.a
 
+# rewritten only when the version changes, so get.c rebuilds only then
+version_h := $(build_dir)/include/moogl_version.h
+
+$(version_h): FORCE
+	@mkdir -p $(dir $@)
+	@echo '#define MOOGL_VERSION "$(MOOGL_VERSION)"' > $@.tmp
+	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
+
+$(build_core_dir)/src/get.o $(build_es_dir)/src/get.o: $(version_h)
+
+FORCE:
+
 $(mgl_lib): $(mgl_core_objs) $(mgl_core_arc_objs) $(mgl_core_obj) $(spirv_cross_archives)
 	@mkdir -p $(dir $@)
 	$(CC) -D$(CFLAGS_GL_CORE) -dynamiclib -o $@ $(filter %.o,$^) $(LIBS) \
-		-install_name @rpath/libmoogl.dylib
+		-install_name @rpath/libmoogl.dylib -current_version $(moogl_version_number)
 	# loading dynamic library requires this
 	ln -fs $(mgl_lib) .
 
@@ -302,6 +270,10 @@ $(mgl_es_lib): $(mgl_es_objs) $(mgl_es_arc_objs) $(mgl_es_obj) $(spirv_cross_arc
 $(mgl_toolchain_lib): $(mgl_toolchain_obj)
 	@mkdir -p $(dir $@)
 	ar rcs $@ $^
+
+# GLFW's own build, made by tools/build_deps.sh; rebuilt when its sources change
+external/glfw/build/src/libglfw3.a: $(wildcard external/glfw/src/*.c external/glfw/src/*.m external/glfw/src/*.h)
+	cmake --build external/glfw/build
 
 # Build GLFW shared library from pre-built static library
 $(build_dir)/libglfw.dylib: external/glfw/build/src/libglfw3.a $(mgl_lib)
@@ -318,27 +290,36 @@ $(build_dir)/libglfw.dylib: external/glfw/build/src/libglfw3.a $(mgl_lib)
 	@echo "This enables compatibility with Minecraft mods and Prism Launcher"
 
 
-# FSR 2's API on MetalFX, under the two library names AMD's build uses. The
-# GL one only re-exports the other.
+# FSR 2's API on MetalFX: all 14 functions, AMD's core and GL ones, in one library
 fsr2_api_dir := submodules/FidelityFX-FSR2-OpenGL/src/ffx-fsr2-api
-fsr2_lib := $(build_dir)/libffx_fsr2_api_x64.dylib
-fsr2_gl_lib := $(build_dir)/libffx_fsr2_api_gl_x64.dylib
+fsr2_lib := $(build_dir)/libffx_fsr2_api.dylib
 
 $(fsr2_lib): src/fsr2/ffx_fsr2_metalfx.mm include/MGLContext.h $(mgl_lib)
 	$(CXX) -std=c++17 -O2 -fobjc-arc -DFFX_GCC -Iinclude -I$(fsr2_api_dir) \
 		-I$(fsr2_api_dir)/gl/external/glad/include -dynamiclib -o $@ $< \
 		-L$(build_dir) -lmoogl -framework Metal -framework MetalFX -framework Foundation \
-		-Wl,-rpath,@loader_path -install_name @rpath/libffx_fsr2_api_x64.dylib
+		-Wl,-rpath,@loader_path -install_name @rpath/libffx_fsr2_api.dylib -current_version $(moogl_version_number)
 
-$(fsr2_gl_lib): $(fsr2_lib)
-	echo | $(CC) -x c - -dynamiclib -o $@ -Wl,-reexport_library,$(fsr2_lib) \
-		-Wl,-rpath,@loader_path -install_name @rpath/libffx_fsr2_api_gl_x64.dylib
+fsr2: $(fsr2_lib)
 
-fsr2: $(fsr2_lib) $(fsr2_gl_lib)
+# SDL2 with a MooGL backend in place of NSOpenGL (submodules/SDL2, branch mgl),
+# installed into build/sdl2/install for its headers and CMake package
+sdl2_dir := submodules/SDL2
+sdl2_install := $(build_dir)/sdl2/install
+sdl2_lib := $(build_dir)/libSDL2-2.0.0.dylib
+
+$(sdl2_lib): $(mgl_lib) $(wildcard $(sdl2_dir)/src/video/cocoa/*.m) $(sdl2_dir)/CMakeLists.txt
+	cmake -S $(sdl2_dir) -B $(build_dir)/sdl2 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+		-DSDL_STATIC=OFF -DSDL_TEST=OFF -DCMAKE_SKIP_BUILD_RPATH=ON \
+		-DMOOGL_LIBRARY=$(abspath $(mgl_lib)) -DCMAKE_INSTALL_PREFIX=$(abspath $(sdl2_install))
+	cmake --build $(build_dir)/sdl2 --target install -j8
+	cp $(sdl2_install)/lib/libSDL2-2.0.0.dylib $@
+
+sdl2: $(sdl2_lib)
 
 # specific rules
 
-lib: $(mgl_lib) $(mgl_es_lib) $(build_dir)/libglfw.dylib $(fsr2_lib) $(fsr2_gl_lib)
+lib: $(mgl_lib) $(mgl_es_lib) $(build_dir)/libglfw.dylib $(fsr2_lib) $(sdl2_lib)
 
 toolchain: $(mgl_toolchain_lib)
 
@@ -369,7 +350,7 @@ $(test_build_dir)/gpu/test_fsr2.o: TEST_CFLAGS += -DFFX_GCC -I$(fsr2_api_dir)
 $(test_exe): $(test_objs) $(mgl_lib) $(fsr2_lib)
 	@mkdir -p $(dir $@)
 	$(CC) -arch $(shell uname -m) -o $@ $(test_objs) \
-	  -L$(build_dir) -lmoogl -lffx_fsr2_api_x64 -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
+	  -L$(build_dir) -lmoogl -lffx_fsr2_api -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
 	  -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore
 
 # --- gears demos: two ports of the classic gears, both runnable as tests ---
@@ -398,6 +379,23 @@ $(gears_gl46_exe): $(gears_build_dir)/gears_gl46.o $(gears_common_obj) $(mgl_lib
 	$(CC) -arch $(shell uname -m) -o $@ $(gears_build_dir)/gears_gl46.o $(gears_common_obj) $(GEARS_LIBS)
 
 gears: $(gears_compat_exe) $(gears_gl46_exe)
+
+# Needs a logged-in session: these open real windows, which the suite does not
+window_libs := -L$(build_dir) -lmoogl -Wl,-rpath,$(CURDIR)/$(build_dir)
+
+$(build_dir)/test_window: tests/window/test_window.c $(mgl_lib) $(build_dir)/libglfw.dylib
+	$(CC) -o $@ $< -Iinclude -Iexternal/glfw/include -L$(build_dir) -lglfw $(window_libs)
+
+$(build_dir)/triangle: examples/triangle/main.c $(mgl_lib) $(build_dir)/libglfw.dylib
+	$(CC) -o $@ $< -Iinclude -Iexternal/glfw/include -L$(build_dir) -lglfw $(window_libs)
+
+$(build_dir)/sdl2_triangle: examples/sdl2_triangle/main.c $(mgl_lib) $(sdl2_lib)
+	$(CC) -o $@ $< -Iinclude -I$(sdl2_install)/include -L$(build_dir) -lSDL2-2.0.0 $(window_libs)
+
+window-test: $(build_dir)/test_window $(build_dir)/triangle $(build_dir)/sdl2_triangle
+	$(build_dir)/test_window
+	$(build_dir)/triangle --frames 60
+	$(build_dir)/sdl2_triangle --frames 60
 
 gears-test: gears
 	@echo "== straight port (fixed function) =="
@@ -523,22 +521,6 @@ clean:
 	rm -f libmoogles.dylib
 	rm -f libglfw.dylib
 
-install-pkgdeps: download-pkgdeps compile-pkgdeps
-
-download-pkgdeps:
-	brew install glm glslang spirv-tools glfw
-	git submodule init
-	git submodule update --depth 1
-
-compile-pkgdeps:
-	(cd $(spirv_cross_include_path) && mkdir -p build && cd build && cmake .. && make)
-
-update-pkdeps:
-	git submodule -q foreach git pull -q origin master
-
-test-make:
-	@echo $(glfw_objs)
-
-.PHONY: default test tests cts gears gears-test dbg lib fsr2 clean generate insall-pkgdeps test-make 
+.PHONY: default test tests cts gears gears-test window-test dbg lib fsr2 sdl2 clean generate FORCE
 
 -include $(deps)

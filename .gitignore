@@ -4,15 +4,8 @@ libmoogl.dylib
 libmoogles.dylib
 libglfw.dylib
 external/OpenGL-Registry/
-external/SPIRV-Cross/
-external/SPIRV-Headers/
 external/SPIRV-Tools/
-external/VK-GL-CTS/
-external/ezxml/
-external/glslang/
 *.DS_Store
-/SPIRV-Headers
-/SPIRV-Cross
 /moogl.gputrace
 /Info.plist
 .claude/
@@ -40,3 +33,4 @@ include/mgl.h
 *.dSYM/
 *.o
 .llminal/
+dist/
