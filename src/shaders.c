@@ -397,7 +397,7 @@ void mglShaderSource(GLMContext ctx, GLuint shader, GLsizei count, const GLchar 
 
     src[len] = 0;
 
-    free(ptr->src);
+    free((void *)ptr->src);
     ptr->src_len = len;
     ptr->src = src;
     ptr->dirty_bits |= DIRTY_SHADER;

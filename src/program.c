@@ -2604,8 +2604,10 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     DEBUG_PRINT("\n%s\n", result);
 
     if (sp)
+    {
         sp->raster_off = spvc_compiler_msl_is_rasterization_disabled(compiler_msl) ? GL_TRUE : GL_FALSE;
         sp->needs_sizes = spvc_compiler_msl_needs_buffer_size_buffer(compiler_msl) ? GL_TRUE : GL_FALSE;
+    }
 
     // The counter blocks made before parsing reflect as storage buffers. GL
     // knows them as atomic counter buffers, bound through
@@ -4693,7 +4695,7 @@ static void dropInactiveStructMembers(Program *pptr)
             if (used)
                 list->list[kept++] = *r;
             else
-                free(r->name);
+                free((void *)r->name);
         }
 
         list->count = kept;

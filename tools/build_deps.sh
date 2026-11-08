@@ -19,9 +19,11 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 jobs="$(sysctl -n hw.ncpu)"
 spirv_tools_commit=5262baed1ceceb131175be564547d2b11a76be84
 
+# Third-party code: its own warnings are not ours to fix, so they are kept quiet
 cmake_build() {
     local src="$1" dir="$2"; shift 2
-    cmake -S "$src" -B "$dir" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    cmake -S "$src" -B "$dir" -Wno-dev -Wno-deprecated -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_C_FLAGS=-w -DCMAKE_CXX_FLAGS=-w \
         -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" -DCMAKE_OSX_ARCHITECTURES=arm64 "$@"
     cmake --build "$dir" -j"$jobs"
 }
@@ -36,11 +38,13 @@ git -C external/SPIRV-Tools fetch -q origin "$spirv_tools_commit" || true
 git -C external/SPIRV-Tools checkout -q "$spirv_tools_commit"
 
 cmake_build external/SPIRV-Tools external/SPIRV-Tools/build \
-    -DSPIRV-Headers_SOURCE_DIR="$root/submodules/SPIRV-Headers" -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF
+    -DSPIRV-Headers_SOURCE_DIR="$root/submodules/SPIRV-Headers" -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF \
+    -DSPIRV_SKIP_EXECUTABLES=ON
 
-cmake_build submodules/SPIRV-Cross submodules/SPIRV-Cross/build -DSPIRV_CROSS_ENABLE_TESTS=OFF
+cmake_build submodules/SPIRV-Cross submodules/SPIRV-Cross/build -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_CLI=OFF
 
-cmake_build submodules/glslang submodules/glslang/build -DENABLE_OPT=0 -DGLSLANG_TESTS=OFF
+cmake_build submodules/glslang submodules/glslang/build -DENABLE_OPT=0 -DGLSLANG_TESTS=OFF -DENABLE_HLSL=OFF \
+    -DENABLE_GLSLANG_BINARIES=OFF
 
 cmake_build external/glfw external/glfw/build -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF \
     -DGLFW_BUILD_DOCS=OFF -DBUILD_SHARED_LIBS=OFF

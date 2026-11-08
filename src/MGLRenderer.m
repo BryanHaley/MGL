@@ -805,27 +805,12 @@ static inline int mglDebugCompute(void)
 
 #pragma mark buffer objects
 
-// didModifyRange only means anything on a Managed buffer, where the CPU and GPU
-// hold separate copies. On a Shared buffer there is one copy and calling it is a
-// validation error, so every flush goes through here.
-static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
-{
-    if (buffer && [buffer storageMode] == MTLStorageModeManaged)
-        [buffer didModifyRange: range];
-}
-
 - (void) bindMTLBuffer:(Buffer *) ptr
 {
     MTLResourceOptions options;
 
-    // Managed means the CPU and GPU hold separate copies and every transfer in
-    // either direction has to be asked for. On unified memory there is only one
-    // copy, so Shared is both correct and free -- and without it a compute
-    // shader's writes never become visible to glGetBufferSubData.
-    if ([_device hasUnifiedMemory])
-        options = MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeShared;
-    else
-        options = MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeManaged;
+    // Apple silicon has one copy of memory, which Shared storage uses directly
+    options = MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeShared;
 
     // ways we will only write to this
     if ((ptr->storage_flags & GL_MAP_READ_BIT) == 0)
@@ -903,7 +888,6 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 - (bool) mapGLBuffersToMTLBufferMap:(BufferMapList *)buffer_map stage: (int) stage
 {
     int count;
-    int mapped_buffers;
     struct {
         int spvc_type;
         int gl_buffer_type;
@@ -1065,7 +1049,6 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         int vao_buffer_start;
 
         count = [self getProgramBindingCount: stage type: SPVC_RESOURCE_TYPE_STAGE_INPUT];
-        mapped_buffers = 0;
 
         // vao buffers start after the uniforms and shader buffers
         vao_buffer_start = buffer_map->count;
@@ -1153,7 +1136,6 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 
                     buffer_map->buffers[map].attribute_mask |= (0x1 << att);
                     found_buffer = true;
-                    mapped_buffers++;
                     break;
                 }
 
@@ -1181,7 +1163,6 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
                     buffer_map->buffers[buffer_map->count].buffer_base_index = attrib_slot++;
                     buffer_map->count++;
 
-                    mapped_buffers++;
                 }
             }
 
@@ -1307,13 +1288,11 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
         // contents in check for EVERY drawing operation
         if (ptr->access & GL_MAP_COHERENT_BIT)
         {
-            mglDidModify(buffer, NSMakeRange(ptr->mapped_offset, ptr->mapped_length));
 
             ptr->data.dirty_bits = DIRTY_BUFFER_DATA;
         }
         else
         {
-            mglDidModify(buffer, NSMakeRange(0, ptr->data.buffer_size));
 
             ptr->data.dirty_bits = 0;
         }
@@ -2028,14 +2007,6 @@ static bool isRGB32BufferFormat(GLenum f)
                 pixelFormat = MTLPixelFormatRGBA8Unorm;
             }
             break;
-        case MTLPixelFormatPVRTC_RGBA_2BPP:
-        case MTLPixelFormatPVRTC_RGBA_4BPP:
-        case MTLPixelFormatPVRTC_RGB_2BPP:
-        case MTLPixelFormatPVRTC_RGB_4BPP:
-            // PVRTC compression can cause issues in virtualization
-            needsFormatConversion = YES;
-            pixelFormat = MTLPixelFormatRGBA8Unorm;
-            break;
         default:
             // Most modern formats should work fine
             break;
@@ -2599,13 +2570,11 @@ static bool isRGB32BufferFormat(GLenum f)
     else
     {
         // PROPER FIX: Enable texture filling with AGX safety and proper memory alignment
-        MTLRegion region = MTLRegionMake2D(0, 0, texture.width, texture.height);
-
         MGL_NSINFO(@"MGL INFO: PROPER FIX - Processing texture fill (tex=%d, dims=%lux%lu)", tex->name, (unsigned long)texture.width, (unsigned long)texture.height);
 
         MTLPixelFormat pf = texture.pixelFormat;
         bool depth_or_stencil = pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float ||
-                                pf == MTLPixelFormatDepth24Unorm_Stencil8 || pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                                pf == MTLPixelFormatDepth32Float_Stencil8 ||
                                 pf == MTLPixelFormatStencil8;
 
         // a buffer copied into depth or stencil has to say which plane, and
@@ -2954,7 +2923,6 @@ static bool isRGB32BufferFormat(GLenum f)
                         }
 
                         free(properData);
-                        skip_fill_operation:;
                     } else {
                         MGL_NSERR(@"MGL ERROR: Failed to allocate properly aligned texture data");
                     }
@@ -3703,8 +3671,6 @@ static void formatChannels(Texture *tex, id<MTLTexture> base, MTLTextureSwizzle 
     {
         if (format == MTLPixelFormatDepth32Float_Stencil8)
             format = MTLPixelFormatX32_Stencil8, stencil = true;
-        else if (format == MTLPixelFormatDepth24Unorm_Stencil8)
-            format = MTLPixelFormatX24_Stencil8, stencil = true;
     }
 
     if (plain && !stencil && first == 0 && count == have)
@@ -4449,16 +4415,14 @@ extern FBOAttachment *getFBOAttachment(GLMContext ctx, Framebuffer *fbo, GLenum 
 static bool mtlFormatIsDepth(MTLPixelFormat f)
 {
     return f == MTLPixelFormatDepth16Unorm || f == MTLPixelFormatDepth32Float ||
-           f == MTLPixelFormatDepth24Unorm_Stencil8 ||
            f == MTLPixelFormatDepth32Float_Stencil8;
 }
 
 static bool mtlFormatIsStencil(MTLPixelFormat f)
 {
     return f == MTLPixelFormatStencil8 ||
-           f == MTLPixelFormatDepth24Unorm_Stencil8 ||
            f == MTLPixelFormatDepth32Float_Stencil8 ||
-           f == MTLPixelFormatX32_Stencil8 || f == MTLPixelFormatX24_Stencil8;
+           f == MTLPixelFormatX32_Stencil8;
 }
 
 // Metal resolves a multisample texture by ending a render pass on it, so a
@@ -4588,7 +4552,6 @@ static bool mtlFormatIsStencil(MTLPixelFormat f)
     if (do_stencil)
     {
         MTLPixelFormat sf = src.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLPixelFormatX32_Stencil8
-                          : src.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8 ? MTLPixelFormatX24_Stencil8
                           : src.pixelFormat;
 
         stencil_view = sf == src.pixelFormat ? src : [src newTextureViewWithPixelFormat: sf];
@@ -5243,8 +5206,7 @@ static NSUInteger layerCount(id<MTLTexture> t)
     if (depth == 0)
         depth = 1;
 
-    if (texture.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
-        texture.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8)
+    if (texture.pixelFormat == MTLPixelFormatDepth32Float_Stencil8)
         return [self uploadDepthStencil: src toTexture: texture bytesPerRow: srcBytesPerRow
                                   slice: slice level: level width: width height: height depth: depth];
 
@@ -10150,7 +10112,6 @@ static MTLWinding mtlWindingFor(const Program *p)
 {
     MTLRenderPipelineDescriptor *pipelineStateDescriptor;
     Program *program;
-    Shader *vertex_shader, *fragment_shader;
     id<MTLFunction> vertexFunction;
     id<MTLFunction> fragmentFunction;
 
@@ -13051,12 +13012,6 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
 
     if (_currentCommandBufferSyncList->count >= _currentCommandBufferSyncList->size)
     {
-        // CRITICAL SECURITY FIX: Check for integer overflow before multiplication
-        if (_currentCommandBufferSyncList->size > SIZE_MAX / 2 / sizeof(Sync *)) {
-            MGL_NSERR(@"MGL SECURITY ERROR: SyncList size would overflow, preventing expansion");
-            return;
-        }
-
         size_t new_size = _currentCommandBufferSyncList->size * 2;
         Sync **new_list = (Sync **)realloc(_currentCommandBufferSyncList->list,
                                            sizeof(Sync *) * new_size);
@@ -13487,8 +13442,6 @@ void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
 
     data = mtl_buffer.contents;
     memcpy(data+offset, ptr, size);
-
-    mglDidModify(mtl_buffer, NSMakeRange(offset, size));
 }
 
 // New storage holding the current contents, for a CPU write that must not
@@ -13604,8 +13557,6 @@ void mtlBufferSubData(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t siz
         return mtl_buffer.contents + offset;
     }
 
-    mglDidModify(mtl_buffer, NSMakeRange(offset, size));
-
     return NULL;
 }
 
@@ -13620,11 +13571,7 @@ void *mtlMapUnmapBuffer(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t s
 #pragma mark C interface to mtlFlushMappedBufferRange
 -(void) mtlFlushMappedBufferRange:(GLMContext) glm_ctx buf:(Buffer *)buf offset:(size_t) offset length:(size_t) length
 {
-    id<MTLBuffer> mtl_buffer;
-
-    mtl_buffer = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
-
-    mglDidModify(mtl_buffer, NSMakeRange(offset, length));
+    // buffers are Shared: the GPU already sees what the CPU wrote
 }
 
 void mtlFlushBufferRange(GLMContext glm_ctx, Buffer *buf, GLintptr offset, GLsizeiptr length)
@@ -13801,7 +13748,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
 
 static bool isCombinedDepthStencil(MTLPixelFormat f)
 {
-    return f == MTLPixelFormatDepth32Float_Stencil8 || f == MTLPixelFormatDepth24Unorm_Stencil8;
+    return f == MTLPixelFormatDepth32Float_Stencil8;
 }
 
 // Metal copies a combined depth-stencil texture out one plane at a time, so
@@ -13959,11 +13906,6 @@ static bool isCombinedDepthStencil(MTLPixelFormat f)
             destinationOffset: 0
        destinationBytesPerRow: staging_pitch
      destinationBytesPerImage: staging_size];
-
-        // the staging buffer is Shared, and synchronizeResource is only legal on
-        // Managed -- Metal's validation layer asserts on it
-        if ([staging storageMode] == MTLStorageModeManaged)
-            [blit synchronizeResource: staging];
 
         [blit endEncoding];
 
@@ -14750,7 +14692,7 @@ void mtlDrawMeshTasks(GLMContext glm_ctx, GLuint x, GLuint y, GLuint z, GLintptr
 }
 
 #pragma mark C interface to mtlDrawArrays
--(void) mtlDrawArrays: (GLMContext) ctx mode:(GLenum) mode first: (GLint) first count: (GLsizei) count
+-(void) mtlDrawArrays: (GLMContext) glm_ctx mode:(GLenum) mode first: (GLint) first count: (GLsizei) count
 {
     MTLPrimitiveType primitiveType;
 
@@ -16153,7 +16095,7 @@ static CGFloat viewScale(NSView *view)
     MGLDeviceFormatCaps fmtCaps = {
         .apple_gpu = [_device supportsFamily: MTLGPUFamilyApple1],
         .supports_bc = [_device supportsBCTextureCompression],
-        .supports_depth24_stencil8 = [_device isDepth24Stencil8PixelFormatSupported],
+        .supports_depth24_stencil8 = false,     // never on Apple silicon
         .supports_32bit_msaa = [_device supports32BitMSAA],
         .supports_32bit_float_filtering = [_device supports32BitFloatFiltering],
         .supports_astc_hdr = [_device supportsFamily: MTLGPUFamilyApple6],
@@ -16807,14 +16749,6 @@ static CGFloat viewScale(NSView *view)
 
     switch(format) {
         // Compressed formats have different alignment requirements
-        case MTLPixelFormatPVRTC_RGBA_2BPP:
-        case MTLPixelFormatPVRTC_RGB_2BPP:
-            return 8; // 2bpp formats need 8-byte alignment
-
-        case MTLPixelFormatPVRTC_RGBA_4BPP:
-        case MTLPixelFormatPVRTC_RGB_4BPP:
-            return 4; // 4bpp formats need 4-byte alignment
-
         case MTLPixelFormatEAC_R11Unorm:
         case MTLPixelFormatEAC_R11Snorm:
             return 4; // EAC single channel needs 4-byte alignment

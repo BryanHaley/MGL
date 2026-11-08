@@ -694,7 +694,6 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
         return;
     }
 
-    size_t row_length;
     size_t pitch_size;
     GLuint pitch;
     size_t buffer_size;
@@ -705,7 +704,6 @@ void mglReadPixels(GLMContext ctx, GLint x, GLint y, GLsizei width, GLsizei heig
         MGL_ERR("MGL Error: mglReadPixels: pitch overflow (width=%d pixel_size=%u)\n", width, pixel_size);
         ERROR_RETURN(GL_OUT_OF_MEMORY);
     }
-    row_length = pitch_size;
     pitch = (GLuint)pitch_size;
 
     if (pitch_size > 0 && (size_t)height > (SIZE_MAX / pitch_size))

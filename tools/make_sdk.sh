@@ -159,5 +159,4 @@ fi
 
 mkdir -p dist
 tar -C dist -czf "dist/$name.tar.gz" "$name"
-shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
 echo "built dist/$name.tar.gz"

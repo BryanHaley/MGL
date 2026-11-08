@@ -100,7 +100,7 @@ void getMacOSDefaults(GLMContext glm_ctx)
     glGetIntegerv(GL_STENCIL_PASS_DEPTH_PASS,&glm_ctx->state.var.stencil_pass_depth_pass);
     glGetIntegerv(GL_STENCIL_REF,&glm_ctx->state.var.stencil_ref);
     glGetIntegerv(GL_STENCIL_WRITEMASK,&glm_ctx->state.var.stencil_writemask);
-    glGetIntegerv(GL_VIEWPORT,glm_ctx->state.viewport);
+    glGetFloatv(GL_VIEWPORT,&glm_ctx->state.viewport[0].x);
 
     glGetIntegerv(GL_BLEND_DST,&glm_ctx->state.var.blend_dst_rgb[0]);
     glGetIntegerv(GL_BLEND_SRC,&glm_ctx->state.var.blend_src_rgb[0]);
@@ -118,8 +118,8 @@ void getMacOSDefaults(GLMContext glm_ctx)
     glGetIntegerv(GL_MAX_TEXTURE_SIZE,&glm_ctx->state.var.max_texture_size);
     glGetIntegerv(GL_MAX_VIEWPORT_DIMS,&glm_ctx->state.var.max_viewport_dims);
     glGetIntegerv(GL_SUBPIXEL_BITS,&glm_ctx->state.var.subpixel_bits);
-    glGetIntegerv(GL_POLYGON_OFFSET_UNITS,&glm_ctx->state.var.polygon_offset_units);
-    glGetIntegerv(GL_POLYGON_OFFSET_FACTOR,&glm_ctx->state.var.polygon_offset_factor);
+    glGetFloatv(GL_POLYGON_OFFSET_UNITS,&glm_ctx->state.var.polygon_offset_units);
+    glGetFloatv(GL_POLYGON_OFFSET_FACTOR,&glm_ctx->state.var.polygon_offset_factor);
     glGetIntegerv(GL_TEXTURE_BINDING_1D,&glm_ctx->state.var.texture_binding_1d);
     glGetIntegerv(GL_TEXTURE_BINDING_2D,&glm_ctx->state.var.texture_binding_2d);
     glGetIntegerv(GL_TEXTURE_BINDING_3D,&glm_ctx->state.var.texture_binding_3d);

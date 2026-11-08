@@ -1258,14 +1258,6 @@ void initBaseTexLevel(GLMContext ctx, Texture *tex, GLint internalformat, GLsize
 
     for(int face=0; face<_CUBE_MAP_MAX_FACE; face++)
     {
-        // CRITICAL SECURITY FIX: Prevent integer overflow in mipmap allocation
-        if (tex->mipmap_levels > SIZE_MAX / sizeof(TextureLevel)) {
-            MGL_ERR("MGL SECURITY ERROR: Mipmap levels %d would cause allocation overflow\n", tex->mipmap_levels);
-            // CRITICAL FIX: Handle gracefully instead of crashing
-            STATE(error) = GL_OUT_OF_MEMORY;
-            return;
-        }
-
         tex->faces[face].levels = (TextureLevel *)calloc(tex->mipmap_levels, sizeof(TextureLevel));
         if (!tex->faces[face].levels) {
             MGL_ERR("MGL SECURITY ERROR: calloc failed for face %d with %d levels\n", face, tex->mipmap_levels);
@@ -2323,11 +2315,11 @@ bool createTextureLevel(GLMContext ctx, Texture *tex, GLuint face, GLint level, 
 
             // the unpack buffer was already resolved above
 
-            pixels = (const GLubyte *)pixels +
+            pixels = (void *)((const GLubyte *)pixels +
                      ((depth > 1 || tex->target == GL_TEXTURE_3D || tex->target == GL_TEXTURE_2D_ARRAY ||
                        tex->target == GL_TEXTURE_1D_ARRAY || tex->target == GL_TEXTURE_CUBE_MAP_ARRAY)
                       ? mglPixelStoreSkipBytes(&ctx->state.unpack, height, src_pixel_size, src_pitch)
-                      : mglPixelStoreSkipBytes2D(&ctx->state.unpack, src_pixel_size, src_pitch));
+                      : mglPixelStoreSkipBytes2D(&ctx->state.unpack, src_pixel_size, src_pitch)));
 
             if (unpackTexture(ctx, tex, face, level, format, type, (void *)pixels, (void *)texture_data, src_pitch, 0, 0, 0, width, height, depth) == false)
                 return false;
@@ -2698,12 +2690,7 @@ bool texSubImage(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x
     // no src data.. return
     ERROR_CHECK_RETURN_VALUE(pixels, GL_INVALID_OPERATION, false);
 
-    size_t pixel_size;
-    size_t src_size;
     size_t src_pitch;
-
-    pixel_size = sizeForFormatType(format, type);
-    src_size = width * pixel_size;
 
     {
         GLuint src_pixel_size = sizeForFormatType(format, type);

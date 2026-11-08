@@ -1,13 +1,18 @@
 diff --git a/FidelityFX-FSR2-CSharpBindings/FFX_FSR2.csproj b/FidelityFX-FSR2-CSharpBindings/FFX_FSR2.csproj
-index 0c2567f..cc82114 100644
+index 0c2567f..d047637 100644
 --- a/FidelityFX-FSR2-CSharpBindings/FFX_FSR2.csproj
 +++ b/FidelityFX-FSR2-CSharpBindings/FFX_FSR2.csproj
-@@ -21,4 +21,11 @@
+@@ -21,4 +21,16 @@
      </Content>
    </ItemGroup>
  
++  <PropertyGroup Condition="'$(MacOSNatives)' != ''">
++    <PackageReadmeFile>Readme.md</PackageReadmeFile>
++  </PropertyGroup>
++
 +  <ItemGroup Condition="'$(MacOSNatives)' != ''">
 +    <Content Remove="Resource/Natives/**" />
++    <None Include="../Readme.md" Pack="true" PackagePath="/" />
 +    <Content Include="$(MacOSNatives)/*.dylib">
 +      <PackagePath>runtimes/osx-arm64/native</PackagePath>
 +    </Content>

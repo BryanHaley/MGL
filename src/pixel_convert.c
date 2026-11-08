@@ -84,11 +84,6 @@ static GLint float_to_snorm(GLfloat f, GLuint bits)
     return (GLint)s;
 }
 
-static GLfloat srgb_to_linear(GLfloat c)
-{
-    return (c <= 0.04045f) ? (c / 12.92f) : powf((c + 0.055f) / 1.055f, 2.4f);
-}
-
 GLfloat mglHalfToFloat(GLushort h)
 {
     GLuint sign = (GLuint)(h >> 15) & 0x1u;

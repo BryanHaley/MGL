@@ -232,20 +232,267 @@ SDL3, SFML 2.6 and 3, raylib and GLUT are on the roadmap.
 [AMD's headers](https://github.com/JuanDiegoMontoya/FidelityFX-FSR2-OpenGL) unchanged. Apple's
 `MTLFXTemporalScaler` does the upscaling, and the rest is ported to Metal: FSR 2's RCAS
 sharpening, the reactive-mask generator, and folding the transparency mask into the reactive one.
+The image is MetalFX's, not AMD's shaders', and the debug log says so when a context is created.
+On IDKEngine at 1022×781 it costs 0.75–1.0 ms of GPU time a frame.
 
-- **C and C++**: link `MooGL::FSR2`, or `-lffx_fsr2_api` where Windows links AMD's
-  `ffx_fsr2_api_x64` and `ffx_fsr2_api_gl_x64`. Include `ffx_fsr2.h` and `gl/ffx_fsr2_gl.h` from
-  `include/ffx-fsr2`, with `FFX_GCC` defined. Nothing in the code changes.
-- **C#**: use the `FFX_FSR2` package in the SDK's `nuget/` folder, a macOS build of
-  [BoyBaykiller's bindings](https://github.com/BoyBaykiller/FidelityFX-FSR2-CSharpBindings) with
-  the library inside. Add the folder as a package source and reference version `1.0.3-macos`.
+Each frame goes the same way in every language:
 
-The upscaler is MetalFX, not AMD's shaders, so the image is MetalFX's. The debug log says so
-when a context is created. On IDKEngine at 1022×781 it costs 0.75–1.0 ms of GPU time a frame.
+1. Ask FSR 2 for this frame's **jitter**, a sub-pixel offset in pixels, and shift the scene by it.
+   In the vertex shader: `gl_Position.xy += 2.0 * jitter / renderSize * gl_Position.w`.
+2. Draw the scene at the **render size** into a colour texture, a depth texture and a
+   **motion texture**: for each pixel, where it was last frame minus where it is now, in UV units.
+3. Hand the three textures, the jitter and an output texture at the **display size** to FSR 2.
+   Show or post-process the output.
 
-## What's emulated, and what costs more
+All three examples below make the same `Upscaler`, in Quality mode (1.5× per side), for a GL 4.6
+context that is already current.
 
-Metal is missing some of what OpenGL has. MooGL fills those gaps, correctly but not for free:
+<details>
+<summary><b>C</b></summary>
+
+Link `MooGL::FSR2`, or `-lffx_fsr2_api -lmoogl` where Windows links AMD's `ffx_fsr2_api_x64` and
+`ffx_fsr2_api_gl_x64`. Add `include/ffx-fsr2` to the include path and define `FFX_GCC`.
+AMD's `gl/ffx_fsr2_gl.h` is C++ only, since it uses default arguments, so a C file declares its
+three functions itself:
+
+```c
+#include <stdbool.h>
+#include <stdlib.h>
+#include <wchar.h>
+#include <GL/glcorearb.h>
+#include "ffx_fsr2.h"
+
+size_t ffxFsr2GetScratchMemorySizeGL(void);
+FfxErrorCode ffxFsr2GetInterfaceGL(FfxFsr2Interface *out, void *scratch, size_t size, void *getProcAddress);
+FfxResource ffxGetTextureResourceGL(GLuint texture, uint32_t width, uint32_t height, GLenum format, const wchar_t *name);
+
+static FfxFsr2Context fsr2;
+static void *scratch;
+static uint32_t renderW, renderH, displayW, displayH;
+
+void upscalerCreate(uint32_t displayWidth, uint32_t displayHeight)
+{
+    displayW = displayWidth;
+    displayH = displayHeight;
+    ffxFsr2GetRenderResolutionFromQualityMode(&renderW, &renderH, displayW, displayH,
+                                              FFX_FSR2_QUALITY_MODE_QUALITY);
+
+    FfxFsr2ContextDescription desc = {0};
+    desc.flags = FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_AUTO_EXPOSURE;
+    desc.maxRenderSize = (FfxDimensions2D){ renderW, renderH };
+    desc.displaySize = (FfxDimensions2D){ displayW, displayH };
+
+    scratch = malloc(ffxFsr2GetScratchMemorySizeGL());
+    ffxFsr2GetInterfaceGL(&desc.callbacks, scratch, ffxFsr2GetScratchMemorySizeGL(), NULL);
+    ffxFsr2ContextCreate(&fsr2, &desc);
+}
+
+// before drawing frame n
+void upscalerJitter(int n, float jitter[2])
+{
+    int32_t phases = ffxFsr2GetJitterPhaseCount(renderW, displayW);
+    ffxFsr2GetJitterOffset(&jitter[0], &jitter[1], n % phases, phases);
+}
+
+// after drawing the scene at renderW x renderH
+void upscalerRun(GLuint color, GLuint depth, GLuint motion, GLuint output,
+                 const float jitter[2], float deltaMs, float fovY)
+{
+    FfxFsr2DispatchDescription d = {0};
+    d.color = ffxGetTextureResourceGL(color, renderW, renderH, GL_RGBA16F, NULL);
+    d.depth = ffxGetTextureResourceGL(depth, renderW, renderH, GL_DEPTH_COMPONENT32F, NULL);
+    d.motionVectors = ffxGetTextureResourceGL(motion, renderW, renderH, GL_RG16F, NULL);
+    d.output = ffxGetTextureResourceGL(output, displayW, displayH, GL_RGBA16F, NULL);
+    d.jitterOffset = (FfxFloatCoords2D){ jitter[0], jitter[1] };
+    d.motionVectorScale = (FfxFloatCoords2D){ (float)renderW, (float)renderH };   // UV to pixels
+    d.renderSize = (FfxDimensions2D){ renderW, renderH };
+    d.enableSharpening = true;
+    d.sharpness = 0.5f;
+    d.frameTimeDelta = deltaMs;
+    d.preExposure = 1.0f;
+    d.cameraNear = 0.1f;
+    d.cameraFar = 1000.0f;
+    d.cameraFovAngleVertical = fovY;
+    ffxFsr2ContextDispatch(&fsr2, &d);
+}
+
+void upscalerDestroy(void)
+{
+    ffxFsr2ContextDestroy(&fsr2);
+    free(scratch);
+}
+```
+
+</details>
+
+<details>
+<summary><b>C++</b></summary>
+
+Link and include as for C, plus `include/ffx-fsr2/glad`; `MooGL::FSR2` sets all of it.
+`gl/ffx_fsr2_gl.h` includes glad's header, which renames every GL function to glad's function
+pointers. So either keep FSR 2 in a file of its own, as here, with the rest of the program on
+`<GL/glcorearb.h>`, or use glad as your loader throughout.
+
+```cpp
+// Upscaler.cpp: no GL calls of its own, so glad's renaming does no harm
+#include <vector>
+#include "ffx_fsr2.h"
+#include "gl/ffx_fsr2_gl.h"
+
+class Upscaler
+{
+public:
+    Upscaler(uint32_t displayW, uint32_t displayH) : displayW(displayW), displayH(displayH)
+    {
+        ffxFsr2GetRenderResolutionFromQualityMode(&renderW, &renderH, displayW, displayH,
+                                                  FFX_FSR2_QUALITY_MODE_QUALITY);
+
+        FfxFsr2ContextDescription desc = {};
+        desc.flags = FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_AUTO_EXPOSURE;
+        desc.maxRenderSize = { renderW, renderH };
+        desc.displaySize = { displayW, displayH };
+
+        scratch.resize(ffxFsr2GetScratchMemorySizeGL());
+        ffxFsr2GetInterfaceGL(&desc.callbacks, scratch.data(), scratch.size(), nullptr);
+        ffxFsr2ContextCreate(&context, &desc);
+    }
+
+    ~Upscaler() { ffxFsr2ContextDestroy(&context); }
+
+    FfxFloatCoords2D jitter(int frame) const
+    {
+        int32_t phases = ffxFsr2GetJitterPhaseCount(renderW, displayW);
+        FfxFloatCoords2D j;
+        ffxFsr2GetJitterOffset(&j.x, &j.y, frame % phases, phases);
+        return j;
+    }
+
+    void run(GLuint color, GLuint depth, GLuint motion, GLuint output,
+             FfxFloatCoords2D jitter, float deltaMs, float fovY)
+    {
+        FfxFsr2DispatchDescription d = {};
+        d.color = ffxGetTextureResourceGL(color, renderW, renderH, GL_RGBA16F);
+        d.depth = ffxGetTextureResourceGL(depth, renderW, renderH, GL_DEPTH_COMPONENT32F);
+        d.motionVectors = ffxGetTextureResourceGL(motion, renderW, renderH, GL_RG16F);
+        d.output = ffxGetTextureResourceGL(output, displayW, displayH, GL_RGBA16F);
+        d.jitterOffset = jitter;
+        d.motionVectorScale = { float(renderW), float(renderH) };   // UV to pixels
+        d.renderSize = { renderW, renderH };
+        d.enableSharpening = true;
+        d.sharpness = 0.5f;
+        d.frameTimeDelta = deltaMs;
+        d.preExposure = 1.0f;
+        d.cameraNear = 0.1f;
+        d.cameraFar = 1000.0f;
+        d.cameraFovAngleVertical = fovY;
+        ffxFsr2ContextDispatch(&context, &d);
+    }
+
+    uint32_t renderW, renderH, displayW, displayH;
+
+private:
+    FfxFsr2Context context;
+    std::vector<unsigned char> scratch;
+};
+```
+
+</details>
+
+<details>
+<summary><b>C#</b></summary>
+
+The SDK's `nuget/` folder holds `FFX_FSR2` version `1.0.3-macos`, a macOS build of
+[BoyBaykiller's bindings](https://github.com/BoyBaykiller/FidelityFX-FSR2-CSharpBindings) with
+`libffx_fsr2_api` and `libmoogl` inside. Add it and allow unsafe code:
+
+```bash
+dotnet add package FFX_FSR2 --version 1.0.3-macos --source /path/to/MooGL-SDK/nuget
+```
+
+```xml
+<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+```
+
+The window still has to come from MooGL's GLFW or SDL2; see [Other languages and engines](#other-languages-and-engines).
+
+```csharp
+using System;
+using System.Runtime.InteropServices;
+using FFX_FSR2;
+
+unsafe class Upscaler : IDisposable
+{
+    public readonly uint RenderW, RenderH, DisplayW, DisplayH;
+
+    private FSR2.Context context;
+    private readonly void* scratch;
+
+    public Upscaler(uint displayW, uint displayH)
+    {
+        DisplayW = displayW;
+        DisplayH = displayH;
+        FSR2.GetRenderResolutionFromQualityMode(out RenderW, out RenderH, displayW, displayH,
+                                                FSR2.QualityMode.Quality);
+
+        var desc = new FSR2.ContextDescription
+        {
+            Flags = FSR2.InitializationFlagBits.EnableHighDynamicRange | FSR2.InitializationFlagBits.EnableAutoExposure,
+            MaxRenderSize = new FSR2Types.Dimensions2D { Width = RenderW, Height = RenderH },
+            DisplaySize = new FSR2Types.Dimensions2D { Width = displayW, Height = displayH },
+        };
+
+        // native memory: FSR 2 keeps the pointer, and the GC would move a managed array
+        nuint size = FSR2.GL.GetScratchMemorySize();
+        scratch = NativeMemory.Alloc(size);
+        FSR2.GL.GetInterface(out desc.Callbacks, scratch, size, null);
+        FSR2.ContextCreate(out context, desc);
+    }
+
+    public FSR2Types.FloatCoords2D Jitter(int frame)
+    {
+        int phases = FSR2.GetJitterPhaseCount((int)RenderW, (int)DisplayW);
+        FSR2.GetJitterOffset(out float x, out float y, frame % phases, phases);
+        return new FSR2Types.FloatCoords2D { X = x, Y = y };
+    }
+
+    public void Run(uint color, uint depth, uint motion, uint output,
+                    FSR2Types.FloatCoords2D jitter, float deltaMs, float fovY)
+    {
+        const uint GL_RGBA16F = 0x881A, GL_RG16F = 0x822F, GL_DEPTH_COMPONENT32F = 0x8CAC;
+
+        var d = new FSR2.DispatchDescription
+        {
+            Color = FSR2.GL.GetTextureResource(color, RenderW, RenderH, GL_RGBA16F),
+            Depth = FSR2.GL.GetTextureResource(depth, RenderW, RenderH, GL_DEPTH_COMPONENT32F),
+            MotionVectors = FSR2.GL.GetTextureResource(motion, RenderW, RenderH, GL_RG16F),
+            Output = FSR2.GL.GetTextureResource(output, DisplayW, DisplayH, GL_RGBA16F),
+            JitterOffset = jitter,
+            MotionVectorScale = new FSR2Types.FloatCoords2D { X = RenderW, Y = RenderH },   // UV to pixels
+            RenderSize = new FSR2Types.Dimensions2D { Width = RenderW, Height = RenderH },
+            EnableSharpening = true,
+            Sharpness = 0.5f,
+            FrameTimeDelta = deltaMs,
+            PreExposure = 1.0f,
+            CameraNear = 0.1f,
+            CameraFar = 1000.0f,
+            CameraFovAngleVertical = fovY,
+        };
+        FSR2.ContextDispatch(ref context, d);
+    }
+
+    public void Dispose()
+    {
+        FSR2.ContextDestroy(ref context);
+        NativeMemory.Free(scratch);
+    }
+}
+```
+
+</details>
+
+## Emulated 4.6 functionality
+
+Metal is missing some of what OpenGL has. MooGL fills those gaps correctly but not for free:
 
 | Feature | How MooGL does it | What it costs |
 | --- | --- | --- |
@@ -288,9 +535,9 @@ All of OpenGL 4.6 core, plus:
 
 ## Known limits
 
-- **Core profile only.** The compatibility profile is partly there (the alpha test, rectangle textures and a few others old games need) but `glBegin`, display lists and the fixed-function pipeline are not (more compatibility features are on the roadmap).
-- **Apps built for Apple's OpenGL** need relinking against MooGL. Drop-in replacement of the system framework is on the roadmap.
-- **Mesh shaders with per-primitive `gl_Layer`**: IDKEngine's mesh-shader point shadows drop a few triangles, differently from run to run. Seven smaller tests of the same pattern pass, so it looks like a Metal driver issue. The vertex-shader path is not affected.
+- Core profile only. The compatibility profile is partly there (the alpha test, rectangle textures and a few others old games need) but `glBegin`, display lists and the fixed-function pipeline are not (more compatibility features are on the roadmap).
+- Apps built for Apple's OpenGL need relinking against MooGL. Drop-in replacement of the system framework is on the roadmap.
+- Mesh shaders with per-primitive `gl_Layer`: IDKEngine's mesh-shader point shadows drop a few triangles, differently from run to run. Seven smaller tests of the same pattern pass, so it looks like a Metal driver issue. The vertex-shader path is not affected.
 
 ## Build from source
 

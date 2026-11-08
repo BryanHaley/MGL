@@ -22,7 +22,7 @@ out="$build/nuget"
 commit=12c709ba140c70d5e0f4ba8716b119ce78952292    # 1.0.3
 version=1.0.3-macos
 
-for lib in libffx_fsr2_api.dylib; do
+for lib in libffx_fsr2_api.dylib libmoogl.dylib; do
     [ -f "$build/$lib" ] || { echo "$build/$lib is missing; run make fsr2" >&2; exit 1; }
 done
 
@@ -35,7 +35,8 @@ git -C "$work/src" apply "$here/macos.patch"
 
 rm -rf "$work/natives"
 mkdir -p "$work/natives" "$out"
-cp "$build/libffx_fsr2_api.dylib" "$work/natives/"
+# libmoogl too: the FSR 2 library needs it beside it
+cp "$build/libffx_fsr2_api.dylib" "$build/libmoogl.dylib" "$work/natives/"
 
 dotnet pack "$work/src/FidelityFX-FSR2-CSharpBindings/FFX_FSR2.csproj" -c Release \
     -p:DefineConstants=FFX_MACOS -p:Version="$version" -p:MacOSNatives="$work/natives" \

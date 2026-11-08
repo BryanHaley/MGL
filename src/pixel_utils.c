@@ -723,6 +723,7 @@ GLenum internalFormatForGLFormatType(GLenum format, GLenum type)
         default:
             break;
     }
+    return 0;
 }
 
 MTLPixelFormat mtlFormatForGLInternalFormat(GLenum internal_format)
@@ -830,7 +831,7 @@ MTLPixelFormat mtlPixelFormatForGLFormatType(GLenum gl_format, GLenum gl_type)
                 case GL_RG: return MTLPixelFormatRG32Float;
                 case GL_RGBA: return MTLPixelFormatRGBA32Float;
                 case GL_DEPTH_COMPONENT: return MTLPixelFormatDepth32Float;
-                case GL_DEPTH_STENCIL: return MTLPixelFormatDepth24Unorm_Stencil8;
+                case GL_DEPTH_STENCIL: return MTLPixelFormatDepth32Float_Stencil8;
 
                 default:
                     return 0;
@@ -876,11 +877,12 @@ MTLPixelFormat mtlPixelFormatForGLFormatType(GLenum gl_format, GLenum gl_type)
 
         case GL_UNSIGNED_INT_2_10_10_10_REV:
             return MTLPixelFormatBGR10A2Unorm;
-            return 0;
 
         default:
             break;
     }
+
+    return 0;
 }
 
 MTLPixelFormat mtlPixelFormatForGLTex(Texture * tex)

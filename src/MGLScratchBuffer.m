@@ -60,12 +60,7 @@ static NSUInteger bucketForLength(NSUInteger length)
     for (int i = 0; i < MGL_SCRATCH_BUCKETS; i++)
         _free[i] = [NSMutableArray array];
 
-    // Same reasoning as the main buffer path: on unified memory there is one
-    // copy and Shared costs nothing, while Managed would need a synchronise
-    // every time the CPU filled one of these.
-    _options = [device hasUnifiedMemory]
-             ? (MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeShared)
-             : (MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeManaged);
+    _options = MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeShared;
 
     return self;
 }

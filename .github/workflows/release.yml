@@ -25,12 +25,13 @@ jobs:
   sdk:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      # the checkout's own git init asks for this
+      - name: Set git's default branch name
+        run: git config --global init.defaultBranch main
+
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      - name: Install CMake
-        run: brew list cmake >/dev/null 2>&1 || brew install cmake
 
       - name: Set up signing
         env:
@@ -72,10 +73,10 @@ jobs:
 
       - name: Keep the SDK with the run
         if: github.ref_type != 'tag'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: MooGL-SDK
-          path: dist/*.tar.gz*
+          path: dist/*.tar.gz
 
       - name: Publish the release
         if: github.ref_type == 'tag'
@@ -84,5 +85,5 @@ jobs:
         run: |
           prerelease=""
           case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
             --title "MooGL $GITHUB_REF_NAME" --generate-notes $prerelease

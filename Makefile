@@ -119,18 +119,13 @@ CFLAGS_GL_CORE += -isysroot $(SDK_ROOT)
 CFLAGS_GL_ES += -isysroot $(SDK_ROOT)
 endif
 
-LIBS += -L$(spirv_cross_lib_path) -lspirv-cross-core -lspirv-cross-c -lspirv-cross-cpp -lspirv-cross-msl -lspirv-cross-glsl -lspirv-cross-hlsl -lspirv-cross-reflect
-# Use static libraries from submodules/glslang instead of homebrew
-LIBS += submodules/glslang/build/glslang/libglslang.a submodules/glslang/build/glslang/libMachineIndependent.a submodules/glslang/build/glslang/libGenericCodeGen.a submodules/glslang/build/glslang/OSDependent/Unix/libOSDependent.a submodules/glslang/build/glslang/libglslang-default-resource-limits.a submodules/glslang/build/SPIRV/libSPIRV.a
-LIBS += -L/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib
+# SPIRV-Cross and glslang, as tools/build_deps.sh builds them
+spirv_cross_libs := c msl glsl hlsl cpp reflect util core
+LIBS += $(foreach l,$(spirv_cross_libs),$(spirv_cross_lib_path)/libspirv-cross-$(l).a)
+glslang_lib_path := submodules/glslang/build/glslang
+LIBS += $(glslang_lib_path)/libglslang.a $(glslang_lib_path)/libMachineIndependent.a \
+        $(glslang_lib_path)/libGenericCodeGen.a $(glslang_lib_path)/libglslang-default-resource-limits.a
 LIBS += -lc++
-
-# add all the SPIRV libs
-SPIRV_LIBS := $(wildcard $(spirv_cross_lib_path)/libspirv*.a)
-LIBS += $(SPIRV_LIBS)
-
-GLSL_LIBS := $(wildcard submodules/glslang/build/glslang/lib*.a)
-LIBS += $(GLSL_LIBS)
 
 # SPIRV-Tools
 LIBS += external/SPIRV-Tools/build/source/lint/libSPIRV-Tools-lint.a
@@ -309,10 +304,11 @@ sdl2_install := $(build_dir)/sdl2/install
 sdl2_lib := $(build_dir)/libSDL2-2.0.0.dylib
 
 $(sdl2_lib): $(mgl_lib) $(wildcard $(sdl2_dir)/src/video/cocoa/*.m) $(sdl2_dir)/CMakeLists.txt
-	cmake -S $(sdl2_dir) -B $(build_dir)/sdl2 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+	cmake -S $(sdl2_dir) -B $(build_dir)/sdl2 -Wno-dev -Wno-deprecated -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_C_FLAGS=-w -DCMAKE_OBJC_FLAGS=-w \
 		-DSDL_STATIC=OFF -DSDL_TEST=OFF -DCMAKE_SKIP_BUILD_RPATH=ON \
 		-DMOOGL_LIBRARY=$(abspath $(mgl_lib)) -DCMAKE_INSTALL_PREFIX=$(abspath $(sdl2_install))
-	cmake --build $(build_dir)/sdl2 --target install -j8
+	cmake --build $(build_dir)/sdl2 --target install
 	cp $(sdl2_install)/lib/libSDL2-2.0.0.dylib $@
 
 sdl2: $(sdl2_lib)
@@ -466,9 +462,6 @@ $(build_core_dir)/%.o: %.cpp | $(generated)
 $(build_core_dir)/arc/%.o: %.m | $(generated)
 	@mkdir -p $(dir $@)
 	clang -fobjc-arc -fmodules -MMD $(CFLAGS_GL_CORE) \
-		-framework Cocoa -framework CoreFoundation -framework CoreGraphics \
-		-framework IOKit -framework Foundation -framework QuartzCore \
-		-framework Metal -framework OpenGL \
 		-c $< -o $@
 
 $(build_core_dir)/%.o: %.m | $(generated)
@@ -492,9 +485,6 @@ $(build_es_dir)/%.o: %.cpp | $(generated)
 $(build_es_dir)/arc/%.o: %.m | $(generated)
 	@mkdir -p $(dir $@)
 	clang -fobjc-arc -fmodules -MMD $(CFLAGS_GL_ES) \
-		-framework Cocoa -framework CoreFoundation -framework CoreGraphics \
-		-framework IOKit -framework Foundation -framework QuartzCore \
-		-framework Metal -framework OpenGL \
 		-c $< -o $@
 
 $(build_dir)/%.o: %.m | $(generated)
@@ -511,7 +501,7 @@ $(GLFW_BUILD_DIR)/%.o: $(GLFW_SRC_DIR)/%.c
 
 $(GLFW_BUILD_DIR)/%.o: $(GLFW_SRC_DIR)/%.m
 	@mkdir -p $(dir $@)
-	clang -fno-objc-arc -fmodules -MMD $(CFLAGS) $(GLFW_FRAMEWORKS) -c $< -o $@
+	clang -fno-objc-arc -fmodules -MMD $(CFLAGS) -c $< -o $@
 
 # everything in the build folder except the CTS results kept in cts-work
 clean:

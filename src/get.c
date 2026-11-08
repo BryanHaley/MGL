@@ -29,7 +29,7 @@ void mglGetIntegeri_v(GLMContext ctx, GLenum target, GLuint index, GLint *data);
 GLuint textureIndexFromTarget(GLMContext ctx, GLenum target);
 
 // these cast a void ptr to a type and value
-#define RET_BOOL(__value__) *((GLboolean *)data) = (__value__) ? GL_TRUE : GL_FALSE; break;
+#define RET_BOOL(__value__) *((GLboolean *)data) = ((__value__) != 0) ? GL_TRUE : GL_FALSE; break;
 #define RET_INT(__value__) *((GLint *)data) = (GLint)__value__; break;
 #define RET_FLOAT(__value__) *((GLfloat *)data) = (GLfloat)__value__; break;
 #define RET_DOUBLE(__value__) *((GLdouble *)data) = (GLdouble)__value__; break;

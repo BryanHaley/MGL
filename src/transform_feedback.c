@@ -51,24 +51,9 @@ static GLboolean isPrimitiveMode(GLenum mode)
     return GL_FALSE;
 }
 
-static void freeVaryings(TransformFeedback *xfb)
-{
-    if (xfb->varyings)
-    {
-        for (GLsizei i = 0; i < xfb->varying_count; i++)
-            free(xfb->varyings[i]);
-
-        free(xfb->varyings);
-        xfb->varyings = NULL;
-    }
-
-    xfb->varying_count = 0;
-}
-
 void mglTransformFeedbackVaryings(GLMContext ctx, GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode)
 {
     Program *prog = findProgram(ctx, program);
-    TransformFeedback *xfb;
     char **names = NULL;
 
     ERROR_CHECK_RETURN(prog, GL_INVALID_VALUE);
