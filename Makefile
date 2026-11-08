@@ -318,9 +318,27 @@ $(build_dir)/libglfw.dylib: external/glfw/build/src/libglfw3.a $(mgl_lib)
 	@echo "This enables compatibility with Minecraft mods and Prism Launcher"
 
 
+# FSR 2's API on MetalFX, under the two library names AMD's build uses. The
+# GL one only re-exports the other.
+fsr2_api_dir := submodules/FidelityFX-FSR2-OpenGL/src/ffx-fsr2-api
+fsr2_lib := $(build_dir)/libffx_fsr2_api_x64.dylib
+fsr2_gl_lib := $(build_dir)/libffx_fsr2_api_gl_x64.dylib
+
+$(fsr2_lib): src/fsr2/ffx_fsr2_metalfx.mm include/MGLContext.h $(mgl_lib)
+	$(CXX) -std=c++17 -O2 -fobjc-arc -DFFX_GCC -Iinclude -I$(fsr2_api_dir) \
+		-I$(fsr2_api_dir)/gl/external/glad/include -dynamiclib -o $@ $< \
+		-L$(build_dir) -lmoogl -framework Metal -framework MetalFX -framework Foundation \
+		-Wl,-rpath,@loader_path -install_name @rpath/libffx_fsr2_api_x64.dylib
+
+$(fsr2_gl_lib): $(fsr2_lib)
+	echo | $(CC) -x c - -dynamiclib -o $@ -Wl,-reexport_library,$(fsr2_lib) \
+		-Wl,-rpath,@loader_path -install_name @rpath/libffx_fsr2_api_gl_x64.dylib
+
+fsr2: $(fsr2_lib) $(fsr2_gl_lib)
+
 # specific rules
 
-lib: $(mgl_lib) $(mgl_es_lib) $(build_dir)/libglfw.dylib
+lib: $(mgl_lib) $(mgl_es_lib) $(build_dir)/libglfw.dylib $(fsr2_lib) $(fsr2_gl_lib)
 
 toolchain: $(mgl_toolchain_lib)
 
@@ -346,10 +364,12 @@ $(test_build_dir)/%.o: $(test_dir)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -MMD $(TEST_CFLAGS) -c $< -o $@
 
-$(test_exe): $(test_objs) $(mgl_lib)
+$(test_build_dir)/gpu/test_fsr2.o: TEST_CFLAGS += -DFFX_GCC -I$(fsr2_api_dir)
+
+$(test_exe): $(test_objs) $(mgl_lib) $(fsr2_lib)
 	@mkdir -p $(dir $@)
 	$(CC) -arch $(shell uname -m) -o $@ $(test_objs) \
-	  -L$(build_dir) -lmoogl -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
+	  -L$(build_dir) -lmoogl -lffx_fsr2_api_x64 -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
 	  -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore
 
 # --- gears demos: two ports of the classic gears, both runnable as tests ---
@@ -519,6 +539,6 @@ update-pkdeps:
 test-make:
 	@echo $(glfw_objs)
 
-.PHONY: default test tests cts gears gears-test dbg lib clean generate insall-pkgdeps test-make 
+.PHONY: default test tests cts gears gears-test dbg lib fsr2 clean generate insall-pkgdeps test-make 
 
 -include $(deps)

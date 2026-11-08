@@ -1,0 +1,79 @@
+diff --git a/FidelityFX-FSR2-CSharpBindings/FFX_FSR2.csproj b/FidelityFX-FSR2-CSharpBindings/FFX_FSR2.csproj
+index 0c2567f..cc82114 100644
+--- a/FidelityFX-FSR2-CSharpBindings/FFX_FSR2.csproj
++++ b/FidelityFX-FSR2-CSharpBindings/FFX_FSR2.csproj
+@@ -21,4 +21,11 @@
+     </Content>
+   </ItemGroup>
+ 
++  <ItemGroup Condition="'$(MacOSNatives)' != ''">
++    <Content Remove="Resource/Natives/**" />
++    <Content Include="$(MacOSNatives)/*.dylib">
++      <PackagePath>runtimes/osx-arm64/native</PackagePath>
++    </Content>
++  </ItemGroup>
++
+ </Project>
+diff --git a/FidelityFX-FSR2-CSharpBindings/Source/FSR2Types.cs b/FidelityFX-FSR2-CSharpBindings/Source/FSR2Types.cs
+index 3062923..d558bc5 100644
+--- a/FidelityFX-FSR2-CSharpBindings/Source/FSR2Types.cs
++++ b/FidelityFX-FSR2-CSharpBindings/Source/FSR2Types.cs
+@@ -130,7 +130,11 @@ namespace FFX_FSR2
+         public struct Resource
+         {
+             public void* _Resource;
++#if FFX_WCHAR32
++            public fixed uint Name[64];
++#else
+             public fixed ushort Name[64];
++#endif
+             public ResourceDescription Description;
+             public ResourceStates State;
+             public bool IsDepth;
+@@ -146,11 +150,19 @@ namespace FFX_FSR2
+ 
+         public struct ResourceBinding
+         {
++#if FFX_WCHAR32
++            public const int SIZE = 264;
++#else
+             public const int SIZE = 136;
++#endif
+ 
+             public uint SlotIndex;
+             public uint ResourceIdentifier;
++#if FFX_WCHAR32
++            public fixed uint Name[64];
++#else
+             public fixed ushort Name[64];
++#endif
+         }
+ 
+         public struct PipelineState
+@@ -207,14 +219,26 @@ namespace FFX_FSR2
+             public fixed uint Dimensions[3];
+ 
+             public fixed byte SRVs[ResourceInternal.SIZE * MAX_NUM_SRVS];
++#if FFX_WCHAR32
++            public fixed uint SRVNames[MAX_NUM_SRVS * 64];
++#else
+             public fixed ushort SRVNames[MAX_NUM_SRVS * 64];
++#endif
+ 
+             public fixed byte UAVs[ResourceInternal.SIZE * MAX_NUM_UAVS];
+             public fixed uint UAVMip[MAX_NUM_UAVS];
++#if FFX_WCHAR32
++            public fixed uint UAVNames[MAX_NUM_UAVS * 64];
++#else
+             public fixed ushort UAVNames[MAX_NUM_UAVS * 64];
++#endif
+ 
+             public fixed byte CBs[ConstantBuffer.SIZE * MAX_NUM_CONST_BUFFERS];
++#if FFX_WCHAR32
++            public fixed uint CBNames[MAX_NUM_CONST_BUFFERS * 64];
++#else
+             public fixed ushort CBNames[MAX_NUM_CONST_BUFFERS * 64];
++#endif
+             public fixed uint CBSlotIndex[MAX_NUM_CONST_BUFFERS];
+         }
+ 
