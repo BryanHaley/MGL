@@ -64,8 +64,6 @@ CFLAGS += -Iinclude/GL # "glcorearb.h"
 CFLAGS += -DENABLE_OPT=0 -DSPIRV_CROSS_C_API_MSL=1 -DSPIRV_CROSS_C_API_GLSL=1 -DSPIRV_CROSS_C_API_CPP=1 -DSPIRV_CROSS_C_API_REFLECT=1
 
 # GLFW configuration for shared library build
-CFLAGS += -I./external/glfw/include -I./external/glfw/src
-CXXFLAGS += -I./external/glfw/include -I./external/glfw/src
 
 # macOS specific compile definitions for GLFW
 CFLAGS += -D_COCOA -D_GLFW_COCOA
@@ -84,35 +82,9 @@ CXXFLAGS_GL_ES := $(CXXFLAGS) -DMGL_GL_ES
 # Add CoreFoundation framework headers for GLFW Objective-C compilation
 GLFW_FRAMEWORKS = -framework Cocoa -framework CoreFoundation -framework CoreGraphics \
                   -framework IOKit -framework Foundation -framework QuartzCore \
-                  -framework Metal -framework OpenGL
+                  -framework Metal
 
-# GLFW sources for shared library build - macOS specific configuration
-GLFW_SRC_DIR = external/glfw/src
-GLFW_C_SOURCES = $(GLFW_SRC_DIR)/context.c \
-                $(GLFW_SRC_DIR)/init.c \
-                $(GLFW_SRC_DIR)/input.c \
-                $(GLFW_SRC_DIR)/monitor.c \
-                $(GLFW_SRC_DIR)/vulkan.c \
-                $(GLFW_SRC_DIR)/window.c \
-                $(GLFW_SRC_DIR)/osmesa_context.c \
-                $(GLFW_SRC_DIR)/egl_context.c \
-                $(GLFW_SRC_DIR)/posix_thread.c \
-                $(GLFW_SRC_DIR)/posix_module.c \
-                $(GLFW_SRC_DIR)/cocoa_time.c \
-                $(GLFW_SRC_DIR)/platform.c
-
-GLFW_M_SOURCES = $(GLFW_SRC_DIR)/cocoa_init.m \
-                $(GLFW_SRC_DIR)/cocoa_joystick.m \
-                $(GLFW_SRC_DIR)/cocoa_monitor.m \
-                $(GLFW_SRC_DIR)/cocoa_window.m \
-                $(GLFW_SRC_DIR)/mgl_context.m
-
-# Simplified GLFW object paths - use a flat structure for easier building
-GLFW_BUILD_DIR = $(build_dir)/glfw
-GLFW_C_OBJS = $(GLFW_C_SOURCES:$(GLFW_SRC_DIR)/%.c=$(GLFW_BUILD_DIR)/%.o)
-
-GLFW_M_OBJS = $(GLFW_M_SOURCES:$(GLFW_SRC_DIR)/%.m=$(GLFW_BUILD_DIR)/%.o)
-glfw_objs = $(GLFW_C_OBJS) $(GLFW_M_OBJS)
+glfw_dir := submodules/glfw
 
 ifneq ($(SDK_ROOT),)
 CFLAGS_GL_CORE += -isysroot $(SDK_ROOT)
@@ -223,7 +195,6 @@ deps += $(mgl_core_obj:.o=.d)
 deps += $(mgl_es_objs:.o=.d)
 deps += $(mgl_es_arc_objs:.o=.d)
 deps += $(mgl_es_obj:.o=.d)
-deps += $(glfw_objs:.o=.d)
 
 
 mgl_lib := $(build_dir)/libmoogl.dylib
@@ -267,11 +238,11 @@ $(mgl_toolchain_lib): $(mgl_toolchain_obj)
 	ar rcs $@ $^
 
 # GLFW's own build, made by tools/build_deps.sh; rebuilt when its sources change
-external/glfw/build/src/libglfw3.a: $(wildcard external/glfw/src/*.c external/glfw/src/*.m external/glfw/src/*.h)
-	cmake --build external/glfw/build
+$(glfw_dir)/build/src/libglfw3.a: $(wildcard $(glfw_dir)/src/*.c $(glfw_dir)/src/*.m $(glfw_dir)/src/*.h)
+	cmake --build $(glfw_dir)/build
 
 # Build GLFW shared library from pre-built static library
-$(build_dir)/libglfw.dylib: external/glfw/build/src/libglfw3.a $(mgl_lib)
+$(build_dir)/libglfw.dylib: $(glfw_dir)/build/src/libglfw3.a $(mgl_lib)
 	@echo "Creating GLFW shared library from static library..."
 	@mkdir -p $(dir $@)
 	$(CC) -shared -fPIC -dynamiclib \
@@ -357,11 +328,11 @@ gears_compat_exe := $(build_dir)/gears_compat
 gears_gl46_exe   := $(build_dir)/gears_gl46
 deps += $(gears_common_obj:.o=.d)
 
-GEARS_CFLAGS := $(TEST_CFLAGS) -I$(gears_dir) -I./external/glfw/include
+GEARS_CFLAGS := $(TEST_CFLAGS) -I$(gears_dir) -I./$(glfw_dir)/include
 # Link GLFW statically. As a dylib it is resolved by leaf name, so a
 # DYLD_LIBRARY_PATH or a Homebrew libglfw silently replaces the MGL-aware
 # build with a stock one that has no MGL backend.
-glfw_static := external/glfw/build/src/libglfw3.a
+glfw_static := $(glfw_dir)/build/src/libglfw3.a
 GEARS_LIBS := $(glfw_static) -L$(build_dir) -lmoogl -Wl,-rpath,@executable_path -Wl,-rpath,$(CURDIR)/$(build_dir) \
   -framework Cocoa -framework Foundation -framework Metal -framework QuartzCore -framework IOKit
 
@@ -381,10 +352,10 @@ gears: $(gears_compat_exe) $(gears_gl46_exe)
 window_libs := -L$(build_dir) -lmoogl -Wl,-rpath,$(CURDIR)/$(build_dir)
 
 $(build_dir)/test_window: tests/window/test_window.c $(mgl_lib) $(build_dir)/libglfw.dylib
-	$(CC) -o $@ $< -Iinclude -Iexternal/glfw/include -L$(build_dir) -lglfw $(window_libs)
+	$(CC) -o $@ $< -Iinclude -I$(glfw_dir)/include -L$(build_dir) -lglfw $(window_libs)
 
 $(build_dir)/triangle: examples/triangle/main.c $(mgl_lib) $(build_dir)/libglfw.dylib
-	$(CC) -o $@ $< -Iinclude -Iexternal/glfw/include -L$(build_dir) -lglfw $(window_libs)
+	$(CC) -o $@ $< -Iinclude -I$(glfw_dir)/include -L$(build_dir) -lglfw $(window_libs)
 
 $(build_dir)/sdl2_triangle: examples/sdl2_triangle/main.c $(mgl_lib) $(sdl2_lib)
 	$(CC) -o $@ $< -Iinclude -I$(sdl2_install)/include -L$(build_dir) -lSDL2-2.0.0 $(window_libs)
@@ -494,15 +465,6 @@ $(build_dir)/%.o: %.m | $(generated)
 
 
 
-
-# GLFW-specific build rules with simplified flat directory structure
-$(GLFW_BUILD_DIR)/%.o: $(GLFW_SRC_DIR)/%.c
-	@mkdir -p $(dir $@)
-	$(CC) -MMD $(CFLAGS) -c $< -o $@
-
-$(GLFW_BUILD_DIR)/%.o: $(GLFW_SRC_DIR)/%.m
-	@mkdir -p $(dir $@)
-	clang -fno-objc-arc -fmodules -MMD $(CFLAGS) -c $< -o $@
 
 # everything in the build folder except the CTS results kept in cts-work
 clean:
