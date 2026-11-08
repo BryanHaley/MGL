@@ -21,6 +21,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>
 
 #include "mgl_test.h"
 #include "harness.h"
@@ -268,4 +269,47 @@ GPU_TEST(program_query, unread_block_array_element_is_unreferenced)
     CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
 
     glDeleteProgram(p);
+}
+
+// GL_KHR_parallel_shader_compile: MGL compiles before returning, so both
+// objects report complete, and the thread count reads back as set.
+GPU_TEST(program_query, parallel_compile_reports_completion_and_thread_count)
+{
+    void (*maxThreads)(GLuint) = (void (*)(GLuint))dlsym(RTLD_DEFAULT, "glMaxShaderCompilerThreadsKHR");
+    static const char *vs =
+        "#version 450 core\n"
+        "void main() { gl_Position = vec4(0.0); }\n";
+    static const char *fs =
+        "#version 450 core\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    GLint threads = 0, done = 0;
+    GLuint sh, prog;
+    char log[1024];
+
+    CHECK(maxThreads != NULL);
+    if (!maxThreads)
+        return;
+
+    glGetIntegerv(GL_MAX_SHADER_COMPILER_THREADS_KHR, &threads);
+    CHECK_EQ_INT(threads, -1);
+    maxThreads(4);
+    glGetIntegerv(GL_MAX_SHADER_COMPILER_THREADS_KHR, &threads);
+    CHECK_EQ_INT(threads, 4);
+    maxThreads(0xFFFFFFFF);
+
+    sh = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(sh, 1, &fs, NULL);
+    glCompileShader(sh);
+    glGetShaderiv(sh, GL_COMPLETION_STATUS_KHR, &done);
+    CHECK_EQ_INT(done, GL_TRUE);
+    glDeleteShader(sh);
+
+    prog = mgl_build_program(vs, fs, log, sizeof log);
+    CHECK_MSG(prog != 0, "program did not link: %s", log);
+    done = 0;
+    glGetProgramiv(prog, GL_COMPLETION_STATUS_KHR, &done);
+    CHECK_EQ_INT(done, GL_TRUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glDeleteProgram(prog);
 }

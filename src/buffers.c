@@ -1534,6 +1534,15 @@ void *mglMapBuffer(GLMContext ctx, GLenum target, GLenum access)
         ERROR_RETURN_VALUE(GL_INVALID_OPERATION, NULL);
     }
 
+    // storage made with glBufferStorage maps only the ways it was made for
+    if (ptr->immutable_storage)
+    {
+        GLbitfield need = access == GL_READ_ONLY ? GL_MAP_READ_BIT :
+                          access == GL_WRITE_ONLY ? GL_MAP_WRITE_BIT : GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;
+
+        ERROR_CHECK_RETURN_VALUE((need & ~ptr->storage_flags) == 0, GL_INVALID_OPERATION, NULL);
+    }
+
     if (access == GL_READ_ONLY || access == GL_READ_WRITE)
         waitForGPUWrites(ctx);
     else
@@ -1850,7 +1859,12 @@ static GLenum storageError(Buffer *ptr, GLsizeiptr size, GLbitfield storage_flag
         return GL_INVALID_VALUE;
 
     if (storage_flags & ~(GL_DYNAMIC_STORAGE_BIT | GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT |
-                          GL_MAP_COHERENT_BIT | GL_CLIENT_STORAGE_BIT))
+                          GL_MAP_COHERENT_BIT | GL_CLIENT_STORAGE_BIT | GL_SPARSE_STORAGE_BIT_ARB))
+        return GL_INVALID_VALUE;
+
+    // GL_ARB_sparse_buffer: a sparse buffer is never mapped
+    if ((storage_flags & GL_SPARSE_STORAGE_BIT_ARB) &&
+        (storage_flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT)))
         return GL_INVALID_VALUE;
 
     // persistent needs read or write, and coherent needs persistent
@@ -2240,3 +2254,60 @@ void mglGetBufferParameteri64v(GLMContext ctx, GLenum target, GLenum pname, GLin
 
     *params = tmp;
 }
+
+#pragma mark GL_ARB_sparse_buffer
+// A sparse buffer is backed in full. Reads of uncommitted pages are undefined,
+// so committing only has to check its arguments.
+static void pageCommitment(GLMContext ctx, Buffer *ptr, GLintptr offset, GLsizeiptr size)
+{
+    GLsizeiptr page = MGL_SPARSE_BUFFER_PAGE_SIZE;
+
+    ERROR_CHECK_RETURN(ptr->storage_flags & GL_SPARSE_STORAGE_BIT_ARB, GL_INVALID_OPERATION);
+    ERROR_CHECK_RETURN(offset >= 0 && size >= 0 && offset + size <= ptr->size, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(offset % page == 0, GL_INVALID_VALUE);
+    ERROR_CHECK_RETURN(size % page == 0 || offset + size == ptr->size, GL_INVALID_VALUE);
+}
+
+void mglBufferPageCommitment(GLMContext ctx, GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit)
+{
+    Buffer *ptr;
+
+    ERROR_CHECK_RETURN(checkTarget(ctx, target), GL_INVALID_ENUM);
+
+    ptr = STATE(buffers[bufferIndexFromTarget(ctx, target)]);
+
+    ERROR_CHECK_RETURN(ptr != NULL, GL_INVALID_OPERATION);
+
+    pageCommitment(ctx, ptr, offset, size);
+}
+
+void mglNamedBufferPageCommitment(GLMContext ctx, GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit)
+{
+    Buffer *ptr = findBuffer(ctx, buffer);
+
+    ERROR_CHECK_RETURN(ptr != NULL, GL_INVALID_OPERATION);
+
+    pageCommitment(ctx, ptr, offset, size);
+}
+
+#ifdef MGL_GL_CORE
+extern GLMContext _ctx;
+extern void mgl_lazy_init(void);
+
+void glBufferPageCommitmentARB(GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit)
+{
+    mgl_lazy_init();
+    mglBufferPageCommitment(_ctx, target, offset, size, commit);
+}
+
+void glNamedBufferPageCommitmentARB(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit)
+{
+    mgl_lazy_init();
+    mglNamedBufferPageCommitment(_ctx, buffer, offset, size, commit);
+}
+
+void glNamedBufferPageCommitmentEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit)
+{
+    glNamedBufferPageCommitmentARB(buffer, offset, size, commit);
+}
+#endif

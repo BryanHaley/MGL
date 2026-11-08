@@ -5,6 +5,7 @@
  * Context, strings, clears and readback against a real Metal device.
  */
 
+#include <dlfcn.h>
 #include "mgl_test.h"
 #include "harness.h"
 
@@ -408,4 +409,26 @@ GPU_TEST(readpixels, float_target_roundtrip)
     CHECK_NEAR(px[3], 1.0, 1e-5);
 
     mgl_target_destroy(&t);
+}
+
+// GL_KHR_no_error: a context made with the flag reports it and records no
+// errors but running out of memory.
+GPU_TEST(basic, a_no_error_context_records_no_errors)
+{
+    void (*setFlags)(void *, GLuint) = (void (*)(void *, GLuint))dlsym(RTLD_DEFAULT, "MGLsetContextFlags");
+    GLint flags = 0;
+
+    CHECK(setFlags != NULL);
+    if (!setFlags)
+        return;
+
+    setFlags(NULL, GL_CONTEXT_FLAG_NO_ERROR_BIT);
+    glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
+    glBindBuffer(0x1234, 0);
+    CHECK_EQ_UINT(glGetError(), GL_NO_ERROR);
+    setFlags(NULL, 0);
+
+    CHECK(flags & GL_CONTEXT_FLAG_NO_ERROR_BIT);
+    glBindBuffer(0x1234, 0);
+    CHECK_EQ_UINT(glGetError(), GL_INVALID_ENUM);
 }

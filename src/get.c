@@ -136,6 +136,16 @@ int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *
     int buffer_base = bufferBaseForPname(pname);
 
     // the compute limits come in threes, and every getter form reads them
+    if (pname == GL_MAX_TASK_WORK_GROUP_COUNT_EXT || pname == GL_MAX_MESH_WORK_GROUP_COUNT_EXT ||
+        pname == GL_MAX_TASK_WORK_GROUP_SIZE_EXT || pname == GL_MAX_MESH_WORK_GROUP_SIZE_EXT)
+    {
+        if (index >= 3) return -1;
+
+        out[0] = pname == GL_MAX_TASK_WORK_GROUP_COUNT_EXT || pname == GL_MAX_MESH_WORK_GROUP_COUNT_EXT
+               ? MGL_MAX_MESH_GROUP_COUNT : MGL_MAX_MESH_INVOCATIONS;
+        return 1;
+    }
+
     if (pname == GL_MAX_COMPUTE_WORK_GROUP_COUNT || pname == GL_MAX_COMPUTE_WORK_GROUP_SIZE)
     {
         if (index >= 3) return -1;
@@ -316,6 +326,16 @@ void mglWriteTypedValues(void *data, GLuint type, const GLdouble *v, int count)
         }
     }
 }
+
+// Apple SIMD groups are 32 wide in every stage. Not the evaluation stage:
+// where MGL tessellates itself, the vertices of one patch need not share a group.
+#define MGL_SUBGROUP_STAGES (GL_COMPUTE_SHADER_BIT | GL_FRAGMENT_SHADER_BIT | GL_VERTEX_SHADER_BIT | \
+                             GL_TESS_CONTROL_SHADER_BIT | GL_GEOMETRY_SHADER_BIT)
+#define MGL_SUBGROUP_FEATURES \
+    (GL_SUBGROUP_FEATURE_BASIC_BIT_KHR | GL_SUBGROUP_FEATURE_VOTE_BIT_KHR | \
+     GL_SUBGROUP_FEATURE_ARITHMETIC_BIT_KHR | GL_SUBGROUP_FEATURE_BALLOT_BIT_KHR | \
+     GL_SUBGROUP_FEATURE_SHUFFLE_BIT_KHR | GL_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT_KHR | \
+     GL_SUBGROUP_FEATURE_CLUSTERED_BIT_KHR | GL_SUBGROUP_FEATURE_QUAD_BIT_KHR)
 
 static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
 {
@@ -712,6 +732,93 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         case 0x826C: RET_TYPE_VAR(type, max_debug_group_stack_depth); break; // GL_MAX_DEBUG_GROUP_STACK_DEPTH
         case 0x826D: RET_TYPE_VAR(type, debug_group_stack_depth); break; // GL_DEBUG_GROUP_STACK_DEPTH
         case 0x82E8: RET_TYPE_VAR(type, max_label_length); break; // GL_MAX_LABEL_LENGTH
+        case 0x91B0: { GLdouble v = ctx->max_shader_compiler_threads; mglWriteTypedValues(data, type, &v, 1); } break; // GL_MAX_SHADER_COMPILER_THREADS_KHR
+        case GL_MAX_SPARSE_TEXTURE_SIZE_ARB: { GLdouble v = MGL_MAX_SPARSE_SIZE; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_MAX_SPARSE_3D_TEXTURE_SIZE_ARB: { GLdouble v = MGL_MAX_SPARSE_3D_SIZE; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_MAX_SPARSE_ARRAY_TEXTURE_LAYERS_ARB: { GLdouble v = MGL_MAX_SPARSE_LAYERS; mglWriteTypedValues(data, type, &v, 1); } break;
+        // Metal gives each slice its own tail, so any shape can be sparse
+        case GL_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS_ARB: { GLdouble v = 1; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_SPARSE_BUFFER_PAGE_SIZE_ARB: { GLdouble v = MGL_SPARSE_BUFFER_PAGE_SIZE; mglWriteTypedValues(data, type, &v, 1); } break;
+        // GL_EXT_mesh_shader: the per-stage limits are the compute stage's,
+        // and the rest the extension's minimums, which Metal meets
+        case GL_MAX_TASK_UNIFORM_BLOCKS_EXT: case GL_MAX_MESH_UNIFORM_BLOCKS_EXT:
+            RET_TYPE_VAR(type, max_compute_uniform_blocks); break;
+        case GL_MAX_TASK_TEXTURE_IMAGE_UNITS_EXT: case GL_MAX_MESH_TEXTURE_IMAGE_UNITS_EXT:
+            RET_TYPE_VAR(type, max_compute_texture_image_units); break;
+        case GL_MAX_TASK_IMAGE_UNIFORMS_EXT: case GL_MAX_MESH_IMAGE_UNIFORMS_EXT:
+            RET_TYPE_VAR(type, max_compute_image_uniforms); break;
+        case GL_MAX_TASK_UNIFORM_COMPONENTS_EXT: case GL_MAX_MESH_UNIFORM_COMPONENTS_EXT:
+            RET_TYPE_VAR(type, max_compute_uniform_components); break;
+        case GL_MAX_TASK_ATOMIC_COUNTER_BUFFERS_EXT: case GL_MAX_MESH_ATOMIC_COUNTER_BUFFERS_EXT:
+            RET_TYPE_VAR(type, max_compute_atomic_counter_buffers); break;
+        case GL_MAX_TASK_ATOMIC_COUNTERS_EXT: case GL_MAX_MESH_ATOMIC_COUNTERS_EXT:
+            RET_TYPE_VAR(type, max_compute_atomic_counters); break;
+        case GL_MAX_TASK_SHADER_STORAGE_BLOCKS_EXT: case GL_MAX_MESH_SHADER_STORAGE_BLOCKS_EXT:
+            RET_TYPE_VAR(type, max_compute_shader_storage_blocks); break;
+        case GL_MAX_COMBINED_TASK_UNIFORM_COMPONENTS_EXT: case GL_MAX_COMBINED_MESH_UNIFORM_COMPONENTS_EXT:
+            RET_TYPE_VAR(type, max_combined_compute_uniform_components); break;
+        case GL_MAX_TASK_WORK_GROUP_TOTAL_COUNT_EXT:
+        case GL_MAX_MESH_WORK_GROUP_TOTAL_COUNT_EXT:
+        case GL_MAX_MESH_WORK_GROUP_INVOCATIONS_EXT:
+        case GL_MAX_TASK_WORK_GROUP_INVOCATIONS_EXT:
+        case GL_MAX_TASK_PAYLOAD_SIZE_EXT:
+        case GL_MAX_TASK_SHARED_MEMORY_SIZE_EXT:
+        case GL_MAX_MESH_SHARED_MEMORY_SIZE_EXT:
+        case GL_MAX_TASK_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT:
+        case GL_MAX_MESH_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT:
+        case GL_MAX_MESH_OUTPUT_MEMORY_SIZE_EXT:
+        case GL_MAX_MESH_PAYLOAD_AND_OUTPUT_MEMORY_SIZE_EXT:
+        case GL_MAX_MESH_OUTPUT_VERTICES_EXT:
+        case GL_MAX_MESH_OUTPUT_PRIMITIVES_EXT:
+        case GL_MAX_MESH_OUTPUT_COMPONENTS_EXT:
+        case GL_MAX_MESH_OUTPUT_LAYERS_EXT:
+        case GL_MAX_MESH_MULTIVIEW_VIEW_COUNT_EXT:
+        case GL_MESH_OUTPUT_PER_VERTEX_GRANULARITY_EXT:
+        case GL_MESH_OUTPUT_PER_PRIMITIVE_GRANULARITY_EXT:
+        case GL_MAX_PREFERRED_TASK_WORK_GROUP_INVOCATIONS_EXT:
+        case GL_MAX_PREFERRED_MESH_WORK_GROUP_INVOCATIONS_EXT:
+        case GL_MESH_PREFERS_LOCAL_INVOCATION_VERTEX_OUTPUT_EXT:
+        case GL_MESH_PREFERS_LOCAL_INVOCATION_PRIMITIVE_OUTPUT_EXT:
+        case GL_MESH_PREFERS_COMPACT_VERTEX_OUTPUT_EXT:
+        case GL_MESH_PREFERS_COMPACT_PRIMITIVE_OUTPUT_EXT:
+        {
+            GLdouble v = 0;
+
+            switch (pname)
+            {
+                case GL_MAX_TASK_WORK_GROUP_TOTAL_COUNT_EXT: v = MGL_MAX_TASK_GROUP_TOTAL; break;
+                case GL_MAX_MESH_WORK_GROUP_TOTAL_COUNT_EXT: v = MGL_MAX_MESH_GROUP_TOTAL; break;
+                case GL_MAX_MESH_WORK_GROUP_INVOCATIONS_EXT:
+                case GL_MAX_TASK_WORK_GROUP_INVOCATIONS_EXT: v = MGL_MAX_MESH_INVOCATIONS; break;
+                case GL_MAX_TASK_PAYLOAD_SIZE_EXT: v = MGL_MAX_TASK_PAYLOAD; break;
+                case GL_MAX_TASK_SHARED_MEMORY_SIZE_EXT: v = 32768; break;
+                case GL_MAX_MESH_SHARED_MEMORY_SIZE_EXT: v = 28672; break;
+                case GL_MAX_TASK_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT: v = 32768; break;
+                case GL_MAX_MESH_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT: v = 28672; break;
+                // SPIRV-Cross builds the outputs in threadgroup memory and
+                // copies them out, and Metal holds both, with the shared
+                // memory, to 60 KB: under the extension's 32 KB minimum
+                case GL_MAX_MESH_OUTPUT_MEMORY_SIZE_EXT: v = MGL_MAX_MESH_OUTPUT; break;
+                case GL_MAX_MESH_PAYLOAD_AND_OUTPUT_MEMORY_SIZE_EXT: v = MGL_MAX_MESH_OUTPUT + MGL_MAX_TASK_PAYLOAD; break;
+                case GL_MAX_MESH_OUTPUT_VERTICES_EXT: v = 256; break;
+                case GL_MAX_MESH_OUTPUT_PRIMITIVES_EXT: v = 256; break;
+                case GL_MAX_MESH_OUTPUT_COMPONENTS_EXT: v = 128; break;
+                case GL_MAX_MESH_OUTPUT_LAYERS_EXT: v = 8; break;
+                case GL_MAX_MESH_MULTIVIEW_VIEW_COUNT_EXT: v = 1; break;
+                case GL_MESH_OUTPUT_PER_VERTEX_GRANULARITY_EXT: v = 1; break;
+                case GL_MESH_OUTPUT_PER_PRIMITIVE_GRANULARITY_EXT: v = 1; break;
+                case GL_MAX_PREFERRED_TASK_WORK_GROUP_INVOCATIONS_EXT:
+                case GL_MAX_PREFERRED_MESH_WORK_GROUP_INVOCATIONS_EXT: v = 32; break;
+                default: v = 0; break;
+            }
+            mglWriteTypedValues(data, type, &v, 1);
+        }
+        break;
+
+        case GL_SUBGROUP_SIZE_KHR: { GLdouble v = 32; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_SUBGROUP_SUPPORTED_STAGES_KHR: { GLdouble v = MGL_SUBGROUP_STAGES; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_SUBGROUP_SUPPORTED_FEATURES_KHR: { GLdouble v = MGL_SUBGROUP_FEATURES; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_SUBGROUP_QUAD_ALL_STAGES_KHR: { GLdouble v = 0; mglWriteTypedValues(data, type, &v, 1); } break;
         case 0x826E: RET_TYPE_VAR(type, max_uniform_locations); break; // GL_MAX_UNIFORM_LOCATIONS
         case 0x9315: RET_TYPE_VAR(type, max_framebuffer_width); break; // GL_MAX_FRAMEBUFFER_WIDTH
         case 0x9316: RET_TYPE_VAR(type, max_framebuffer_height); break; // GL_MAX_FRAMEBUFFER_HEIGHT
@@ -996,6 +1103,17 @@ static const char * const mgl_extensions[] = {
     "GL_ARB_transform_feedback_instanced",
     "GL_ARB_transform_feedback_overflow_query",
     "GL_KHR_debug",
+    "GL_KHR_no_error",
+    "GL_KHR_parallel_shader_compile",
+    "GL_ARB_shader_viewport_layer_array",
+    "GL_ARB_fragment_shader_interlock",
+    "GL_KHR_shader_subgroup",
+    "GL_ARB_sparse_buffer",
+    "GL_ARB_sparse_texture",
+    "GL_ARB_sparse_texture2",
+    "GL_ARB_sparse_texture_clamp",
+    "GL_EXT_mesh_shader",
+    "GL_ARB_parallel_shader_compile",
     "GL_KHR_robustness",
     // Apple GPUs decode ASTC themselves, and the format table maps every LDR size
     "GL_KHR_texture_compression_astc_ldr",
@@ -1166,6 +1284,12 @@ static GLint internalFormatQuery(GLMContext ctx, GLenum target, GLenum internalf
 {
     switch(pname)
     {
+        case GL_NUM_VIRTUAL_PAGE_SIZES_ARB:
+        case GL_VIRTUAL_PAGE_SIZE_X_ARB:
+        case GL_VIRTUAL_PAGE_SIZE_Y_ARB:
+        case GL_VIRTUAL_PAGE_SIZE_Z_ARB:
+            return mglSparseFormatQuery(ctx, target, internalformat, pname);
+
         case GL_INTERNALFORMAT_SUPPORTED:
             return internalFormatSupported(internalformat);
 

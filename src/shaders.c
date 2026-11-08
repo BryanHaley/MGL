@@ -34,9 +34,8 @@ const glslang_resource_t* glslang_default_resource(void);
 
 const char *getShaderTypeStr(GLuint type)
 {
-    static const char *types[] = {"VERTEX_SHADER", "FRAGMENT_SHADER",
-        "GEOMETRY_SHADER", "TESS_CONTROL_SHADER", "TESS_EVALUATION_SHADER",
-        "COMPUTE_SHADER", "MAX_SHADER_TYPES", NULL};
+    static const char *types[] = {"VERTEX_SHADER", "TESS_CONTROL_SHADER", "TESS_EVALUATION_SHADER",
+        "GEOMETRY_SHADER", "FRAGMENT_SHADER", "COMPUTE_SHADER", "TASK_SHADER", "MESH_SHADER", NULL};
 
     if (type < 0 || type >= _MAX_SHADER_TYPES)
         return "UNKNOWN_SHADER_TYPE";
@@ -53,6 +52,8 @@ GLuint glShaderTypeToGLMType(GLuint type)
         case GL_TESS_CONTROL_SHADER: return _TESS_CONTROL_SHADER;
         case GL_TESS_EVALUATION_SHADER: return _TESS_EVALUATION_SHADER;
         case GL_COMPUTE_SHADER: return _COMPUTE_SHADER;
+        case GL_TASK_SHADER_EXT: return _TASK_SHADER;
+        case GL_MESH_SHADER_EXT: return _MESH_SHADER;
         default:
             // CRITICAL FIX: Handle unknown shader types gracefully instead of crashing
             MGL_ERR("MGL ERROR: Unknown shader type 0x%x, defaulting to vertex shader\n", type);
@@ -69,6 +70,8 @@ glslang_stage_t getGLSLStage(GLuint type)
         case GL_TESS_CONTROL_SHADER: return GLSLANG_STAGE_TESSCONTROL;
         case GL_TESS_EVALUATION_SHADER: return GLSLANG_STAGE_TESSEVALUATION;
         case GL_COMPUTE_SHADER: return GLSLANG_STAGE_COMPUTE;
+        case GL_TASK_SHADER_EXT: return GLSLANG_STAGE_TASK;
+        case GL_MESH_SHADER_EXT: return GLSLANG_STAGE_MESH;
         default:
             // CRITICAL FIX: Handle unknown shader types gracefully instead of crashing
             MGL_ERR("MGL ERROR: Unknown GLSL shader type 0x%x, defaulting to vertex\n", type);
@@ -85,6 +88,14 @@ void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t
     input->client = GLSLANG_CLIENT_OPENGL;
     input->target_language = GLSLANG_TARGET_SPV;
     input->target_language_version = GLSLANG_TARGET_SPV_1_0;
+
+    // glslang only makes subgroup operations for SPIR-V 1.3
+    if (strstr(src, "GL_KHR_shader_subgroup"))
+        input->target_language_version = GLSLANG_TARGET_SPV_1_3;
+
+    // and mesh and task shaders, and what they feed, for 1.4
+    if (type == GL_MESH_SHADER_EXT || type == GL_TASK_SHADER_EXT || strstr(src, "GL_EXT_mesh_shader"))
+        input->target_language_version = GLSLANG_TARGET_SPV_1_4;
 
     /* Detect and upgrade GLSL version from source
      * GLSL 1.40 (OpenGL 3.1) shaders from virglrenderer need upgrading to 3.30
@@ -278,6 +289,8 @@ GLuint mglCreateShader(GLMContext ctx, GLenum type)
         case GL_COMPUTE_SHADER:
         case GL_TESS_CONTROL_SHADER:
         case GL_TESS_EVALUATION_SHADER:
+        case GL_TASK_SHADER_EXT:
+        case GL_MESH_SHADER_EXT:
             break;
 
         default:
@@ -1523,6 +1536,10 @@ static char *rewriteAlphaTest(const char *src)
     if (!fragmentOutputName(src, out_name, sizeof out_name))
         return NULL;
 
+    // glslang only takes the interlock calls inside main itself
+    if (strstr(src, "InvocationInterlock"))
+        return NULL;
+
     // zero is the test off; the rest are GL's compare functions in order
     snprintf(tail, sizeof tail,
              "\nvoid main()\n{\n"
@@ -2287,6 +2304,8 @@ void mglGetShaderiv(GLMContext ctx, GLuint shader, GLenum pname, GLint *params)
                 case _COMPUTE_SHADER: *params = GL_COMPUTE_SHADER; break;
                 case _TESS_CONTROL_SHADER: *params = GL_TESS_CONTROL_SHADER; break;
                 case _TESS_EVALUATION_SHADER: *params = GL_TESS_EVALUATION_SHADER; break;
+                case _TASK_SHADER: *params = GL_TASK_SHADER_EXT; break;
+                case _MESH_SHADER: *params = GL_MESH_SHADER_EXT; break;
                 default:
                     // CRITICAL FIX: Handle unknown shader types gracefully instead of crashing
                     MGL_ERR("MGL ERROR: Unknown internal shader type %d, defaulting to vertex\n", ptr->glm_type);
@@ -2296,6 +2315,10 @@ void mglGetShaderiv(GLMContext ctx, GLuint shader, GLenum pname, GLint *params)
 
         case GL_DELETE_STATUS:
             *params = ptr->delete_status;
+            break;
+
+        case GL_COMPLETION_STATUS_KHR:
+            *params = GL_TRUE;
             break;
 
         case GL_COMPILE_STATUS:
@@ -2450,6 +2473,8 @@ static int spirvModelFor(GLenum type)
         case GL_GEOMETRY_SHADER:        return 3;
         case GL_FRAGMENT_SHADER:        return 4;
         case GL_COMPUTE_SHADER:         return 5;
+        case GL_TASK_SHADER_EXT:        return 5364;    // SpvExecutionModelTaskEXT
+        case GL_MESH_SHADER_EXT:        return 5365;    // SpvExecutionModelMeshEXT
     }
     return -1;
 }
@@ -2595,3 +2620,19 @@ void mglSpecializeShader(GLMContext ctx, GLuint shader, const GLchar *pEntryPoin
 
     compileShaderObject(ctx, ptr);
 }
+
+#ifdef MGL_GL_CORE
+extern GLMContext _ctx;
+extern void mgl_lazy_init(void);
+
+void glMaxShaderCompilerThreadsKHR(GLuint count)
+{
+    mgl_lazy_init();
+    _ctx->max_shader_compiler_threads = (GLint)count;
+}
+
+void glMaxShaderCompilerThreadsARB(GLuint count)
+{
+    glMaxShaderCompilerThreadsKHR(count);
+}
+#endif

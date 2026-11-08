@@ -1114,6 +1114,8 @@ static void phase8(void)
         "GL_ARB_fragment_shader_interlock", "GL_EXT_shader_image_load_formatted",
         "GL_ARB_shader_viewport_layer_array", "GL_KHR_parallel_shader_compile",
         "GL_ARB_sparse_texture", "GL_EXT_texture_compression_s3tc",
+        "GL_ARB_sparse_texture2", "GL_ARB_sparse_texture_clamp", "GL_ARB_sparse_buffer",
+        "GL_EXT_mesh_shader",
     };
 
     phase("PHASE 8  extensions beyond core");

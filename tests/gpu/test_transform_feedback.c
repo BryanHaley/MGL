@@ -1492,3 +1492,72 @@ GPU_TEST(transform_feedback, vertex_formats_metal_lacks_are_converted)
     glDeleteBuffers(1, &buf);
     glDeleteVertexArrays(1, &vao);
 }
+
+// An indexed indirect draw records the vertex ids its indices pick, with the
+// command's first index and base vertex, when the indices and the command
+// share one buffer.
+GPU_TEST(transform_feedback, indexed_indirect_draws_record_their_vertex_ids)
+{
+    static const char *vs =
+        "#version 430\n"
+        "flat out ivec2 ids;\n"
+        "void main() { ids = ivec2(gl_VertexID, gl_InstanceID); gl_Position = vec4(0.0); }\n";
+    static const char *fs =
+        "#version 430\n"
+        "out vec4 o;\n"
+        "void main() { o = vec4(1.0); }\n";
+    static const char *varyings[] = { "ids" };
+    enum { N = 8, BASE = 1000 };
+    // command (5 uints), then N + 1 indices counting down
+    GLuint data[5 + N + 1];
+    GLuint prog, vao, dbo, tf;
+    GLint got[2 * N * 2];
+    char log[2048];
+
+    data[0] = N;        // count
+    data[1] = 2;        // instances
+    data[2] = 5 + 1;    // first index: past the command and one index
+    data[3] = BASE;     // base vertex
+    data[4] = 0;        // base instance
+    for (int i = 0; i <= N; i++)
+        data[5 + i] = (GLuint)(N - i) * 4096u;
+
+    prog = linkRecording(vs, fs, varyings, 1, GL_INTERLEAVED_ATTRIBS, log, sizeof log);
+    CHECK_MSG(prog != 0, "recording program did not link: %s", log);
+    if (!prog)
+        return;
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &dbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, dbo);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, dbo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof data, data, GL_STATIC_DRAW);
+
+    tf = recordingBuffer(0, sizeof got);
+    glUseProgram(prog);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawElementsIndirect(GL_POINTS, GL_UNSIGNED_INT, NULL);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    memset(got, 0, sizeof got);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, tf);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof got, got);
+
+    for (int k = 0; k < 2 * N; k++)
+    {
+        GLint want_v = (GLint)data[6 + k % N] + BASE, want_i = k / N;
+
+        CHECK_MSG(got[2 * k] == want_v && got[2 * k + 1] == want_i, "record %d holds %d/%d, want %d/%d",
+                  k, got[2 * k], got[2 * k + 1], want_v, want_i);
+    }
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &tf);
+    glDeleteBuffers(1, &dbo);
+    glDeleteVertexArrays(1, &vao);
+}

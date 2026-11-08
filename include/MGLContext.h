@@ -48,6 +48,10 @@ void MGLswapBuffers(GLMContext ctx);
 // 0 turns vsync off, anything else on. NULL ctx means the current one.
 void MGLsetSwapInterval(GLMContext ctx, int interval);
 
+// GL_CONTEXT_FLAGS for the context, such as GL_CONTEXT_FLAG_NO_ERROR_BIT,
+// which stops it recording errors. NULL ctx means the current one.
+void MGLsetContextFlags(GLMContext ctx, GLuint flags);
+
 // MGLget can take NULL for the ctx, in this case it will use the current ctx
 void MGLget(GLMContext ctx, GLenum param, GLuint *data);
 

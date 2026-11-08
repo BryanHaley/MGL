@@ -583,6 +583,14 @@ bool getParam(GLMContext ctx, TextureParameter *tex_params, GLenum pname, GLint 
 // texture's pixels away when it sees one, so a plain filter change must not.
 static void setTexParamiv(GLMContext ctx, Texture *tex, GLenum pname, const GLint *params)
 {
+    GLenum err;
+
+    if (mglSparseTexParam(tex, pname, *params, &err))
+    {
+        ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
+        return;
+    }
+
     if (setTexParamsi(ctx, &tex->params, pname, params))
     {
         tex->dirty_bits |= DIRTY_TEXTURE_PARAM;
@@ -608,6 +616,14 @@ static void setTexParamiv(GLMContext ctx, Texture *tex, GLenum pname, const GLin
 
 static void setTexParamfv(GLMContext ctx, Texture *tex, GLenum pname, const GLfloat *params)
 {
+    GLenum err;
+
+    if (mglSparseTexParam(tex, pname, (GLint)*params, &err))
+    {
+        ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
+        return;
+    }
+
     if (setTexParamsf(ctx, &tex->params, pname, params))
     {
         tex->dirty_bits |= DIRTY_TEXTURE_PARAM;

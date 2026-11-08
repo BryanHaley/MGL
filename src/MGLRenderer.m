@@ -153,6 +153,13 @@ typedef struct SyncList_t {
 } SyncList;
 
 MTLPixelFormat mtlPixelFormatForGLTex(Texture * gl_tex);
+MTLPixelFormat mtlFormatForGLInternalFormat(GLenum internal_format);
+
+static bool isDepthFormat(MTLPixelFormat f)
+{
+    return f == MTLPixelFormatDepth16Unorm || f == MTLPixelFormatDepth32Float;
+}
+
 
 typedef struct MGLDrawable_t {
     GLuint width;
@@ -321,6 +328,8 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
 
     // what a sampler reads when GL says its texture is incomplete
     id<MTLTexture> _incompleteTexture;
+    // every sparse texture takes its pages from here
+    id<MTLHeap> _sparseHeap;
     id<MTLSamplerState> _incompleteSampler;
 
     // cull distance: record the distances, then pick the primitives that live
@@ -1179,11 +1188,22 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
 
 - (bool) mapBuffersToMTL
 {
-    if ([self mapGLBuffersToMTLBufferMap: &ctx->state.vertex_buffer_map_list stage:_VERTEX_SHADER] == false)
+    if (mglProgramIsMesh(ctx->state.program))
+        ctx->state.vertex_buffer_map_list.count = 0;
+    else if ([self mapGLBuffersToMTLBufferMap: &ctx->state.vertex_buffer_map_list stage:_VERTEX_SHADER] == false)
         return false;
 
     if ([self mapGLBuffersToMTLBufferMap: &ctx->state.fragment_buffer_map_list stage:_FRAGMENT_SHADER] == false)
         return false;
+
+    if (mglProgramIsMesh(ctx->state.program))
+    {
+        if ([self mapGLBuffersToMTLBufferMap: &ctx->state.mesh_buffer_map_list stage:_MESH_SHADER] == false)
+            return false;
+
+        if ([self mapGLBuffersToMTLBufferMap: &ctx->state.task_buffer_map_list stage:_TASK_SHADER] == false)
+            return false;
+    }
 
     if (ctx->state.program && ctx->state.program->tess.active)
     {
@@ -1550,6 +1570,77 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
         convertAttribElement(type, size, VAO_ATTRIB_STATE(a).normalized, src + k * stride, dst + k * 4);
 
     return copy;
+}
+
+// The buffers of a mesh program's object and mesh stages, which Metal sets
+// apart from the vertex ones.
+- (bool) bindMeshStageBuffers: (BufferMapList *) list stage: (int) stage
+{
+    bool object = stage == _TASK_SHADER;
+    id<MTLRenderCommandEncoder> enc = _currentRenderEncoder;
+    void (^setBytes)(const void *, NSUInteger, NSUInteger) = ^(const void *b, NSUInteger l, NSUInteger i) {
+        if (object) [enc setObjectBytes: b length: l atIndex: i]; else [enc setMeshBytes: b length: l atIndex: i];
+    };
+    void (^setBuffer)(id<MTLBuffer>, NSUInteger, NSUInteger) = ^(id<MTLBuffer> b, NSUInteger o, NSUInteger i) {
+        if (object) [enc setObjectBuffer: b offset: o atIndex: i]; else [enc setMeshBuffer: b offset: o atIndex: i];
+    };
+
+    MTL_CHECK_RETURN_FALSE(enc, GL_INVALID_OPERATION);
+
+    {
+        uint32_t sizes[31];
+
+        if (bufferSizesFor(ctx->state.program, stage, list, sizes))
+            setBytes(sizes, sizeof sizes, MGL_BUFFER_SIZES_MSL_SLOT);
+    }
+
+    for (int i = 0; i < list->count; i++)
+    {
+        BufferMap *map = &list->buffers[i];
+        Buffer *ptr = map->buf;
+        GLintptr offset = map->offset;
+
+        if (map->in_table)
+            continue;
+
+        MTL_CHECK_RETURN_FALSE(ptr, GL_INVALID_OPERATION);
+
+        bool writable = (map->gl_buffer_type == _SHADER_STORAGE_BUFFER ||
+                         map->gl_buffer_type == _ATOMIC_COUNTER_BUFFER);
+        GLintptr inline_len = offset < ptr->size ? ptr->size - offset : 0;
+        GLubyte laid[4096];
+        size_t laid_len = metalUniformLayout(map, ptr, laid, sizeof laid);
+
+        if (laid_len)
+        {
+            setBytes(laid, laid_len, map->buffer_base_index);
+            ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
+        }
+        else if (!writable && ptr->size < 4096 && ptr->data.mtl_data == NULL)
+        {
+            static const uint32_t none = 0;
+
+            setBytes(inline_len > 0 ? (const void *)(ptr->data.buffer_data + offset) : (const void *)&none,
+                     (NSUInteger)(inline_len > 0 ? inline_len : sizeof none), map->buffer_base_index);
+            ptr->data.dirty_bits &= ~DIRTY_BUFFER_DATA;
+        }
+        else
+        {
+            RETURN_FALSE_ON_FAILURE([self processBuffer: ptr]);
+
+            id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)(ptr->data.mtl_data);
+
+            MTL_CHECK_RETURN_FALSE(buffer, GL_OUT_OF_MEMORY);
+            setBuffer(buffer, offset, map->buffer_base_index);
+        }
+    }
+
+    [self fillPlainTable: list
+                setBytes: ^(const void *b, NSUInteger l, NSUInteger i) { setBytes(b, l, i); }
+                     use: ^(id<MTLResource> r) { [enc useResource: r usage: MTLResourceUsageRead
+                                                           stages: object ? MTLRenderStageObject : MTLRenderStageMesh]; }];
+
+    return true;
 }
 
 - (bool) bindFragmentBuffersToCurrentRenderEncoder
@@ -2036,6 +2127,18 @@ static bool isRGB32BufferFormat(GLenum f)
 
     id<MTLTexture> texture;
 
+    if (tex->sparse && tex->immutable_storage)
+    {
+        // made once and never remade, so it takes every use it could need;
+        // shader writes go through a plain copy (sparseShadowFor:)
+        tex_desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView;
+        tex_desc.cpuCacheMode = [self sparseHeap].cpuCacheMode;
+        texture = [[self sparseHeap] newTextureWithDescriptor: tex_desc];
+
+        if (!texture)
+            return NULL;
+    }
+    else
     // CRITICAL FIX: Safe texture creation with proper validation
     @try {
         texture = [_device newTextureWithDescriptor:tex_desc];
@@ -3804,6 +3907,17 @@ static bool textureReadyForCast(id<MTLTexture> t, MTLPixelFormat atomic)
     if (base == nil)
         return nil;
 
+    if ((iu->tex->sparse && (iu->access != GL_READ_ONLY || atomic)) || isDepthFormat(base.pixelFormat))
+    {
+        NSMutableDictionary *s = [self sparseShadowFor: base create: false];
+
+        if (s)
+        {
+            s[@"pending"] = @YES;
+            base = s[@"shadow"];
+        }
+    }
+
     // a multisampled image is worked on as a layer per sample
     if (base.textureType == MTLTextureType2DMultisample || base.textureType == MTLTextureType2DMultisampleArray)
     {
@@ -4169,6 +4283,18 @@ static MGLTexParam texParamFor(GLMContext ctx, const TextureParameter *p, GLenum
 {
     // Realising a texture can retire the encoder, so each call asks for the
     // current one rather than holding on to the one there was at the start.
+    if (stage == _MESH_SHADER)
+        return [self bindTexturesForStage: stage
+                               setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setMeshTexture: t atIndex: i]; }
+                               setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setMeshSamplerState: s atIndex: i]; }
+                                setParams: ^(const void *p, NSUInteger n) { [self->_currentRenderEncoder setMeshBytes: p length: n atIndex: MGL_VERTEX_TEX_PARAM_MSL_SLOT]; }];
+
+    if (stage == _TASK_SHADER)
+        return [self bindTexturesForStage: stage
+                               setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setObjectTexture: t atIndex: i]; }
+                               setSampler: ^(id<MTLSamplerState> s, NSUInteger i) { [self->_currentRenderEncoder setObjectSamplerState: s atIndex: i]; }
+                                setParams: ^(const void *p, NSUInteger n) { [self->_currentRenderEncoder setObjectBytes: p length: n atIndex: MGL_VERTEX_TEX_PARAM_MSL_SLOT]; }];
+
     if (stage == _VERTEX_SHADER)
         return [self bindTexturesForStage: stage
                                setTexture: ^(id<MTLTexture> t, NSUInteger i) { [self->_currentRenderEncoder setVertexTexture: t atIndex: i]; }
@@ -5247,6 +5373,11 @@ static MTLTextureType viewTextureType(GLenum target)
     // the storage may do that -- a filter or wrap change must not.
     bool storage_changed = (tex->dirty_bits & (DIRTY_TEXTURE_LEVEL | DIRTY_TEXTURE_DATA)) != 0;
     bool sampler_changed = (tex->dirty_bits & (DIRTY_TEXTURE_PARAM | DIRTY_TEXTURE_ACCESS)) != 0;
+
+    // a sparse texture's pages are mapped into the one it has; a new one
+    // would have none, and there is no CPU copy to fill it from
+    if (tex->sparse && tex->mtl_data)
+        storage_changed = false;
 
     if (storage_changed && tex->mtl_data)
     {
@@ -6594,8 +6725,21 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
         _pendingScissorClear = 0;
     }
 
+    // a mesh program takes no vertex arrays
+    if (mglProgramIsMesh(ctx->state.program) && !_clearOnly)
+    {
+        if (![self bindMeshStageBuffers: &ctx->state.mesh_buffer_map_list stage: _MESH_SHADER] ||
+            ![self bindMeshStageBuffers: &ctx->state.task_buffer_map_list stage: _TASK_SHADER] ||
+            ![self bindFragmentBuffersToCurrentRenderEncoder] ||
+            ![self bindTexturesForStage: _MESH_SHADER] || ![self bindTexturesForStage: _TASK_SHADER] ||
+            ![self bindTexturesForStage: _FRAGMENT_SHADER])
+        {
+            [self recordGPUError];
+            return false;
+        }
+    }
     // only bind all this if there is a VAO and something will be drawn
-    if (VAO() && !_clearOnly)
+    else if (VAO() && !_clearOnly)
     {
         if ([self bindVertexBuffersToCurrentRenderEncoder] == false)
         {
@@ -9736,6 +9880,39 @@ static MTLWinding mtlWindingFor(const Program *p)
     return cw ? MTLWindingCounterClockwise : MTLWindingClockwise;
 }
 
+// The mesh pipeline of a mesh program, with everything but the vertex stage
+// taken from the descriptor built the usual way.
+- (id<MTLRenderPipelineState>) meshPipelineFrom: (MTLRenderPipelineDescriptor *) rp error: (NSError **) error
+{
+    Program *p = ctx->state.program;
+    MTLMeshRenderPipelineDescriptor *d = [MTLMeshRenderPipelineDescriptor new];
+
+    d.label = @"GLSL Mesh Pipeline";
+    d.objectFunction = (__bridge id<MTLFunction>)p->spirv[_TASK_SHADER].mtl_function;
+    d.meshFunction = [self clipVariant: &p->spirv[_MESH_SHADER]];
+    d.fragmentFunction = rp.fragmentFunction;
+    d.rasterizationEnabled = rp.rasterizationEnabled;
+    d.rasterSampleCount = rp.rasterSampleCount;
+    d.alphaToCoverageEnabled = rp.alphaToCoverageEnabled;
+    d.alphaToOneEnabled = rp.alphaToOneEnabled;
+    d.depthAttachmentPixelFormat = rp.depthAttachmentPixelFormat;
+    d.stencilAttachmentPixelFormat = rp.stencilAttachmentPixelFormat;
+
+    for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+        d.colorAttachments[i] = rp.colorAttachments[i];
+
+    if (d.objectFunction)
+    {
+        d.maxTotalThreadsPerObjectThreadgroup = p->mesh.task_size[0] * p->mesh.task_size[1] * p->mesh.task_size[2];
+        d.payloadMemoryLength = MGL_MAX_TASK_PAYLOAD;
+    }
+
+    d.maxTotalThreadsPerMeshThreadgroup = p->mesh.mesh_size[0] * p->mesh.mesh_size[1] * p->mesh.mesh_size[2];
+
+    return [_device newRenderPipelineStateWithMeshDescriptor: d options: MTLPipelineOptionNone
+                                                  reflection: nil error: error];
+}
+
 -(MTLRenderPipelineDescriptor *)generatePipelineDescriptor
 {
     MTLRenderPipelineDescriptor *pipelineStateDescriptor;
@@ -9806,6 +9983,13 @@ static MTLWinding mtlWindingFor(const Program *p)
         fragmentFunction = (__bridge id<MTLFunction>)(program->fs_sample_rate.mtl_function);
     }
 
+    // a mesh program's first stage is its mesh function; the caller builds
+    // the mesh pipeline from this descriptor
+    bool mesh = mglProgramIsMesh(program);
+
+    if (mesh)
+        vertexFunction = (__bridge id<MTLFunction>)(program->spirv[_MESH_SHADER].mtl_function);
+
     if (!vertexFunction || (!fragmentFunction && !raster_off && !no_fs))
     {
         MGL_NSERR(@"MGL ERROR: program %u has no linked %s stage", program->name,
@@ -9820,7 +10004,7 @@ static MTLWinding mtlWindingFor(const Program *p)
     pipelineStateDescriptor.label = @"GLSL Pipeline";
     // tessellating, the vertex stage is a compute kernel and the evaluation
     // stage is set below
-    if (!program->tess.active)
+    if (!program->tess.active && !mesh)
         pipelineStateDescriptor.vertexFunction = [self clipVariant: vsp];
     pipelineStateDescriptor.fragmentFunction = fragmentFunction;
 
@@ -9838,6 +10022,12 @@ static MTLWinding mtlWindingFor(const Program *p)
         pipelineStateDescriptor.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
         pipelineStateDescriptor.tessellationPartitionMode = mtlPartitionForSpv(program->tess.partition);
         pipelineStateDescriptor.tessellationOutputWindingOrder = mtlWindingFor(program);
+
+        const char *tes = program->spirv[_TESS_EVALUATION_SHADER].msl_str;
+
+        if (tes && (strstr(tes, "render_target_array_index") || strstr(tes, "viewport_array_index")))
+            pipelineStateDescriptor.inputPrimitiveTopology = program->tess.point_mode ?
+                MTLPrimitiveTopologyClassPoint : MTLPrimitiveTopologyClassTriangle;
     }
     else
     {
@@ -10435,6 +10625,157 @@ static int countingQueries(GLMContext ctx, Query **out)
         _visibilityHolders--;
 }
 
+#pragma mark sparse textures
+#define MGL_SPARSE_HEAP_SIZE (256u << 20)
+
+- (id<MTLHeap>) sparseHeap
+{
+    if (_sparseHeap == nil)
+    {
+        MTLHeapDescriptor *d = [MTLHeapDescriptor new];
+
+        d.type = MTLHeapTypeSparse;
+        d.storageMode = MTLStorageModePrivate;
+        d.size = MGL_SPARSE_HEAP_SIZE;
+        _sparseHeap = [_device newHeapWithDescriptor: d];
+    }
+
+    return _sparseHeap;
+}
+
+static MTLTextureType sparseTextureType(GLenum target)
+{
+    switch (target)
+    {
+        case GL_TEXTURE_2D_ARRAY: return MTLTextureType2DArray;
+        case GL_TEXTURE_CUBE_MAP: return MTLTextureTypeCube;
+        case GL_TEXTURE_CUBE_MAP_ARRAY: return MTLTextureTypeCubeArray;
+        case GL_TEXTURE_3D: return MTLTextureType3D;
+        case GL_TEXTURE_2D_MULTISAMPLE: return MTLTextureType2DMultisample;
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: return MTLTextureType2DMultisampleArray;
+    }
+
+    return MTLTextureType2D;
+}
+
+- (bool) sparseTileSize: (GLenum) target format: (GLenum) internalformat samples: (GLsizei) samples
+                    out: (GLuint *) size
+{
+    MTLPixelFormat fmt = mtlFormatForGLInternalFormat(internalformat);
+
+    if (fmt == MTLPixelFormatInvalid || ![_device supportsFamily: MTLGPUFamilyApple6])
+        return false;
+
+    MTLSize t = [_device sparseTileSizeWithTextureType: sparseTextureType(target) pixelFormat: fmt
+                                           sampleCount: samples < 1 ? 1 : samples];
+
+    size[0] = (GLuint)t.width;
+    size[1] = (GLuint)t.height;
+    size[2] = (GLuint)t.depth;
+    return t.width > 0 && t.height > 0;
+}
+
+// Maps or unmaps a region of one level, in pixels, on every slice it covers.
+// A level in the tail takes the whole tail of each slice with it.
+- (bool) sparseCommit: (Texture *) tex level: (GLint) level x: (GLint) x y: (GLint) y z: (GLint) z
+                    w: (GLsizei) w h: (GLsizei) h d: (GLsizei) d commit: (GLboolean) commit
+{
+    id<MTLTexture> texture = (__bridge id<MTLTexture>)tex->mtl_data;
+    MTLSparseTextureMappingMode mode = commit ? MTLSparseTextureMappingModeMap : MTLSparseTextureMappingModeUnmap;
+    bool is_3d = tex->target == GL_TEXTURE_3D;
+    MTLSize tile;
+
+    if (texture == nil)
+        return false;
+
+    tile = [_device sparseTileSizeWithTextureType: texture.textureType pixelFormat: texture.pixelFormat
+                                      sampleCount: texture.sampleCount];
+
+    [self endComputeEncoding];
+    [self endRenderEncoding];
+
+    id<MTLResourceStateCommandEncoder> enc = [[self liveCommandBuffer] resourceStateCommandEncoder];
+
+    if (enc == nil)
+        return false;
+
+    GLuint first_tail = (GLuint)texture.firstMipmapInTail;
+    GLuint slices = is_3d ? 1 : (GLuint)texture.arrayLength * (texture.textureType == MTLTextureTypeCube ||
+                                                               texture.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+
+    // one region on the given slices, or every tail level on every slice
+    GLuint lo = (GLuint)level, hi = (GLuint)level + 1, s0 = is_3d ? 0 : (GLuint)z, s1 = is_3d ? 1 : (GLuint)(z + d);
+
+    if ((GLuint)level >= tex->sparse_levels)
+    {
+        lo = tex->sparse_levels;
+        hi = (GLuint)texture.mipmapLevelCount;
+        s0 = 0;
+        s1 = slices;
+    }
+
+    for (GLuint l = lo; l < hi && l <= first_tail; l++)
+    {
+        for (GLuint s = s0; s < s1; s++)
+        {
+            MTLRegion px, tiles;
+
+            if ((GLuint)level >= tex->sparse_levels || l != (GLuint)level)
+            {
+                NSUInteger lw = MAX(texture.width >> l, 1), lh = MAX(texture.height >> l, 1);
+                NSUInteger ld = is_3d ? MAX(texture.depth >> l, 1) : 1;
+
+                px = MTLRegionMake3D(0, 0, 0, lw, lh, ld);
+            }
+            else
+                px = MTLRegionMake3D(x, y, is_3d ? z : 0, w, h, is_3d ? d : 1);
+
+            if (l == first_tail)
+                tiles = MTLRegionMake3D(0, 0, 0, 1, 1, 1);
+            else
+                [_device convertSparsePixelRegions: &px toTileRegions: &tiles withTileSize: tile
+                                     alignmentMode: MTLSparseTextureRegionAlignmentModeOutward numRegions: 1];
+
+            [enc updateTextureMapping: texture mode: mode region: tiles mipLevel: l slice: s];
+        }
+    }
+
+    [enc endEncoding];
+    [self flushCommandBuffer: false];
+
+    return true;
+}
+
+- (void) unmapSparseTexture: (id<MTLTexture>) texture
+{
+    MTLSize tile = [_device sparseTileSizeWithTextureType: texture.textureType pixelFormat: texture.pixelFormat
+                                              sampleCount: texture.sampleCount];
+    bool is_3d = texture.textureType == MTLTextureType3D;
+    bool cube = texture.textureType == MTLTextureTypeCube || texture.textureType == MTLTextureTypeCubeArray;
+    NSUInteger slices = is_3d ? 1 : texture.arrayLength * (cube ? 6 : 1);
+
+    [self endComputeEncoding];
+    [self endRenderEncoding];
+
+    id<MTLResourceStateCommandEncoder> enc = [[self liveCommandBuffer] resourceStateCommandEncoder];
+
+    for (NSUInteger l = 0; l < texture.mipmapLevelCount && l <= texture.firstMipmapInTail; l++)
+        for (NSUInteger s = 0; s < slices; s++)
+        {
+            MTLRegion px = MTLRegionMake3D(0, 0, 0, MAX(texture.width >> l, 1u), MAX(texture.height >> l, 1u),
+                                           is_3d ? MAX(texture.depth >> l, 1u) : 1);
+            MTLRegion tiles = MTLRegionMake3D(0, 0, 0, 1, 1, 1);
+
+            if (l != texture.firstMipmapInTail)
+                [_device convertSparsePixelRegions: &px toTileRegions: &tiles withTileSize: tile
+                                     alignmentMode: MTLSparseTextureRegionAlignmentModeOutward numRegions: 1];
+
+            [enc updateTextureMapping: texture mode: MTLSparseTextureMappingModeUnmap region: tiles mipLevel: l slice: s];
+        }
+
+    [enc endEncoding];
+}
+
 - (id<MTLBlitCommandEncoder>) newBlitEncoder
 {
     [self endComputeEncoding];
@@ -10598,6 +10939,91 @@ static int formatKind(MTLPixelFormat f)
     return s;
 }
 
+// Every level and slice of one texture into another of the same shape. A
+// depth texture and a color one of its size go through a buffer, since a blit
+// will not copy between them.
+- (void) copyWholeTexture: (id<MTLTexture>) from to: (id<MTLTexture>) to blit: (id<MTLBlitCommandEncoder>) blit
+{
+    bool cube = from.textureType == MTLTextureTypeCube || from.textureType == MTLTextureTypeCubeArray;
+    NSUInteger slices = from.textureType == MTLTextureType3D ? 1 : from.arrayLength * (cube ? 6 : 1);
+
+    if (from.pixelFormat == to.pixelFormat)
+    {
+        [blit copyFromTexture: from sourceSlice: 0 sourceLevel: 0 toTexture: to destinationSlice: 0 destinationLevel: 0
+                   sliceCount: slices levelCount: from.mipmapLevelCount];
+        return;
+    }
+
+    NSUInteger bpp = (from.pixelFormat == MTLPixelFormatDepth16Unorm || from.pixelFormat == MTLPixelFormatR16Unorm) ? 2 : 4;
+    NSUInteger size = from.width * from.height * MAX(from.depth, (NSUInteger)1) * bpp;
+    id<MTLBuffer> buf = [_scratchPool bufferOfLength: size forCommandBuffer: [self liveCommandBuffer]];
+
+    if (buf == nil)
+        return;
+
+    for (NSUInteger l = 0; l < from.mipmapLevelCount; l++)
+        for (NSUInteger sl = 0; sl < slices; sl++)
+        {
+            NSUInteger w = MAX(from.width >> l, 1u), h = MAX(from.height >> l, 1u);
+            NSUInteger d = from.textureType == MTLTextureType3D ? MAX(from.depth >> l, 1u) : 1;
+
+            [blit copyFromTexture: from sourceSlice: sl sourceLevel: l sourceOrigin: MTLOriginMake(0, 0, 0)
+                       sourceSize: MTLSizeMake(w, h, d) toBuffer: buf destinationOffset: 0
+              destinationBytesPerRow: w * bpp destinationBytesPerImage: w * h * bpp
+                          options: from.pixelFormat == MTLPixelFormatDepth16Unorm || from.pixelFormat == MTLPixelFormatDepth32Float
+                                   ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
+            [blit copyFromBuffer: buf sourceOffset: 0 sourceBytesPerRow: w * bpp sourceBytesPerImage: w * h * bpp
+                      sourceSize: MTLSizeMake(w, h, d) toTexture: to destinationSlice: sl destinationLevel: l
+               destinationOrigin: MTLOriginMake(0, 0, 0)
+                         options: to.pixelFormat == MTLPixelFormatDepth16Unorm || to.pixelFormat == MTLPixelFormatDepth32Float
+                                  ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
+        }
+}
+
+// The whole of a sparse texture again, as a plain texture an image unit can write
+- (NSMutableDictionary *) sparseShadowFor: (id<MTLTexture>) base create: (bool) create
+{
+    for (NSMutableDictionary *s in _imageShadows)
+        if (s[@"base"] == base && [s[@"sparse"] boolValue])
+            return s;
+
+    if (!create)
+        return nil;
+
+    MTLTextureDescriptor *d = [[MTLTextureDescriptor alloc] init];
+
+    d.textureType = base.textureType;
+    // an image unit reads a depth texture as the color format of its size,
+    // which Metal will not view a depth texture as
+    d.pixelFormat = base.pixelFormat == MTLPixelFormatDepth16Unorm ? MTLPixelFormatR16Unorm :
+                    base.pixelFormat == MTLPixelFormatDepth32Float ? MTLPixelFormatR32Float : base.pixelFormat;
+    d.width = base.width;
+    d.height = base.height;
+    d.depth = base.depth;
+    d.arrayLength = base.arrayLength;
+    d.mipmapLevelCount = base.mipmapLevelCount;
+    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
+    d.storageMode = MTLStorageModePrivate;
+
+    if (@available(macOS 14.0, *))
+        if (base.pixelFormat == MTLPixelFormatR32Uint || base.pixelFormat == MTLPixelFormatR32Sint)
+            d.usage |= MTLTextureUsageShaderAtomic;
+
+    id<MTLTexture> shadow = [_device newTextureWithDescriptor: d];
+
+    if (shadow == nil)
+        return nil;
+
+    if (_imageShadows == nil)
+        _imageShadows = [NSMutableArray array];
+
+    NSMutableDictionary *s = [@{ @"base": base, @"shadow": shadow, @"sparse": @YES, @"pending": @NO } mutableCopy];
+
+    [_imageShadows addObject: s];
+
+    return s;
+}
+
 // The shadow for one slice of a 3D image, made on first use
 - (NSMutableDictionary *) imageShadowFor: (id<MTLTexture>) base level: (NSUInteger) level layer: (NSUInteger) layer
                                   create: (bool) create
@@ -10635,6 +11061,24 @@ static int formatKind(MTLPixelFormat f)
     return s;
 }
 
+// whether the current program does atomics on an image unit
+static bool unitTakesAtomics(GLMContext ctx, int unit)
+{
+    Program *program = ctx->state.program;
+
+    for (int stage = 0; program && stage < _MAX_SHADER_TYPES; stage++)
+    {
+        SpirvResourceList *images = &program->spirv_resources_list[stage][SPVC_RESOURCE_TYPE_STORAGE_IMAGE];
+
+        for (GLuint i = 0; i < images->count; i++)
+            for (GLint e = 0; e < (images->list[i].array_size > 1 ? images->list[i].array_size : 1); e++)
+                if (images->list[i].atomic && mglResourceUnit(&images->list[i], e) == unit)
+                    return true;
+    }
+
+    return false;
+}
+
 // Copies each 3D slice a bound image unit names into its shadow. Ending the
 // open encoder first puts back what the last draw wrote.
 - (void) prepareImageShadows
@@ -10657,10 +11101,60 @@ static int formatKind(MTLPixelFormat f)
         ImageUnit *iu = &ctx->state.image_units[i];
 
         // a texture is made on its first use, which may be this draw
-        if (iu->tex && iu->tex->mtl_data == NULL && !iu->layered)
+        if (iu->tex && iu->tex->mtl_data == NULL && (!iu->layered || iu->tex->sparse))
             [self bindMTLTexture: iu->tex];
 
         id<MTLTexture> base = iu->tex ? (__bridge id<MTLTexture>)(iu->tex->mtl_data) : nil;
+
+        // a sparse texture cannot be written by a shader on these GPUs, and a
+        // depth texture cannot be viewed as the color format an image unit
+        // reads it as, so those units work on a plain copy, put back after;
+        // writes to pages that are not committed fall away in the copy back
+        // a read-only unit reads the sparse texture itself, so it still learns
+        // which texels are resident
+        if (base && base.sampleCount == 1 &&
+            ((iu->tex->sparse && (iu->access != GL_READ_ONLY || unitTakesAtomics(ctx, i))) ||
+             isDepthFormat(base.pixelFormat)))
+        {
+            NSMutableDictionary *s = [self sparseShadowFor: base create: true];
+
+            if (s == nil || [s[@"pending"] boolValue])
+                continue;
+
+            if (blit == nil)
+                blit = [self newBlitEncoder];
+
+            // a copy from pages that are not committed leaves the target as it
+            // was, so the shadow starts from zero
+            {
+                id<MTLTexture> sh = s[@"shadow"];
+                NSUInteger bpp = mglFormatDesc(iu->tex->internalformat)->bytes_per_block;
+                NSUInteger slices = sh.textureType == MTLTextureType3D ? 1 :
+                    sh.arrayLength * (sh.textureType == MTLTextureTypeCube || sh.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+                NSUInteger row = sh.width * MAX(bpp, (NSUInteger)1), image = row * sh.height;
+                id<MTLBuffer> zero = [_scratchPool bufferOfLength: image * sh.depth forCommandBuffer: [self liveCommandBuffer]];
+
+                if (zero)
+                {
+                    memset(zero.contents, 0, image * sh.depth);
+                    for (NSUInteger l = 0; l < sh.mipmapLevelCount; l++)
+                        for (NSUInteger sl = 0; sl < slices; sl++)
+                        {
+                            NSUInteger w = MAX(sh.width >> l, 1u), h = MAX(sh.height >> l, 1u);
+                            NSUInteger d = sh.textureType == MTLTextureType3D ? MAX(sh.depth >> l, 1u) : 1;
+
+                            [blit copyFromBuffer: zero sourceOffset: 0 sourceBytesPerRow: w * bpp
+                                 sourceBytesPerImage: w * bpp * h sourceSize: MTLSizeMake(w, h, d)
+                                           toTexture: sh destinationSlice: sl destinationLevel: l
+                                   destinationOrigin: MTLOriginMake(0, 0, 0)];
+                        }
+                }
+            }
+
+            [self copyWholeTexture: base to: s[@"shadow"] blit: blit];
+            s[@"pending"] = @YES;
+            continue;
+        }
 
         if (base && (base.textureType == MTLTextureType2DMultisample ||
                      base.textureType == MTLTextureType2DMultisampleArray))
@@ -10726,6 +11220,18 @@ static int formatKind(MTLPixelFormat f)
     {
         if (![s[@"pending"] boolValue])
             continue;
+
+        if ([s[@"sparse"] boolValue])
+        {
+            id<MTLTexture> shadow = s[@"shadow"];
+
+            if (blit == nil)
+                blit = [[self liveCommandBuffer] blitCommandEncoder];
+
+            [self copyWholeTexture: shadow to: s[@"base"] blit: blit];
+            s[@"pending"] = @NO;
+            continue;
+        }
 
         if ([s[@"ms"] boolValue])
         {
@@ -10870,11 +11376,21 @@ static int formatKind(MTLPixelFormat f)
     if (p->uses_draw_id < 0)
     {
         const char *msl = p->spirv[_VERTEX_SHADER].msl_str;
+        const char *mesh = p->spirv[_MESH_SHADER].msl_str, *task = p->spirv[_TASK_SHADER].msl_str;
 
-        p->uses_draw_id = (msl && strstr(msl, "spvDrawIndex")) ? 1 : 0;
+        p->uses_draw_id = (msl && strstr(msl, "spvDrawIndex")) || (mesh && strstr(mesh, "spvDrawIndex")) ||
+                          (task && strstr(task, "spvDrawIndex")) ? 1 : 0;
     }
 
-    if (p->uses_draw_id)
+    if (!p->uses_draw_id)
+        return;
+
+    if (mglProgramIsMesh(p))
+    {
+        [_currentRenderEncoder setMeshBytes: &draw_id length: sizeof draw_id atIndex: MGL_DRAW_ID_MSL_SLOT];
+        [_currentRenderEncoder setObjectBytes: &draw_id length: sizeof draw_id atIndex: MGL_DRAW_ID_MSL_SLOT];
+    }
+    else
         [_currentRenderEncoder setVertexBytes: &draw_id length: sizeof draw_id atIndex: MGL_DRAW_ID_MSL_SLOT];
 }
 
@@ -10998,8 +11514,9 @@ static int formatKind(MTLPixelFormat f)
 #endif
     }
 
-    // since a clear is embedded into a render encoder
-    if (VAO() == NULL)
+    // since a clear is embedded into a render encoder; a mesh program reads
+    // no vertex arrays
+    if (VAO() == NULL && !mglProgramIsMesh(ctx->state.program))
     {
         if (draw_command)
         {
@@ -11243,7 +11760,8 @@ static int formatKind(MTLPixelFormat f)
             // create vertex descriptor
             MTLVertexDescriptor *vertexDescriptor;
 
-            vertexDescriptor = [self generateVertexDescriptor];
+            vertexDescriptor = mglProgramIsMesh(ctx->state.program) ? [MTLVertexDescriptor new]
+                                                                     : [self generateVertexDescriptor];
             RETURN_FALSE_ON_NULL(vertexDescriptor);
 
             // write masks apply even with blending off
@@ -11276,6 +11794,9 @@ static int formatKind(MTLPixelFormat f)
                     MGL_NSINFO(@"MGL INFO: AGX virtualization detected - using safe synchronous compilation");
                 }
 
+                if (mglProgramIsMesh(ctx->state.program))
+                    _pipelineState = [self meshPipelineFrom: pipelineStateDescriptor error: &error];
+                else
                 _pipelineState = [_device newRenderPipelineStateWithDescriptor:pipelineStateDescriptor error:&error];
 
                 if (!_pipelineState) {
@@ -11285,6 +11806,7 @@ static int formatKind(MTLPixelFormat f)
                     [self recoverFromMetalError:error operation:@"pipeline_creation"];
 
                     // AGX VIRTUALIZATION FALLBACK: Try with minimal descriptor
+                    if (!mglProgramIsMesh(ctx->state.program))
                     @try {
                         MGL_NSINFO(@"MGL INFO: VIRTUALIZED AGX - Trying simplified compilation fallback...");
 
@@ -12100,6 +12622,24 @@ void mtlSetSwapInterval(GLMContext glm_ctx, int interval)
     }
 }
 
+#pragma mark C interface to sparse textures
+bool mtlSparseTileSize(GLMContext glm_ctx, GLenum target, GLenum internalformat, GLsizei samples, GLuint size[3])
+{
+    @autoreleasepool {
+        return [(__bridge id) glm_ctx->mtl_funcs.mtlObj sparseTileSize: target format: internalformat
+                                                               samples: samples out: size];
+    }
+}
+
+bool mtlSparseCommit(GLMContext glm_ctx, Texture *tex, GLint level, GLint x, GLint y, GLint z,
+                     GLsizei w, GLsizei h, GLsizei d, GLboolean commit)
+{
+    @autoreleasepool {
+        return [(__bridge id) glm_ctx->mtl_funcs.mtlObj sparseCommit: tex level: level x: x y: y z: z
+                                                                   w: w h: h d: d commit: commit];
+    }
+}
+
 #pragma mark C interface to bindless
 GLuint mtlBindlessSampler(GLMContext glm_ctx, TextureParameter *params, GLenum target)
 {
@@ -12144,6 +12684,25 @@ bool mtlBindProgram(GLMContext glm_ctx, Program *ptr)
     MTL_CHECK_RETURN(obj, GL_OUT_OF_MEMORY);
     
     [self flushCommandBuffer: false];
+
+    // the image shadows of a texture go with it, or they keep it alive, and a
+    // sparse one keeps its pages
+    if (_imageShadows)
+    {
+        id gone = (__bridge id)obj;
+        NSIndexSet *mine = [_imageShadows indexesOfObjectsPassingTest:
+                               ^BOOL(NSMutableDictionary *s, NSUInteger i, BOOL *stop) { return s[@"base"] == gone; }];
+
+        [_imageShadows removeObjectsAtIndexes: mine];
+    }
+
+    // a sparse texture hands its pages back now, whoever still holds it
+    {
+        id o = (__bridge id)obj;
+
+        if ([o conformsToProtocol: @protocol(MTLTexture)] && ((id<MTLTexture>)o).heap == _sparseHeap && _sparseHeap)
+            [self unmapSparseTexture: o];
+    }
 
     // this should release it to the GC
     CFBridgingRelease(obj);
@@ -13761,6 +14320,53 @@ static bool drawRunsStages(GLMContext ctx)
     return p && (mglProgramHasGeometry(p) || p->tess.active);
 }
 
+// The indirect draws record through the direct ones, which set up the capture
+static bool feedbackRecording(GLMContext ctx)
+{
+    TransformFeedback *tf = ctx->state.transform_feedback;
+
+    return tf && tf->active && !tf->paused;
+}
+
+#pragma mark mesh draws
+- (void) mtlDrawMeshTasks: (GLuint) x y: (GLuint) y z: (GLuint) z indirect: (GLintptr) indirect draw: (GLuint) draw
+{
+    Program *p = ctx->state.program;
+    MTLSize task = MTLSizeMake(MAX(p->mesh.task_size[0], 1u), MAX(p->mesh.task_size[1], 1u),
+                               MAX(p->mesh.task_size[2], 1u));
+    MTLSize mesh = MTLSizeMake(MAX(p->mesh.mesh_size[0], 1u), MAX(p->mesh.mesh_size[1], 1u),
+                               MAX(p->mesh.mesh_size[2], 1u));
+
+    _drawTopology = MTLPrimitiveTopologyClassTriangle;
+    RETURN_ON_FAILURE([self processGLState: true]);
+    [self bindDrawID: draw];
+
+    if (indirect < 0)
+    {
+        [_currentRenderEncoder drawMeshThreadgroups: MTLSizeMake(x, y, z) threadsPerObjectThreadgroup: task
+                                 threadsPerMeshThreadgroup: mesh];
+        return;
+    }
+
+    Buffer *buf = ctx->state.buffers[_DRAW_INDIRECT_BUFFER];
+
+    if (buf == NULL || [self processBuffer: buf] == false)
+        return;
+
+    id<MTLBuffer> args = (__bridge id<MTLBuffer>)(buf->data.mtl_data);
+
+    MTL_CHECK_RETURN(args, GL_OUT_OF_MEMORY);
+    [_currentRenderEncoder drawMeshThreadgroupsWithIndirectBuffer: args indirectBufferOffset: (NSUInteger)indirect
+                                       threadsPerObjectThreadgroup: task threadsPerMeshThreadgroup: mesh];
+}
+
+void mtlDrawMeshTasks(GLMContext glm_ctx, GLuint x, GLuint y, GLuint z, GLintptr indirect, GLuint draw)
+{
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlDrawMeshTasks: x y: y z: z indirect: indirect draw: draw];
+    }
+}
+
 #pragma mark C interface to mtlDrawArrays
 -(void) mtlDrawArrays: (GLMContext) ctx mode:(GLenum) mode first: (GLint) first count: (GLsizei) count
 {
@@ -14272,7 +14878,7 @@ void mtlDrawElementsInstancedBaseVertex(GLMContext glm_ctx, GLenum mode, GLsizei
 {
     MTLPrimitiveType primitiveType;
 
-    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx))
+    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx) || feedbackRecording(ctx))
     {
         DrawArraysIndirectCommand cmd;
 
@@ -14315,7 +14921,7 @@ void mtlDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *indirect
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx))
+    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx) || feedbackRecording(ctx))
     {
         DrawElementsIndirectCommand cmd;
         GLuint index_size = type == GL_UNSIGNED_BYTE ? 1 : type == GL_UNSIGNED_SHORT ? 2 : 4;
@@ -14699,7 +15305,7 @@ void mtlMultiDrawElementsBaseVertex(GLMContext glm_ctx, GLenum mode, const GLsiz
 
     // modes MGL expands and stages it runs need each command read first,
     // which the single indirect draw does
-    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx))
+    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx) || feedbackRecording(ctx))
     {
         size_t step = stride ? (size_t)stride : sizeof(DrawArraysIndirectCommand);
 
@@ -14756,7 +15362,7 @@ void mtlMultiDrawArraysIndirect(GLMContext glm_ctx, GLenum mode, const void *ind
     MTLPrimitiveType primitiveType;
     MGLIndexSource src;
 
-    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx))
+    if (primitive_mode_needs_expand(mode) || drawRunsStages(ctx) || feedbackRecording(ctx))
     {
         size_t step = stride ? (size_t)stride : sizeof(DrawElementsIndirectCommand);
 
@@ -14829,6 +15435,9 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
     glm_ctx->mtl_funcs.mtlBindTexture = mtlBindTexture;
     glm_ctx->mtl_funcs.mtlSetSwapInterval = mtlSetSwapInterval;
     glm_ctx->mtl_funcs.mtlBindlessSampler = mtlBindlessSampler;
+    glm_ctx->mtl_funcs.mtlDrawMeshTasks = mtlDrawMeshTasks;
+    glm_ctx->mtl_funcs.mtlSparseTileSize = mtlSparseTileSize;
+    glm_ctx->mtl_funcs.mtlSparseCommit = mtlSparseCommit;
     glm_ctx->mtl_funcs.mtlBindlessRelease = mtlBindlessRelease;
     glm_ctx->mtl_funcs.mtlBindProgram = mtlBindProgram;
 

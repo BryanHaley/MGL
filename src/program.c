@@ -1868,6 +1868,13 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
     if (!(ptr->tess.active && (stage == _VERTEX_SHADER || stage == _TESS_CONTROL_SHADER)))
         spvc_compiler_mask_stage_output_by_builtin(compiler_msl, SpvBuiltInCullDistance);
 
+    // a layer or viewport written ahead of the tessellator goes nowhere
+    if (ptr->tess.active && stage == _VERTEX_SHADER)
+    {
+        spvc_compiler_mask_stage_output_by_builtin(compiler_msl, SpvBuiltInLayer);
+        spvc_compiler_mask_stage_output_by_builtin(compiler_msl, SpvBuiltInViewportIndex);
+    }
+
     // ERROR_CHECK_RETURN_VALUE(spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) == SPVC_SUCCESS, GL_INVALID_OPERATION, NULL);
     if (spvc_compiler_msl_add_discrete_descriptor_set(compiler_msl, 3) != SPVC_SUCCESS) {
         MGL_ERR("MGL Error: spvc_compiler_msl_add_discrete_descriptor_set failed\n");
@@ -2324,6 +2331,8 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
             case _GEOMETRY_SHADER: snprintf(entry_point, sizeof(entry_point), "geometry_%d",name); break;
             case _FRAGMENT_SHADER: snprintf(entry_point, sizeof(entry_point), "fragment_%d",name); break;
             case _COMPUTE_SHADER: snprintf(entry_point, sizeof(entry_point), "compute_%d",name); break;
+            case _TASK_SHADER: snprintf(entry_point, sizeof(entry_point), "task_%d",name); break;
+            case _MESH_SHADER: snprintf(entry_point, sizeof(entry_point), "mesh_%d",name); break;
             default: // CRITICAL FIX: Handle error gracefully instead of crashing
             MGL_ERR("MGL ERROR: Critical error in program.c at line %d\n", __LINE__);
             STATE(error) = GL_INVALID_OPERATION;
@@ -3322,6 +3331,8 @@ static glslang_stage_t glslangStageFor(int stage)
         case _GEOMETRY_SHADER:        return GLSLANG_STAGE_GEOMETRY;
         case _FRAGMENT_SHADER:        return GLSLANG_STAGE_FRAGMENT;
         case _COMPUTE_SHADER:         return GLSLANG_STAGE_COMPUTE;
+        case _TASK_SHADER:            return GLSLANG_STAGE_TASK;
+        case _MESH_SHADER:            return GLSLANG_STAGE_MESH;
         default:                      return GLSLANG_STAGE_VERTEX;
     }
 }
@@ -4034,6 +4045,46 @@ static bool linkGeometryProgram(GLMContext ctx, Program *pptr)
 // a failed stage lets go of the glslang program it made
 #define LINK_FAIL(_type_) do { glslang_program_delete(glsl_program); ERROR_RETURN_VALUE(_type_, false); } while (0)
 
+// The work group sizes and outputs of the mesh stages, from their SPIR-V
+// execution modes.
+static void scanMeshModes(Program *pptr)
+{
+    memset(&pptr->mesh, 0, sizeof pptr->mesh);
+
+    for (int stage = _TASK_SHADER; stage <= _MESH_SHADER; stage++)
+    {
+        const unsigned int *w = pptr->spirv[stage].ir;
+        size_t n = pptr->spirv[stage].size;
+        GLuint *size = stage == _TASK_SHADER ? pptr->mesh.task_size : pptr->mesh.mesh_size;
+
+        for (size_t i = 5; w && i < n;)
+        {
+            unsigned int op = w[i] & 0xffff, len = w[i] >> 16;
+
+            if (len == 0 || i + len > n)
+                break;
+
+            if (op == 16 && len >= 3)       // OpExecutionMode
+            {
+                switch (w[i + 2])
+                {
+                    case 17:                // LocalSize
+                        if (len >= 6)
+                            size[0] = w[i + 3], size[1] = w[i + 4], size[2] = w[i + 5];
+                        break;
+                    case 26: if (len >= 4) pptr->mesh.max_vertices = w[i + 3]; break;
+                    case 5270: if (len >= 4) pptr->mesh.max_primitives = w[i + 3]; break;
+                    case 27: pptr->mesh.output_type = GL_POINTS; break;
+                    case 5269: pptr->mesh.output_type = GL_LINES; break;
+                    case 5298: pptr->mesh.output_type = GL_TRIANGLES; break;
+                }
+            }
+
+            i += len;
+        }
+    }
+}
+
 bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool modes_only)
 {
     glslang_program_t *glsl_program;
@@ -4110,7 +4161,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
 
     // generate SPIVR
     MGL_INFO("MGL DEBUG: Generating SPIRV for stage %d\n", stage);
-    glslang_program_SPIRV_generate(glsl_program, stage);
+    glslang_program_SPIRV_generate(glsl_program, glslangStageFor(stage));
     MGL_INFO("MGL DEBUG: SPIRV generated\n");
 
     if (glslang_program_SPIRV_get_messages(glsl_program))
@@ -4869,6 +4920,30 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         }
     }
 
+    // GL_EXT_mesh_shader: the mesh pipeline stands in for the vertex one
+    if (pptr->shader_slots[_MESH_SHADER] || pptr->shader_slots[_TASK_SHADER])
+    {
+        const char *why = NULL;
+
+        if (pptr->shader_slots[_VERTEX_SHADER] || pptr->shader_slots[_TESS_CONTROL_SHADER] ||
+            pptr->shader_slots[_TESS_EVALUATION_SHADER] || pptr->shader_slots[_GEOMETRY_SHADER])
+            why = "link failed: a mesh or task shader cannot be linked with vertex, tessellation or geometry shaders";
+        else if (!pptr->shader_slots[_MESH_SHADER] && !pptr->separable)
+            why = "link failed: a task shader needs a mesh shader";
+        else if (pptr->xfb_varying_count > 0)
+            why = "link failed: a mesh program has no transform feedback";
+
+        if (why)
+        {
+            pptr->link_status = GL_FALSE;
+            pptr->validate_status = GL_FALSE;
+            free(pptr->log);
+            pptr->log = strdup(why);
+
+            return;
+        }
+    }
+
     // GL 4.6 section 7.3: the shaders of one program are all SPIR-V or none are
     {
         int spirv = 0, glsl = 0;
@@ -5201,6 +5276,8 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
     // a program with no stage, or one whose stage failed, did not link
     if (stages_linked == 0)
         pptr->link_status = GL_FALSE;
+
+    scanMeshModes(pptr);
 
     linkTransformCapture(ctx, pptr);
 
@@ -5616,6 +5693,9 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
         case GL_LINK_STATUS:
             *params = pptr->link_status;
             break;
+        case GL_COMPLETION_STATUS_KHR:
+            *params = GL_TRUE;
+            break;
         case GL_DELETE_STATUS:
             *params = pptr->delete_status;
             break;
@@ -5692,6 +5772,27 @@ void mglGetProgramiv(GLMContext ctx, GLuint program, GLenum pname, GLint *params
             params[1] = pptr->local_workgroup_size.y;
             params[2] = pptr->local_workgroup_size.z;
             break;
+        // GL_EXT_mesh_shader, what the linked stages declared
+        case GL_TASK_WORK_GROUP_SIZE_EXT:
+            ERROR_CHECK_RETURN(pptr->link_status == GL_TRUE && pptr->spirv[_TASK_SHADER].ir, GL_INVALID_OPERATION);
+            for (int i = 0; i < 3; i++)
+                params[i] = (GLint)pptr->mesh.task_size[i];
+            break;
+
+        case GL_MESH_WORK_GROUP_SIZE_EXT:
+        case GL_MESH_VERTICES_OUT_EXT:
+        case GL_MESH_PRIMITIVES_OUT_EXT:
+        case GL_MESH_OUTPUT_TYPE_EXT:
+            ERROR_CHECK_RETURN(pptr->link_status == GL_TRUE && pptr->spirv[_MESH_SHADER].ir, GL_INVALID_OPERATION);
+            if (pname == GL_MESH_WORK_GROUP_SIZE_EXT)
+                for (int i = 0; i < 3; i++)
+                    params[i] = (GLint)pptr->mesh.mesh_size[i];
+            else
+                *params = pname == GL_MESH_VERTICES_OUT_EXT ? (GLint)pptr->mesh.max_vertices :
+                          pname == GL_MESH_PRIMITIVES_OUT_EXT ? (GLint)pptr->mesh.max_primitives :
+                          (GLint)pptr->mesh.output_type;
+            break;
+
         // what the tessellation stages declared, read out of their SPIR-V
         case GL_TESS_CONTROL_OUTPUT_VERTICES:
             *params = (GLint)pptr->tess.out_control_points;

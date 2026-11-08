@@ -2976,6 +2976,13 @@ void texStorage(GLMContext ctx, Texture *tex, GLuint faces, GLsizei levels, GLbo
     // arrives here as NULL
     ERROR_CHECK_RETURN(tex, GL_INVALID_OPERATION);
 
+    if (!proxy)
+    {
+        GLenum err = mglSparseStorageError(ctx, tex, levels, internalformat, width, height, depth);
+
+        ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
+    }
+
     tex->access = GL_READ_ONLY;
 
     for(int face=0; face<faces; face++)
@@ -4915,6 +4922,9 @@ static GLuint textureLayers(const Texture *tex)
 bool mglTextureObjectParam(const Texture *tex, GLenum pname, GLint *out)
 {
     bool immutable = tex->immutable_storage != 0;
+
+    if (mglSparseTexObjectParam(tex, pname, out))
+        return true;
 
     switch (pname)
     {

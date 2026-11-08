@@ -70,6 +70,10 @@ void error_func(GLMContext ctx, const char *func, GLenum error)
         return;
     }
 
+    // GL_KHR_no_error: only running out of memory is still reported
+    if ((ctx->context_flags & GL_CONTEXT_FLAG_NO_ERROR_BIT) && error != GL_OUT_OF_MEMORY)
+        return;
+
     // GL keeps only the first error until glGetError clears it, but an app that
     // never calls glGetError would then silence every later error in the log
     if (ctx->state.error == GL_NO_ERROR)

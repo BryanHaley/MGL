@@ -220,6 +220,10 @@ GLFWbool _glfwCreateContextMGL(_GLFWwindow* window,
                                                0, 0);
     assert(window->context.mgl.ctx);
 
+    if (ctxconfig->noerror || ctxconfig->debug)
+        MGLsetContextFlags(window->context.mgl.ctx, (ctxconfig->noerror ? GL_CONTEXT_FLAG_NO_ERROR_BIT : 0) |
+                                                    (ctxconfig->debug ? GL_CONTEXT_FLAG_DEBUG_BIT : 0));
+
     if (window->context.mgl.ctx == nil)
     {
         _glfwInputError(GLFW_VERSION_UNAVAILABLE,

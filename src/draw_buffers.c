@@ -365,6 +365,10 @@ bool validate_program(GLMContext ctx, GLenum mode)
     if (prog == NULL)
         return true;
 
+    // a mesh program draws only with glDrawMeshTasks*
+    if (mglProgramIsMesh(prog))
+        return false;
+
     // patches only make sense with a tessellation stage, and a tessellation
     // stage only accepts patches
     if (prog->tess.active)

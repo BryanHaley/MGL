@@ -695,3 +695,295 @@ GPU_TEST(layered_rendering, no_attachment_framebuffer_draws_every_layer)
     glDeleteFramebuffers(1, &fb);
     glDeleteTextures(1, &tex);
 }
+
+/* ---------- GL_ARB_shader_viewport_layer_array ---------- */
+
+static GLuint linkStages(const GLenum *stages, const char **srcs, int n, char *log, int log_size)
+{
+    GLuint prog = glCreateProgram();
+    GLint ok = 0;
+
+    log[0] = 0;
+
+    for (int i = 0; i < n; i++)
+    {
+        GLuint sh = compileOne(stages[i], srcs[i], log, log_size);
+
+        if (!sh)
+            return 0;
+
+        glAttachShader(prog, sh);
+    }
+
+    glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+
+    if (!ok)
+        glGetProgramInfoLog(prog, log_size, NULL, log);
+
+    return ok ? prog : 0;
+}
+
+static const char *green_fs =
+    "#version 460 core\n"
+    "out vec4 o;\n"
+    "void main() { o = vec4(0,1,0,1); }\n";
+
+GPU_TEST(layered_rendering, a_vertex_shader_picks_the_viewport)
+{
+    static const GLfloat tri[6] = { -1,-1, 3,-1, -1,3 };
+    static const char *vs =
+        "#version 450 core\n"
+        "#extension GL_ARB_shader_viewport_layer_array : require\n"
+        "layout(location = 0) in vec2 p;\n"
+        "void main() { gl_Position = vec4(p, 0.0, 1.0); gl_ViewportIndex = 1; }\n";
+    const GLenum stages[] = { GL_VERTEX_SHADER, GL_FRAGMENT_SHADER };
+    const char *srcs[] = { vs, green_fs };
+    MGLTestTarget t;
+    GLuint prog, vao, vbo;
+    char log[2048];
+    unsigned char *px, left[4] = { 0 }, right[4] = { 0 };
+
+    prog = linkStages(stages, srcs, 2, log, sizeof log);
+    CHECK_MSG(prog != 0, "program did not link: %s", log);
+    if (!prog)
+        return;
+
+    if (!mgl_target_create(&t, 64, 64, GL_RGBA8, 0))
+    {
+        CHECK(0);
+        glDeleteProgram(prog);
+        return;
+    }
+
+    mgl_target_bind(&t);
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glViewportIndexedf(0, 0, 0, 32, 64);
+    glViewportIndexedf(1, 32, 0, 32, 64);
+
+    glUseProgram(prog);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    px = mgl_read_rgba8(&t);
+    if (px)
+    {
+        mgl_pixel_at(px, &t, 10, 32, left);
+        mgl_pixel_at(px, &t, 50, 32, right);
+        free(px);
+    }
+    CHECK_MSG(left[0] == 255 && left[1] == 0, "left half should stay red, got %d,%d", left[0], left[1]);
+    CHECK_MSG(right[1] == 255 && right[0] == 0, "right half should be green, got %d,%d", right[0], right[1]);
+
+    glViewport(0, 0, 64, 64);
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    mgl_target_destroy(&t);
+}
+
+// Copies src into dst with the one occurrence of key replaced by val.
+static void replaceWord(char *dst, size_t size, const char *src, const char *key, const char *val)
+{
+    const char *k = strstr(src, key);
+
+    snprintf(dst, size, "%.*s%s%s", (int)(k - src), src, val, k + strlen(key));
+}
+
+// The CTS pipelines for the layer: vertex only, then with tessellation, then
+// with tessellation and a geometry shader, each adding one to the layer, and
+// all drawn as two patches from an indexed quad into a 3D texture's slices.
+static int layerPipeline(int with_tess, int with_gs, int layers, int layer_in, int *hit)
+{
+    static const char *vs =
+        "#version 450 core\n"
+        "#extension GL_ARB_shader_viewport_layer_array: require\n"
+        "in highp vec2 inPosition;\n"
+        "in int inLayer;\n"
+        "in highp vec4 inColor;\n"
+        "out int vsLayer;\n"
+        "out highp vec3 vsPosition;\n"
+        "out highp vec4 vsColor;\n"
+        "void main()\n"
+        "{\n"
+        "    gl_Position = vec4(inPosition, 0.0, 1.0);\n"
+        "    gl_Layer = (inLayer + 1) % LAYERS;\n"
+        "    vsLayer = inLayer;\n"
+        "    vsPosition = vec3(inPosition, 0.0);\n"
+        "    vsColor = inColor;\n"
+        "}\n";
+    static const char *tcs =
+        "#version 450 core\n"
+        "layout(vertices = 3) out;\n"
+        "in highp vec3 vsPosition[];\n"
+        "in highp vec4 vsColor[];\n"
+        "in int vsLayer[];\n"
+        "out highp vec3 tcsPosition[];\n"
+        "out highp vec4 tcsColor[];\n"
+        "out int tcsLayer[];\n"
+        "void main()\n"
+        "{\n"
+        "    tcsPosition[gl_InvocationID] = vsPosition[gl_InvocationID];\n"
+        "    tcsColor[gl_InvocationID] = vsColor[gl_InvocationID];\n"
+        "    tcsLayer[gl_InvocationID] = vsLayer[gl_InvocationID];\n"
+        "    gl_TessLevelInner[0] = 3;\n"
+        "    gl_TessLevelOuter[0] = 3;\n"
+        "    gl_TessLevelOuter[1] = 3;\n"
+        "    gl_TessLevelOuter[2] = 3;\n"
+        "}\n";
+    static const char *tes =
+        "#version 450 core\n"
+        "#extension GL_ARB_shader_viewport_layer_array: require\n"
+        "layout(triangles, equal_spacing, cw) in;\n"
+        "in highp vec3 tcsPosition[];\n"
+        "in highp vec4 tcsColor[];\n"
+        "in int tcsLayer[];\n"
+        "out highp vec4 tesColor;\n"
+        "out highp int tesLayer;\n"
+        "void main()\n"
+        "{\n"
+        "    vec3 p0 = gl_TessCoord.x * tcsPosition[0];\n"
+        "    vec3 p1 = gl_TessCoord.y * tcsPosition[1];\n"
+        "    vec3 p2 = gl_TessCoord.z * tcsPosition[2];\n"
+        "    tesColor = tcsColor[0];\n"
+        "    tesLayer = tcsLayer[0];\n"
+        "    gl_Layer = (tcsLayer[0] + 2) % LAYERS;\n"
+        "    gl_Position = vec4(normalize(p0 + p1 + p2), 1.0);\n"
+        "}\n";
+    static const char *gs =
+        "#version 450 core\n"
+        "#extension GL_ARB_shader_viewport_layer_array: require\n"
+        "layout(triangles) in;\n"
+        "layout(triangle_strip, max_vertices = 3) out;\n"
+        "in highp vec4 tesColor[];\n"
+        "in int tesLayer[];\n"
+        "out highp vec4 gsColor;\n"
+        "void main()\n"
+        "{\n"
+        "    for (int i = 0; i<3; i++)\n"
+        "    {\n"
+        "        gl_Position = gl_in[i].gl_Position;\n"
+        "        gl_Layer = (tesLayer[i] + 3) % LAYERS;\n"
+        "        gsColor = tesColor[i];\n"
+        "        EmitVertex();\n"
+        "    }\n"
+        "    EndPrimitive();\n"
+        "}\n";
+    static const GLfloat pos[8] = { -1,-1, -1,1, 1,-1, 1,1 };
+    static const GLfloat col[16] = { 1,0,0,1, 1,0,0,1, 1,0,0,1, 1,0,0,1 };
+    static const GLushort idx[6] = { 0, 1, 2, 2, 1, 3 };
+    char vsb[2048], tcsb[2048], tesb[2048], gsb[2048], fsb[512], log[2048], defs[64];
+    const char *srcs[5];
+    GLenum stages[5];
+    GLint lay[4] = { layer_in, layer_in, layer_in, layer_in };
+    GLuint prog, vao, vbo[4], tex, fb, readfb;
+    int n = 0, want, ok;
+
+    snprintf(defs, sizeof defs, "%d", layers);
+    replaceWord(vsb, sizeof vsb, vs, "LAYERS", defs);
+    replaceWord(tesb, sizeof tesb, tes, "LAYERS", defs);
+    replaceWord(gsb, sizeof gsb, gs, "LAYERS", defs);
+    snprintf(tcsb, sizeof tcsb, "%s", tcs);
+    {
+        const char *name = with_gs ? "gsColor" : with_tess ? "tesColor" : "vsColor";
+        snprintf(fsb, sizeof fsb,
+                 "#version 450 core\nin highp vec4 %s;\nout vec4 finalOutColor;\n"
+                 "void main() { finalOutColor = %s; }\n", name, name);
+    }
+
+    stages[n] = GL_VERTEX_SHADER; srcs[n++] = vsb;
+    if (with_tess)
+    {
+        stages[n] = GL_TESS_CONTROL_SHADER; srcs[n++] = tcsb;
+        stages[n] = GL_TESS_EVALUATION_SHADER; srcs[n++] = tesb;
+    }
+    if (with_gs)
+    {
+        stages[n] = GL_GEOMETRY_SHADER; srcs[n++] = gsb;
+    }
+    stages[n] = GL_FRAGMENT_SHADER; srcs[n++] = fsb;
+
+    prog = linkStages(stages, srcs, n, log, sizeof log);
+    CHECK_MSG(prog != 0, "program did not link: %s", log);
+    if (!prog)
+        return 0;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_3D, tex);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 128, 128, layers, 0, GL_RGBA, GL_FLOAT, 0);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0);
+    glViewport(0, 0, 128, 128);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(4, vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof pos, pos, GL_STATIC_DRAW);
+    glVertexAttribPointer(glGetAttribLocation(prog, "inPosition"), 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(glGetAttribLocation(prog, "inPosition"));
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof lay, lay, GL_STATIC_DRAW);
+    glVertexAttribIPointer(glGetAttribLocation(prog, "inLayer"), 1, GL_INT, 0, 0);
+    glEnableVertexAttribArray(glGetAttribLocation(prog, "inLayer"));
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[2]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof col, col, GL_STATIC_DRAW);
+    glVertexAttribPointer(glGetAttribLocation(prog, "inColor"), 4, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(glGetAttribLocation(prog, "inColor"));
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vbo[3]);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx, idx, GL_STATIC_DRAW);
+    glDrawElements(with_tess ? GL_PATCHES : GL_TRIANGLE_STRIP, 6, GL_UNSIGNED_SHORT, 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    want = (layer_in + (with_gs ? 3 : with_tess ? 2 : 1)) % layers;
+    *hit = -1;
+    ok = 1;
+    glGenFramebuffers(1, &readfb);
+    for (int l = 0; l < layers; l++)
+    {
+        GLfloat rgba[4] = { -1, -1, -1, -1 };
+
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, readfb);
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0, l);
+        glReadPixels(64, 64, 1, 1, GL_RGBA, GL_FLOAT, rgba);
+        if (rgba[0] > 0.9f)
+            *hit = l;
+        if ((rgba[0] > 0.9f) != (l == want))
+            ok = 0;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(4, vbo);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteFramebuffers(1, &readfb);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(prog);
+    return ok;
+}
+
+GPU_TEST(layered_rendering, each_stage_picks_a_3d_texture_slice)
+{
+    int hit;
+
+    for (int stage = 0; stage < 3; stage++)
+        for (int layer = 0; layer < 4; layer++)
+            CHECK_MSG(layerPipeline(stage > 0, stage > 1, 4, layer, &hit),
+                      "stage %d, layer in %d: slice %d drawn", stage, layer, hit);
+
+    CHECK_MSG(layerPipeline(1, 0, 1, 0, &hit), "one slice through tessellation: slice %d drawn", hit);
+}

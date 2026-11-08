@@ -1476,3 +1476,42 @@ GPU_TEST(image_store, fragment_loads_multisampled_images)
     glDeleteProgram(prog);
     mgl_target_destroy(&target);
 }
+
+// A depth texture written through an image unit as R16, which Metal will not
+// view a depth texture as, then read back as depth.
+GPU_TEST(image_store, a_depth_texture_takes_image_stores_as_r16)
+{
+    static const char *cs =
+        "#version 450 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(r16, binding = 0) writeonly uniform image2D img;\n"
+        "void main() { imageStore(img, ivec2(gl_WorkGroupID.xy), vec4(0.5)); }\n";
+    GLuint tex, prog;
+    GLushort got[16 * 16];
+    char log[4096];
+    int good = 0;
+
+    prog = mgl_build_compute_program(cs, log, sizeof log);
+    CHECK_MSG(prog != 0, "compute program did not link: %s", log);
+    if (!prog)
+        return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT16, 16, 16);
+    glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R16);
+    glUseProgram(prog);
+    glDispatchCompute(16, 16, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    memset(got, 0, sizeof got);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, got);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    for (int i = 0; i < 16 * 16; i++)
+        good += got[i] >= 32766 && got[i] <= 32769;
+    CHECK_EQ_INT(good, 16 * 16);
+
+    glUseProgram(0);
+    glDeleteProgram(prog);
+    glDeleteTextures(1, &tex);
+}

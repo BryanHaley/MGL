@@ -8,6 +8,8 @@
  * glBindBuffersRange).
  */
 
+#include <dlfcn.h>
+#include <string.h>
 #include "mgl_test.h"
 #include "harness.h"
 
@@ -863,4 +865,45 @@ GPU_TEST(buffer_storage_map, refilled_vertex_and_index_buffers_keep_each_draw)
     glDeleteBuffers(1, &ibo);
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
+}
+
+// GL_ARB_sparse_buffer: committed pages hold what was written, the commit
+// checks its page alignment, and a sparse buffer cannot be mapped.
+GPU_TEST(buffer_storage_map, a_sparse_buffer_commits_pages_and_keeps_data)
+{
+    void (*commit)(GLenum, GLintptr, GLsizeiptr, GLboolean) =
+        (void (*)(GLenum, GLintptr, GLsizeiptr, GLboolean))dlsym(RTLD_DEFAULT, "glBufferPageCommitmentARB");
+    GLint page = 0;
+    GLuint buf[2], in[4] = { 1, 2, 3, 4 }, out[4] = { 0 };
+
+    CHECK(commit != NULL);
+    if (!commit)
+        return;
+
+    glGetIntegerv(GL_SPARSE_BUFFER_PAGE_SIZE_ARB, &page);
+    CHECK(page > 0);
+
+    glGenBuffers(2, buf);
+    glBindBuffer(GL_ARRAY_BUFFER, buf[0]);
+    glBufferStorage(GL_ARRAY_BUFFER, page * 3, NULL, GL_SPARSE_STORAGE_BIT_ARB | GL_DYNAMIC_STORAGE_BIT);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    commit(GL_ARRAY_BUFFER, page, page, GL_TRUE);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    glBufferSubData(GL_ARRAY_BUFFER, page, sizeof in, in);
+    glGetBufferSubData(GL_ARRAY_BUFFER, page, sizeof out, out);
+    CHECK(memcmp(in, out, sizeof in) == 0);
+
+    commit(GL_ARRAY_BUFFER, page / 2, page, GL_TRUE);
+    CHECK_EQ_UINT(glGetError(), GL_INVALID_VALUE);
+    commit(GL_ARRAY_BUFFER, 0, page * 4, GL_TRUE);
+    CHECK_EQ_UINT(glGetError(), GL_INVALID_VALUE);
+    CHECK(glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY) == NULL);
+    CHECK_EQ_UINT(glGetError(), GL_INVALID_OPERATION);
+
+    glBindBuffer(GL_COPY_WRITE_BUFFER, buf[1]);
+    glBufferStorage(GL_COPY_WRITE_BUFFER, page, NULL, GL_SPARSE_STORAGE_BIT_ARB | GL_MAP_READ_BIT);
+    CHECK_EQ_UINT(glGetError(), GL_INVALID_VALUE);
+
+    glDeleteBuffers(2, buf);
 }

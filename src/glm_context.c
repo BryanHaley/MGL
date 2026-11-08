@@ -92,6 +92,7 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     // vsync on unless the application asks for something else, which is what
     // MGL did before there was a way to ask
     ctx->swap_interval = 1;
+    ctx->max_shader_compiler_threads = -1;
 
     ctx->pixel_format.format = format;
     ctx->pixel_format.type = type;
@@ -384,6 +385,18 @@ void MGLget(GLMContext ctx, GLenum param, GLuint *data)
             // MGLget is an MGL entry point, not GL, so there is no error to set
             break;
     }
+}
+
+void MGLsetContextFlags(GLMContext ctx, GLuint flags)
+{
+    if (ctx == NULL)
+        ctx = _ctx;
+
+    if (ctx == NULL)
+        return;
+
+    ctx->context_flags = flags;
+    ctx->state.var.context_flags = flags;
 }
 
 void MGLswapBuffers(GLMContext ctx)
