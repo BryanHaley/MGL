@@ -18,6 +18,7 @@
  *
  */
 
+#include <os/lock.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
@@ -292,6 +293,18 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
 
     // The render pipeline generated from the vertex and fragment shaders in the .metal shader file.
     id<MTLRenderPipelineState> _pipelineState;
+    // pipelines by everything their descriptor holds; each entry keeps its
+    // functions too, so a key's function addresses stay theirs
+    NSMutableDictionary<NSData *, NSArray *> *_pipelineCache;
+    NSMutableDictionary<NSData *, id<MTLBuffer>> *_clearSources;
+    NSMutableDictionary<NSData *, id<MTLDepthStencilState>> *_depthStencilStates;
+    // attachments glInvalidateFramebuffer said need not be loaded, for the
+    // next pass on that framebuffer if nothing writes textures first
+    Framebuffer *_invalidFbo;
+    GLuint _invalidMask;
+    // buffers a whole-buffer write retired, back for reuse once the GPU is done
+    NSMutableDictionary<NSString *, NSMutableArray<id<MTLBuffer>> *> *_bufferPool;
+    os_unfair_lock _bufferPoolLock;
 
     // render pass descriptor containts the binding information for VAO's and such
     MTLRenderPassDescriptor *_renderPassDescriptor;
@@ -1186,6 +1199,29 @@ static inline void mglDidModify(id<MTLBuffer> buffer, NSRange range)
     return true;
 }
 
+// a mesh program's stages, on the triggers that rebind the vertex stage
+- (bool) updateMeshStageBuffers: (bool) force mesh: (bool) mesh_dirty task: (bool) task_dirty
+{
+    if (!mglProgramIsMesh(ctx->state.program))
+        return true;
+
+    if (force || mesh_dirty)
+    {
+        RETURN_FALSE_ON_FAILURE([self updateDirtyBaseBufferList: &ctx->state.mesh_buffer_map_list]);
+        if (_currentRenderEncoder != nil)
+            RETURN_FALSE_ON_FAILURE([self bindMeshStageBuffers: &ctx->state.mesh_buffer_map_list stage: _MESH_SHADER]);
+    }
+
+    if (force || task_dirty)
+    {
+        RETURN_FALSE_ON_FAILURE([self updateDirtyBaseBufferList: &ctx->state.task_buffer_map_list]);
+        if (_currentRenderEncoder != nil)
+            RETURN_FALSE_ON_FAILURE([self bindMeshStageBuffers: &ctx->state.task_buffer_map_list stage: _TASK_SHADER]);
+    }
+
+    return true;
+}
+
 - (bool) mapBuffersToMTL
 {
     if (mglProgramIsMesh(ctx->state.program))
@@ -1643,6 +1679,16 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
     return true;
 }
 
+// the GL sample mask, applied by the fragment stage; all ones when it is off
+// or there is only one sample
+- (void) bindSampleMask
+{
+    uint32_t mask = ctx->state.caps.sample_mask && mglDrawFramebufferSamples(ctx) > 1
+                  ? (uint32_t)ctx->state.var.sample_mask_value : 0xFFFFFFFFu;
+
+    [_currentRenderEncoder setFragmentBytes: &mask length: sizeof mask atIndex: MGL_SAMPLE_MASK_MSL_SLOT];
+}
+
 - (bool) bindFragmentBuffersToCurrentRenderEncoder
 {
     BufferMap *map;
@@ -1651,14 +1697,7 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
     
     MTL_CHECK_RETURN_FALSE(_currentRenderEncoder, GL_INVALID_OPERATION);
 
-    // the GL sample mask, applied by the fragment stage; all ones when it is off
-    // or there is only one sample
-    {
-        uint32_t mask = ctx->state.caps.sample_mask && mglDrawFramebufferSamples(ctx) > 1
-                      ? (uint32_t)ctx->state.var.sample_mask_value : 0xFFFFFFFFu;
-
-        [_currentRenderEncoder setFragmentBytes: &mask length: sizeof mask atIndex: MGL_SAMPLE_MASK_MSL_SLOT];
-    }
+    [self bindSampleMask];
 
     [self bindPointCoordFlip];
 
@@ -3462,6 +3501,10 @@ static bool usesBindless(Program *program, int first, int last)
     {
         MglHandle *h = &b->handles[i];
 
+        // ready since the last draw and nothing has touched the texture
+        if (h->resident && h->tex && h->mtl_texture && h->mtl_base == h->tex->mtl_data && h->tex->dirty_bits == 0)
+            continue;
+
         if (h->resident && h->tex && [self realizeBindless: h] == false)
             MGL_NSERR(@"MGL: bindless handle for texture %u could not be made resident", h->tex->name);
     }
@@ -4019,12 +4062,38 @@ static bool textureReadyForCast(id<MTLTexture> t, MTLPixelFormat atomic)
     if (levels == 1 && !one_layer && !as_array && format == base.pixelFormat)
         return base;
 
-    id<MTLTexture> view = [base newTextureViewWithPixelFormat: format
-                                                  textureType: type
-                                                       levels: NSMakeRange(level, 1)
-                                                       slices: slices];
+    id<MTLTexture> view = [self viewOf: iu->tex base: base format: format type: type level: level slices: slices];
 
     return view ? view : base;
+}
+
+// views kept with the texture they look into, made once per shape
+- (id<MTLTexture>) viewOf: (Texture *) tex base: (id<MTLTexture>) base format: (MTLPixelFormat) format
+                     type: (MTLTextureType) type level: (NSUInteger) level slices: (NSRange) slices
+{
+    uint64_t k[5] = { format, type, level, slices.location, slices.length };
+    NSData *key = [NSData dataWithBytes: k length: sizeof k];
+    NSMutableDictionary<NSData *, id<MTLTexture>> *views;
+    id<MTLTexture> view;
+
+    if (tex->mtl_image_views_base != (__bridge void *)base)
+    {
+        if (tex->mtl_image_views)
+            CFBridgingRelease(tex->mtl_image_views);
+        tex->mtl_image_views = (void *)CFBridgingRetain([NSMutableDictionary dictionary]);
+        tex->mtl_image_views_base = (__bridge void *)base;
+    }
+    views = (__bridge NSMutableDictionary *)tex->mtl_image_views;
+
+    if ((view = views[key]) == nil)
+    {
+        view = [base newTextureViewWithPixelFormat: format textureType: type
+                                            levels: NSMakeRange(level, 1) slices: slices];
+        if (view)
+            views[key] = view;
+    }
+
+    return view;
 }
 
 extern GLuint textureIndexFromTarget(GLMContext ctx, GLenum target);
@@ -4169,8 +4238,10 @@ static MGLTexParam texParamFor(GLMContext ctx, const TextureParameter *p, GLenum
 
     MGLTexParam params[MGL_TEX_PARAM_SLOTS];
     GLuint param_count = 0;
-    bool wants_params = setParams && program->spirv[stage].msl_str &&
-                        strstr(program->spirv[stage].msl_str, "spvTexParams");
+    bool wants_params = setParams && (program->spirv[stage].msl_flags & MGL_MSL_TEX_PARAMS);
+    // page maps of sparse image units, sent after the params; a unit's
+    // pad[1] says how many words on from its own entry its map starts
+    GLuint pages[512], page_words = 0, page_slot[MGL_TEX_PARAM_SLOTS], page_at[MGL_TEX_PARAM_SLOTS], page_units = 0;
 
     memset(params, 0, sizeof params);
 
@@ -4266,6 +4337,19 @@ static MGLTexParam texParamFor(GLMContext ctx, const TextureParameter *p, GLenum
 
                 tp.pad[0] = iu->tex && iu->tex->samples > 1 && texture.textureType == MTLTextureType2DArray
                           ? iu->tex->samples : 1;
+
+                if (iu->tex && iu->tex->sparse && page_units < MGL_TEX_PARAM_SLOTS)
+                {
+                    size_t n = mglSparseUnitPages(ctx, iu->tex, iu->level, iu->layered ? 0 : (GLuint)MAX(iu->layer, 0),
+                                                  pages + page_words, sizeof pages / sizeof pages[0] - page_words);
+
+                    if (n)
+                    {
+                        page_slot[page_units] = slot;
+                        page_at[page_units++] = page_words;
+                        page_words += (GLuint)n;
+                    }
+                }
                 params[slot] = tp;
                 if (slot + 1 > param_count)
                     param_count = slot + 1;
@@ -4274,7 +4358,23 @@ static MGLTexParam texParamFor(GLMContext ctx, const TextureParameter *p, GLenum
     }
 
     if (wants_params)
-        setParams(params, sizeof(MGLTexParam) * (param_count ? param_count : 1));
+    {
+        size_t head = sizeof(MGLTexParam) * (param_count ? param_count : 1);
+
+        if (page_units && head + page_words * sizeof(GLuint) <= 4096)
+        {
+            GLubyte blob[4096];
+
+            for (GLuint u = 0; u < page_units; u++)
+                params[page_slot[u]].pad[1] = (GLuint)(head / sizeof(GLuint)) + page_at[u] -
+                                              page_slot[u] * (GLuint)(sizeof(MGLTexParam) / sizeof(GLuint));
+            memcpy(blob, params, head);
+            memcpy(blob + head, pages, page_words * sizeof(GLuint));
+            setParams(blob, head + page_words * sizeof(GLuint));
+        }
+        else
+            setParams(params, head);
+    }
 
     return true;
 }
@@ -4329,7 +4429,12 @@ static MGLTexParam texParamFor(GLMContext ctx, const TextureParameter *p, GLenum
 
 - (bool) bindTexturesToCurrentRenderEncoder
 {
-    if ([self bindTexturesForStage: _VERTEX_SHADER] == false)
+    if (mglProgramIsMesh(ctx->state.program))
+    {
+        if (![self bindTexturesForStage: _MESH_SHADER] || ![self bindTexturesForStage: _TASK_SHADER])
+            return false;
+    }
+    else if ([self bindTexturesForStage: _VERTEX_SHADER] == false)
         return false;
 
     return [self bindTexturesForStage: _FRAGMENT_SHADER];
@@ -5328,6 +5433,10 @@ static MTLTextureType viewTextureType(GLenum target)
 
 - (bool)bindMTLTexture:(Texture *)tex
 {
+    // an upload gives the texture contents an invalidated attachment would lose
+    if (tex && (tex->dirty_bits & (DIRTY_TEXTURE_DATA | DIRTY_TEXTURE_LEVEL)))
+        _invalidFbo = NULL;
+
     // A texture with no storage is an ordinary thing to find bound to a unit
     // the shader never reads. Metal cannot make one, but saying so on every
     // draw buried the real messages -- one sweep logged this 425,472 times.
@@ -5785,6 +5894,12 @@ static id<MTLFunction> stageFunction(id<MTLLibrary> library, const char *entry)
                 ptr->spirv[i].mtl_function = NULL;
             }
 
+            if (ptr->spirv[i].mtl_compute_pipeline)
+            {
+                CFBridgingRelease(ptr->spirv[i].mtl_compute_pipeline);
+                ptr->spirv[i].mtl_compute_pipeline = NULL;
+            }
+
             if (ptr->spirv[i].mtl_library)
             {
                 CFBridgingRelease(ptr->spirv[i].mtl_library);
@@ -5944,6 +6059,40 @@ static id<MTLFunction> stageFunction(id<MTLLibrary> library, const char *entry)
     return true;
 }
 
+// one state object per distinct descriptor, made once
+- (id<MTLDepthStencilState>) depthStencilStateFor: (MTLDepthStencilDescriptor *) d
+{
+    uint32_t k[16] = { (uint32_t)d.depthCompareFunction, d.depthWriteEnabled };
+    MTLStencilDescriptor *faces[2] = { d.frontFaceStencil, d.backFaceStencil };
+    NSData *key;
+    id<MTLDepthStencilState> st;
+
+    for (int f = 0; f < 2; f++)
+        if (faces[f])
+        {
+            uint32_t *o = k + 2 + f * 7;
+
+            o[0] = 1;
+            o[1] = (uint32_t)faces[f].stencilCompareFunction;
+            o[2] = (uint32_t)faces[f].stencilFailureOperation;
+            o[3] = (uint32_t)faces[f].depthFailureOperation;
+            o[4] = (uint32_t)faces[f].depthStencilPassOperation;
+            o[5] = faces[f].readMask;
+            o[6] = faces[f].writeMask;
+        }
+
+    key = [NSData dataWithBytes: k length: sizeof k];
+    if (_depthStencilStates == nil)
+        _depthStencilStates = [NSMutableDictionary dictionary];
+    if ((st = _depthStencilStates[key]) == nil)
+    {
+        st = [_device newDepthStencilStateWithDescriptor: d];
+        if (st)
+            _depthStencilStates[key] = st;
+    }
+    return st;
+}
+
 - (void) updateCurrentRenderEncoder
 {
     if (ctx->state.caps.depth_test ||
@@ -6001,8 +6150,7 @@ static id<MTLFunction> stageFunction(id<MTLLibrary> library, const char *entry)
             }
         }
 
-        id <MTLDepthStencilState> dsState = [_device
-                                  newDepthStencilStateWithDescriptor:dsDesc];
+        id <MTLDepthStencilState> dsState = [self depthStencilStateFor: dsDesc];
 
         [_currentRenderEncoder setDepthStencilState: dsState];
 
@@ -6137,9 +6285,7 @@ static id<MTLFunction> stageFunction(id<MTLLibrary> library, const char *entry)
 // the pass has a depth attachment; GL just lets the value go nowhere
 static bool fragmentWritesDepth(Program *p)
 {
-    const char *msl = p ? p->spirv[_FRAGMENT_SHADER].msl_str : NULL;
-
-    return msl && strstr(msl, "[[depth(") != NULL;
+    return p && (p->spirv[_FRAGMENT_SHADER].msl_flags & MGL_MSL_WRITES_DEPTH);
 }
 
 // GL only encodes into an sRGB image while GL_FRAMEBUFFER_SRGB is on; off, a
@@ -6615,6 +6761,18 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
     _renderPassDescriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
     _renderPassDescriptor.depthAttachment.storeAction = MTLStoreActionStore;
     _renderPassDescriptor.stencilAttachment.storeAction = MTLStoreActionStore;
+
+    if (_invalidFbo && _invalidFbo == ctx->state.framebuffer)
+    {
+        for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+            if ((_invalidMask & (1u << i)) && _renderPassDescriptor.colorAttachments[i].loadAction == MTLLoadActionLoad)
+                _renderPassDescriptor.colorAttachments[i].loadAction = MTLLoadActionDontCare;
+        if ((_invalidMask & MGL_INVALIDATE_DEPTH) && _renderPassDescriptor.depthAttachment.loadAction == MTLLoadActionLoad)
+            _renderPassDescriptor.depthAttachment.loadAction = MTLLoadActionDontCare;
+        if ((_invalidMask & MGL_INVALIDATE_STENCIL) && _renderPassDescriptor.stencilAttachment.loadAction == MTLLoadActionLoad)
+            _renderPassDescriptor.stencilAttachment.loadAction = MTLLoadActionDontCare;
+    }
+    _invalidFbo = NULL;
 
     // create a render encoder from the renderpass descriptor
     // CRITICAL SAFETY: Validate inputs before creating render encoder
@@ -9882,6 +10040,79 @@ static MTLWinding mtlWindingFor(const Program *p)
 
 // The mesh pipeline of a mesh program, with everything but the vertex stage
 // taken from the descriptor built the usual way.
+#define MGL_PIPELINE_CACHE_MAX 1024
+
+- (id<MTLRenderPipelineState>) cachedPipelineFor: (MTLRenderPipelineDescriptor *) d error: (NSError **) error
+{
+    Program *p = ctx->state.program;
+    bool mesh = mglProgramIsMesh(p);
+    id<MTLFunction> fns[4] = { d.vertexFunction, d.fragmentFunction, nil, nil };
+    NSMutableData *key = [NSMutableData dataWithCapacity: 512];
+    id<MTLRenderPipelineState> pipeline;
+    NSArray *hit;
+
+#define KEY(v) do { uint64_t k_ = (uint64_t)(v); [key appendBytes: &k_ length: sizeof k_]; } while (0)
+
+    if (mesh)
+    {
+        fns[2] = (__bridge id<MTLFunction>)p->spirv[_TASK_SHADER].mtl_function;
+        fns[3] = [self clipVariant: &p->spirv[_MESH_SHADER]];
+        KEY(p->mesh.payload_size);
+    }
+    for (int i = 0; i < 4; i++)
+        KEY((uintptr_t)(__bridge void *)fns[i]);
+
+    KEY(d.rasterSampleCount); KEY(d.alphaToCoverageEnabled); KEY(d.alphaToOneEnabled);
+    KEY(d.rasterizationEnabled); KEY(d.inputPrimitiveTopology);
+    KEY(d.depthAttachmentPixelFormat); KEY(d.stencilAttachmentPixelFormat);
+    for (int i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+    {
+        MTLRenderPipelineColorAttachmentDescriptor *c = d.colorAttachments[i];
+
+        KEY(c.pixelFormat); KEY(c.writeMask); KEY(c.blendingEnabled);
+        KEY(c.sourceRGBBlendFactor); KEY(c.destinationRGBBlendFactor); KEY(c.rgbBlendOperation);
+        KEY(c.sourceAlphaBlendFactor); KEY(c.destinationAlphaBlendFactor); KEY(c.alphaBlendOperation);
+    }
+    KEY(d.maxTessellationFactor); KEY(d.tessellationPartitionMode); KEY(d.tessellationFactorStepFunction);
+    KEY(d.tessellationOutputWindingOrder); KEY(d.tessellationControlPointIndexType);
+    KEY(d.tessellationFactorFormat); KEY(d.tessellationFactorScaleEnabled);
+    KEY(d.vertexDescriptor != nil);
+    if (d.vertexDescriptor)
+        for (int i = 0; i < 31; i++)
+        {
+            MTLVertexAttributeDescriptor *a = d.vertexDescriptor.attributes[i];
+            MTLVertexBufferLayoutDescriptor *l = d.vertexDescriptor.layouts[i];
+
+            KEY(a.format); KEY(a.offset); KEY(a.bufferIndex);
+            KEY(l.stride); KEY(l.stepFunction); KEY(l.stepRate);
+        }
+#undef KEY
+
+    if (_pipelineCache == nil)
+        _pipelineCache = [NSMutableDictionary dictionary];
+
+    if ((hit = _pipelineCache[key]) != nil)
+        return hit[0];
+
+    pipeline = mesh ? [self meshPipelineFrom: d error: error]
+                    : [_device newRenderPipelineStateWithDescriptor: d error: error];
+
+    if (pipeline)
+    {
+        NSMutableArray *entry = [NSMutableArray arrayWithObject: pipeline];
+
+        for (int i = 0; i < 4; i++)
+            if (fns[i])
+                [entry addObject: fns[i]];
+
+        if (_pipelineCache.count >= MGL_PIPELINE_CACHE_MAX)
+            [_pipelineCache removeAllObjects];
+        _pipelineCache[key] = entry;
+    }
+
+    return pipeline;
+}
+
 - (id<MTLRenderPipelineState>) meshPipelineFrom: (MTLRenderPipelineDescriptor *) rp error: (NSError **) error
 {
     Program *p = ctx->state.program;
@@ -9904,7 +10135,14 @@ static MTLWinding mtlWindingFor(const Program *p)
     if (d.objectFunction)
     {
         d.maxTotalThreadsPerObjectThreadgroup = p->mesh.task_size[0] * p->mesh.task_size[1] * p->mesh.task_size[2];
-        d.payloadMemoryLength = MGL_MAX_TASK_PAYLOAD;
+        // only what the payload needs; the full limit on every object
+        // threadgroup also corrupts per-primitive outputs under load
+        GLuint payload = p->mesh.payload_size ? (p->mesh.payload_size + 15) / 16 * 16 : MGL_MAX_TASK_PAYLOAD;
+
+        d.payloadMemoryLength = payload;
+        // Apple GPUs launch at most this many; above it, and at the default
+        // of 0, per-primitive outputs come out wrong under load
+        d.maxTotalThreadgroupsPerMeshGrid = MGL_METAL_MESH_GRID_MAX;
     }
 
     d.maxTotalThreadsPerMeshThreadgroup = p->mesh.mesh_size[0] * p->mesh.mesh_size[1] * p->mesh.mesh_size[2];
@@ -10023,21 +10261,18 @@ static MTLWinding mtlWindingFor(const Program *p)
         pipelineStateDescriptor.tessellationPartitionMode = mtlPartitionForSpv(program->tess.partition);
         pipelineStateDescriptor.tessellationOutputWindingOrder = mtlWindingFor(program);
 
-        const char *tes = program->spirv[_TESS_EVALUATION_SHADER].msl_str;
-
-        if (tes && (strstr(tes, "render_target_array_index") || strstr(tes, "viewport_array_index")))
+        if (program->spirv[_TESS_EVALUATION_SHADER].msl_flags & MGL_MSL_LAYER_VIEWPORT)
             pipelineStateDescriptor.inputPrimitiveTopology = program->tess.point_mode ?
                 MTLPrimitiveTopologyClassPoint : MTLPrimitiveTopologyClassTriangle;
     }
     else
     {
         MTLPrimitiveTopologyClass cls = _drawTopology ? _drawTopology : MTLPrimitiveTopologyClassTriangle;
-        const char *msl = program->spirv[_VERTEX_SHADER].msl_str;
+        GLuint vf = program->spirv[_VERTEX_SHADER].msl_flags;
 
         // macOS 27 refuses a point size write on a line or triangle pipeline.
         // Layer and viewport writes still need the class set.
-        if (cls != MTLPrimitiveTopologyClassPoint && msl && strstr(msl, "[[point_size]]") &&
-            !strstr(msl, "render_target_array_index") && !strstr(msl, "viewport_array_index"))
+        if (cls != MTLPrimitiveTopologyClassPoint && (vf & MGL_MSL_POINT_SIZE) && !(vf & MGL_MSL_LAYER_VIEWPORT))
             cls = MTLPrimitiveTopologyClassUnspecified;
 
         pipelineStateDescriptor.inputPrimitiveTopology = cls;
@@ -10778,6 +11013,7 @@ static MTLTextureType sparseTextureType(GLenum target)
 
 - (id<MTLBlitCommandEncoder>) newBlitEncoder
 {
+    _invalidFbo = NULL;
     [self endComputeEncoding];
     [self endRenderEncoding];
 
@@ -11273,6 +11509,7 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
 
     [self endRenderEncoding];
 
+    _invalidFbo = NULL;
     _currentComputeEncoder = [cmd computeCommandEncoder];
     _computeWaited = [self waitForBarrier: _currentComputeEncoder render: nil];
 
@@ -11704,6 +11941,7 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
             {
                 RETURN_FALSE_ON_FAILURE([self bindVertexBuffersToCurrentRenderEncoder]);
                 RETURN_FALSE_ON_FAILURE([self bindFragmentBuffersToCurrentRenderEncoder]);
+                RETURN_FALSE_ON_FAILURE([self updateMeshStageBuffers: true mesh: false task: false]);
             }
 
         }
@@ -11719,6 +11957,7 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
             {
                 RETURN_FALSE_ON_FAILURE([self bindVertexBuffersToCurrentRenderEncoder]);
                 RETURN_FALSE_ON_FAILURE([self bindFragmentBuffersToCurrentRenderEncoder]);
+                RETURN_FALSE_ON_FAILURE([self updateMeshStageBuffers: true mesh: false task: false]);
             }
 
             ctx->state.dirty_bits &= ~DIRTY_BUFFER;
@@ -11738,6 +11977,7 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
 
             // updateCurrentRenderEncoder will update the renderstate outside of creating a new one
             [self updateCurrentRenderEncoder];
+            [self bindSampleMask];
 
             ctx->state.dirty_bits &= ~DIRTY_RENDER_STATE;
         }
@@ -11794,10 +12034,7 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
                     MGL_NSINFO(@"MGL INFO: AGX virtualization detected - using safe synchronous compilation");
                 }
 
-                if (mglProgramIsMesh(ctx->state.program))
-                    _pipelineState = [self meshPipelineFrom: pipelineStateDescriptor error: &error];
-                else
-                _pipelineState = [_device newRenderPipelineStateWithDescriptor:pipelineStateDescriptor error:&error];
+                _pipelineState = [self cachedPipelineFor: pipelineStateDescriptor error: &error];
 
                 if (!_pipelineState) {
                     MGL_NSERR(@"MGL ERROR: Pipeline creation failed: %@", error);
@@ -11899,6 +12136,10 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
     {
         bool vertex_dirty = [self checkForDirtyBufferData: &ctx->state.vertex_buffer_map_list];
         bool fragment_dirty = [self checkForDirtyBufferData: &ctx->state.fragment_buffer_map_list];
+        bool mesh_dirty = mglProgramIsMesh(ctx->state.program) &&
+                          [self checkForDirtyBufferData: &ctx->state.mesh_buffer_map_list];
+        bool task_dirty = mglProgramIsMesh(ctx->state.program) &&
+                          [self checkForDirtyBufferData: &ctx->state.task_buffer_map_list];
 
         if (vertex_dirty)
         {
@@ -11913,6 +12154,8 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
 
             RETURN_FALSE_ON_FAILURE([self bindFragmentBuffersToCurrentRenderEncoder]);
         }
+
+        RETURN_FALSE_ON_FAILURE([self updateMeshStageBuffers: false mesh: mesh_dirty task: task_dirty]);
     }
 
     [self bindBindlessToRenderEncoder];
@@ -12193,10 +12436,17 @@ static void allowFormatViews(GLMContext glm_ctx, Texture *tex, MTLPixelFormat at
         return false;
     }
 
-    id <MTLComputePipelineState> computePipelineState;
-    NSError *errors;
-    computePipelineState = [_device newComputePipelineStateWithFunction:func error: &errors];
-    MTL_CHECK_RETURN_FALSE(computePipelineState, GL_OUT_OF_MEMORY);
+    id <MTLComputePipelineState> computePipelineState =
+        (__bridge id<MTLComputePipelineState>)program->spirv[_COMPUTE_SHADER].mtl_compute_pipeline;
+
+    if (computePipelineState == nil)
+    {
+        NSError *errors;
+
+        computePipelineState = [_device newComputePipelineStateWithFunction:func error: &errors];
+        MTL_CHECK_RETURN_FALSE(computePipelineState, GL_OUT_OF_MEMORY);
+        program->spirv[_COMPUTE_SHADER].mtl_compute_pipeline = (void *)CFBridgingRetain(computePipelineState);
+    }
 
     [computeCommandEncoder setComputePipelineState:computePipelineState];
 
@@ -13238,13 +13488,68 @@ void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
 
 // New storage holding the current contents, for a CPU write that must not
 // reach GPU work already recorded; that work keeps the old storage
+#define MGL_BUFFER_POOL_DEPTH 4
+
+static NSString *poolKey(NSUInteger length, MTLResourceOptions options)
+{
+    return [NSString stringWithFormat: @"%lu-%lu", (unsigned long)length, (unsigned long)options];
+}
+
+- (id<MTLBuffer>) pooledBuffer: (NSUInteger) length options: (MTLResourceOptions) options
+{
+    id<MTLBuffer> buf = nil;
+
+    os_unfair_lock_lock(&_bufferPoolLock);
+    NSMutableArray<id<MTLBuffer>> *list = _bufferPool[poolKey(length, options)];
+    if (list.count)
+    {
+        buf = list.lastObject;
+        [list removeLastObject];
+    }
+    os_unfair_lock_unlock(&_bufferPoolLock);
+
+    return buf;
+}
+
+// the GPU may still read it until the work recorded so far is done
+- (void) retireBuffer: (id<MTLBuffer>) buf
+{
+    if (buf == nil || _currentCommandBuffer == nil || _currentCommandBuffer.status > MTLCommandBufferStatusEnqueued)
+        return;
+
+    __weak MGLRenderer *weakSelf = self;
+
+    [_currentCommandBuffer addCompletedHandler: ^(id<MTLCommandBuffer> cb) {
+        MGLRenderer *me = weakSelf;
+
+        if (me == nil)
+            return;
+
+        os_unfair_lock_lock(&me->_bufferPoolLock);
+        if (me->_bufferPool == nil)
+            me->_bufferPool = [NSMutableDictionary dictionary];
+
+        NSString *key = poolKey(buf.length, buf.resourceOptions);
+        NSMutableArray<id<MTLBuffer>> *list = me->_bufferPool[key];
+
+        if (list == nil)
+            me->_bufferPool[key] = list = [NSMutableArray array];
+        if (list.count < MGL_BUFFER_POOL_DEPTH)
+            [list addObject: buf];
+        os_unfair_lock_unlock(&me->_bufferPoolLock);
+    }];
+}
+
 - (void) renameBuffer: (Buffer *) ptr keepContents: (bool) keep
 {
     id<MTLBuffer> old = (__bridge id<MTLBuffer>)(ptr->data.mtl_data);
-    id<MTLBuffer> fresh = nil;
-    if (old && keep)
+    id<MTLBuffer> fresh = old ? [self pooledBuffer: old.length options: old.resourceOptions] : nil;
+
+    if (fresh && keep)
+        memcpy(fresh.contents, old.contents, old.length);
+    else if (fresh == nil && old && keep)
         fresh = [_device newBufferWithBytes: old.contents length: old.length options: old.resourceOptions];
-    else if (old)
+    else if (fresh == nil && old)
         fresh = [_device newBufferWithLength: old.length options: old.resourceOptions];
 
     if (fresh == nil)
@@ -13254,6 +13559,7 @@ void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
         return;
     }
 
+    [self retireBuffer: old];
     CFBridgingRelease(ptr->data.mtl_data);
     ptr->data.mtl_data = (void *)CFBridgingRetain(fresh);
     ptr->data.buffer_data = (vm_address_t)fresh.contents;
@@ -13904,8 +14210,47 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
 // made for it, after the work already queued. Making the texture again from
 // the CPU copy instead threw away whatever the GPU had drawn into it.
 // Returns false when the whole texture has to be made again after all.
+// A staging buffer holding one texel repeated, kept for the next clear of the
+// same size and value: a clear is usually the same every frame.
+- (id<MTLBuffer>) clearSource: (const void *) texel size: (size_t) px length: (size_t) length
+{
+    NSMutableData *key = [NSMutableData dataWithBytes: texel length: px];
+    id<MTLBuffer> buf;
+
+    [key appendBytes: &length length: sizeof length];
+
+    if (_clearSources == nil)
+        _clearSources = [NSMutableDictionary dictionary];
+
+    if ((buf = _clearSources[key]) != nil)
+        return buf;
+
+    buf = [_device newBufferWithLength: length options: MTLResourceStorageModeShared];
+    if (buf == nil)
+        return nil;
+
+    uint8_t *dst = (uint8_t *)buf.contents;
+
+    for (size_t i = 0; i + px <= length; i += px)
+        memcpy(dst + i, texel, px);
+
+    if (_clearSources.count >= 16)
+        [_clearSources removeAllObjects];
+    _clearSources[key] = buf;
+
+    return buf;
+}
+
 -(bool) mtlUpdateTexRegion:(Texture *)tex face:(GLuint)face level:(GLuint)level
                          x:(size_t)x y:(size_t)y z:(size_t)z w:(size_t)w h:(size_t)h d:(size_t)d
+{
+    return [self uploadTexRegion: tex face: face level: level x: x y: y z: z w: w h: h d: d texel: NULL];
+}
+
+// From the CPU copy, or with texel set, that one value over the whole region
+-(bool) uploadTexRegion:(Texture *)tex face:(GLuint)face level:(GLuint)level
+                      x:(size_t)x y:(size_t)y z:(size_t)z w:(size_t)w h:(size_t)h d:(size_t)d
+                  texel:(const void *)texel
 {
     if (tex->mtl_data == NULL || tex->view_of || tex->samples > 1 ||
         (tex->dirty_bits & (DIRTY_TEXTURE_LEVEL | DIRTY_TEXTURE_DATA)) ||
@@ -13940,25 +14285,36 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
     if (px == 0 || lvl->pitch != px * lvl->width)
         return false;
 
-    id<MTLBuffer> staging = [_device newBufferWithLength: aligned * rows * depth * layers
-                                                 options: MTLResourceStorageModeShared];
+    id<MTLBuffer> staging;
+
+    // a repeated texel lines up with the rows only when the row padding is whole texels
+    if (texel && aligned % px == 0)
+        staging = [self clearSource: texel size: px length: aligned * rows * depth * layers];
+    else
+    {
+        staging = [_device newBufferWithLength: aligned * rows * depth * layers
+                                       options: MTLResourceStorageModeShared];
+
+        if (staging == nil)
+            return false;
+
+        uint8_t *dst = (uint8_t *)staging.contents;
+        const uint8_t *base = (const uint8_t *)lvl->data;
+
+        for (size_t l = 0; l < layers; l++)
+            for (size_t s = 0; s < depth; s++)
+                for (size_t r = 0; r < rows; r++)
+                {
+                    size_t src_y = rows_are_layers ? y + l : y + r;
+                    size_t src_z = slices_are_layers ? z + l : z + s;
+
+                    memcpy(dst + ((l * depth + s) * rows + r) * aligned,
+                           base + src_z * image + src_y * lvl->pitch + x * px, row);
+                }
+    }
 
     if (staging == nil)
         return false;
-
-    uint8_t *dst = (uint8_t *)staging.contents;
-    const uint8_t *base = (const uint8_t *)lvl->data;
-
-    for (size_t l = 0; l < layers; l++)
-        for (size_t s = 0; s < depth; s++)
-            for (size_t r = 0; r < rows; r++)
-            {
-                size_t src_y = rows_are_layers ? y + l : y + r;
-                size_t src_z = slices_are_layers ? z + l : z + s;
-
-                memcpy(dst + ((l * depth + s) * rows + r) * aligned,
-                       base + src_z * image + src_y * lvl->pitch + x * px, row);
-            }
 
     id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
 
@@ -13984,6 +14340,27 @@ void mtlGenerateMipmaps(GLMContext glm_ctx, Texture *tex)
     [blit endEncoding];
 
     return true;
+}
+
+- (void) invalidateAttachments: (Framebuffer *) fbo mask: (GLuint) mask
+{
+    // a pass already open on it has chosen how it loads
+    _invalidFbo = (_currentRenderEncoder && ctx->state.framebuffer == fbo) ? NULL : fbo;
+    _invalidMask = mask;
+}
+
+void mtlInvalidateAttachments(GLMContext glm_ctx, Framebuffer *fbo, GLuint mask)
+{
+    [(__bridge id) glm_ctx->mtl_funcs.mtlObj invalidateAttachments: fbo mask: mask];
+}
+
+bool mtlClearTexRegion(GLMContext glm_ctx, Texture *tex, GLuint face, GLuint level,
+                       size_t x, size_t y, size_t z, size_t w, size_t h, size_t d, const void *texel)
+{
+    @autoreleasepool {
+        return [(__bridge id) glm_ctx->mtl_funcs.mtlObj uploadTexRegion: tex face: face level: level
+                                                                      x: x y: y z: z w: w h: h d: d texel: texel];
+    }
 }
 
 bool mtlUpdateTexRegion(GLMContext glm_ctx, Texture *tex, GLuint face, GLuint level,
@@ -15477,6 +15854,8 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
     glm_ctx->mtl_funcs.mtlGenerateMipmaps = mtlGenerateMipmaps;
     glm_ctx->mtl_funcs.mtlTexSubImage = mtlTexSubImage;
     glm_ctx->mtl_funcs.mtlUpdateTexRegion = mtlUpdateTexRegion;
+    glm_ctx->mtl_funcs.mtlClearTexRegion = mtlClearTexRegion;
+    glm_ctx->mtl_funcs.mtlInvalidateAttachments = mtlInvalidateAttachments;
 
     glm_ctx->mtl_funcs.mtlDrawArrays = mtlDrawArrays;
     glm_ctx->mtl_funcs.mtlDrawElements = mtlDrawElements;

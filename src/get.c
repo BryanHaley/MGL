@@ -146,6 +146,14 @@ int mglIndexedStateValues(GLMContext ctx, GLenum pname, GLuint index, GLdouble *
         return 1;
     }
 
+    if (pname == GL_MAX_MESH_WORK_GROUP_SIZE_NV || pname == GL_MAX_TASK_WORK_GROUP_SIZE_NV)
+    {
+        if (index >= 3) return -1;
+
+        out[0] = index == 0 ? 32 : 1;
+        return 1;
+    }
+
     if (pname == GL_MAX_COMPUTE_WORK_GROUP_COUNT || pname == GL_MAX_COMPUTE_WORK_GROUP_SIZE)
     {
         if (index >= 3) return -1;
@@ -801,7 +809,7 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
                 case GL_MAX_MESH_OUTPUT_MEMORY_SIZE_EXT: v = MGL_MAX_MESH_OUTPUT; break;
                 case GL_MAX_MESH_PAYLOAD_AND_OUTPUT_MEMORY_SIZE_EXT: v = MGL_MAX_MESH_OUTPUT + MGL_MAX_TASK_PAYLOAD; break;
                 case GL_MAX_MESH_OUTPUT_VERTICES_EXT: v = 256; break;
-                case GL_MAX_MESH_OUTPUT_PRIMITIVES_EXT: v = 256; break;
+                case GL_MAX_MESH_OUTPUT_PRIMITIVES_EXT: v = 512; break;
                 case GL_MAX_MESH_OUTPUT_COMPONENTS_EXT: v = 128; break;
                 case GL_MAX_MESH_OUTPUT_LAYERS_EXT: v = 8; break;
                 case GL_MAX_MESH_MULTIVIEW_VIEW_COUNT_EXT: v = 1; break;
@@ -815,6 +823,14 @@ static void mglGet(GLMContext ctx, GLenum pname, GLuint type, void *data)
         }
         break;
 
+        // GL_NV_mesh_shader's own names; the rest share the EXT values
+        case GL_MAX_MESH_WORK_GROUP_INVOCATIONS_NV:
+        case GL_MAX_TASK_WORK_GROUP_INVOCATIONS_NV: { GLdouble v = 32; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_MAX_MESH_TOTAL_MEMORY_SIZE_NV: { GLdouble v = MGL_MAX_MESH_OUTPUT; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_MAX_TASK_TOTAL_MEMORY_SIZE_NV: { GLdouble v = MGL_MAX_TASK_PAYLOAD; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_MAX_MESH_OUTPUT_PRIMITIVES_NV: { GLdouble v = 512; mglWriteTypedValues(data, type, &v, 1); } break;
+        case GL_MAX_TASK_OUTPUT_COUNT_NV:
+        case GL_MAX_DRAW_MESH_TASKS_COUNT_NV: { GLdouble v = MGL_MAX_MESH_GROUP_COUNT; mglWriteTypedValues(data, type, &v, 1); } break;
         case GL_SUBGROUP_SIZE_KHR: { GLdouble v = 32; mglWriteTypedValues(data, type, &v, 1); } break;
         case GL_SUBGROUP_SUPPORTED_STAGES_KHR: { GLdouble v = MGL_SUBGROUP_STAGES; mglWriteTypedValues(data, type, &v, 1); } break;
         case GL_SUBGROUP_SUPPORTED_FEATURES_KHR: { GLdouble v = MGL_SUBGROUP_FEATURES; mglWriteTypedValues(data, type, &v, 1); } break;
@@ -1113,6 +1129,7 @@ static const char * const mgl_extensions[] = {
     "GL_ARB_sparse_texture2",
     "GL_ARB_sparse_texture_clamp",
     "GL_EXT_mesh_shader",
+    "GL_NV_mesh_shader",
     "GL_ARB_parallel_shader_compile",
     "GL_KHR_robustness",
     // Apple GPUs decode ASTC themselves, and the format table maps every LDR size

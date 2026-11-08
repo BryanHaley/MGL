@@ -623,3 +623,44 @@ GPU_TEST(ssbo, switching_buffers_between_draws)
     glDeleteBuffers(5, bufs);
     mgl_target_destroy(&t);
 }
+
+// Engines number storage blocks past 32; NVIDIA allows 96.
+GPU_TEST(ssbo, high_binding_numbers_reach_the_shader)
+{
+    static const char *cs =
+        "#version 460 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(std430, binding = 2) buffer A { uint a; };\n"
+        "layout(std430, binding = 40) buffer B { uint b; };\n"
+        "layout(std430, binding = 95) buffer C { uint c; };\n"
+        "void main() { c = a + b; }\n";
+    char log[2048] = "";
+    GLuint prog = mgl_build_compute_program(cs, log, sizeof log);
+    GLuint bufs[3], vals[3] = { 5, 7, 0 };
+    GLint max = 0;
+
+    glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &max);
+    CHECK(max >= 96);
+    CHECK_MSG(prog != 0, "kernel did not build: %s", log);
+    if (!prog)
+        return;
+
+    glGenBuffers(3, bufs);
+    for (int i = 0; i < 3; i++)
+    {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufs[i]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), &vals[i], GL_DYNAMIC_DRAW);
+    }
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, bufs[0]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 40, bufs[1]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 95, bufs[2]);
+
+    CHECK(run_compute(prog, 1, 1, 1));
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufs[2]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &vals[2]);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+    CHECK_EQ_UINT(vals[2], 12);
+
+    glDeleteBuffers(3, bufs);
+    glDeleteProgram(prog);
+}

@@ -284,6 +284,9 @@ const void *mglGlslangResource(GLMContext ctx)
     r.max_compute_atomic_counters = v->max_compute_atomic_counters;
     r.max_compute_atomic_counter_buffers = v->max_compute_atomic_counter_buffers;
 
+    // Metal's mesh stage takes 512 primitives, GL_NV_mesh_shader's minimum
+    r.max_mesh_output_primitives_ext = 512;
+
     r.max_varying_components = v->max_varying_components;
     r.max_vertex_output_components = v->max_vertex_output_components;
     r.max_geometry_input_components = v->max_geometry_input_components;

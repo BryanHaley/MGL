@@ -390,6 +390,10 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
             CFRelease(ptr->spirv[i].mtl_function);
             ptr->spirv[i].mtl_function = NULL;
         }
+        if (ptr->spirv[i].mtl_compute_pipeline) {
+            CFRelease(ptr->spirv[i].mtl_compute_pipeline);
+            ptr->spirv[i].mtl_compute_pipeline = NULL;
+        }
         if (ptr->spirv[i].mtl_library) {
             CFRelease(ptr->spirv[i].mtl_library);
             ptr->spirv[i].mtl_library = NULL;
@@ -1900,6 +1904,7 @@ char *parseSPIRVShaderToMetal(GLMContext ctx, Program *ptr, int stage, Spirv *sp
         spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_PARAMS, SPVC_TRUE);
         spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_PARAMS_BUFFER_INDEX,
                                        own_slot ? MGL_TEX_PARAM_MSL_SLOT : MGL_VERTEX_TEX_PARAM_MSL_SLOT);
+        spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_SPARSE_IMAGE_GUARDS, SPVC_TRUE);
     }
 
     if (stage == _FRAGMENT_SHADER)
@@ -3389,6 +3394,8 @@ static glslang_shader_t *companionShader(GLMContext ctx, GLenum gl_type, const c
 
     return shader;
 }
+static void scanMsl(Spirv *sp);
+
 
 static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_type,
                                     int spirv_slot, Spirv *dest, const char *src, const char *entry,
@@ -3510,6 +3517,7 @@ static bool buildGeneratedStageInto(GLMContext ctx, Program *pptr, GLenum gl_typ
 
     sp->msl_str = parseSPIRVShaderToMetal(ctx, pptr, spirv_slot >= 0 ? spirv_slot : _COMPUTE_SHADER,
                                           sp, entry);
+    scanMsl(sp);
 
     glslang_program_delete(prog);
     glslang_shader_delete(shader);
@@ -4047,6 +4055,124 @@ static bool linkGeometryProgram(GLMContext ctx, Program *pptr)
 
 // The work group sizes and outputs of the mesh stages, from their SPIR-V
 // execution modes.
+// what the renderer asks of the MSL on every draw, found once here
+static void scanMsl(Spirv *sp)
+{
+    const char *m = sp->msl_str;
+
+    sp->msl_flags = 0;
+    if (m == NULL)
+        return;
+    if (strstr(m, "spvTexParams"))
+        sp->msl_flags |= MGL_MSL_TEX_PARAMS;
+    if (strstr(m, "[[depth("))
+        sp->msl_flags |= MGL_MSL_WRITES_DEPTH;
+    if (strstr(m, "[[point_size]]"))
+        sp->msl_flags |= MGL_MSL_POINT_SIZE;
+    if (strstr(m, "render_target_array_index") || strstr(m, "viewport_array_index"))
+        sp->msl_flags |= MGL_MSL_LAYER_VIEWPORT;
+}
+
+// Size and alignment of a SPIR-V type as Metal lays it out, erring large;
+// 0 for a type this does not know.
+static size_t spirvTypeSize(const unsigned int *w, const size_t *def, unsigned int bound, unsigned int id,
+                            size_t *align, int depth)
+{
+    const unsigned int *t;
+    size_t s, a, sub;
+
+    if (id >= bound || def[id] == 0 || depth > 16)
+        return 0;
+
+    t = w + def[id];
+    switch (t[0] & 0xffff)
+    {
+        case 20:                            // OpTypeBool
+            *align = 4;
+            return 4;
+        case 21: case 22:                   // OpTypeInt, OpTypeFloat
+            *align = t[2] / 8;
+            return t[2] / 8;
+        case 23:                            // OpTypeVector
+            s = spirvTypeSize(w, def, bound, t[2], &a, depth + 1) * (t[3] == 3 ? 4 : t[3]);
+            *align = s;
+            return s;
+        case 24:                            // OpTypeMatrix
+            s = spirvTypeSize(w, def, bound, t[2], &a, depth + 1);
+            *align = a;
+            return s * t[3];
+        case 28:                            // OpTypeArray
+        {
+            const unsigned int *len = t[3] < bound && def[t[3]] ? w + def[t[3]] : NULL;
+
+            s = spirvTypeSize(w, def, bound, t[2], &a, depth + 1);
+            if (s == 0 || len == NULL || (len[0] & 0xffff) != 43)
+                return 0;
+            *align = a;
+            return ((s + a - 1) / a * a) * len[3];
+        }
+        case 30:                            // OpTypeStruct
+        {
+            size_t off = 0, max_align = 1;
+
+            for (unsigned int m = 2; m < (t[0] >> 16); m++)
+            {
+                if ((sub = spirvTypeSize(w, def, bound, t[m], &a, depth + 1)) == 0)
+                    return 0;
+                off = (off + a - 1) / a * a + sub;
+                max_align = a > max_align ? a : max_align;
+            }
+            *align = max_align;
+            return (off + max_align - 1) / max_align * max_align;
+        }
+    }
+    return 0;
+}
+
+// the task payload's size, from the variable in TaskPayloadWorkgroupEXT
+static size_t spirvPayloadSize(const unsigned int *w, size_t n)
+{
+    unsigned int bound = n > 3 ? w[3] : 0;
+    size_t *def, size = 0, align;
+
+    if (w == NULL || bound == 0 || (def = calloc(bound, sizeof *def)) == NULL)
+        return 0;
+
+    for (size_t i = 5; i < n;)
+    {
+        unsigned int op = w[i] & 0xffff, len = w[i] >> 16;
+
+        if (len == 0 || i + len > n)
+            break;
+        // type and constant results are the first word after the opcode, or the second
+        if (op >= 19 && op <= 39 && len >= 2 && w[i + 1] < bound)
+            def[w[i + 1]] = i;
+        else if (op == 43 && len >= 3 && w[i + 2] < bound)
+            def[w[i + 2]] = i;
+        i += len;
+    }
+
+    for (size_t i = 5; i < n;)
+    {
+        unsigned int op = w[i] & 0xffff, len = w[i] >> 16;
+
+        if (len == 0 || i + len > n)
+            break;
+        if (op == 59 && len >= 4 && w[i + 3] == 5402 && w[i + 1] < bound && def[w[i + 1]])
+        {
+            const unsigned int *ptr = w + def[w[i + 1]];
+
+            if ((ptr[0] & 0xffff) == 32)    // OpTypePointer
+                size = spirvTypeSize(w, def, bound, ptr[3], &align, 0);
+            break;
+        }
+        i += len;
+    }
+
+    free(def);
+    return size;
+}
+
 static void scanMeshModes(Program *pptr)
 {
     memset(&pptr->mesh, 0, sizeof pptr->mesh);
@@ -4083,6 +4209,8 @@ static void scanMeshModes(Program *pptr)
             i += len;
         }
     }
+
+    pptr->mesh.payload_size = (GLuint)spirvPayloadSize(pptr->spirv[_TASK_SHADER].ir, pptr->spirv[_TASK_SHADER].size);
 }
 
 bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool modes_only)
@@ -4111,6 +4239,10 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     if (pptr->spirv[stage].mtl_function) {
         CFRelease(pptr->spirv[stage].mtl_function);
         pptr->spirv[stage].mtl_function = NULL;
+    }
+    if (pptr->spirv[stage].mtl_compute_pipeline) {
+        CFRelease(pptr->spirv[stage].mtl_compute_pipeline);
+        pptr->spirv[stage].mtl_compute_pipeline = NULL;
     }
     if (pptr->spirv[stage].mtl_library) {
         CFRelease(pptr->spirv[stage].mtl_library);
@@ -4223,6 +4355,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
     // compile SPIRV to Metal
     MGL_INFO("MGL DEBUG: About to parse SPIRV to Metal\n");
     pptr->spirv[stage].msl_str = parseSPIRVShaderToMetal(ctx, pptr, stage, NULL, NULL);
+    scanMsl(&pptr->spirv[stage]);
     MGL_INFO("MGL DEBUG: SPIRV parsed to Metal\n");
 
     // the same vertex stage again, still returning its position, for drawing
@@ -4261,6 +4394,7 @@ bool linkAndCompileProgramToMetal(GLMContext ctx, Program *pptr, int stage, bool
             memcpy(v->ir, pptr->spirv[stage].ir, v->size * sizeof(unsigned));
             pptr->building_vs_raster = GL_TRUE;
             v->msl_str = parseSPIRVShaderToMetal(ctx, pptr, stage, v, NULL);
+            scanMsl(v);
             pptr->building_vs_raster = GL_FALSE;
         }
     }
@@ -4682,6 +4816,7 @@ bool mglBuildNoRasterVertex(GLMContext ctx, Program *pptr)
     memcpy(v->ir, src->ir, v->size * sizeof(unsigned));
     pptr->building_vs_noraster = GL_TRUE;
     v->msl_str = parseSPIRVShaderToMetal(ctx, pptr, _VERTEX_SHADER, v, NULL);
+    scanMsl(v);
     pptr->building_vs_noraster = GL_FALSE;
 
     return v->msl_str != NULL;
@@ -4727,6 +4862,7 @@ bool mglBuildSampleRateFragment(GLMContext ctx, Program *pptr)
     // the shader object may be gone by now, so the name comes from the link
     pptr->building_fs_sample_rate = GL_TRUE;
     v->msl_str = parseSPIRVShaderToMetal(ctx, pptr, _FRAGMENT_SHADER, v, src->entry_point);
+    scanMsl(v);
     pptr->building_fs_sample_rate = GL_FALSE;
 
     for (int r = 0; r < MAX_SPVC_RESOURCE_TYPES; r++)
@@ -5196,6 +5332,8 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
         }
         pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
         pptr->indexed_draw_loc = mglFindUniformByName(pptr, MGL_INDEXED_DRAW_NAME);
+        pptr->nv_first_loc[0] = mglFindUniformByName(pptr, MGL_NV_TASK_FIRST_NAME);
+        pptr->nv_first_loc[1] = mglFindUniformByName(pptr, MGL_NV_MESH_FIRST_NAME);
         pptr->sample_mask_off_loc = mglFindSampleMaskOffLocation(pptr);
 #ifdef MGL_COMPAT_PROFILE
         mglFindAlphaTestLocations(pptr);
@@ -5310,6 +5448,8 @@ void mglLinkProgram(GLMContext ctx, GLuint program)
 
     pptr->num_samples_loc = mglFindNumSamplesLocation(pptr);
     pptr->indexed_draw_loc = mglFindUniformByName(pptr, MGL_INDEXED_DRAW_NAME);
+    pptr->nv_first_loc[0] = mglFindUniformByName(pptr, MGL_NV_TASK_FIRST_NAME);
+    pptr->nv_first_loc[1] = mglFindUniformByName(pptr, MGL_NV_MESH_FIRST_NAME);
     pptr->sample_mask_off_loc = mglFindSampleMaskOffLocation(pptr);
 #ifdef MGL_COMPAT_PROFILE
     mglFindAlphaTestLocations(pptr);

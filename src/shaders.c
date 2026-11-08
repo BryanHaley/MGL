@@ -2108,6 +2108,17 @@ static void compileShaderObject(GLMContext ctx, Shader *ptr)
 #endif
                 }
 
+                if (ptr->glm_type == _TASK_SHADER || ptr->glm_type == _MESH_SHADER)
+                {
+                    char *nv = mglRewriteNvMesh(fixed, ptr->glm_type == _TASK_SHADER);
+
+                    if (nv)
+                    {
+                        free(fixed);
+                        fixed = nv;
+                    }
+                }
+
                 if (ptr->glm_type == _VERTEX_SHADER)
                 {
                     char *based = rewriteBaseVertex(fixed);

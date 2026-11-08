@@ -18,6 +18,7 @@
  *
  */
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach_vm.h>
 #include <mach/mach_init.h>
 #include <mach/vm_map.h>
@@ -613,6 +614,7 @@ void mglFreeTextureObject(GLMContext ctx, Texture *tex)
     if (tex->params.mtl_data)
         ctx->mtl_funcs.mtlDeleteMTLObj(ctx, tex->params.mtl_data);
 
+    free(tex->sparse_bits);
     free(tex);
 
     if (orig && orig->view_count && --orig->view_count == 0 && orig->deleted)
@@ -1190,6 +1192,13 @@ void invalidateTexture(GLMContext ctx, Texture *tex)
         ctx->mtl_funcs.mtlDeleteMTLObj(ctx, tex->mtl_sample_view);
         tex->mtl_sample_view = NULL;
         tex->mtl_sample_base = NULL;
+    }
+
+    if (tex->mtl_image_views)
+    {
+        CFRelease(tex->mtl_image_views);
+        tex->mtl_image_views = NULL;
+        tex->mtl_image_views_base = NULL;
     }
 
     for(int face=0; face<_CUBE_MAP_MAX_FACE; face++)
@@ -3382,6 +3391,57 @@ void mglClearTexImage(GLMContext ctx, GLuint texture, GLint level, GLenum format
                         w > 0 ? w : 1, h > 0 ? h : 1, d > 0 ? d : 1, format, type, data);
 }
 
+// The clear value converted once, then repeated over the region in the
+// texture's own layout. Pixel store state plays no part in a clear.
+static bool clearTexRegion(GLMContext ctx, Texture *tex, GLuint face, GLint level, GLint x, GLint y, GLint z,
+                           GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type, const void *data)
+{
+    TextureLevel *lv = &tex->faces[face].levels[level];
+    GLubyte texel[16] = { 0 }, *dst, *row;
+    size_t px = sizeForInternalFormat(tex->internalformat, format, type);
+    size_t level_height = lv->height ? lv->height : (size_t)h;
+    size_t slice_pitch = lv->pitch * level_height;
+
+    if (px == 0 || px > sizeof texel || tex->view_of || mglFormatCompressible(tex->internalformat) ||
+        lv->data == 0 || lv->data_size == 0 || !lv->complete)
+        return false;
+
+    if ((size_t)x * px + (size_t)w * px > lv->pitch ||
+        (size_t)(z + d - 1) * slice_pitch + (size_t)(y + h - 1) * lv->pitch + (size_t)(x + w) * px > lv->data_size)
+        return false;
+
+    if (data && mglUploadNeedsNoConversion(tex->internalformat, format, type))
+        memcpy(texel, data, px);
+    else if (data)
+    {
+        MGLNativeFormat native = mglNativeFormatForGLInternalFormat(tex->internalformat);
+
+        if (native == MGL_NF_UNKNOWN || !mglConvertPixelsToNative(data, 0, format, type, texel, 0, native, 1, 1))
+            return false;
+    }
+
+    dst = (GLubyte *)lv->data + (size_t)z * slice_pitch + (size_t)y * lv->pitch + (size_t)x * px;
+    row = dst;
+    for (GLsizei i = 0; i < w; i++)
+        memcpy(row + (size_t)i * px, texel, px);
+
+    for (GLsizei k = 0; k < d; k++)
+        for (GLsizei j = 0; j < h; j++)
+        {
+            GLubyte *out = dst + (size_t)k * slice_pitch + (size_t)j * lv->pitch;
+
+            if (out != row)
+                memcpy(out, row, (size_t)w * px);
+        }
+
+    if (!(ctx->mtl_funcs.mtlClearTexRegion &&
+          ctx->mtl_funcs.mtlClearTexRegion(ctx, tex, face, (GLuint)level, (size_t)x, (size_t)y, (size_t)z,
+                                           (size_t)w, (size_t)h, (size_t)d, texel)))
+        tex->dirty_bits |= DIRTY_TEXTURE_DATA;
+
+    return true;
+}
+
 void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *data)
 {
     MGL_INFO("MGL: glClearTexSubImage called - texture=%u %dx%dx%d at (%d,%d,%d)\n",
@@ -3425,6 +3485,19 @@ void mglClearTexSubImage(GLMContext ctx, GLuint texture, GLint level, GLint xoff
         if (first_face + face_count > _CUBE_MAP_MAX_FACE) {
             ERROR_RETURN(GL_INVALID_VALUE);
         }
+    }
+
+    if (tex->faces[first_face].levels)
+    {
+        GLuint f;
+
+        for (f = 0; f < face_count; f++)
+            if (!clearTexRegion(ctx, tex, first_face + f, level, xoffset, yoffset, zoffset,
+                                width, height, depth, format, type, data))
+                break;
+
+        if (f == face_count)
+            return;
     }
 
     void *fill_data = calloc(1, size);

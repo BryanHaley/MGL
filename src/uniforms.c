@@ -1396,6 +1396,21 @@ void mglWriteIndexedDraw(GLMContext ctx, Program *pptr, GLint indexed)
     programUniformWrite(ctx, pptr, pptr->indexed_draw_loc, &indexed, sizeof(GLint));
 }
 
+// GL_NV_mesh_shader's first group goes to the first stage that runs
+void mglWriteNvMeshFirst(GLMContext ctx, Program *pptr, GLuint first)
+{
+    bool task = pptr && pptr->spirv[_TASK_SHADER].msl_str;
+    GLuint values[2] = { task ? first : 0u, task ? 0u : first };
+
+    if (pptr == NULL)
+        return;
+
+    ctx->uniform_setter = 0;
+    for (int i = 0; i < 2; i++)
+        if (pptr->nv_first_loc[i] >= 0)
+            programUniformWrite(ctx, pptr, pptr->nv_first_loc[i], &values[i], sizeof(GLuint));
+}
+
 // GL's gl_NumSamples is the draw framebuffer's sample count, so it is written
 // at draw time rather than by the application.
 void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples)
@@ -1520,6 +1535,10 @@ void programUniformWrite(GLMContext ctx, Program *pptr, GLint location, const vo
         const void *data = packed_size ? (const void *)packed : ptr;
         size_t n = packed_size ? (size_t)packed_size : (size_t)size;
         size_t have = buf->data.buffer_data ? (size_t)buf->size : 0;
+
+        // the same value again changes nothing, and rebinding costs a draw
+        if (offset + n <= have && !memcmp((const GLubyte *)buf->data.buffer_data + offset, data, n))
+            return;
 
         if (offset == 0 && n >= have)
         {

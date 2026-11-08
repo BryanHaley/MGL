@@ -1813,6 +1813,32 @@ static GLenum invalidateError(GLMContext ctx, Framebuffer *fbo, GLsizei n, const
     return GL_NO_ERROR;
 }
 
+// which attachments a whole-framebuffer invalidate names, for the next pass
+static void invalidateAttachments(GLMContext ctx, Framebuffer *fbo, GLsizei n, const GLenum *attachments)
+{
+    GLuint mask = 0;
+
+    if (fbo == NULL || ctx->mtl_funcs.mtlInvalidateAttachments == NULL)
+        return;
+
+    for (GLsizei i = 0; i < n; i++)
+    {
+        GLenum a = attachments[i];
+
+        if (a >= GL_COLOR_ATTACHMENT0 && a < GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)
+            mask |= 1u << (a - GL_COLOR_ATTACHMENT0);
+        else if (a == GL_DEPTH_ATTACHMENT)
+            mask |= MGL_INVALIDATE_DEPTH;
+        else if (a == GL_STENCIL_ATTACHMENT)
+            mask |= MGL_INVALIDATE_STENCIL;
+        else if (a == GL_DEPTH_STENCIL_ATTACHMENT)
+            mask |= MGL_INVALIDATE_DEPTH | MGL_INVALIDATE_STENCIL;
+    }
+
+    if (mask)
+        ctx->mtl_funcs.mtlInvalidateAttachments(ctx, fbo, mask);
+}
+
 void mglInvalidateFramebuffer(GLMContext ctx, GLenum target, GLsizei numAttachments, const GLenum *attachments)
 {
     bool ok;
@@ -1824,6 +1850,8 @@ void mglInvalidateFramebuffer(GLMContext ctx, GLenum target, GLsizei numAttachme
 
     GLenum err = invalidateError(ctx, fbo, numAttachments, attachments);
     ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
+
+    invalidateAttachments(ctx, fbo, numAttachments, attachments);
 }
 
 void mglInvalidateSubFramebuffer(GLMContext ctx, GLenum target, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height)
@@ -2010,6 +2038,8 @@ void mglInvalidateNamedFramebufferData(GLMContext ctx, GLuint framebuffer, GLsiz
 
     GLenum err = invalidateError(ctx, fbo, numAttachments, attachments);
     ERROR_CHECK_RETURN(err == GL_NO_ERROR, err);
+
+    invalidateAttachments(ctx, fbo, numAttachments, attachments);
 }
 
 void mglInvalidateNamedFramebufferSubData(GLMContext ctx, GLuint framebuffer, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height)

@@ -310,3 +310,40 @@ GPU_TEST(clear_texture, clearing_a_depth_cube_face_keeps_the_other_faces)
     glDeleteProgram(prog);
     mgl_target_destroy(&t);
 }
+
+// A clear reads one texel from client memory: unpack state and an unpack
+// buffer play no part in it.
+GPU_TEST(clear_texture, a_clear_ignores_the_unpack_state)
+{
+    static const GLubyte red[4] = { 255, 0, 0, 255 };
+    GLubyte junk[64], px[4 * 4 * 4];
+    GLuint tex, pbo;
+    int wrong = 0;
+
+    memset(junk, 0x55, sizeof junk);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+    glGenBuffers(1, &pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, sizeof junk, junk, GL_STATIC_DRAW);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 2);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 1);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+
+    glClearTexImage(tex, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    for (int i = 0; i < 16; i++)
+        wrong += memcmp(px + i * 4, red, 4) != 0;
+    CHECK_MSG(wrong == 0, "%d of 16 texels are not red", wrong);
+
+    glDeleteBuffers(1, &pbo);
+    glDeleteTextures(1, &tex);
+}

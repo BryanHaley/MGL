@@ -121,6 +121,11 @@ static_assert(_TEXTURE_BUFFER == _TEXTURE_BUFFER_TARGET, "_TEXTURE_BUFFER != _TE
 #define MGL_MAX_MESH_OUTPUT         16368
 #define MGL_MAX_TASK_GROUP_TOTAL    4194304
 #define MGL_MAX_MESH_GROUP_TOTAL    4194304
+// mesh groups one task group can launch on Apple GPUs; a draw asking for more is dropped
+#define MGL_METAL_MESH_GRID_MAX     1024
+// glInvalidateFramebuffer's attachments: colour i is bit i
+#define MGL_INVALIDATE_DEPTH        0x10000
+#define MGL_INVALIDATE_STENCIL      0x20000
 
 // GL_EXT_mesh_shader, newer than glcorearb.h
 #ifndef GL_EXT_mesh_shader
@@ -333,7 +338,7 @@ typedef struct BufferBaseTarget_t {
 // The indexed buffer targets each have their own binding space and their own
 // spec minimum, so they get their own ceilings rather than one shared number.
 #define MAX_UNIFORM_BUFFER_BINDINGS         96
-#define MAX_SHADER_STORAGE_BUFFER_BINDINGS  32
+#define MAX_SHADER_STORAGE_BUFFER_BINDINGS  96
 #define MAX_ATOMIC_COUNTER_BUFFER_BINDINGS  16
 // what the capture machinery can really lay out, which is the spec minimum;
 // MGL_XFB_MAX_BUFFERS and MAX_TF_BUFFERS are the same number seen from the
@@ -463,6 +468,9 @@ typedef struct Texture_t {
     // format's own missing channels folded in, and what it was made for
     void    *mtl_sample_view;
     void    *mtl_sample_base;
+    // image views of one Metal texture by shape, and which texture that is
+    void    *mtl_image_views;
+    void    *mtl_image_views_base;
     GLuint  mtl_sample_key;
     GLsizei samples;
     // a buffer texture is a view of one MTLBuffer; which one, so a buffer given
@@ -487,6 +495,7 @@ typedef struct Texture_t {
     GLboolean sparse;
     GLint   page_index;
     GLuint  sparse_levels;
+    GLuint  *sparse_bits;       // a bit per committed page, level after level
 } Texture;
 
 #define MGL_MAX_SPARSE_SIZE     16384
@@ -914,6 +923,11 @@ typedef struct Shader_t {
     SubroutineInfo subroutines;
 } Shader;
 
+#define MGL_MSL_TEX_PARAMS      0x1     // reads texture params from spvTexParams
+#define MGL_MSL_WRITES_DEPTH    0x2
+#define MGL_MSL_POINT_SIZE      0x4
+#define MGL_MSL_LAYER_VIEWPORT  0x8     // writes render_target_array_index or viewport_array_index
+
 typedef struct Spirv_t {
     GLuint stage;
     size_t size;
@@ -922,6 +936,8 @@ typedef struct Spirv_t {
     char *entry_point;
     void *mtl_function;
     void *mtl_library;
+    void *mtl_compute_pipeline;     // made on the first dispatch, freed with the function
+    GLuint msl_flags;               // MGL_MSL_*, what the MSL holds, worked out once
     // SPIRV-Cross made this a vertex function that returns nothing -- it writes
     // no outputs at all -- and Metal refuses to rasterise from one of those
     GLboolean raster_off;
@@ -1104,6 +1120,7 @@ typedef struct Program_t {
     // where the rewritten gl_NumSamples lives, or -1 when the shader never asked
     GLint num_samples_loc;
     GLint indexed_draw_loc;     // mglIndexedDraw, -1 when gl_BaseVertex is unused
+    GLint nv_first_loc[2];      // GL_NV_mesh_shader's first group: task, mesh
     GLint sample_mask_off_loc;
 #ifdef MGL_COMPAT_PROFILE
     GLint alpha_func_loc;
@@ -1132,6 +1149,7 @@ typedef struct Program_t {
         GLuint max_vertices;
         GLuint max_primitives;
         GLenum output_type;
+        GLuint payload_size;    // 0 when it could not be worked out
     } mesh;
     // a geometry shader becomes a compute pass plus a generated vertex shader
     GeometryInfo geom;
@@ -1399,6 +1417,9 @@ size_t mglPixelStoreSkipBytes2D(const PixelStore *ps, GLuint pixel_size, size_t 
 // same length as gl_SampleMask, so the rewrite swaps it in place
 #define MGL_SAMPLE_MASK_TMP   "mglSMaskValue"
 #define MGL_SAMPLE_MASK_BODY  "mglSampleMaskBody"
+// GL_NV_mesh_shader's first group, added to gl_WorkGroupID of the first stage
+#define MGL_NV_TASK_FIRST_NAME "mglNvTaskFirst"
+#define MGL_NV_MESH_FIRST_NAME "mglNvMeshFirst"
 
 #ifdef MGL_COMPAT_PROFILE
 // The alpha test is fixed-function state with nowhere to live in Metal, so a
@@ -1418,7 +1439,7 @@ static inline bool mglIsDriverUniform(const char *name)
         return false;
 
     if (!strcmp(name, MGL_NUM_SAMPLES_NAME) || !strcmp(name, MGL_SAMPLE_MASK_FORCE) ||
-        !strcmp(name, MGL_INDEXED_DRAW_NAME))
+        !strcmp(name, MGL_INDEXED_DRAW_NAME) || !strncmp(name, "mglNv", 5))
         return true;
 
     // the alpha test and the geometry rewrite add their own, in any profile
@@ -1461,6 +1482,8 @@ bool mglUniformIsActive(Program *p, const char *name);
 GLint mglArrayOfArraysElement(const char *subs, const GLint *dims, GLint dim_count);
 void mglWriteNumSamples(GLMContext ctx, Program *pptr, GLint samples);
 void mglWriteIndexedDraw(GLMContext ctx, Program *pptr, GLint indexed);
+void mglWriteNvMeshFirst(GLMContext ctx, Program *pptr, GLuint first);
+char *mglRewriteNvMesh(const char *src, bool task);
 GLint mglFindSampleMaskOffLocation(Program *pptr);
 void mglWriteSampleMaskOff(GLMContext ctx, Program *pptr, GLint off);
 #ifdef MGL_COMPAT_PROFILE
@@ -1637,6 +1660,7 @@ bool mglSparsePageSize(GLMContext ctx, GLenum target, GLenum internalformat, GLs
 GLint mglSparseFormatQuery(GLMContext ctx, GLenum target, GLenum internalformat, GLenum pname);
 bool mglSparseTexParam(Texture *tex, GLenum pname, GLint v, GLenum *err);
 bool mglSparseTexObjectParam(const Texture *tex, GLenum pname, GLint *out);
+size_t mglSparseUnitPages(GLMContext ctx, Texture *tex, GLint level, GLuint base_layer, GLuint *out, size_t cap);
 GLenum mglSparseStorageError(GLMContext ctx, Texture *tex, GLsizei levels, GLenum internalformat,
                              GLsizei width, GLsizei height, GLsizei depth);
 
@@ -1694,6 +1718,8 @@ struct GLMMetalFuncs {
 
     void (*mtlGenerateMipmaps)(GLMContext glm_ctx, Texture *tex);
     bool (*mtlUpdateTexRegion)(GLMContext glm_ctx, Texture *tex, GLuint face, GLuint level, size_t x, size_t y, size_t z, size_t w, size_t h, size_t d);
+    void (*mtlInvalidateAttachments)(GLMContext glm_ctx, Framebuffer *fbo, GLuint mask);
+    bool (*mtlClearTexRegion)(GLMContext glm_ctx, Texture *tex, GLuint face, GLuint level, size_t x, size_t y, size_t z, size_t w, size_t h, size_t d, const void *texel);
     void (*mtlTexSubImage)(GLMContext glm_ctx, Texture *tex, Buffer *buf, size_t src_offset, size_t src_pitch, size_t src_image_size, size_t src_size, GLuint slice, GLuint level, size_t width, size_t height, size_t depth, size_t xoffset, size_t yoffset, size_t zoffset);
     void (*mtlCopyTexSubImage)(GLMContext glm_ctx, Texture *tex, GLint level, GLint xoffset, GLint yoffset, GLint slice, GLint x, GLint y, GLsizei width, GLsizei height);
     void (*mtlCopyImageSubData)(GLMContext glm_ctx, Texture *srcTex, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, Texture *dstTex, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei width, GLsizei height, GLsizei depth);

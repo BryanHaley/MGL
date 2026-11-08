@@ -433,3 +433,59 @@ GPU_TEST(sparse_texture, shadow_lookups_with_zero_gradients_and_offset_gathers)
     glDeleteProgram(prog);
     glDeleteTextures(1, &tex);
 }
+
+// An uncommitted texel stays zero inside one shader: an atomic or a store to
+// it goes nowhere and a load of it after reads 0, while a committed texel
+// keeps what was done to it.
+GPU_TEST(sparse_texture, uncommitted_texels_ignore_atomics_and_stores)
+{
+    static const char *cs =
+        "#version 450 core\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(r32ui, binding = 0) uniform uimage2D img;\n"
+        "layout(std430, binding = 0) buffer O { uvec4 o; };\n"
+        "void main() {\n"
+        "    uint a = imageAtomicAdd(img, ivec2(5, 5), 7u);\n"
+        "    uint b = imageAtomicAdd(img, ivec2(130, 5), 7u);\n"
+        "    imageStore(img, ivec2(131, 5), uvec4(9u));\n"
+        "    o = uvec4(imageLoad(img, ivec2(5, 5)).x, imageLoad(img, ivec2(130, 5)).x,\n"
+        "              imageLoad(img, ivec2(131, 5)).x, a + b * 1000u);\n"
+        "}\n";
+    CommitFn commit = commitFn();
+    GLuint tex, buf, prog, out[4] = { 9, 9, 9, 9 }, *three = fill(3u, 256 * 256);
+    char log[4096];
+
+    prog = mgl_build_compute_program(cs, log, sizeof log);
+    CHECK_MSG(prog != 0, "compute program did not link: %s", log);
+    if (!prog || !commit)
+        return;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SPARSE_ARB, GL_TRUE);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32UI, 256, 256);
+    commit(GL_TEXTURE_2D, 0, 0, 0, 0, 128, 256, 1, GL_TRUE);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 128, 256, GL_RED_INTEGER, GL_UNSIGNED_INT, three);
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof out, out, GL_DYNAMIC_COPY);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+    glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32UI);
+    glUseProgram(prog);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof out, out);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    CHECK_EQ_UINT(out[0], 10);
+    CHECK_EQ_UINT(out[1], 0);
+    CHECK_EQ_UINT(out[2], 0);
+    CHECK_EQ_UINT(out[3], 3);
+
+    glUseProgram(0);
+    glDeleteBuffers(1, &buf);
+    glDeleteProgram(prog);
+    glDeleteTextures(1, &tex);
+    free(three);
+}

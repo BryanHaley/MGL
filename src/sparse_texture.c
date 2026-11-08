@@ -22,6 +22,8 @@
  */
 
 #include "glcorearb.h"
+#include <stdlib.h>
+#include <string.h>
 #include "glm_context.h"
 
 Texture *getTex(GLMContext ctx, GLuint name, GLenum target);
@@ -212,6 +214,77 @@ static GLuint levelLayers(Texture *tex, GLint level)
     return 1;
 }
 
+// pages across, down and deep at a level, and where its bits start
+static size_t levelPages(GLMContext ctx, Texture *tex, GLint level, const GLint page[3], GLuint n[3])
+{
+    size_t start = 0;
+
+    for (GLint l = 0; l <= level; l++)
+    {
+        GLuint lw = tex->width >> l ? tex->width >> l : 1;
+        GLuint lh = tex->height >> l ? tex->height >> l : 1;
+        GLuint ld = levelLayers(tex, l);
+        GLuint m[3] = { (lw + page[0] - 1) / page[0], (lh + page[1] - 1) / page[1], (ld + page[2] - 1) / page[2] };
+
+        if (l == level)
+            memcpy(n, m, sizeof m);
+        else
+            start += (size_t)m[0] * m[1] * m[2];
+    }
+
+    return start;
+}
+
+static void markPages(GLMContext ctx, Texture *tex, GLint level, const GLint page[3],
+                      GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLboolean commit)
+{
+    GLuint n[3];
+    size_t start = levelPages(ctx, tex, level, page, n);
+
+    for (GLuint k = (GLuint)z / page[2]; k < ((GLuint)(z + d) + page[2] - 1) / page[2] && k < n[2]; k++)
+        for (GLuint j = (GLuint)y / page[1]; j < ((GLuint)(y + h) + page[1] - 1) / page[1] && j < n[1]; j++)
+            for (GLuint i = (GLuint)x / page[0]; i < ((GLuint)(x + w) + page[0] - 1) / page[0] && i < n[0]; i++)
+            {
+                size_t b = start + i + (size_t)n[0] * (j + (size_t)n[1] * k);
+
+                if (commit)
+                    tex->sparse_bits[b / 32] |= 1u << (b % 32);
+                else
+                    tex->sparse_bits[b / 32] &= ~(1u << (b % 32));
+            }
+}
+
+// What a shader needs to tell an uncommitted texel of one level: page size,
+// pages across, down and deep, the first layer of the binding, then a bit per
+// page. Returns the words written, 0 when they do not fit.
+size_t mglSparseUnitPages(GLMContext ctx, Texture *tex, GLint level, GLuint base_layer, GLuint *out, size_t cap)
+{
+    GLint page[3];
+    GLuint n[3];
+    size_t start, count, words;
+
+    if (!tex->sparse || !tex->sparse_bits || level < 0 || (GLuint)level >= tex->mipmap_levels ||
+        !mglSparsePageSize(ctx, tex->target, tex->internalformat, tex->samples, page))
+        return 0;
+
+    start = levelPages(ctx, tex, level, page, n);
+    count = (size_t)n[0] * n[1] * n[2];
+    words = 7 + (count + 31) / 32;
+
+    if (words > cap)
+        return 0;
+
+    out[0] = (GLuint)page[0]; out[1] = (GLuint)page[1]; out[2] = (GLuint)page[2];
+    out[3] = n[0]; out[4] = n[1]; out[5] = n[2]; out[6] = base_layer;
+    memset(out + 7, 0, (words - 7) * sizeof *out);
+
+    for (size_t i = 0; i < count; i++)
+        if (tex->sparse_bits[(start + i) / 32] & (1u << ((start + i) % 32)))
+            out[7 + i / 32] |= 1u << (i % 32);
+
+    return words;
+}
+
 static void pageCommitment(GLMContext ctx, Texture *tex, GLint level, GLint x, GLint y, GLint z,
                            GLsizei w, GLsizei h, GLsizei d, GLboolean commit)
 {
@@ -244,6 +317,24 @@ static void pageCommitment(GLMContext ctx, Texture *tex, GLint level, GLint x, G
 
     ERROR_CHECK_RETURN(ctx->mtl_funcs.mtlSparseCommit(ctx, tex, level, x, y, z, w, h, d, commit),
                        GL_OUT_OF_MEMORY);
+
+    if (tex->sparse_bits == NULL)
+    {
+        GLuint n[3];
+        size_t total = levelPages(ctx, tex, (GLint)tex->mipmap_levels - 1, page, n) + (size_t)n[0] * n[1] * n[2];
+
+        tex->sparse_bits = (GLuint *)calloc((total + 31) / 32, sizeof(GLuint));
+        ERROR_CHECK_RETURN(tex->sparse_bits, GL_OUT_OF_MEMORY);
+    }
+
+    // the tail goes in and out whole, every level on every layer
+    if ((GLuint)level >= tex->sparse_levels)
+    {
+        for (GLuint l = tex->sparse_levels; l < tex->mipmap_levels; l++)
+            markPages(ctx, tex, (GLint)l, page, 0, 0, 0, tex->width, tex->height, (GLsizei)levelLayers(tex, (GLint)l), commit);
+    }
+    else
+        markPages(ctx, tex, level, page, x, y, z, w, h, d, commit);
 }
 
 void mglTexPageCommitment(GLMContext ctx, GLenum target, GLint level, GLint x, GLint y, GLint z,
