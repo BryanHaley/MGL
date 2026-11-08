@@ -6,16 +6,13 @@ SHELL := /bin/bash
 # on M1 monterey, comment out the following line
 SDK_ROOT = $(shell xcrun --sdk macosx --show-sdk-path)
 
-# SPIRV-Cross now comes from submodules/ -- current upstream plus the fp64
-# emulation. The old external/ fork still builds: override these three on the
-# make line to point back at it.
 spirv_cross_include_path ?= ./submodules/SPIRV-Cross
 spirv_cross_config_include_path ?= ./submodules/SPIRV-Cross
 spirv_cross_lib_path ?= ./submodules/SPIRV-Cross/build
 spirv_headers_path ?= ./submodules/SPIRV-Headers
 
-spirv_tools_include_path ?= ./external/SPIRV-Tools/include
-spirv_tools_path ?= ./external/SPIRV-Tools/build
+spirv_tools_include_path ?= ./submodules/SPIRV-Tools/include
+spirv_tools_path ?= ./submodules/SPIRV-Tools/build
 
 glslang_include_path ?= ./submodules/glslang/glslang/Include
 
@@ -68,7 +65,7 @@ CFLAGS += -DENABLE_OPT=0 -DSPIRV_CROSS_C_API_MSL=1 -DSPIRV_CROSS_C_API_GLSL=1 -D
 # macOS specific compile definitions for GLFW
 CFLAGS += -D_COCOA -D_GLFW_COCOA
 CXXFLAGS += -D_COCOA -D_GLFW_COCOA
-CXXFLAGS += -I./external/SPIRV-Tools/include -Iinclude -std=c++17
+CXXFLAGS += -I$(spirv_tools_include_path) -Iinclude -std=c++17
 CXXFLAGS += -I./submodules/glslang -Iinclude/GL
 
 # GL_CORE SPECIFIC FLAGS
@@ -100,12 +97,12 @@ LIBS += $(glslang_lib_path)/libglslang.a $(glslang_lib_path)/libMachineIndepende
 LIBS += -lc++
 
 # SPIRV-Tools
-LIBS += external/SPIRV-Tools/build/source/lint/libSPIRV-Tools-lint.a
-LIBS += external/SPIRV-Tools/build/source/reduce/libSPIRV-Tools-reduce.a
-LIBS += external/SPIRV-Tools/build/source/diff/libSPIRV-Tools-diff.a
-LIBS += external/SPIRV-Tools/build/source/libSPIRV-Tools.a
-LIBS += external/SPIRV-Tools/build/source/link/libSPIRV-Tools-link.a
-LIBS += external/SPIRV-Tools/build/source/opt/libSPIRV-Tools-opt.a
+LIBS += $(spirv_tools_path)/source/lint/libSPIRV-Tools-lint.a
+LIBS += $(spirv_tools_path)/source/reduce/libSPIRV-Tools-reduce.a
+LIBS += $(spirv_tools_path)/source/diff/libSPIRV-Tools-diff.a
+LIBS += $(spirv_tools_path)/source/libSPIRV-Tools.a
+LIBS += $(spirv_tools_path)/source/link/libSPIRV-Tools-link.a
+LIBS += $(spirv_tools_path)/source/opt/libSPIRV-Tools-opt.a
 
 
 # --
@@ -168,7 +165,7 @@ mgl_es_arc_objs := $(addprefix $(build_es_dir)/arc/,$(mgl_es_arc_objs))
 
 # --- generating them -----------------------------------------------------
 # The registry copy lives in the tree so a build needs no network. Refresh it
-# from external/OpenGL-Registry when Khronos publishes a new one.
+# from https://github.com/KhronosGroup/OpenGL-Registry when Khronos publishes a new one.
 $(spec_parser): tools/spec_parser/spec_parser.c tools/enum_parser/ezxml.c
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -o $@ $^ -Itools/enum_parser -w
@@ -220,14 +217,14 @@ FORCE:
 
 $(mgl_lib): $(mgl_core_objs) $(mgl_core_arc_objs) $(mgl_core_obj) $(spirv_cross_archives)
 	@mkdir -p $(dir $@)
-	$(CC) -D$(CFLAGS_GL_CORE) -dynamiclib -o $@ $(filter %.o,$^) $(LIBS) \
+	$(CC) $(CFLAGS_GL_CORE) -dynamiclib -o $@ $(filter %.o,$^) $(LIBS) \
 		-install_name @rpath/libmoogl.dylib -current_version $(moogl_version_number)
 	# loading dynamic library requires this
 	ln -fs $(mgl_lib) .
 
 $(mgl_es_lib): $(mgl_es_objs) $(mgl_es_arc_objs) $(mgl_es_obj) $(spirv_cross_archives)
 	@mkdir -p $(dir $@)
-	$(CC) -D$(CFLAGS_GL_ES) -dynamiclib -o $@ $(filter %.o,$^) $(LIBS) \
+	$(CC) $(CFLAGS_GL_ES) -dynamiclib -o $@ $(filter %.o,$^) $(LIBS) \
 		-install_name @rpath/libmoogles.dylib
 	# loading dynamic library requires this
 	ln -fs $(mgl_es_lib) .

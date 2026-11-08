@@ -3,8 +3,6 @@ build/
 libmoogl.dylib
 libmoogles.dylib
 libglfw.dylib
-external/OpenGL-Registry/
-external/SPIRV-Tools/
 *.DS_Store
 /moogl.gputrace
 /Info.plist

@@ -22,6 +22,9 @@
 [submodule "submodules/glu"]
 	path = submodules/glu
 	url = https://gitlab.freedesktop.org/mesa/glu.git
+[submodule "submodules/SPIRV-Tools"]
+	path = submodules/SPIRV-Tools
+	url = https://github.com/KhronosGroup/SPIRV-Tools.git
 [submodule "submodules/glslang"]
 	path = submodules/glslang
 	url = https://github.com/BryanHaley/glslang.git

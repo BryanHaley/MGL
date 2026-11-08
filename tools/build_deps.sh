@@ -2,9 +2,8 @@
 # Copyright (C) The MooGL Project
 #
 # Fetches and builds what MooGL links against, from a fresh clone:
-#   submodules/SPIRV-Cross, SPIRV-Headers, glslang, FidelityFX-FSR2-OpenGL, glfw, SDL2
+#   submodules/SPIRV-Tools, SPIRV-Cross, SPIRV-Headers, glslang, FidelityFX-FSR2-OpenGL, glfw, SDL2
 #     (SDL2 itself is built by make, after libmoogl)
-#   external/SPIRV-Tools (cloned at a pinned commit)
 # The CTS and IDKEngine submodules are left alone; they are only for testing.
 #
 # MACOSX_DEPLOYMENT_TARGET sets the oldest macOS the build runs on (default 13.0).
@@ -16,7 +15,6 @@ cd "$root"
 
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 jobs="$(sysctl -n hw.ncpu)"
-spirv_tools_commit=5262baed1ceceb131175be564547d2b11a76be84
 
 # Third-party code: its own warnings are not ours to fix, so they are kept quiet
 cmake_build() {
@@ -27,16 +25,10 @@ cmake_build() {
     cmake --build "$dir" -j"$jobs"
 }
 
-git submodule update --init submodules/SPIRV-Cross submodules/SPIRV-Headers \
+git submodule update --init submodules/SPIRV-Tools submodules/SPIRV-Cross submodules/SPIRV-Headers \
     submodules/glslang submodules/FidelityFX-FSR2-OpenGL submodules/glfw submodules/SDL2
 
-if [ ! -d external/SPIRV-Tools/.git ]; then
-    git clone https://github.com/KhronosGroup/SPIRV-Tools.git external/SPIRV-Tools
-fi
-git -C external/SPIRV-Tools fetch -q origin "$spirv_tools_commit" || true
-git -C external/SPIRV-Tools checkout -q "$spirv_tools_commit"
-
-cmake_build external/SPIRV-Tools external/SPIRV-Tools/build \
+cmake_build submodules/SPIRV-Tools submodules/SPIRV-Tools/build \
     -DSPIRV-Headers_SOURCE_DIR="$root/submodules/SPIRV-Headers" -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF \
     -DSPIRV_SKIP_EXECUTABLES=ON
 
