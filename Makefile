@@ -308,7 +308,8 @@ $(sdl2_lib): $(mgl_lib) $(wildcard $(sdl2_dir)/src/video/cocoa/*.m) $(sdl2_dir)/
 		-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_C_FLAGS=-w -DCMAKE_OBJC_FLAGS=-w \
 		-DSDL_STATIC=OFF -DSDL_TEST=OFF -DCMAKE_SKIP_BUILD_RPATH=ON \
 		-DMOOGL_LIBRARY=$(abspath $(mgl_lib)) -DCMAKE_INSTALL_PREFIX=$(abspath $(sdl2_install))
-	cmake --build $(build_dir)/sdl2 --target install
+	# its own job count: CMake's make can't share this make's
+	MAKEFLAGS= cmake --build $(build_dir)/sdl2 --target install -j8
 	cp $(sdl2_install)/lib/libSDL2-2.0.0.dylib $@
 
 sdl2: $(sdl2_lib)

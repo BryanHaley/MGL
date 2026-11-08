@@ -22,8 +22,8 @@ spirv_tools_commit=5262baed1ceceb131175be564547d2b11a76be84
 # Third-party code: its own warnings are not ours to fix, so they are kept quiet
 cmake_build() {
     local src="$1" dir="$2"; shift 2
-    cmake -S "$src" -B "$dir" -Wno-dev -Wno-deprecated -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_C_FLAGS=-w -DCMAKE_CXX_FLAGS=-w \
+    CFLAGS=-w CXXFLAGS=-w cmake -S "$src" -B "$dir" -Wno-dev -Wno-deprecated -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
         -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" -DCMAKE_OSX_ARCHITECTURES=arm64 "$@"
     cmake --build "$dir" -j"$jobs"
 }
