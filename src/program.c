@@ -250,6 +250,8 @@ static void freeResourceList(SpirvResourceList *l)
     l->count = 0;
 }
 
+static void freeGlslCopies(glslang_shader_t *copies[_MAX_SHADER_TYPES][1 + MGL_STAGE_EXTRA_UNITS]);
+
 void mglFreeProgram(GLMContext ctx, Program *ptr)
 {
     freeResourceList(&ptr->atomic_uniforms);
@@ -259,6 +261,10 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
         glslang_program_delete(ptr->linked_glsl_program);
         ptr->linked_glsl_program = NULL;
     }
+
+    // after the program that borrows them
+    freeGlslCopies(ptr->kept_glsl);
+    freeGlslCopies(ptr->link_glsl);
 
     if (ptr->mtl_data)
     {
@@ -664,6 +670,52 @@ static_assert(_GEOMETRY_SHADER == GLSLANG_STAGE_GEOMETRY, "_GEOMETRY_SHADER == G
 static_assert(_FRAGMENT_SHADER == GLSLANG_STAGE_FRAGMENT, "_FRAGMENT_SHADER == GLSLANG_STAGE_FRAGMENT failed");
 static_assert(_COMPUTE_SHADER == GLSLANG_STAGE_COMPUTE, "_COMPUTE_SHADER == GLSLANG_STAGE_COMPUTE failed");
 
+glslang_shader_t *mglCopyShaderForLink(GLMContext ctx, Shader *ptr);
+
+// The tree a stage's unit k links from: this link's copy, else the copy the
+// kept program was built from, else the shader object's own
+static glslang_shader_t *stageGlsl(Program *pptr, int s, int k)
+{
+    Shader *sh = k == 0 ? pptr->shader_slots[s] : pptr->also_attached[s][k - 1];
+
+    if (pptr->link_glsl[s][k])
+        return pptr->link_glsl[s][k];
+
+    if (pptr->kept_glsl[s][k])
+        return pptr->kept_glsl[s][k];
+
+    return sh ? sh->compiled_glsl_shader : NULL;
+}
+
+static void freeGlslCopies(glslang_shader_t *copies[_MAX_SHADER_TYPES][1 + MGL_STAGE_EXTRA_UNITS])
+{
+    for (int s = 0; s < _MAX_SHADER_TYPES; s++)
+        for (int k = 0; k < 1 + MGL_STAGE_EXTRA_UNITS; k++)
+        {
+            if (copies[s][k])
+                glslang_shader_delete(copies[s][k]);
+
+            copies[s][k] = NULL;
+        }
+}
+
+// Copies of every compiled shader the program links, for this link to map
+static void copyShadersForLink(GLMContext ctx, Program *pptr)
+{
+    freeGlslCopies(pptr->link_glsl);
+
+    for (int s = 0; s < _MAX_SHADER_TYPES; s++)
+    {
+        for (int k = 0; k < 1 + MGL_STAGE_EXTRA_UNITS; k++)
+        {
+            Shader *sh = k == 0 ? pptr->shader_slots[s] : pptr->also_attached[s][k - 1];
+
+            if (sh && sh->compiled_glsl_shader && sh->log == NULL)
+                pptr->link_glsl[s][k] = mglCopyShaderForLink(ctx, sh);
+        }
+    }
+}
+
 bool addShadersToProgram(GLMContext ctx, Program *pptr, glslang_program_t *glsl_program)
 {
     // add shaders
@@ -681,18 +733,18 @@ bool addShadersToProgram(GLMContext ctx, Program *pptr, glslang_program_t *glsl_
             return false;
         }
 
-        if(ptr && ptr->compiled_glsl_shader)
+        if(ptr && stageGlsl(pptr, i, 0))
         {
-            glslang_program_add_shader(glsl_program, ptr->compiled_glsl_shader);
+            glslang_program_add_shader(glsl_program, stageGlsl(pptr, i, 0));
 
             for (int k = 0; k < MGL_STAGE_EXTRA_UNITS && pptr->also_attached[i][k]; k++)
             {
                 Shader *unit = pptr->also_attached[i][k];
 
-                if (unit->log || unit->compiled_glsl_shader == NULL)
+                if (unit->log || stageGlsl(pptr, i, k + 1) == NULL)
                     return false;
 
-                glslang_program_add_shader(glsl_program, unit->compiled_glsl_shader);
+                glslang_program_add_shader(glsl_program, stageGlsl(pptr, i, k + 1));
             }
         }
         else if(ptr)
@@ -3562,7 +3614,7 @@ static void noteShaderCapture(Program *pptr)
         if (sh == NULL)
             continue;
 
-        int n = mglXfbLayout(sh->compiled_glsl_shader, items, 64, strides, MGL_XFB_MAX_BUFFERS);
+        int n = mglXfbLayout(stageGlsl(pptr, order[i], 0), items, 64, strides, MGL_XFB_MAX_BUFFERS);
 
         for (int b = 0; n > 0 && b < MGL_XFB_MAX_BUFFERS; b++)
             pptr->xfb_shader_strides[b] = strides[b];
@@ -3597,7 +3649,7 @@ static void linkTransformCapture(GLMContext ctx, Program *pptr)
         return;
     }
 
-    if (!mglBuildTransformCapture(vs->pp_src ? vs->pp_src : vs->src, vs->compiled_glsl_shader,
+    if (!mglBuildTransformCapture(vs->pp_src ? vs->pp_src : vs->src, stageGlsl(pptr, _VERTEX_SHADER, 0),
                                   pptr->xfb_varyings, pptr->xfb_varying_count,
                                   pptr->xfb_buffer_mode, "gl_VertexID - mglBase + gl_InstanceID * mglCount",
                                   &pptr->xfb))
@@ -3730,7 +3782,11 @@ static void linkGeometryCapture(Program *pptr)
     if (gs == NULL)
         return;
 
-    n = mglTransformCaptureItems(gs->pp_src ? gs->pp_src : gs->src, gs->compiled_glsl_shader,
+    glslang_shader_t *gs_glsl = pptr->synthetic_gs ? stageGlsl(pptr, _TESS_EVALUATION_SHADER, 0)
+                              : gs == pptr->shader_slots[_GEOMETRY_SHADER] ? stageGlsl(pptr, _GEOMETRY_SHADER, 0)
+                              : gs->compiled_glsl_shader;
+
+    n = mglTransformCaptureItems(gs->pp_src ? gs->pp_src : gs->src, gs_glsl,
                                  pptr->xfb_varyings, pptr->xfb_varying_count, pptr->xfb_buffer_mode,
                                  items, 64, strides, &from_shader);
 
@@ -4526,10 +4582,10 @@ static void applyUniformInitializers(GLMContext ctx, Program *pptr)
         Shader *sh = pptr->shader_slots[s];
         int n;
 
-        if (sh == NULL || sh->compiled_glsl_shader == NULL || sh->spirv_binary)
+        if (sh == NULL || stageGlsl(pptr, s, 0) == NULL || sh->spirv_binary)
             continue;
 
-        n = mglUniformInitializers(sh->compiled_glsl_shader, sh->pp_src ? sh->pp_src : sh->src,
+        n = mglUniformInitializers(stageGlsl(pptr, s, 0), sh->pp_src ? sh->pp_src : sh->src,
                                    mglGlslangResource(ctx), inits, 256);
 
         for (int k = 0; k < n; k++)
@@ -4718,9 +4774,9 @@ static void reflectProgram(GLMContext ctx, Program *pptr)
     {
         Shader *sh = pptr->shader_slots[s];
 
-        if (sh && sh->compiled_glsl_shader && sh->spirv_binary == NULL)
+        if (sh && stageGlsl(pptr, s, 0) && sh->spirv_binary == NULL)
         {
-            shaders[s] = sh->compiled_glsl_shader;
+            shaders[s] = stageGlsl(pptr, s, 0);
             sources[s] = sh->pp_src ? sh->pp_src : sh->src;
         }
     }
@@ -4947,8 +5003,34 @@ static bool perVertexMembers(const char *src, const char *dir, char *out, size_t
 }
 
 static bool linkedFromSpirv(Program *ptr);
+static void linkProgram(GLMContext ctx, GLuint program);
 
 void mglLinkProgram(GLMContext ctx, GLuint program)
+{
+    Program *pptr = findProgram(ctx, program);
+    glslang_program_t *old;
+
+    if (pptr == NULL)
+    {
+        linkProgram(ctx, program);
+        return;
+    }
+
+    copyShadersForLink(ctx, pptr);
+    old = pptr->linked_glsl_program;
+    linkProgram(ctx, program);
+
+    if (pptr->linked_glsl_program != old)
+    {
+        freeGlslCopies(pptr->kept_glsl);
+        memcpy(pptr->kept_glsl, pptr->link_glsl, sizeof(pptr->link_glsl));
+        memset(pptr->link_glsl, 0, sizeof(pptr->link_glsl));
+    }
+    else
+        freeGlslCopies(pptr->link_glsl);
+}
+
+static void linkProgram(GLMContext ctx, GLuint program)
 {
     Program *pptr;
 

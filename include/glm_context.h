@@ -1091,6 +1091,10 @@ typedef struct Program_t {
     // the stage's other compilation units, linked with the one in shader_slots
     Shader *also_attached[_MAX_SHADER_TYPES][MGL_STAGE_EXTRA_UNITS];
     glslang_program_t *linked_glsl_program;
+    // glslang writes link locations into the shaders it links, so each link
+    // gets its own copies. kept_glsl is borrowed by linked_glsl_program.
+    glslang_shader_t *link_glsl[_MAX_SHADER_TYPES][1 + MGL_STAGE_EXTRA_UNITS];
+    glslang_shader_t *kept_glsl[_MAX_SHADER_TYPES][1 + MGL_STAGE_EXTRA_UNITS];
     // a link has succeeded at least once, so there is something to run
     GLboolean executable;
     // the geometry stage takes a different primitive than tessellation makes:

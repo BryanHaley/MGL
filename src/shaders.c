@@ -215,6 +215,42 @@ void initGLSLInput(GLMContext ctx, GLuint type, const char *src, glslang_input_t
     input->force_default_version_and_profile = 1;
 }
 
+// A copy of a compiled shader for one link to map: parsed again from the text
+// glCompileShader settled on, with the same options
+glslang_shader_t *mglCopyShaderForLink(GLMContext ctx, Shader *ptr)
+{
+    const char *text = glslang_shader_get_preprocessed_code(ptr->compiled_glsl_shader);
+    glslang_input_t input;
+    glslang_shader_t *copy;
+
+    if (text == NULL)
+        return NULL;
+
+    initGLSLInput(ctx, ptr->type, text, &input);
+    copy = glslang_shader_create(&input);
+
+    if (copy == NULL)
+        return NULL;
+
+    glslang_shader_set_options(copy, GLSLANG_SHADER_VULKAN_RULES_RELAXED | GLSLANG_SHADER_AUTO_MAP_LOCATIONS |
+                                     GLSLANG_SHADER_AUTO_MAP_BINDINGS);
+    glslang_shader_set_preprocessed_code(copy, text);
+
+    if (!glslang_shader_parse(copy, &input))
+    {
+        // the integer mix() warning compile lets through
+        const char *warn = glslang_shader_get_info_log(copy);
+
+        if (!(warn && strstr(warn, "extension GL_EXT_shader_integer_mix is being used")))
+        {
+            glslang_shader_delete(copy);
+            return NULL;
+        }
+    }
+
+    return copy;
+}
+
 Shader *newShader(GLMContext ctx, GLenum type, GLuint shader)
 {
     Shader *ptr;

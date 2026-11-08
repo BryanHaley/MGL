@@ -30,3 +30,9 @@
 	path = submodules/SDL2
 	url = https://github.com/BryanHaley/SDL.git
 	branch = mgl
+[submodule "submodules/stk-code"]
+	path = submodules/stk-code
+	url = https://github.com/supertuxkart/stk-code.git
+[submodule "submodules/supertuxkart"]
+	path = submodules/supertuxkart
+	url = https://github.com/supertuxkart/stk-code.git

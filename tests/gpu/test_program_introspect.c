@@ -399,3 +399,68 @@ GPU_TEST(program_introspect, an_output_element_has_its_array_index)
 
     glDeleteProgram(prog);
 }
+
+static GLuint compile(GLenum type, const char *src)
+{
+    GLuint sh = glCreateShader(type);
+
+    glShaderSource(sh, 1, &src, NULL);
+    glCompileShader(sh);
+    return sh;
+}
+
+// Shaders linked again with new partners. Linking wrote each program's
+// uniform locations into the shaders it used, and the crossed link failed with
+// "Uniform location overlaps across stages".
+GPU_TEST(program_introspect, shaders_link_again_with_new_partners)
+{
+#define COMMON "#version 330 core\nuniform mat4 mvp;\nuniform vec4 tint;\n"
+    static const char *vs1 = COMMON
+        "in vec4 pos;\n"
+        "out vec4 color;\n"
+        "void main() { gl_Position = mvp * pos; color = tint; }\n";
+    static const char *vs2 = COMMON
+        "uniform vec4 wind;\n"
+        "in vec4 pos;\n"
+        "out vec4 color;\n"
+        "void main() { gl_Position = mvp * (pos + wind); color = tint; }\n";
+    static const char *fs1 = COMMON
+        "uniform float alpha_ref;\n"
+        "uniform vec4 fog;\n"
+        "in vec4 color;\n"
+        "out vec4 o;\n"
+        "void main() { if (color.a < alpha_ref) discard; o = color * tint + fog; }\n";
+    static const char *fs2 = COMMON
+        "uniform float fade;\n"
+        "in vec4 color;\n"
+        "out vec4 o;\n"
+        "void main() { o = color * tint * fade; }\n";
+#undef COMMON
+    GLuint v1 = compile(GL_VERTEX_SHADER, vs1), v2 = compile(GL_VERTEX_SHADER, vs2);
+    GLuint f1 = compile(GL_FRAGMENT_SHADER, fs1), f2 = compile(GL_FRAGMENT_SHADER, fs2);
+    GLuint pairs[4][2] = { { v1, f1 }, { v2, f2 }, { v1, f2 }, { v2, f1 } };
+    GLuint progs[4];
+
+    for (int i = 0; i < 4; i++)
+    {
+        GLint ok = 0;
+
+        progs[i] = glCreateProgram();
+        glAttachShader(progs[i], pairs[i][0]);
+        glAttachShader(progs[i], pairs[i][1]);
+        glLinkProgram(progs[i]);
+        glGetProgramiv(progs[i], GL_LINK_STATUS, &ok);
+        CHECK(ok);
+    }
+
+    CHECK(glGetUniformLocation(progs[2], "fade") >= 0);
+    CHECK(glGetUniformLocation(progs[3], "wind") >= 0);
+    CHECK_EQ_UINT(mgl_drain_errors(), GL_NO_ERROR);
+
+    for (int i = 0; i < 4; i++)
+        glDeleteProgram(progs[i]);
+    glDeleteShader(v1);
+    glDeleteShader(v2);
+    glDeleteShader(f1);
+    glDeleteShader(f2);
+}
