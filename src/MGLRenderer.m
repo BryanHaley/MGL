@@ -72,6 +72,16 @@ extern GLsizei genStrideFromTypeSize(GLenum type, GLint size);
 
 // What a disabled vertex array feeds the shader, in the layout the vertex
 // descriptor points into. A double input reads raw bits from the second half.
+// Command buffers can finish on another thread, so the epoch only moves forward
+static void mglNoteIdleEpoch(GLMContext c, uint64_t epoch)
+{
+    uint64_t seen = __atomic_load_n(&c->idle_epoch, __ATOMIC_RELAXED);
+
+    while (seen < epoch &&
+           !__atomic_compare_exchange_n(&c->idle_epoch, &seen, epoch, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        ;
+}
+
 static void fillAttribConstants(GLMContext ctx, uint8_t *out)
 {
     for (int i = 0; i < MAX_ATTRIBS; i++)
@@ -367,6 +377,13 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
     bool          _tessIndexed;
     // the default framebuffer's size has been set from the layer once
     bool          _attachedToWindowSystem;
+    // glClear over a whole target waits to be the next pass's load action,
+    // with the values it was issued with
+    GLbitfield    _snapMask;
+    GLfloat       _snapColor[4];
+    GLdouble      _snapDepth;
+    GLuint        _snapStencil;
+    bool          _applyingClears;
     // the 3D slice readSourceTexture chose, for whoever copies out of it
     NSUInteger    _readPlane;
     // a pass that only clears, with nothing drawn: skip binding draw state
@@ -643,6 +660,17 @@ MTLVertexFormat glTypeSizeToMtlType(GLuint type, GLuint size, bool normalized)
             case GL_UNSIGNED_INT_10_10_10_2:
                 if (normalized)
                     return MTLVertexFormatInt1010102Normalized;
+                break;
+
+            // Metal packs these the same way, x in the low bits
+            case GL_INT_2_10_10_10_REV:
+                if (normalized && size == 4)
+                    return MTLVertexFormatInt1010102Normalized;
+                break;
+
+            case GL_UNSIGNED_INT_2_10_10_10_REV:
+                if (normalized && size == 4)
+                    return MTLVertexFormatUInt1010102Normalized;
                 break;
         }
 
@@ -1283,19 +1311,8 @@ static inline int mglDebugCompute(void)
             return false;
         }
 
-        // clear dirty bits if not mapped as coherent
-        // this will cause us to keep loading the buffer and keep the GPU
-        // contents in check for EVERY drawing operation
-        if (ptr->access & GL_MAP_COHERENT_BIT)
-        {
-
-            ptr->data.dirty_bits = DIRTY_BUFFER_DATA;
-        }
-        else
-        {
-
-            ptr->data.dirty_bits = 0;
-        }
+        // the GPU reads this memory directly, coherent mapping or not
+        ptr->data.dirty_bits = 0;
     }
     else
     {
@@ -1442,6 +1459,8 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
 - (bool) bindVertexBuffersToCurrentRenderEncoder
 {
     BufferMap *map;
+
+    ctx->stats.buffer_rebinds++;
     Buffer *ptr;
     GLintptr offset;
     
@@ -1550,7 +1569,8 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
 }
 
 // A slot whose attribute Metal cannot read is fed a copy of it, four floats
-// an element, made from the GL buffer as it stands.
+// an element, made from the GL buffer as it stands. The copy is kept until the
+// CPU changes the buffer.
 - (id<MTLBuffer>) convertedVertexBuffer: (BufferMap *) map
 {
     if (!map->converted || ctx->state.vao == NULL || map->buf == NULL || map->buf->data.buffer_data == 0)
@@ -1559,9 +1579,28 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
     int a = __builtin_ctz(map->attribute_mask);
     GLenum type = VAO_ATTRIB_STATE(a).type;
     GLint size = VAO_ATTRIB_STATE(a).size;
-    // a packed format is one 32-bit word whatever its component count
-    size_t elem = (type == GL_INT_2_10_10_10_REV || type == GL_UNSIGNED_INT_2_10_10_10_REV ||
-                   type == GL_UNSIGNED_INT_10F_11F_11F_REV) ? 4 : (size_t)genStrideFromTypeSize(type, size);
+    BufferData *bd = &map->buf->data;
+    size_t key_stride = map->constant_step ? 0 : map->stride;
+
+    // what the GPU writes, or a persistent mapping, changes without the
+    // version moving, so those are converted every time
+    bool cache = !bd->gpu_written && !(map->buf->storage_flags & GL_MAP_PERSISTENT_BIT) && !map->buf->mapped;
+    int slot = 0;
+
+    for (int i = 0; cache && i < 4; i++)
+    {
+        typeof(bd->converted[0]) *c = &bd->converted[i];
+
+        if (c->mtl_data && c->version == bd->version && c->type == type && c->size == size &&
+            c->normalized == VAO_ATTRIB_STATE(a).normalized && c->offset == (size_t)map->offset &&
+            c->stride == key_stride)
+            return (__bridge id<MTLBuffer>)c->mtl_data;
+
+        // reuse a stale slot first, then the first one
+        if (c->mtl_data == NULL || c->version != bd->version)
+            slot = i;
+    }
+    size_t elem = (size_t)genStrideFromTypeSize(type, size);
     size_t stride = map->constant_step ? 0 : map->stride;
     size_t total = (size_t)map->buf->size;
     size_t at = (size_t)map->offset;
@@ -1572,7 +1611,11 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
     else
         n = stride ? (total - at - elem) / stride + 1 : 1;
 
-    id<MTLBuffer> copy = [_scratchPool bufferOfLength: MAX(n, (size_t)1) * 16 forCommandBuffer: _currentCommandBuffer];
+    NSUInteger bytes = MAX(n, (size_t)1) * 16;
+
+    ctx->stats.attrib_conversions++;
+    id<MTLBuffer> copy = cache ? [_device newBufferWithLength: bytes options: MTLResourceStorageModeShared]
+                               : [_scratchPool bufferOfLength: bytes forCommandBuffer: _currentCommandBuffer];
 
     if (copy == nil)
         return nil;
@@ -1580,10 +1623,27 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
     const uint8_t *src = (const uint8_t *)map->buf->data.buffer_data + at;
     float *dst = (float *)copy.contents;
 
-    memset(dst, 0, MAX(n, (size_t)1) * 16);
+    memset(dst, 0, bytes);
 
     for (size_t k = 0; k < n; k++)
         convertAttribElement(type, size, VAO_ATTRIB_STATE(a).normalized, src + k * stride, dst + k * 4);
+
+    if (cache)
+    {
+        typeof(bd->converted[0]) *c = &bd->converted[slot];
+
+        // work already recorded keeps the old copy alive
+        if (c->mtl_data)
+            CFBridgingRelease(c->mtl_data);
+
+        c->mtl_data = (void *)CFBridgingRetain(copy);
+        c->version = bd->version;
+        c->type = type;
+        c->size = size;
+        c->normalized = VAO_ATTRIB_STATE(a).normalized;
+        c->offset = (size_t)map->offset;
+        c->stride = key_stride;
+    }
 
     return copy;
 }
@@ -1672,6 +1732,8 @@ static bool bufferSizesFor(Program *program, int stage, const BufferMapList *lis
 - (bool) bindFragmentBuffersToCurrentRenderEncoder
 {
     BufferMap *map;
+
+    ctx->stats.buffer_rebinds++;
     Buffer *ptr;
     GLintptr offset;
     
@@ -5816,6 +5878,7 @@ static id<MTLFunction> stageFunction(id<MTLLibrary> library, const char *entry)
     // the program owns these, so it survives deleting its shaders
     if (ptr->dirty_bits & DIRTY_PROGRAM)
     {
+        ctx->stats.program_rebuilds++;
         if (ptr->gs_passthrough.mtl_function)
         {
             CFBridgingRelease(ptr->gs_passthrough.mtl_function);
@@ -6292,10 +6355,8 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
             return false;
         }
 
+        // the drawable is only needed for the swap, which takes it then
         [self syncLayerSize];
-
-        if (![self isHeadless])
-            _drawable = [_layer nextDrawable];
 
         _attachedToWindowSystem = true;
     }
@@ -6530,7 +6591,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
     // framebuffer bound at the time. Letting it ride to the next pass wiped
     // whatever was bound later -- a texture the app had only just uploaded.
     if (ctx->state.clear_bitmask && ctx->state.clear_framebuffer != ctx->state.framebuffer)
-        ctx->state.clear_bitmask = 0;
+        ctx->state.clear_bitmask = 0, _snapMask = 0;
 
     // glClearBuffer* records its request on the attachment it names rather
     // than in the state-wide mask, so a program that only ever calls it left
@@ -6552,8 +6613,13 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
     // A load action always covers the whole attachment and ignores the write
     // masks, so a clipped scissor or a masked glClear has to be done with a
     // draw after the encoder exists.
-    bool scissored_clear = wanted_clear &&
+    // a deferred clear was checked for scissor and masks when it was issued
+    bool snapped = _snapMask && (ctx->state.clear_bitmask & ~_snapMask) == 0;
+    bool scissored_clear = wanted_clear && !snapped &&
         ([self scissorClipsTarget] || (attachment_clear == 0 && [self clearIsMasked: wanted_clear]));
+    const GLfloat *clear_rgba = snapped ? _snapColor : STATE(color_clear_value);
+    GLdouble clear_depth = snapped ? _snapDepth : STATE_VAR(depth_clear_value);
+    GLuint clear_stencil = snapped ? _snapStencil : STATE_VAR(stencil_clear_value);
 
     _pendingScissorClear = scissored_clear ? wanted_clear : 0;
 
@@ -6562,10 +6628,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
         if (ctx->state.clear_bitmask & GL_COLOR_BUFFER_BIT)
         {
             _renderPassDescriptor.colorAttachments[0].clearColor =
-                MTLClearColorMake(STATE(color_clear_value[0]),
-                                  STATE(color_clear_value[1]),
-                                  STATE(color_clear_value[2]),
-                                  STATE(color_clear_value[3]));
+                MTLClearColorMake(clear_rgba[0], clear_rgba[1], clear_rgba[2], clear_rgba[3]);
 
             _renderPassDescriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
         }
@@ -6596,10 +6659,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
                     fboa->clear_bitmask &= ~GL_COLOR_BUFFER_BIT;
                 } else if (clear_all) {
                     _renderPassDescriptor.colorAttachments[i].clearColor =
-                        MTLClearColorMake(STATE(color_clear_value[0]),
-                                          STATE(color_clear_value[1]),
-                                          STATE(color_clear_value[2]),
-                                          STATE(color_clear_value[3]));
+                        MTLClearColorMake(clear_rgba[0], clear_rgba[1], clear_rgba[2], clear_rgba[3]);
 
                     _renderPassDescriptor.colorAttachments[i].loadAction = MTLLoadActionClear;
                 } else {
@@ -6612,7 +6672,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
 
         if (ctx->state.clear_bitmask & GL_DEPTH_BUFFER_BIT)
         {
-            _renderPassDescriptor.depthAttachment.clearDepth = STATE_VAR(depth_clear_value);
+            _renderPassDescriptor.depthAttachment.clearDepth = clear_depth;
 
             _renderPassDescriptor.depthAttachment.loadAction = MTLLoadActionClear;
         }
@@ -6630,7 +6690,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
 
         if (ctx->state.clear_bitmask & GL_STENCIL_BUFFER_BIT)
         {
-            _renderPassDescriptor.stencilAttachment.clearStencil = STATE_VAR(stencil_clear_value);
+            _renderPassDescriptor.stencilAttachment.clearStencil = clear_stencil;
 
             _renderPassDescriptor.stencilAttachment.loadAction = MTLLoadActionClear;
         }
@@ -6653,6 +6713,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
         _renderPassDescriptor.stencilAttachment.storeAction = MTLStoreActionStore;
 
         ctx->state.clear_bitmask = 0;
+        _snapMask = 0;
     }
     else
     {
@@ -6810,6 +6871,7 @@ static MTLPixelFormat drawFormat(GLMContext ctx, MTLPixelFormat f)
     @try {
         _currentRenderEncoder = [[self liveCommandBuffer] renderCommandEncoderWithDescriptor: _renderPassDescriptor];
         _encoderFramebuffer = ctx->state.framebuffer;
+        ctx->stats.render_passes++;
         if (!_currentRenderEncoder) {
             MGL_NSERR(@"MGL ERROR: Failed to create render encoder - invalid render pass descriptor or command buffer");
             MGL_NSDEBUG(@"MGL DEBUG: Command buffer: %@, Render pass descriptor: %@", _currentCommandBuffer, _renderPassDescriptor);
@@ -10051,6 +10113,7 @@ static MTLWinding mtlWindingFor(const Program *p)
     if ((hit = _pipelineCache[key]) != nil)
         return hit[0];
 
+    ctx->stats.pipelines_built++;
     pipeline = mesh ? [self meshPipelineFrom: d error: error]
                     : [_device newRenderPipelineStateWithDescriptor: d error: error];
 
@@ -10131,6 +10194,9 @@ static MTLWinding mtlWindingFor(const Program *p)
     }
 
     program = ctx->state.program;
+
+    if (program == NULL)
+        return NULL;
 
     Spirv *vsp = &program->spirv[_VERTEX_SHADER];
 
@@ -10976,6 +11042,7 @@ static MTLTextureType sparseTextureType(GLenum target)
 
 - (id<MTLBlitCommandEncoder>) newBlitEncoder
 {
+    [self applyPendingClears];
     _invalidFbo = NULL;
     [self endComputeEncoding];
     [self endRenderEncoding];
@@ -11470,6 +11537,7 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
     if (_currentComputeEncoder)
         return _currentComputeEncoder;
 
+    [self applyPendingClears];
     [self endRenderEncoding];
 
     _invalidFbo = NULL;
@@ -11955,10 +12023,12 @@ static bool unitTakesAtomics(GLMContext ctx, int unit)
         bool gs_program = mglProgramHasGeometry(ctx->state.program);
 
         if (!gs_program &&
-            (dirty_on_entry & (DIRTY_PROGRAM | DIRTY_VAO | DIRTY_FBO | DIRTY_ALPHA_STATE | DIRTY_RENDER_STATE | DIRTY_STATE)))
+            (dirty_on_entry & (DIRTY_PROGRAM | DIRTY_VAO | DIRTY_FBO | DIRTY_ALPHA_STATE | DIRTY_STATE)))
         {
             // create pipeline descriptor
             MTLRenderPipelineDescriptor *pipelineStateDescriptor;
+
+            ctx->stats.pipeline_lookups++;
 
             pipelineStateDescriptor = [self generatePipelineDescriptor];
             RETURN_FALSE_ON_NULL(pipelineStateDescriptor);
@@ -12699,7 +12769,10 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
         MGL_NSDEBUG(@"MGL: flushCommandBuffer - buffer already committed, nothing to flush");
 
         if (finish && currentStatus < MTLCommandBufferStatusCompleted)
+        {
+            ctx->stats.gpu_waits++;
             [_currentCommandBuffer waitUntilCompleted];
+        }
 
         // A finished buffer is spent: the next pass cannot open an encoder on
         // it. Retire its fences and start a fresh one, or everything drawn
@@ -12809,6 +12882,7 @@ void mtlDispatchComputeIndirect(GLMContext glm_ctx, GLintptr indirect)
         _currentCommandBuffer.status < MTLCommandBufferStatusCompleted)
     {
         @try {
+            ctx->stats.gpu_waits++;
             [_currentCommandBuffer waitUntilCompleted];
         } @catch (NSException *exception) {
             MGL_NSERR(@"MGL ERROR: waiting on command buffer failed: %@", exception);
@@ -12898,8 +12972,15 @@ bool mtlBindProgram(GLMContext glm_ctx, Program *ptr)
 -(void) mtlDeleteMTLObj:(GLMContext) glm_ctx buffer: (void *)obj
 {
     MTL_CHECK_RETURN(obj, GL_OUT_OF_MEMORY);
-    
-    [self flushCommandBuffer: false];
+
+    // command buffers keep what they use alive, so the work recorded so far
+    // only has to be sent first when the pages go back to the shared heap
+    {
+        id o = (__bridge id)obj;
+
+        if (_sparseHeap && [o conformsToProtocol: @protocol(MTLTexture)] && ((id<MTLTexture>)o).heap == _sparseHeap)
+            [self flushCommandBuffer: false];
+    }
 
     // the image shadows of a texture go with it, or they keep it alive, and a
     // sparse one keeps its pages
@@ -13195,10 +13276,12 @@ void mtlApplyPendingClears(GLMContext glm_ctx)
 #pragma mark C interface to mtlFlush
 -(void) mtlFlush:(GLMContext) glm_ctx finish:(bool)finish
 {
+    // a glClear with no draw after it still has to happen
+    [self applyPendingClears];
     [self flushCommandBuffer: finish];
 
     if (finish)
-        glm_ctx->idle_epoch = glm_ctx->gpu_epoch;
+        mglNoteIdleEpoch(glm_ctx, glm_ctx->gpu_epoch);
 }
 
 void mtlQueryBegin (GLMContext glm_ctx, Query *q)
@@ -13233,6 +13316,8 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
 #pragma mark C interface to mtlSwapBuffers
 -(void) mtlSwapBuffers:(GLMContext) glm_ctx
 {
+    [self applyPendingClears];
+
     // headless has nowhere to present; the frame's work just goes to the GPU
     if ([self isHeadless])
     {
@@ -13358,15 +13443,11 @@ void mtlFlush (GLMContext glm_ctx, bool finish)
             [self recordGPUError];
         }
 
+        // the next drawable is taken at the next swap, and the next pass
+        // opens when something is drawn
+        _drawable = nil;
         [self syncLayerSize];
-            _drawable = [_layer nextDrawable];
-        if (_drawable == NULL) {
-            MGL_NSERR(@"MGL WARNING: Failed to get next drawable in mtlSwapBuffers");
-            // Don't assert - just continue without creating new command buffer
-            return;
-        }
-        
-        [self newCommandBufferAndRenderEncoder];
+        [self newCommandBuffer];
     }
 }
 
@@ -13402,7 +13483,34 @@ void mtlSwapBuffers (GLMContext glm_ctx)
 #pragma mark C interface to mtlClearBuffer
 -(void) mtlClearBuffer:(GLMContext) glm_ctx type:(GLuint) type mask:(GLbitfield) mask
 {
-    [self applyPendingClears];
+    // only glClear (type 1) waits; glClearBuffer* keeps its own path
+    bool whole = type == 1 && !ctx->state.caps.scissor_test && ![self clearIsMasked: mask];
+
+    // a clear still waiting goes first, with its own values
+    if (_snapMask && !whole)
+    {
+        ctx->state.clear_bitmask = _snapMask;
+        [self applyPendingClears];
+        ctx->state.clear_bitmask = mask;
+    }
+
+    if (!whole)
+    {
+        [self applyPendingClears];
+        return;
+    }
+
+    // what was drawn before the clear stays in an earlier pass
+    [self endRenderEncoding];
+
+    if (mask & GL_COLOR_BUFFER_BIT)
+        memcpy(_snapColor, STATE(color_clear_value), sizeof _snapColor);
+    if (mask & GL_DEPTH_BUFFER_BIT)
+        _snapDepth = STATE_VAR(depth_clear_value);
+    if (mask & GL_STENCIL_BUFFER_BIT)
+        _snapStencil = STATE_VAR(stencil_clear_value);
+
+    _snapMask |= mask;
 }
 
 void mtlClearBuffer (GLMContext glm_ctx, GLuint type, GLbitfield mask)
@@ -13513,7 +13621,7 @@ static NSString *poolKey(NSUInteger length, MTLResourceOptions options)
     if (fresh == nil)
     {
         [self flushCommandBuffer: true];
-        ctx->idle_epoch = ctx->gpu_epoch;
+        mglNoteIdleEpoch(ctx, ctx->gpu_epoch);
         return;
     }
 
@@ -13523,6 +13631,38 @@ static NSString *poolKey(NSUInteger length, MTLResourceOptions options)
     ptr->data.buffer_data = (vm_address_t)fresh.contents;
 
     ctx->state.dirty_bits |= DIRTY_BUFFER | DIRTY_BUFFER_BASE_STATE;
+}
+
+// A write into a buffer the GPU may still be reading, done by the GPU in
+// order: work recorded earlier sees the old bytes, later work the new
+- (bool) stageBufferWrite: (Buffer *) ptr offset: (size_t) offset size: (size_t) size data: (const void *) data
+{
+    id<MTLBuffer> dst = (__bridge id<MTLBuffer>)ptr->data.mtl_data;
+
+    // blit copies on macOS move whole 4-byte words
+    if (dst == nil || size == 0 || (offset | size) & 3 || offset + size > dst.length)
+        return false;
+
+    id<MTLCommandBuffer> cb = [self liveCommandBuffer];
+    id<MTLBuffer> src = [_scratchPool bufferOfLength: size forCommandBuffer: cb];
+
+    if (src == nil)
+        return false;
+
+    memcpy(src.contents, data, size);
+
+    id<MTLBlitCommandEncoder> blit = [self newBlitEncoder];
+    [blit copyFromBuffer: src sourceOffset: 0 toBuffer: dst destinationOffset: offset size: size];
+    [blit endEncoding];
+
+    return true;
+}
+
+bool mtlStageBufferWrite(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, const void *data)
+{
+    @autoreleasepool {
+        return [(__bridge id) glm_ctx->mtl_funcs.mtlObj stageBufferWrite: buf offset: offset size: size data: data];
+    }
 }
 
 void mtlRenameBuffer(GLMContext glm_ctx, Buffer *buf, bool keep_contents)
@@ -13597,6 +13737,20 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
 // does it. Anything reading an image back has to make that pass happen first.
 - (void) applyPendingClears
 {
+    // a waiting glClear belongs to the framebuffer it was issued on, which a
+    // DSA call may have swapped out for the moment
+    if (_snapMask && ctx->state.clear_bitmask && !_applyingClears &&
+        ctx->state.clear_framebuffer != ctx->state.framebuffer)
+    {
+        Framebuffer *bound = ctx->state.framebuffer;
+
+        ctx->state.framebuffer = ctx->state.clear_framebuffer;
+        ctx->state.dirty_bits |= DIRTY_FBO;
+        [self applyPendingClears];
+        ctx->state.framebuffer = bound;
+        ctx->state.dirty_bits |= DIRTY_FBO;
+    }
+
     Framebuffer *fb = ctx->state.framebuffer;
     GLbitfield pending = ctx->state.clear_framebuffer == fb ? ctx->state.clear_bitmask : 0;
 
@@ -13608,11 +13762,12 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
         pending |= fb->depth.clear_bitmask | fb->stencil.clear_bitmask;
     }
 
-    if (!pending)
+    if (!pending || _applyingClears)
         return;
 
     // A clear is a pass of its own: what was drawn before it stays before it,
     // and nothing drawn after it can be wiped when some later pass begins.
+    _applyingClears = true;
     [self endRenderEncoding];
 
     if (_currentCommandBuffer == nil && [self newCommandBuffer] == false)
@@ -13624,6 +13779,7 @@ static MGLNativeFormat nativeFormatForMTL(MTLPixelFormat f)
         [self endRenderEncoding];
 
     _clearOnly = false;
+    _applyingClears = false;
 
     // the next draw builds its encoder, and binds everything on it, afresh
     ctx->state.dirty_bits |= DIRTY_VAO | DIRTY_TEX | DIRTY_RENDER_STATE;
@@ -14415,7 +14571,8 @@ MTLPrimitiveType getMTLPrimitiveType(GLenum mode);
          baseVertex:(GLint)baseVertex
        baseInstance:(GLuint)baseInstance
 {
-    bool expand = type != 0 ? primitive_mode_needs_expand_ctx(ctx, mode) : primitive_mode_needs_expand(mode);
+    bool expand = type != 0 ? primitive_mode_needs_expand_ctx(ctx, mode, count, type, (size_t)(uintptr_t)indices)
+                            : primitive_mode_needs_expand(mode);
 
     if (expand == false)
     {
@@ -14435,6 +14592,7 @@ MTLPrimitiveType getMTLPrimitiveType(GLenum mode);
     if (_primitiveExpander == NULL)
         _primitiveExpander = primitive_expander_new();
 
+    ctx->stats.cpu_expansions++;
     PrimitiveExpansion ex = (type != 0)
         ? primitive_expand_elements(_primitiveExpander, ctx, mode, count, type, (size_t)(uintptr_t)indices)
         : primitive_expand_arrays(_primitiveExpander, ctx, mode, count);
@@ -15784,6 +15942,7 @@ void mtlMultiDrawElementsIndirect(GLMContext glm_ctx, GLenum mode, GLenum type, 
 
     glm_ctx->mtl_funcs.mtlBufferSubData = mtlBufferSubData;
     glm_ctx->mtl_funcs.mtlRenameBuffer = mtlRenameBuffer;
+    glm_ctx->mtl_funcs.mtlStageBufferWrite = mtlStageBufferWrite;
     glm_ctx->mtl_funcs.mtlMapUnmapBuffer = mtlMapUnmapBuffer;
     glm_ctx->mtl_funcs.mtlFlushBufferRange = mtlFlushBufferRange;
 
@@ -16599,7 +16758,11 @@ static CGFloat viewScale(NSView *view)
 
     // Add completion handler for AGX error detection
     __block typeof(self) blockSelf = self;
+    GLMContext doneCtx = ctx;
+    uint64_t doneEpoch = ctx->gpu_epoch;
     [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+        mglNoteIdleEpoch(doneCtx, doneEpoch);
+
         if (buffer.error) {
             MGL_NSINFO(@"MGL AGX ERROR: Command buffer completed with error: %@", buffer.error);
             [blockSelf recordGPUError];

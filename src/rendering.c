@@ -44,17 +44,19 @@ void mglClear(GLMContext ctx, GLbitfield mask)
     if (!mglDrawFramebufferComplete(ctx) || mglConditionalRenderSkips(ctx))
         return;
 
-    ctx->state.clear_bitmask = mask;
+    // clears still waiting on this framebuffer add up
+    if (ctx->state.clear_framebuffer == ctx->state.framebuffer)
+        ctx->state.clear_bitmask |= mask;
+    else
+        ctx->state.clear_bitmask = mask;
     ctx->state.clear_framebuffer = ctx->state.framebuffer;
 
-    // Do it now. Deferring means a second glClear overwrites the first, and the
-    // clear colour and scissor get sampled whenever the pass happens to be built
-    // rather than at the point of the call. DIRTY_STATE is what makes the
-    // renderer open a pass when there is nothing else to draw.
+    // The renderer clears now, or keeps the values for the next pass to load
+    // with (type 1). DIRTY_STATE makes it open a pass when nothing else draws.
     ctx->state.dirty_bits |= DIRTY_STATE;
 
     if (ctx->mtl_funcs.mtlClearBuffer)
-        ctx->mtl_funcs.mtlClearBuffer(ctx, 0, mask);
+        ctx->mtl_funcs.mtlClearBuffer(ctx, 1, mask);
 }
 
 void mglClearColor(GLMContext ctx, GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)
@@ -272,6 +274,8 @@ void mglDrawBuffers(GLMContext ctx, GLsizei n, const GLenum *bufs)
 
     Framebuffer *fbo = ctx->state.framebuffer;
 
+    mglApplyClearsFor(ctx, fbo);
+
     // Check the whole list before touching anything: a call that fails has to
     // leave the old draw buffers exactly as they were.
     for (GLsizei i = 0; i < n; ++i)
@@ -334,6 +338,8 @@ void mglDrawBuffer(GLMContext ctx, GLenum buf)
     Framebuffer *fbo = ctx->state.framebuffer;
 
     ERROR_CHECK_RETURN(drawBufferKnown(buf), GL_INVALID_ENUM);
+
+    mglApplyClearsFor(ctx, fbo);
 
     if (fbo)
     {

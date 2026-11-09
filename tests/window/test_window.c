@@ -23,6 +23,8 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#include "MGLContext.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -143,6 +145,26 @@ int main(void)
     pixel(3 * w / 4, h / 2, b);
     check(green(a) && red(b), "the scissor box carries over to the next frame");
     glfwSwapBuffers(window);
+
+    // a frame of clear, draw and swap is one render pass
+    {
+        GLuint before = 0, after = 0;
+
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glfwSwapBuffers(window);
+
+        MGLget(NULL, MGL_STAT_RENDER_PASSES, &before);
+        for (int frame = 0; frame < 3; frame++)
+        {
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glfwSwapBuffers(window);
+        }
+        MGLget(NULL, MGL_STAT_RENDER_PASSES, &after);
+        check(after - before == 3, "a clear, a draw and a swap make one render pass");
+    }
 
     check(glGetError() == GL_NO_ERROR, "no GL errors");
 

@@ -25,8 +25,34 @@
 static bool validBlendFactor(GLenum f);
 static bool validBlendEquation(GLenum mode);
 
-#define ENABLE_CAP(_cap_)   ctx->state.caps._cap_ = true; break
-#define DISABLE_CAP(_cap_)   ctx->state.caps._cap_ = false; break
+// a cap set to what it already holds leaves nothing to redo
+#define ENABLE_CAP(_cap_)   changed |= !ctx->state.caps._cap_; ctx->state.caps._cap_ = true; break
+#define DISABLE_CAP(_cap_)  changed |= ctx->state.caps._cap_; ctx->state.caps._cap_ = false; break
+
+// caps that are part of the Metal render pipeline; the rest only reach the encoder
+static bool capInPipeline(GLenum cap)
+{
+    switch (cap)
+    {
+        case GL_BLEND:
+        case GL_COLOR_LOGIC_OP:
+        case GL_MULTISAMPLE:
+        case GL_SAMPLE_ALPHA_TO_COVERAGE:
+        case GL_SAMPLE_ALPHA_TO_ONE:
+        case GL_SAMPLE_COVERAGE:
+        case GL_SAMPLE_MASK:
+        case GL_SAMPLE_SHADING:
+        case GL_RASTERIZER_DISCARD:
+        case GL_FRAMEBUFFER_SRGB:
+        case GL_PROGRAM_POINT_SIZE:
+#ifdef MGL_COMPAT_PROFILE
+        case GL_ALPHA_TEST:
+#endif
+            return true;
+    }
+
+    return false;
+}
 
 static void setScissorTests(GLMContext ctx, GLboolean on)
 {
@@ -58,6 +84,7 @@ static bool clipDistanceCap(GLMContext ctx, GLenum cap, GLuint *index)
 void mglDisable(GLMContext ctx, GLenum cap)
 {
     GLuint cd;
+    bool changed = false;
 
     if (clipDistanceCap(ctx, cap, &cd))
     {
@@ -68,14 +95,14 @@ void mglDisable(GLMContext ctx, GLenum cap)
 
     switch(cap)
     {
-        case GL_BLEND: ctx->state.caps.use_blend_i = false; DISABLE_CAP(blend);
+        case GL_BLEND: changed |= ctx->state.caps.use_blend_i; ctx->state.caps.use_blend_i = false; DISABLE_CAP(blend);
         case GL_LINE_SMOOTH: DISABLE_CAP(line_smooth);
         case GL_POLYGON_SMOOTH: DISABLE_CAP(polygon_smooth);
         case GL_CULL_FACE: DISABLE_CAP(cull_face);
         case GL_DEPTH_TEST: DISABLE_CAP(depth_test);
         case GL_STENCIL_TEST: DISABLE_CAP(stencil_test);
         case GL_DITHER: DISABLE_CAP(dither);
-        case GL_SCISSOR_TEST: setScissorTests(ctx, false); DISABLE_CAP(scissor_test);
+        case GL_SCISSOR_TEST: changed = true; setScissorTests(ctx, false); DISABLE_CAP(scissor_test);
         case GL_COLOR_LOGIC_OP: DISABLE_CAP(color_logic_op);
         case GL_POLYGON_OFFSET_POINT: DISABLE_CAP(polygon_offset_point);
         case GL_POLYGON_OFFSET_LINE: DISABLE_CAP(polygon_offset_line);
@@ -85,7 +112,7 @@ void mglDisable(GLMContext ctx, GLenum cap)
         case GL_SAMPLE_ALPHA_TO_ONE: DISABLE_CAP(sample_alpha_to_one);
         case GL_SAMPLE_COVERAGE: DISABLE_CAP(sample_coverage);
         case GL_RASTERIZER_DISCARD: DISABLE_CAP(rasterizer_discard);
-        case GL_FRAMEBUFFER_SRGB: srgbChanged(ctx); DISABLE_CAP(framebuffer_srgb);
+        case GL_FRAMEBUFFER_SRGB: changed = true; srgbChanged(ctx); DISABLE_CAP(framebuffer_srgb);
         case GL_PRIMITIVE_RESTART: DISABLE_CAP(primitive_restart);
         case GL_DEPTH_CLAMP: DISABLE_CAP(depth_clamp);
         case GL_TEXTURE_CUBE_MAP_SEAMLESS: DISABLE_CAP(texture_cube_map_seamless);
@@ -107,12 +134,17 @@ void mglDisable(GLMContext ctx, GLenum cap)
             ERROR_RETURN(GL_INVALID_ENUM);
     }
 
-    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
+    if (!changed)
+        return;
+
+    ctx->state.dirty_bits |= capInPipeline(cap) ? DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE
+                                                : DIRTY_RENDER_STATE;
 }
 
 void mglEnable(GLMContext ctx, GLenum cap)
 {
     GLuint cd;
+    bool changed = false;
 
     if (clipDistanceCap(ctx, cap, &cd))
     {
@@ -123,14 +155,14 @@ void mglEnable(GLMContext ctx, GLenum cap)
 
     switch(cap)
     {
-        case GL_BLEND: ctx->state.caps.use_blend_i = false; ENABLE_CAP(blend);
+        case GL_BLEND: changed |= ctx->state.caps.use_blend_i; ctx->state.caps.use_blend_i = false; ENABLE_CAP(blend);
         case GL_LINE_SMOOTH: ENABLE_CAP(line_smooth);
         case GL_POLYGON_SMOOTH: ENABLE_CAP(polygon_smooth);
         case GL_CULL_FACE: ENABLE_CAP(cull_face);
         case GL_DEPTH_TEST: ENABLE_CAP(depth_test);
         case GL_STENCIL_TEST: ENABLE_CAP(stencil_test);
         case GL_DITHER: ENABLE_CAP(dither);
-        case GL_SCISSOR_TEST: setScissorTests(ctx, true); ENABLE_CAP(scissor_test);
+        case GL_SCISSOR_TEST: changed = true; setScissorTests(ctx, true); ENABLE_CAP(scissor_test);
         case GL_COLOR_LOGIC_OP: ENABLE_CAP(color_logic_op);
         case GL_POLYGON_OFFSET_POINT: ENABLE_CAP(polygon_offset_point);
         case GL_POLYGON_OFFSET_LINE: ENABLE_CAP(polygon_offset_line);
@@ -141,7 +173,7 @@ void mglEnable(GLMContext ctx, GLenum cap)
         case GL_SAMPLE_ALPHA_TO_ONE: ENABLE_CAP(sample_alpha_to_one);
         case GL_SAMPLE_COVERAGE: ENABLE_CAP(sample_coverage);
         case GL_RASTERIZER_DISCARD: ENABLE_CAP(rasterizer_discard);
-        case GL_FRAMEBUFFER_SRGB: srgbChanged(ctx); ENABLE_CAP(framebuffer_srgb);
+        case GL_FRAMEBUFFER_SRGB: changed = true; srgbChanged(ctx); ENABLE_CAP(framebuffer_srgb);
         case GL_PRIMITIVE_RESTART: ENABLE_CAP(primitive_restart);
         case GL_DEPTH_CLAMP: ENABLE_CAP(depth_clamp);
         case GL_TEXTURE_CUBE_MAP_SEAMLESS: ENABLE_CAP(texture_cube_map_seamless);
@@ -165,7 +197,11 @@ void mglEnable(GLMContext ctx, GLenum cap)
             ERROR_RETURN(GL_INVALID_ENUM);
     }
 
-    ctx->state.dirty_bits |= DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE;
+    if (!changed)
+        return;
+
+    ctx->state.dirty_bits |= capInPipeline(cap) ? DIRTY_STATE | DIRTY_RENDER_STATE | DIRTY_ALPHA_STATE
+                                                : DIRTY_RENDER_STATE;
 }
 
 void mglCullFace(GLMContext ctx, GLenum mode)
@@ -175,6 +211,8 @@ void mglCullFace(GLMContext ctx, GLenum mode)
         case GL_FRONT:
         case GL_BACK:
         case GL_FRONT_AND_BACK:
+            if (ctx->state.var.cull_face_mode == mode)
+                return;
             ctx->state.var.cull_face_mode = mode;
             break;
 
@@ -191,6 +229,8 @@ void mglFrontFace(GLMContext ctx, GLenum mode)
     {
         case GL_CW:
         case GL_CCW:
+            if (ctx->state.var.front_face == mode)
+                return;
             ctx->state.var.front_face = mode;
             break;
 
@@ -393,6 +433,9 @@ void mglColorMask(GLMContext ctx, GLboolean red, GLboolean green, GLboolean blue
 
 void mglDepthMask(GLMContext ctx, GLboolean flag)
 {
+    if (ctx->state.var.depth_writemask == flag)
+        return;
+
     ctx->state.var.depth_writemask = flag;
 
     ctx->state.dirty_bits |= DIRTY_RENDER_STATE;
@@ -518,6 +561,8 @@ void mglDepthFunc(GLMContext ctx, GLenum func)
         case GL_NOTEQUAL:
         case GL_ALWAYS:
         case GL_NEVER:
+            if (ctx->state.var.depth_func == func)
+                return;
             ctx->state.var.depth_func = func;
             break;
 

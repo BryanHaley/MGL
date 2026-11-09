@@ -183,11 +183,56 @@ static bool expands_to_strip(GLenum mode)
 /*  public predicate                                                  */
 /* ------------------------------------------------------------------ */
 // Metal restarts strips only, so lists are cut into runs here
-bool primitive_mode_needs_expand_ctx(GLMContext ctx, GLenum mode)
+static bool restart_index(GLMContext ctx, GLenum type, GLuint *out);
+
+// Metal has no restart for lists, so a list holding the restart index is cut
+// up on the CPU. Most hold none, and the answer is kept until the CPU changes
+// the buffer.
+static bool list_holds_restart(GLMContext ctx, GLsizei count, GLenum type, size_t offset)
 {
-    if ((mode == GL_LINES || mode == GL_TRIANGLES) &&
-        (ctx->state.caps.primitive_restart || ctx->state.caps.primitive_restart_fixed_index))
+    Buffer *eb = ctx->state.vao ? ctx->state.vao->element_array.buffer : NULL;
+    GLuint restart;
+
+    if (!restart_index(ctx, type, &restart))
+        return false;
+
+    // what the GPU writes, or a persistent mapping, is not in step with the
+    // CPU copy, so those keep being expanded
+    if (!eb || !eb->data.buffer_data || eb->data.gpu_written ||
+        (eb->storage_flags & GL_MAP_PERSISTENT_BIT) || eb->mapped)
         return true;
+
+    bool cache = eb != ctx->state.client_indices;
+    typeof(eb->data.restart_scan) *s = &eb->data.restart_scan;
+
+    if (cache && s->valid && s->version == eb->data.version && s->offset == offset &&
+        s->count == count && s->type == type && s->index == restart)
+        return s->holds;
+
+    const uint8_t *src = (const uint8_t *)eb->data.buffer_data + offset;
+    bool holds = false;
+
+    for (GLsizei i = 0; i < count && !holds; i++)
+        holds = read_index(src, type, i) == restart;
+
+    if (cache)
+    {
+        s->version = eb->data.version;
+        s->offset = offset;
+        s->count = count;
+        s->type = type;
+        s->index = restart;
+        s->holds = holds;
+        s->valid = true;
+    }
+
+    return holds;
+}
+
+bool primitive_mode_needs_expand_ctx(GLMContext ctx, GLenum mode, GLsizei count, GLenum type, size_t offset)
+{
+    if (mode == GL_LINES || mode == GL_TRIANGLES)
+        return list_holds_restart(ctx, count, type, offset);
 
     return primitive_mode_needs_expand(mode);
 }

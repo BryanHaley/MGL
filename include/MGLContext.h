@@ -22,7 +22,17 @@ enum {
     MGL_STENCIL_FORMAT,
     MGL_STENCIL_TYPE,
     MGL_CONTEXT_FLAGS,
-    MGL_SWAP_INTERVAL
+    MGL_SWAP_INTERVAL,
+
+    // running counts of costly driver work, for tests and profiling
+    MGL_STAT_PIPELINES_BUILT,       // Metal render pipelines compiled
+    MGL_STAT_PIPELINE_LOOKUPS,      // pipeline descriptors built to look one up
+    MGL_STAT_GPU_WAITS,             // times the CPU waited for the GPU to finish
+    MGL_STAT_RENDER_PASSES,         // render passes started
+    MGL_STAT_BUFFER_REBINDS,        // stage buffer lists rebound on the encoder
+    MGL_STAT_CPU_EXPANSIONS,        // draws whose indices were expanded on the CPU
+    MGL_STAT_PROGRAM_REBUILDS,      // times a program's Metal functions were remade
+    MGL_STAT_ATTRIB_CONVERSIONS     // vertex attributes converted to a format Metal reads
 };
 
 #ifdef __cplusplus

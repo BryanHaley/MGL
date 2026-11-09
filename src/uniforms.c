@@ -977,7 +977,8 @@ void mglUniformBlockBinding(GLMContext ctx, GLuint program, GLuint uniformBlockI
         }
     }
 
-    ptr->dirty_bits |= DIRTY_PROGRAM;
+    // bindings are read at draw time
+    ctx->state.dirty_bits |= DIRTY_BUFFER_BASE_STATE;
 }
 
 // glUniform* writes the current program, or with none, the program a bound
@@ -1681,6 +1682,7 @@ static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, co
     }
 
     // the same sampler in another stage is the same uniform
+    bool changed = false;
     {
         int n = opaqueCount(pptr);
 
@@ -1695,16 +1697,18 @@ static bool writeOpaqueUniform(GLMContext ctx, Program *pptr, GLint location, co
             {
                 GLint e = first + k;
 
-                if (e == 0)
-                    other->tex_unit = units[k];
+                if (e == 0 && other->tex_unit != units[k])
+                    other->tex_unit = units[k], changed = true;
 
-                if (other->element_unit && e < other->array_size)
-                    other->element_unit[e] = units[k];
+                if (other->element_unit && e < other->array_size && other->element_unit[e] != units[k])
+                    other->element_unit[e] = units[k], changed = true;
             }
         }
     }
 
-    pptr->dirty_bits |= DIRTY_PROGRAM;
+    // units are read at draw time, so only the bindings need redoing
+    if (changed)
+        ctx->state.dirty_bits |= image ? DIRTY_IMAGE_UNIT_STATE : DIRTY_TEX_BINDING;
 
     return true;
 }

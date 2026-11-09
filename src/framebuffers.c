@@ -287,11 +287,12 @@ void mglSyncReadBuffer(GLMContext ctx)
     STATE(read_buffer) = STATE(readbuffer) ? STATE(readbuffer)->read_buffer : STATE(default_read_buffer);
 }
 
-// glClear only records what to clear; a framebuffer being left or deleted
-// has to have it done first, or its images never see it
-static void applyClearsFor(GLMContext ctx, Framebuffer *fbo)
+// glClear only records what to clear; a framebuffer being left, deleted or
+// reattached has to have it done first, or its images never see it. NULL is
+// the default framebuffer.
+void mglApplyClearsFor(GLMContext ctx, Framebuffer *fbo)
 {
-    bool pending = fbo && ctx->state.clear_framebuffer == fbo && ctx->state.clear_bitmask;
+    bool pending = ctx->state.clear_framebuffer == fbo && ctx->state.clear_bitmask;
 
     for (int i = 0; fbo && !pending && i < MAX_COLOR_ATTACHMENTS; i++)
         pending = fbo->color_attachments[i].clear_bitmask != 0;
@@ -327,7 +328,7 @@ void mglBindFramebuffer(GLMContext ctx, GLenum target, GLuint framebuffer)
     }
 
     if ((target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER) && ctx->state.framebuffer != ptr)
-        applyClearsFor(ctx, ctx->state.framebuffer);
+        mglApplyClearsFor(ctx, ctx->state.framebuffer);
 
     switch(target) {
         case GL_DRAW_FRAMEBUFFER:
@@ -372,7 +373,7 @@ void mglDeleteFramebuffers(GLMContext ctx, GLsizei n, const GLuint *framebuffers
         if (!fbo)
             continue;
 
-        applyClearsFor(ctx, fbo);
+        mglApplyClearsFor(ctx, fbo);
             
         // Unbind if currently bound
         if (ctx->state.framebuffer == fbo)
@@ -938,7 +939,9 @@ void framebufferTexture(GLMContext ctx, GLenum target, GLenum attachment_type, G
 
     // NULL means a bad target, or the default framebuffer, which has no attachments
     ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
-    
+
+    mglApplyClearsFor(ctx, fbo);
+
     // Log FBO texture attachments for large textures (framebuffer size)
     if (texture != 0) {
         Texture *t = findTexture(ctx, texture);
@@ -1244,6 +1247,8 @@ void mglFramebufferRenderbuffer(GLMContext ctx, GLenum target, GLenum attachment
 
     // NULL means a bad target, or the default framebuffer, which has no attachments
     ERROR_CHECK_RETURN(fbo, GL_INVALID_OPERATION);
+
+    mglApplyClearsFor(ctx, fbo);
 
     switch(attachment)
     {

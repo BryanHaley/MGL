@@ -69,6 +69,11 @@ GLsizei typeSize(GLenum type)
 
 GLsizei genStrideFromTypeSize(GLenum type, GLint size)
 {
+    // a packed format is one 32-bit word whatever its component count
+    if (type == GL_INT_2_10_10_10_REV || type == GL_UNSIGNED_INT_2_10_10_10_REV ||
+        type == GL_UNSIGNED_INT_10F_11F_11F_REV)
+        return typeSize(type);
+
     return typeSize(type) * size;
 }
 

@@ -380,6 +380,14 @@ void MGLget(GLMContext ctx, GLenum param, GLuint *data)
         case MGL_STENCIL_TYPE: *data = ctx->stencil_format.type; break;
         case MGL_CONTEXT_FLAGS: *data = ctx->context_flags; break;
         case MGL_SWAP_INTERVAL: *data = ctx->swap_interval; break;
+        case MGL_STAT_PIPELINES_BUILT: *data = ctx->stats.pipelines_built; break;
+        case MGL_STAT_PIPELINE_LOOKUPS: *data = ctx->stats.pipeline_lookups; break;
+        case MGL_STAT_GPU_WAITS: *data = ctx->stats.gpu_waits; break;
+        case MGL_STAT_RENDER_PASSES: *data = ctx->stats.render_passes; break;
+        case MGL_STAT_BUFFER_REBINDS: *data = ctx->stats.buffer_rebinds; break;
+        case MGL_STAT_CPU_EXPANSIONS: *data = ctx->stats.cpu_expansions; break;
+        case MGL_STAT_PROGRAM_REBUILDS: *data = ctx->stats.program_rebuilds; break;
+        case MGL_STAT_ATTRIB_CONVERSIONS: *data = ctx->stats.attrib_conversions; break;
 
         default:
             // MGLget is an MGL entry point, not GL, so there is no error to set

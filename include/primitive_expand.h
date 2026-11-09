@@ -102,6 +102,7 @@ PrimitiveExpansion primitive_expand_elements(PrimitiveExpander *exp,
  * decide whether to call the expander or to use getMTLPrimitiveType.
  */
 bool primitive_mode_needs_expand(GLenum mode);
-bool primitive_mode_needs_expand_ctx(GLMContext ctx, GLenum mode);
+// count indices of type from offset into the bound element buffer
+bool primitive_mode_needs_expand_ctx(GLMContext ctx, GLenum mode, GLsizei count, GLenum type, size_t offset);
 
 #endif /* primitive_expand_h */

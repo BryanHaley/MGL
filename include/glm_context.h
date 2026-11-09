@@ -301,6 +301,29 @@ typedef struct BufferData_t {
     GLboolean       gpu_written;
     // a buffer texture views this storage
     GLboolean       texture_view;
+    // goes up whenever the CPU changes the contents
+    uint32_t        version;
+    // whether an index range held the restart index, as of version
+    struct {
+        uint32_t    version;
+        size_t      offset;
+        GLsizei     count;
+        GLenum      type;
+        GLuint      index;
+        bool        valid;
+        bool        holds;
+    } restart_scan;
+    // float copies of attributes Metal cannot read, made from this version
+    // of the contents
+    struct {
+        void        *mtl_data;
+        uint32_t    version;
+        GLenum      type;
+        GLint       size;
+        GLboolean   normalized;
+        size_t      offset;
+        size_t      stride;
+    } converted[4];
 } BufferData;
 
 #define BUFFER_IMMUTABLE_STORAGE_FLAG   0x1
@@ -1366,6 +1389,7 @@ typedef struct Framebuffer_t {
 } Framebuffer;
 
 void mglApplyDrawBuffers(GLMContext ctx, struct Framebuffer_t *fbo);
+void mglApplyClearsFor(GLMContext ctx, struct Framebuffer_t *fbo);
 
 typedef struct __GLsync {
     GLsizei name;
@@ -1712,6 +1736,7 @@ struct GLMMetalFuncs {
 
     void (*mtlBufferSubData)(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, const void *ptr);
     void (*mtlRenameBuffer)(GLMContext glm_ctx, Buffer *buf, bool keep_contents);
+    bool (*mtlStageBufferWrite)(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, const void *data);
     void *(*mtlMapUnmapBuffer)(GLMContext glm_ctx, Buffer *buf, size_t offset, size_t size, GLenum access, bool map);
     void (*mtlFlushBufferRange)(GLMContext glm_ctx, Buffer *buf, GLintptr offset, GLsizeiptr length);
 
@@ -1807,6 +1832,17 @@ typedef struct GLMContextRec_t {
     uint64_t    gpu_epoch;
     uint64_t    idle_epoch;
 
+    struct {
+        GLuint pipelines_built;
+        GLuint pipeline_lookups;
+        GLuint gpu_waits;
+        GLuint render_passes;
+        GLuint buffer_rebinds;
+        GLuint cpu_expansions;
+        GLuint program_rebuilds;
+        GLuint attrib_conversions;
+    } stats;
+
     void (* error_func)(GLMContext ctx, const char *func, GLenum type);
 } GLMContextRec;
 
@@ -1827,7 +1863,17 @@ enum {
     MGL_STENCIL_FORMAT,
     MGL_STENCIL_TYPE,
     MGL_CONTEXT_FLAGS,
-    MGL_SWAP_INTERVAL
+    MGL_SWAP_INTERVAL,
+
+    // running counts of costly driver work, for tests and profiling
+    MGL_STAT_PIPELINES_BUILT,       // Metal render pipelines compiled
+    MGL_STAT_PIPELINE_LOOKUPS,      // pipeline descriptors built to look one up
+    MGL_STAT_GPU_WAITS,             // times the CPU waited for the GPU to finish
+    MGL_STAT_RENDER_PASSES,         // render passes started
+    MGL_STAT_BUFFER_REBINDS,        // stage buffer lists rebound on the encoder
+    MGL_STAT_CPU_EXPANSIONS,        // draws whose indices were expanded on the CPU
+    MGL_STAT_PROGRAM_REBUILDS,      // times a program's Metal functions were remade
+    MGL_STAT_ATTRIB_CONVERSIONS     // vertex attributes converted to a format Metal reads
 };
 
 #ifdef __cplusplus
