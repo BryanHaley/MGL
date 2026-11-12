@@ -63,10 +63,11 @@ Download `MooGL-SDK-<version>-macos-arm64.tar.gz` from the
 MooGL-SDK/
   lib/        libmoogl.dylib (OpenGL)
               libglfw.dylib  libSDL2-2.0.0.dylib (GLFW and SDL2 for MooGL)
+              libimgui.a (Dear ImGui, drawing with MooGL)
               libffx_fsr2_api.dylib (FSR 2 on MetalFX)
               cmake/MooGL/  cmake/SDL2/
-  include/    GL/glcorearb.h  KHR/khrplatform.h  GLFW/  SDL2/  MGLContext.h  ffx-fsr2/
-  examples/   triangle/ (GLFW)  sdl2_triangle/ (SDL2)
+  include/    GL/glcorearb.h  KHR/khrplatform.h  GLFW/  SDL2/  imgui/  MGLContext.h  ffx-fsr2/
+  examples/   triangle/ (GLFW)  sdl2_triangle/ (SDL2)  imgui/ imgui_sdl2/ (Dear ImGui)
   nuget/      FFX_FSR2 for C# on macOS
   licenses/
 ```
@@ -103,6 +104,12 @@ target_link_libraries(my_app PRIVATE MooGL::glfw)   # GLFW and OpenGL
 
 `MooGL::GL` is the GL library alone and `MooGL::FSR2` is FSR 2. `MooGL_LIBRARY_DIR` holds
 the folder with the dylibs.
+
+`MooGL::imgui` is [Dear ImGui](https://github.com/ocornut/imgui) (docking branch) with its GLFW,
+SDL2 and OpenGL 3 backends. Stock ImGui's OpenGL backend loads Apple's OpenGL on a Mac; this
+one draws with MooGL. Link it with `MooGL::glfw` or `SDL2::SDL2`. Its examples, one for GLFW
+and one for SDL2, open ImGui's demo with docking and multi-viewports, so windows dragged out of
+the main one get their own shared-context window.
 
 ## Writing OpenGL 4.6 on a Mac
 
@@ -148,8 +155,12 @@ Link it with `find_package(SDL2)` and `SDL2::SDL2` plus `MooGL::GL`, or `-lSDL2 
 debug and no-error flags work too. A few things differ from Apple's driver:
 
 - A MooGL context draws into the window it was created for, and can't be made current on another.
-- Contexts can't share objects yet, so a share request fails: `SDL_GL_SHARE_WITH_CURRENT_CONTEXT`
-  in SDL2, a share window in GLFW. Sharing is on the roadmap.
+- Contexts can share objects: `SDL_GL_SHARE_WITH_CURRENT_CONTEXT` in SDL2, or a share window in
+  GLFW (`glfwCreateWindow(..., share)`). Shared contexts have buffers, textures, renderbuffers,
+  samplers, shaders, programs and syncs in common; each keeps its own vertex arrays, framebuffers,
+  transform feedback objects, program pipelines and queries. They can be current on different
+  threads at once, for example a loading thread. Order work between them with a fence:
+  `glFenceSync` and `glFlush` in one, `glWaitSync` or `glClientWaitSync` in the other.
 - `SDL_Renderer` has no `opengl` backend, which needs legacy GL. It uses Metal, its default on
   macOS anyway.
 

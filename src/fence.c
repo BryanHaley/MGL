@@ -18,6 +18,7 @@
  *
  */
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <strings.h>
 
 #include "glm_context.h"
@@ -35,11 +36,13 @@ Sync *newSync(GLMContext ctx)
     }
 
     bzero(ptr, sizeof(Sync));
+    ptr->owner = ctx;
 
-    ptr->name = STATE(sync_name)++;
-
-    ptr->next = STATE(sync_list);
-    STATE(sync_list) = ptr;
+    pthread_mutex_lock(&SHARED(lock));
+    ptr->name = SHARED(sync_name)++;
+    ptr->next = SHARED(sync_list);
+    SHARED(sync_list) = ptr;
+    pthread_mutex_unlock(&SHARED(lock));
 
     return ptr;
 }
@@ -48,26 +51,54 @@ Sync *newSync(GLMContext ctx)
 // Comparing sync->name would dereference whatever the caller passed.
 int isSync(GLMContext ctx, GLsync sync)
 {
+    int found = 0;
+
     if (sync == NULL)
         return 0;
 
-    for (Sync *s = STATE(sync_list); s; s = s->next)
-        if (s == sync)
-            return 1;
+    pthread_mutex_lock(&SHARED(lock));
+    for (Sync *s = SHARED(sync_list); s && !found; s = s->next)
+        found = s == sync;
+    pthread_mutex_unlock(&SHARED(lock));
 
-    return 0;
+    return found;
 }
 
 static void unlinkSync(GLMContext ctx, GLsync sync)
 {
-    for (Sync **p = &STATE(sync_list); *p; p = &(*p)->next)
+    pthread_mutex_lock(&SHARED(lock));
+    for (Sync **p = &SHARED(sync_list); *p; p = &(*p)->next)
     {
         if (*p == sync)
         {
             *p = sync->next;
-            return;
+            break;
         }
     }
+    pthread_mutex_unlock(&SHARED(lock));
+}
+
+// Frees a sync already out of the list. The context that made it may not be
+// this one, so every renderer in the group forgets it.
+void mglReleaseSync(GLMContext ctx, Sync *sync)
+{
+    MGLShareGroup *g = ctx->state.share;
+
+    pthread_mutex_lock(&g->lock);
+    for (GLuint i = 0; i < g->context_count; i++)
+        if (g->contexts[i]->mtl_funcs.mtlForgetSync && g->contexts[i]->mtl_funcs.mtlObj)
+            g->contexts[i]->mtl_funcs.mtlForgetSync(g->contexts[i], sync);
+    pthread_mutex_unlock(&g->lock);
+
+    // a group's last context has already left it
+    if (g->context_count == 0 && ctx->mtl_funcs.mtlForgetSync)
+        ctx->mtl_funcs.mtlForgetSync(ctx, sync);
+
+    if (sync->mtl_event)
+        CFRelease(sync->mtl_event);
+
+    mtlSyncRelease(sync);
+    free(sync);
 }
 
 GLsync mglFenceSync(GLMContext ctx, GLenum condition, GLbitfield flags)
@@ -131,11 +162,8 @@ void mglDeleteSync(GLMContext ctx, GLsync sync)
         }
     }
 
-    if (ctx->mtl_funcs.mtlForgetSync)
-        ctx->mtl_funcs.mtlForgetSync(ctx, sync);
-
     mglForgetObjectLabel(ctx, 0, 0, sync);
-    free(sync);
+    mglReleaseSync(ctx, sync);
 }
 
 GLenum  mglClientWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint64 timeout)
@@ -150,18 +178,15 @@ GLenum  mglClientWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint6
         ERROR_RETURN_VALUE(GL_INVALID_VALUE, GL_WAIT_FAILED);
     }
 
-    if (sync->mtl_event == NULL)
-    {
+    if (mtlSyncSignaled(sync))
         return GL_ALREADY_SIGNALED;
-    }
 
-    // the flush bit means "behave as if glFlush came first"
-    if (flags & GL_SYNC_FLUSH_COMMANDS_BIT)
+    // the flush bit means "behave as if glFlush came first"; a fence this
+    // context made needs its own work sent to go off at all
+    if ((flags & GL_SYNC_FLUSH_COMMANDS_BIT) || sync->owner == ctx)
         ctx->mtl_funcs.mtlFlush(ctx, false);
 
-    ctx->mtl_funcs.mtlWaitForSync(ctx, sync);
-
-    return GL_CONDITION_SATISFIED;
+    return mtlSyncWait(sync, timeout) ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
 }
 
 void mglWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint64 timeout)
@@ -182,12 +207,9 @@ void mglWaitSync(GLMContext ctx, GLsync sync, GLbitfield flags, GLuint64 timeout
         ERROR_RETURN(GL_INVALID_VALUE);
     }
 
-    ctx->mtl_funcs.mtlWaitForSync(ctx, sync);
-
-    // Handle gracefully if event is not null after wait
-    if (sync->mtl_event != NULL) {
-        MGL_ERR("MGL WARNING: sync->mtl_event should be NULL after server wait, but is %p\n", sync->mtl_event);
-    }
+    // one queue runs in order, so only another context's fence needs a wait
+    if (sync->owner != ctx && !mtlSyncSignaled(sync))
+        mtlServerWaitSync(ctx, sync);
 }
 
 void mglGetSynciv(GLMContext ctx, GLsync sync, GLenum pname, GLsizei count, GLsizei *length, GLint *values)
@@ -213,7 +235,7 @@ void mglGetSynciv(GLMContext ctx, GLsync sync, GLenum pname, GLsizei count, GLsi
             break;
 
         case GL_SYNC_STATUS:
-            v = sync->mtl_event ? GL_UNSIGNALED : GL_SIGNALED;
+            v = mtlSyncSignaled(sync) ? GL_SIGNALED : GL_UNSIGNALED;
             break;
 
         case GL_SYNC_CONDITION:

@@ -59,13 +59,13 @@ static Renderbuffer *getRenderbuffer(GLMContext ctx, GLuint renderbuffer)
 {
     Renderbuffer *ptr;
 
-    ptr = (Renderbuffer *)searchHashTable(&STATE(renderbuffer_table), renderbuffer);
+    ptr = (Renderbuffer *)searchHashTable(&SHARED(renderbuffer_table), renderbuffer);
 
     if (!ptr)
     {
         ptr = newRenderbuffer(ctx, renderbuffer);
 
-        insertHashElement(&STATE(renderbuffer_table), renderbuffer, ptr);
+        insertHashElement(&SHARED(renderbuffer_table), renderbuffer, ptr);
     }
 
     return ptr;
@@ -75,7 +75,7 @@ static int isRenderBuffer(GLMContext ctx, GLuint renderbuffer)
 {
     Renderbuffer *ptr;
 
-    ptr = (Renderbuffer *)searchHashTable(&STATE(renderbuffer_table), renderbuffer);
+    ptr = (Renderbuffer *)searchHashTable(&SHARED(renderbuffer_table), renderbuffer);
 
     if (ptr)
         return 1;
@@ -87,7 +87,7 @@ Renderbuffer *findRenderbuffer(GLMContext ctx, GLuint renderbuffer)
 {
     Renderbuffer *ptr;
 
-    ptr = (Renderbuffer *)searchHashTable(&STATE(renderbuffer_table), renderbuffer);
+    ptr = (Renderbuffer *)searchHashTable(&SHARED(renderbuffer_table), renderbuffer);
 
     return ptr;
 }
@@ -577,7 +577,7 @@ void mglGenRenderbuffers(GLMContext ctx, GLsizei n, GLuint *renderbuffers)
 
     while(n--)
     {
-        *renderbuffers++ = getNewName(&STATE(renderbuffer_table));
+        *renderbuffers++ = getNewName(&SHARED(renderbuffer_table));
     }
 }
 
@@ -669,15 +669,15 @@ static void freeRenderbuffer(GLMContext ctx, Renderbuffer *rbo)
 
 static void retireRenderbuffer(GLMContext ctx, Renderbuffer *rbo)
 {
-    Renderbuffer **grown = (Renderbuffer **)realloc(STATE(retired_renderbuffers),
-                                                    (STATE(retired_renderbuffer_count) + 1) * sizeof(Renderbuffer *));
+    Renderbuffer **grown = (Renderbuffer **)realloc(SHARED(retired_renderbuffers),
+                                                    (SHARED(retired_renderbuffer_count) + 1) * sizeof(Renderbuffer *));
 
     // with nowhere to note it, keeping it is safer than freeing it
     if (grown == NULL)
         return;
 
-    STATE(retired_renderbuffers) = grown;
-    STATE(retired_renderbuffers)[STATE(retired_renderbuffer_count)++] = rbo;
+    SHARED(retired_renderbuffers) = grown;
+    SHARED(retired_renderbuffers)[SHARED(retired_renderbuffer_count)++] = rbo;
 }
 
 // a deleted renderbuffer goes once no framebuffer holds it any more
@@ -685,17 +685,17 @@ void mglSweepRetiredRenderbuffers(GLMContext ctx)
 {
     GLuint kept = 0;
 
-    for (GLuint i = 0; i < STATE(retired_renderbuffer_count); i++)
+    for (GLuint i = 0; i < SHARED(retired_renderbuffer_count); i++)
     {
-        Renderbuffer *rbo = STATE(retired_renderbuffers)[i];
+        Renderbuffer *rbo = SHARED(retired_renderbuffers)[i];
 
         if (framebufferHoldsRenderbuffer(ctx, rbo))
-            STATE(retired_renderbuffers)[kept++] = rbo;
+            SHARED(retired_renderbuffers)[kept++] = rbo;
         else
             freeRenderbuffer(ctx, rbo);
     }
 
-    STATE(retired_renderbuffer_count) = kept;
+    SHARED(retired_renderbuffer_count) = kept;
 }
 
 void mglDeleteRenderbuffers(GLMContext ctx, GLsizei n, const GLuint *renderbuffers)
@@ -732,8 +732,11 @@ void mglDeleteRenderbuffers(GLMContext ctx, GLsizei n, const GLuint *renderbuffe
         if (STATE(readbuffer) && STATE(readbuffer) != STATE(framebuffer))
             detachRenderbuffer(STATE(readbuffer), rbo);
 
-        deleteHashElement(&STATE(renderbuffer_table), renderbuffers[i]);
+        deleteHashElement(&SHARED(renderbuffer_table), renderbuffers[i]);
         mglForgetObjectLabel(ctx, GL_RENDERBUFFER, renderbuffers[i], NULL);
+
+        if (mglHoldIfUsedElsewhere(ctx, GL_RENDERBUFFER, rbo))
+            continue;
 
         if (framebufferHoldsRenderbuffer(ctx, rbo))
             retireRenderbuffer(ctx, rbo);
@@ -741,6 +744,7 @@ void mglDeleteRenderbuffers(GLMContext ctx, GLsizei n, const GLuint *renderbuffe
             freeRenderbuffer(ctx, rbo);
     }
 
+    mglSweepHeldObjects(ctx);
     STATE(dirty_bits) |= DIRTY_FBO;
 }
 
@@ -2174,7 +2178,7 @@ void mglCreateRenderbuffers(GLMContext ctx, GLsizei n, GLuint *renderbuffers)
 
     for (GLsizei i = 0; i < n; i++)
     {
-        renderbuffers[i] = getNewName(&STATE(renderbuffer_table));
+        renderbuffers[i] = getNewName(&SHARED(renderbuffer_table));
 
         getRenderbuffer(ctx, renderbuffers[i]);
     }

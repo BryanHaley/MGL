@@ -40,3 +40,7 @@
 [submodule "submodules/supertuxkart"]
 	path = submodules/supertuxkart
 	url = https://github.com/supertuxkart/stk-code.git
+[submodule "submodules/imgui"]
+	path = submodules/imgui
+	url = https://github.com/ocornut/imgui.git
+	branch = docking

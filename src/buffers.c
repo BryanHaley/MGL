@@ -35,7 +35,7 @@
 
 // Used to recover from a corrupted context pointer (e.g. small non-NULL values like 0x2f)
 extern void mgl_lazy_init(void);
-extern GLMContext _ctx;
+extern __thread GLMContext _ctx;
 
 #pragma mark Utility Functions
 
@@ -99,13 +99,13 @@ Buffer *getBuffer(GLMContext ctx, GLenum target, GLuint buffer)
 {
     Buffer *ptr;
 
-    ptr = (Buffer *)searchHashTable(&STATE(buffer_table), buffer);
+    ptr = (Buffer *)searchHashTable(&SHARED(buffer_table), buffer);
 
     if (!ptr)
     {
         ptr = newBuffer(ctx, target, buffer);
 
-        insertHashElement(&STATE(buffer_table), buffer, ptr);
+        insertHashElement(&SHARED(buffer_table), buffer, ptr);
     }
 
     return ptr;
@@ -115,7 +115,7 @@ bool isBuffer(GLMContext ctx, GLuint buffer)
 {
     Buffer *ptr;
 
-    ptr = (Buffer *)searchHashTable(&STATE(buffer_table), buffer);
+    ptr = (Buffer *)searchHashTable(&SHARED(buffer_table), buffer);
 
     if (ptr)
         return true;
@@ -127,7 +127,7 @@ Buffer *findBuffer(GLMContext ctx, GLuint buffer)
 {
     Buffer *ptr;
 
-    ptr = (Buffer *)searchHashTable(&STATE(buffer_table), buffer);
+    ptr = (Buffer *)searchHashTable(&SHARED(buffer_table), buffer);
 
     return ptr;
 }
@@ -608,7 +608,7 @@ void mglGenBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 
     while(n--)
     {
-        *buffers++ = getNewName(&STATE(buffer_table));
+        *buffers++ = getNewName(&SHARED(buffer_table));
     }
 }
 
@@ -621,7 +621,7 @@ void mglCreateBuffers(GLMContext ctx, GLsizei n, GLuint *buffers)
 
     while(n--)
     {
-        name = getNewName(&STATE(buffer_table));
+        name = getNewName(&SHARED(buffer_table));
 
         // create an unbound buffer
         getBuffer(ctx, 0, name);
@@ -651,11 +651,9 @@ void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
         {
             Buffer *ptr;
 
-            ptr = (Buffer *)searchHashTable(&STATE(buffer_table), buffer);
+            ptr = (Buffer *)searchHashTable(&SHARED(buffer_table), buffer);
 
-            mglReleaseBufferStorage(ctx, ptr);
-
-            deleteHashElement(&STATE(buffer_table), buffer);
+            deleteHashElement(&SHARED(buffer_table), buffer);
             mglForgetObjectLabel(ctx, GL_BUFFER, buffer, NULL);
 
             // Drop every reference to this buffer. ptr->target is a GL enum, so
@@ -706,9 +704,16 @@ void mglDeleteBuffers(GLMContext ctx, GLsizei n, const GLuint *buffers)
                     if (maps[m]->buffers[i].buf == ptr)
                         maps[m]->buffers[i].buf = NULL;
 
-            free(ptr);
+            // another context drawing with it keeps it until it lets go
+            if (!mglHoldIfUsedElsewhere(ctx, GL_BUFFER, ptr))
+            {
+                mglReleaseBufferStorage(ctx, ptr);
+                free(ptr);
+            }
         } // if (isBuffer(ctx, buffer))
     } // while(--n)
+
+    mglSweepHeldObjects(ctx);
 }
 
 GLboolean mglIsBuffer(GLMContext ctx, GLuint buffer)
@@ -733,7 +738,7 @@ void mglBindBuffer(GLMContext ctx, GLenum target, GLuint buffer)
     {
         // core GL binds only names glGenBuffers handed out
         ERROR_CHECK_RETURN(isBuffer(ctx, buffer) ||
-                           (buffer < STATE(buffer_table.current_name) && !isFreeName(&STATE(buffer_table), buffer)),
+                           (buffer < SHARED(buffer_table.current_name) && !isFreeName(&SHARED(buffer_table), buffer)),
                            GL_INVALID_OPERATION);
 
         ptr = getBuffer(ctx, target, buffer);
@@ -2330,19 +2335,19 @@ void mglNamedBufferPageCommitment(GLMContext ctx, GLuint buffer, GLintptr offset
 }
 
 #ifdef MGL_GL_CORE
-extern GLMContext _ctx;
+extern __thread GLMContext _ctx;
 extern void mgl_lazy_init(void);
 
 void glBufferPageCommitmentARB(GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit)
 {
     mgl_lazy_init();
-    mglBufferPageCommitment(_ctx, target, offset, size, commit);
+    mglBufferPageCommitment((mgl_lazy_init(), _ctx), target, offset, size, commit);
 }
 
 void glNamedBufferPageCommitmentARB(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit)
 {
     mgl_lazy_init();
-    mglNamedBufferPageCommitment(_ctx, buffer, offset, size, commit);
+    mglNamedBufferPageCommitment((mgl_lazy_init(), _ctx), buffer, offset, size, commit);
 }
 
 void glNamedBufferPageCommitmentEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit)

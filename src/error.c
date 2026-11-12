@@ -327,7 +327,8 @@ void mglPopDebugGroup(GLMContext ctx)
 // instead of costing every object a name buffer. A sync object has no name, so
 // it is keyed by its pointer with identifier left at zero.
 typedef struct ObjectLabel_t {
-    GLMContext ctx;
+    // the context, or for an object contexts share, its share group
+    const void *owner;
     GLenum identifier;
     GLuint name;
     const void *ptr;
@@ -337,6 +338,25 @@ typedef struct ObjectLabel_t {
 static ObjectLabel *label_list = NULL;
 static GLuint label_count = 0;
 static GLuint label_capacity = 0;
+static pthread_mutex_t label_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// a label is part of the object, so contexts that share an object share it
+static const void *labelOwner(GLMContext ctx, GLenum identifier)
+{
+    switch (identifier)
+    {
+        case 0:                 // a sync, named by pointer
+        case GL_BUFFER:
+        case GL_SHADER:
+        case GL_PROGRAM:
+        case GL_TEXTURE:
+        case GL_SAMPLER:
+        case GL_RENDERBUFFER:
+            return ctx->state.share;
+    }
+
+    return ctx;
+}
 
 static GLboolean labelIdentifierValid(GLenum identifier)
 {
@@ -365,16 +385,16 @@ static GLboolean labelObjectExists(GLMContext ctx, GLenum identifier, GLuint nam
 
     switch (identifier)
     {
-        case GL_BUFFER:             table = &ctx->state.buffer_table; break;
-        case GL_SHADER:             table = &ctx->state.shader_table; break;
-        case GL_PROGRAM:            table = &ctx->state.program_table; break;
-        case GL_TEXTURE:            table = &ctx->state.texture_table; break;
+        case GL_BUFFER:             table = &ctx->state.share->buffer_table; break;
+        case GL_SHADER:             table = &ctx->state.share->shader_table; break;
+        case GL_PROGRAM:            table = &ctx->state.share->program_table; break;
+        case GL_TEXTURE:            table = &ctx->state.share->texture_table; break;
         case GL_VERTEX_ARRAY:       table = &ctx->state.vao_table; break;
         case GL_QUERY:              table = &ctx->state.query_table; break;
         case GL_PROGRAM_PIPELINE:   table = &ctx->state.program_pipeline_table; break;
         case GL_TRANSFORM_FEEDBACK: table = &ctx->state.transform_feedback_table; break;
-        case GL_SAMPLER:            table = &ctx->state.sampler_table; break;
-        case GL_RENDERBUFFER:       table = &ctx->state.renderbuffer_table; break;
+        case GL_SAMPLER:            table = &ctx->state.share->sampler_table; break;
+        case GL_RENDERBUFFER:       table = &ctx->state.share->renderbuffer_table; break;
 
         case GL_FRAMEBUFFER:
             // zero is the default framebuffer, which can be labelled
@@ -405,7 +425,7 @@ static ObjectLabel *labelFind(GLMContext ctx, GLenum identifier, GLuint name, co
     {
         ObjectLabel *l = &label_list[i];
 
-        if (l->ctx == ctx && l->identifier == identifier &&
+        if (l->owner == labelOwner(ctx, identifier) && l->identifier == identifier &&
             l->name == name && l->ptr == ptr)
             return l;
     }
@@ -417,25 +437,37 @@ static ObjectLabel *labelFind(GLMContext ctx, GLenum identifier, GLuint name, co
 // object given the same name turns up already labelled.
 void mglForgetObjectLabel(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr)
 {
+    pthread_mutex_lock(&label_lock);
+
     ObjectLabel *l = labelFind(ctx, identifier, name, ptr);
 
     if (l)
         *l = label_list[--label_count];
+
+    pthread_mutex_unlock(&label_lock);
 }
 
+// The context's own labels, and its group's once no context is left in it
 void mglForgetContextLabels(GLMContext ctx)
 {
     GLuint kept = 0;
+    bool group_gone = ctx->state.share->context_count == 0;
+
+    pthread_mutex_lock(&label_lock);
 
     for (GLuint i = 0; i < label_count; i++)
-        if (label_list[i].ctx != ctx)
+        if (label_list[i].owner != ctx && !(group_gone && label_list[i].owner == ctx->state.share))
             label_list[kept++] = label_list[i];
 
     label_count = kept;
+
+    pthread_mutex_unlock(&label_lock);
 }
 
 static void labelStore(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr, const char *text, GLsizei len)
 {
+    pthread_mutex_lock(&label_lock);
+
     ObjectLabel *l = labelFind(ctx, identifier, name, ptr);
 
     if (l == NULL)
@@ -446,14 +478,17 @@ static void labelStore(GLMContext ctx, GLenum identifier, GLuint name, const voi
             ObjectLabel *grown = (ObjectLabel *)realloc(label_list, capacity * sizeof(ObjectLabel));
 
             if (grown == NULL)
+            {
+                pthread_mutex_unlock(&label_lock);
                 return;
+            }
 
             label_list = grown;
             label_capacity = capacity;
         }
 
         l = &label_list[label_count++];
-        l->ctx = ctx;
+        l->owner = labelOwner(ctx, identifier);
         l->identifier = identifier;
         l->name = name;
         l->ptr = ptr;
@@ -461,14 +496,13 @@ static void labelStore(GLMContext ctx, GLenum identifier, GLuint name, const voi
 
     memcpy(l->text, text, (size_t)len);
     l->text[len] = '\0';
+
+    pthread_mutex_unlock(&label_lock);
 }
 
 static void labelClear(GLMContext ctx, GLenum identifier, GLuint name, const void *ptr)
 {
-    ObjectLabel *l = labelFind(ctx, identifier, name, ptr);
-
-    if (l)
-        *l = label_list[--label_count];
+    mglForgetObjectLabel(ctx, identifier, name, ptr);
 }
 
 static void labelReturn(const ObjectLabel *l, GLsizei bufSize, GLsizei *length, GLchar *label)
@@ -530,7 +564,9 @@ void mglObjectLabelFetch(GLMContext ctx, GLenum identifier, GLuint name, GLsizei
     ERROR_CHECK_RETURN(labelObjectExists(ctx, identifier, name), GL_INVALID_OPERATION);
     ERROR_CHECK_RETURN(bufSize > 0, GL_INVALID_VALUE);
 
+    pthread_mutex_lock(&label_lock);
     labelReturn(labelFind(ctx, identifier, name, NULL), bufSize, length, label);
+    pthread_mutex_unlock(&label_lock);
 }
 
 void mglObjectPtrLabel(GLMContext ctx, const void *ptr, GLsizei length, const GLchar *label)
@@ -558,5 +594,7 @@ void mglObjectPtrLabelFetch(GLMContext ctx, const void *ptr, GLsizei bufSize, GL
     ERROR_CHECK_RETURN(isSync(ctx, (GLsync)ptr), GL_INVALID_VALUE);
     ERROR_CHECK_RETURN(bufSize > 0, GL_INVALID_VALUE);
 
+    pthread_mutex_lock(&label_lock);
     labelReturn(labelFind(ctx, 0, 0, ptr), bufSize, length, label);
+    pthread_mutex_unlock(&label_lock);
 }

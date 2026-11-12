@@ -39,12 +39,12 @@ static Texture *dsaTex(GLMContext ctx, GLuint texture)
 
     tex = findTexture(ctx, texture);
 
-    if (!tex && texture < STATE(texture_table.current_name) && !isFreeName(&STATE(texture_table), texture))
+    if (!tex && texture < SHARED(texture_table.current_name) && !isFreeName(&SHARED(texture_table), texture))
     {
         tex = newTexture(ctx, GL_TEXTURE_2D, texture);
 
         if (tex)
-            insertHashElement(&STATE(texture_table), texture, tex);
+            insertHashElement(&SHARED(texture_table), texture, tex);
     }
 
     ERROR_CHECK_RETURN_VALUE(tex, GL_INVALID_OPERATION, NULL);

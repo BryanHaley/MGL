@@ -450,7 +450,7 @@ static size_t metalUniformLayout(const BufferMap *map, const Buffer *buf, GLubyt
 
     GLuint _blitOperationComplete;
 
-    id<MTLEvent> _currentEvent;
+    id<MTLSharedEvent> _currentEvent;
     GLsizei _currentSyncName;
 
     // scissored glClear is done with a draw, since a load action ignores scissor
@@ -13039,7 +13039,8 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
     if (_currentEvent == NULL)
     {
         @try {
-            _currentEvent = [_device newEvent];
+            // shared, so a CPU wait or another context can read it
+            _currentEvent = [_device newSharedEvent];
             if (!_currentEvent) {
                 MGL_NSERR(@"MGL ERROR: Failed to create Metal event");
                 return;
@@ -13053,6 +13054,8 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
     _currentSyncName = sync->name;
 
     sync->mtl_event = (void *)CFBridgingRetain(_currentEvent);
+    sync->shared_event = (void *)CFBridgingRetain(_currentEvent);
+    sync->value = (uint64_t)sync->name;
 
     // GL says the fence goes off once everything queued before it has run, so
     // signal it from the buffer holding that work. Waiting on it here instead
@@ -13103,6 +13106,72 @@ void mtlDeleteMTLObj (GLMContext glm_ctx, void *obj)
 
         _currentCommandBufferSyncList->size = new_size;
         _currentCommandBufferSyncList->list = new_list;
+    }
+}
+
+bool mtlSyncSignaled(Sync *sync)
+{
+    if (sync->shared_event == NULL)
+        return true;
+
+    return ((__bridge id<MTLSharedEvent>)sync->shared_event).signaledValue >= sync->value;
+}
+
+// Waits up to timeout_ns for the fence; true once it has gone off
+bool mtlSyncWait(Sync *sync, uint64_t timeout_ns)
+{
+    static MTLSharedEventListener *listener;
+    static dispatch_once_t once;
+
+    if (mtlSyncSignaled(sync))
+        return true;
+
+    if (timeout_ns == 0)
+        return false;
+
+    dispatch_once(&once, ^{
+        listener = [[MTLSharedEventListener alloc] initWithDispatchQueue:
+                       dispatch_queue_create("moogl.sync", DISPATCH_QUEUE_SERIAL)];
+    });
+
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+
+    [(__bridge id<MTLSharedEvent>)sync->shared_event notifyListener: listener atValue: sync->value
+                                                              block: ^(id<MTLSharedEvent> e, uint64_t v) {
+        dispatch_semaphore_signal(done);
+    }];
+
+    dispatch_time_t until = timeout_ns >= (uint64_t)INT64_MAX ? DISPATCH_TIME_FOREVER
+                                                              : dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout_ns);
+
+    return dispatch_semaphore_wait(done, until) == 0 || mtlSyncSignaled(sync);
+}
+
+void mtlSyncRelease(Sync *sync)
+{
+    if (sync->shared_event)
+        CFBridgingRelease(sync->shared_event);
+
+    sync->shared_event = NULL;
+}
+
+// GPU work recorded after this waits for the fence, which another context's
+// queue signals
+-(void) mtlServerWaitSync: (Sync *) sync
+{
+    if (sync->shared_event == NULL)
+        return;
+
+    [self endComputeEncoding];
+    [self endRenderEncoding];
+    [[self liveCommandBuffer] encodeWaitForEvent: (__bridge id<MTLSharedEvent>)sync->shared_event
+                                           value: sync->value];
+}
+
+void mtlServerWaitSync(GLMContext glm_ctx, Sync *sync)
+{
+    @autoreleasepool {
+        [(__bridge id) glm_ctx->mtl_funcs.mtlObj mtlServerWaitSync: sync];
     }
 }
 

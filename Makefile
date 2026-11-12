@@ -277,14 +277,28 @@ $(sdl2_lib): $(mgl_lib) $(wildcard $(sdl2_dir)/src/video/cocoa/*.m) $(sdl2_dir)/
 		-DSDL_STATIC=OFF -DSDL_TEST=OFF -DCMAKE_SKIP_BUILD_RPATH=ON \
 		-DMOOGL_LIBRARY=$(abspath $(mgl_lib)) -DCMAKE_INSTALL_PREFIX=$(abspath $(sdl2_install))
 	# its own job count: CMake's make can't share this make's
-	MAKEFLAGS= cmake --build $(build_dir)/sdl2 --target install -j8
+	env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL cmake --build $(build_dir)/sdl2 --target install -j8
 	cp $(sdl2_install)/lib/libSDL2-2.0.0.dylib $@
 
 sdl2: $(sdl2_lib)
 
 # specific rules
 
-lib: $(mgl_lib) $(mgl_es_lib) $(build_dir)/libglfw.dylib $(fsr2_lib) $(sdl2_lib)
+# Dear ImGui with its GLFW, SDL2 and OpenGL 3 backends, the last one on MooGL
+imgui_dir := submodules/imgui
+imgui_lib := $(build_dir)/libimgui.a
+imgui_srcs := $(addprefix $(imgui_dir)/,imgui.cpp imgui_demo.cpp imgui_draw.cpp imgui_tables.cpp imgui_widgets.cpp \
+  backends/imgui_impl_glfw.cpp backends/imgui_impl_sdl2.cpp) tools/sdk/imgui/imgui_impl_opengl3_moogl.cpp
+imgui_cflags := -Iinclude -I$(imgui_dir) -I$(imgui_dir)/backends -I$(glfw_dir)/include -I$(sdl2_install)/include/SDL2
+
+$(imgui_lib): $(imgui_srcs) $(sdl2_lib)
+	@mkdir -p $(build_dir)/imgui
+	for src in $(imgui_srcs); do \
+		$(CXX) -std=c++17 -O2 -arch $(shell uname -m) $(imgui_cflags) -c $$src -o $(build_dir)/imgui/$$(basename $$src .cpp).o || exit 1; \
+	done
+	libtool -static -o $@ $(build_dir)/imgui/*.o
+
+lib: $(mgl_lib) $(mgl_es_lib) $(build_dir)/libglfw.dylib $(fsr2_lib) $(sdl2_lib) $(imgui_lib)
 
 toolchain: $(mgl_toolchain_lib)
 
@@ -357,8 +371,20 @@ $(build_dir)/triangle: examples/triangle/main.c $(mgl_lib) $(build_dir)/libglfw.
 $(build_dir)/sdl2_triangle: examples/sdl2_triangle/main.c $(mgl_lib) $(sdl2_lib)
 	$(CC) -o $@ $< -Iinclude -I$(sdl2_install)/include -L$(build_dir) -lSDL2-2.0.0 $(window_libs)
 
-window-test: $(build_dir)/test_window $(build_dir)/triangle $(build_dir)/sdl2_triangle
+$(build_dir)/test_sdl_share: tests/window/test_sdl_share.c $(mgl_lib) $(sdl2_lib)
+	$(CC) -o $@ $< -Iinclude -I$(sdl2_install)/include -L$(build_dir) -lSDL2-2.0.0 $(window_libs)
+
+$(build_dir)/test_imgui_viewports: tests/window/test_imgui_viewports.cpp $(imgui_lib) $(mgl_lib) $(build_dir)/libglfw.dylib
+	$(CXX) -std=c++17 -o $@ $< $(imgui_cflags) -L$(build_dir) -limgui -lglfw $(window_libs)
+
+$(build_dir)/test_imgui_viewports_sdl2: tests/window/test_imgui_viewports.cpp $(imgui_lib) $(mgl_lib) $(sdl2_lib)
+	$(CXX) -std=c++17 -DMGL_TEST_SDL2 -o $@ $< $(imgui_cflags) -L$(build_dir) -limgui -lSDL2-2.0.0 $(window_libs)
+
+window-test: $(build_dir)/test_window $(build_dir)/test_sdl_share $(build_dir)/test_imgui_viewports $(build_dir)/test_imgui_viewports_sdl2 $(build_dir)/triangle $(build_dir)/sdl2_triangle
 	$(build_dir)/test_window
+	$(build_dir)/test_sdl_share
+	$(build_dir)/test_imgui_viewports
+	$(build_dir)/test_imgui_viewports_sdl2
 	$(build_dir)/triangle --frames 60
 	$(build_dir)/sdl2_triangle --frames 60
 

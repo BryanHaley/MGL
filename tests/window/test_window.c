@@ -25,6 +25,7 @@
 
 #include "MGLContext.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -71,6 +72,34 @@ static void pixel(int x, int y, unsigned char out[4])
 
 static int green(const unsigned char p[4]) { return p[0] < 30 && p[1] > 220 && p[2] < 30; }
 static int red(const unsigned char p[4])   { return p[0] > 220 && p[1] < 30 && p[2] < 30; }
+
+typedef struct {
+    GLFWwindow *window;
+    GLuint prog;
+    unsigned char px[4];
+} SharedDraw;
+
+// the shared window's context, current on this thread only
+static void *drawShared(void *arg)
+{
+    SharedDraw *job = (SharedDraw *)arg;
+    GLuint vao;
+    int w, h;
+
+    glfwMakeContextCurrent(job->window);
+    glfwGetFramebufferSize(job->window, &w, &h);
+    glViewport(0, 0, w, h);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glUseProgram(job->prog);
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glReadPixels(w / 2, h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, job->px);
+    glDeleteVertexArrays(1, &vao);
+    glfwMakeContextCurrent(NULL);
+    return NULL;
+}
 
 int main(void)
 {
@@ -168,12 +197,26 @@ int main(void)
 
     check(glGetError() == GL_NO_ERROR, "no GL errors");
 
-    // MooGL contexts can't share objects yet, so asking to is refused, not ignored
+    // a window made to share sees the first one's program, not its vertex array
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     GLFWwindow *shared = glfwCreateWindow(64, 64, "shared", NULL, window);
-    check(shared == NULL, "a share request is refused");
+    check(shared != NULL, "a window can share the first one's objects");
     if (shared)
+    {
+        SharedDraw job = { shared, prog, { 0 } };
+        pthread_t th;
+
+        glfwMakeContextCurrent(shared);
+        check(glIsProgram(prog) && !glIsVertexArray(vao), "programs are shared and vertex arrays are not");
+        glfwMakeContextCurrent(NULL);
+
+        pthread_create(&th, NULL, drawShared, &job);
+        pthread_join(th, NULL);
+        check(green(job.px), "it draws with that program from another thread");
+
+        glfwMakeContextCurrent(window);
         glfwDestroyWindow(shared);
+    }
 
     glfwTerminate();
     printf("%s\n", fails ? "FAILED" : "passed");

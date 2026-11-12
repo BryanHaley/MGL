@@ -43,6 +43,16 @@ GLMContext createGLMContext(GLenum format, GLenum type,
                             GLenum depth_format, GLenum depth_type,
                             GLenum stencil_format, GLenum stencil_type);
 
+// A context with the buffers, textures, renderbuffers, samplers, shaders,
+// programs and syncs of share, or its own when share is NULL. Each context
+// keeps its own vertex arrays, framebuffers, transform feedback objects,
+// program pipelines and queries. Contexts in a group can be current on
+// different threads at once.
+GLMContext createGLMContextShared(GLenum format, GLenum type,
+                                  GLenum depth_format, GLenum depth_type,
+                                  GLenum stencil_format, GLenum stencil_type,
+                                  GLMContext share);
+
 GLuint sizeForFormatType(GLenum format, GLenum type);
 GLuint bicountForFormatType(GLenum format, GLenum type, GLenum component);
 

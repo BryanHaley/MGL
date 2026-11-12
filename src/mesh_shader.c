@@ -240,54 +240,54 @@ void mglMultiDrawMeshTasksIndirectCountNV(GLMContext ctx, GLintptr indirect, GLi
 }
 
 #ifdef MGL_GL_CORE
-extern GLMContext _ctx;
+extern __thread GLMContext _ctx;
 extern void mgl_lazy_init(void);
 
 void glDrawMeshTasksEXT(GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z)
 {
     mgl_lazy_init();
-    mglDrawMeshTasks(_ctx, num_groups_x, num_groups_y, num_groups_z);
+    mglDrawMeshTasks((mgl_lazy_init(), _ctx), num_groups_x, num_groups_y, num_groups_z);
 }
 
 void glDrawMeshTasksIndirectEXT(GLintptr indirect)
 {
     mgl_lazy_init();
-    mglDrawMeshTasksIndirect(_ctx, indirect);
+    mglDrawMeshTasksIndirect((mgl_lazy_init(), _ctx), indirect);
 }
 
 void glMultiDrawMeshTasksIndirectEXT(GLintptr indirect, GLsizei drawcount, GLsizei stride)
 {
     mgl_lazy_init();
-    mglMultiDrawMeshTasksIndirect(_ctx, indirect, drawcount, stride);
+    mglMultiDrawMeshTasksIndirect((mgl_lazy_init(), _ctx), indirect, drawcount, stride);
 }
 
 void glMultiDrawMeshTasksIndirectCountEXT(GLintptr indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride)
 {
     mgl_lazy_init();
-    mglMultiDrawMeshTasksIndirectCount(_ctx, indirect, drawcount, maxdrawcount, stride);
+    mglMultiDrawMeshTasksIndirectCount((mgl_lazy_init(), _ctx), indirect, drawcount, maxdrawcount, stride);
 }
 
 void glDrawMeshTasksNV(GLuint first, GLuint count)
 {
     mgl_lazy_init();
-    mglDrawMeshTasksNV(_ctx, first, count);
+    mglDrawMeshTasksNV((mgl_lazy_init(), _ctx), first, count);
 }
 
 void glDrawMeshTasksIndirectNV(GLintptr indirect)
 {
     mgl_lazy_init();
-    mglDrawMeshTasksIndirectNV(_ctx, indirect);
+    mglDrawMeshTasksIndirectNV((mgl_lazy_init(), _ctx), indirect);
 }
 
 void glMultiDrawMeshTasksIndirectNV(GLintptr indirect, GLsizei drawcount, GLsizei stride)
 {
     mgl_lazy_init();
-    mglMultiDrawMeshTasksIndirectNV(_ctx, indirect, drawcount, stride);
+    mglMultiDrawMeshTasksIndirectNV((mgl_lazy_init(), _ctx), indirect, drawcount, stride);
 }
 
 void glMultiDrawMeshTasksIndirectCountNV(GLintptr indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride)
 {
     mgl_lazy_init();
-    mglMultiDrawMeshTasksIndirectCountNV(_ctx, indirect, drawcount, maxdrawcount, stride);
+    mglMultiDrawMeshTasksIndirectCountNV((mgl_lazy_init(), _ctx), indirect, drawcount, maxdrawcount, stride);
 }
 #endif

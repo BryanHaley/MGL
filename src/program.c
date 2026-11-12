@@ -182,13 +182,13 @@ Program *getProgram(GLMContext ctx, GLuint program)
 {
     Program *ptr;
 
-    ptr = (Program *)searchHashTable(&STATE(program_table), program);
+    ptr = (Program *)searchHashTable(&SHARED(program_table), program);
 
     if (!ptr)
     {
         ptr = newProgram(ctx, program);
 
-        insertHashElement(&STATE(program_table), program, ptr);
+        insertHashElement(&SHARED(program_table), program, ptr);
     }
 
     return ptr;
@@ -198,7 +198,7 @@ int isProgram(GLMContext ctx, GLuint program)
 {
     Program *ptr;
 
-    ptr = (Program *)searchHashTable(&STATE(program_table), program);
+    ptr = (Program *)searchHashTable(&SHARED(program_table), program);
 
     if (ptr)
         return 1;
@@ -210,7 +210,7 @@ Program *findProgram(GLMContext ctx, GLuint program)
 {
     Program *ptr;
 
-    ptr = (Program *)searchHashTable(&STATE(program_table), program);
+    ptr = (Program *)searchHashTable(&SHARED(program_table), program);
 
     return ptr;
 }
@@ -219,7 +219,7 @@ GLuint mglCreateProgram(GLMContext ctx)
 {
     GLuint program;
 
-    program = getNewName(&STATE(program_table));
+    program = getNewName(&SHARED(program_table));
 
     getProgram(ctx, program);
 
@@ -422,7 +422,7 @@ void mglFreeProgram(GLMContext ctx, Program *ptr)
             sptr->refcount--;
             if (sptr->refcount == 0 && sptr->delete_status)
             {
-                deleteHashElement(&STATE(shader_table), sptr->name);
+                deleteHashElement(&SHARED(shader_table), sptr->name);
                 mglForgetObjectLabel(ctx, GL_SHADER, sptr->name, NULL);
                 mglFreeShader(ctx, sptr);
             }
@@ -437,7 +437,7 @@ static void freeDeletedProgram(GLMContext ctx, Program *ptr)
 {
     if (findProgram(ctx, ptr->name) == ptr)
     {
-        deleteHashElement(&STATE(program_table), ptr->name);
+        deleteHashElement(&SHARED(program_table), ptr->name);
         mglForgetObjectLabel(ctx, GL_PROGRAM, ptr->name, NULL);
     }
 
@@ -647,7 +647,7 @@ void mglDetachShader(GLMContext ctx, GLuint program, GLuint shader)
     
     if (sptr->refcount == 0 && sptr->delete_status)
     {
-        deleteHashElement(&STATE(shader_table), sptr->name);
+        deleteHashElement(&SHARED(shader_table), sptr->name);
         mglForgetObjectLabel(ctx, GL_SHADER, sptr->name, NULL);
         mglFreeShader(ctx, sptr);
     }

@@ -26,6 +26,8 @@
 // smallest table we hand out
 #define HASH_TABLE_MIN_SIZE 32
 
+#include <pthread.h>
+
 typedef struct {
     GLuint name;
     void *data;
@@ -42,6 +44,9 @@ typedef struct {
     GLuint *free_names;
     size_t  free_count;
     size_t  free_capacity;
+
+    // set for a table that contexts on several threads share
+    pthread_mutex_t *lock;
 } HashTable;
 
 HashTable *createHashTable(GLuint size);

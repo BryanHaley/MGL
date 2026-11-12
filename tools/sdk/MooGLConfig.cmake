@@ -4,6 +4,9 @@
 #   MooGL::GL    OpenGL 4.6 (libmoogl), with GL/glcorearb.h
 #   MooGL::glfw  GLFW built to make MooGL contexts; links MooGL::GL
 #   MooGL::FSR2  AMD FSR 2's API on MetalFX, with AMD's headers
+#   MooGL::imgui Dear ImGui (docking) with its GLFW, SDL2 and OpenGL 3
+#                backends, the last one drawing with MooGL. Link MooGL::glfw
+#                or SDL2::SDL2 alongside it for the platform backend you use.
 # MooGL_LIBRARY_DIR is the folder holding the dylibs.
 
 get_filename_component(MooGL_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
@@ -30,6 +33,12 @@ if(NOT TARGET MooGL::GL)
         IMPORTED_SONAME "@rpath/libffx_fsr2_api.dylib"
         INTERFACE_INCLUDE_DIRECTORIES "${MooGL_INCLUDE_DIR}/ffx-fsr2;${MooGL_INCLUDE_DIR}/ffx-fsr2/glad"
         INTERFACE_COMPILE_DEFINITIONS FFX_GCC
+        INTERFACE_LINK_LIBRARIES MooGL::GL)
+
+    add_library(MooGL::imgui STATIC IMPORTED)
+    set_target_properties(MooGL::imgui PROPERTIES
+        IMPORTED_LOCATION "${MooGL_LIBRARY_DIR}/libimgui.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${MooGL_INCLUDE_DIR}/imgui"
         INTERFACE_LINK_LIBRARIES MooGL::GL)
 endif()
 

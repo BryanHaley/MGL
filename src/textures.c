@@ -173,13 +173,13 @@ static Texture *getTexture(GLMContext ctx, GLenum target, GLuint texture)
 {
     Texture *ptr;
 
-    ptr = (Texture *)searchHashTable(&STATE(texture_table), texture);
+    ptr = (Texture *)searchHashTable(&SHARED(texture_table), texture);
 
     if (!ptr)
     {
         ptr = newTexture(ctx, target, texture);
 
-        insertHashElement(&STATE(texture_table), texture, ptr);
+        insertHashElement(&SHARED(texture_table), texture, ptr);
     }
 
     return ptr;
@@ -189,7 +189,7 @@ static int isTexture(GLMContext ctx, GLuint texture)
 {
     Texture *ptr;
 
-    ptr = (Texture *)searchHashTable(&STATE(texture_table), texture);
+    ptr = (Texture *)searchHashTable(&SHARED(texture_table), texture);
 
     if (ptr)
         return 1;
@@ -201,7 +201,7 @@ Texture *findTexture(GLMContext ctx, GLuint texture)
 {
     Texture *ptr;
 
-    ptr = (Texture *)searchHashTable(&STATE(texture_table), texture);
+    ptr = (Texture *)searchHashTable(&SHARED(texture_table), texture);
 
     return ptr;
 }
@@ -350,11 +350,11 @@ void mglGenTextures(GLMContext ctx, GLsizei n, GLuint *textures)
 
     while(n--)
     {
-        *textures++ = getNewName(&STATE(texture_table));
+        *textures++ = getNewName(&SHARED(texture_table));
 
         // TEX_OBJ_RES_NAME has special name.. skip it
-        if (STATE(texture_table.current_name) == TEX_OBJ_RES_NAME)
-            getNewName(&STATE(texture_table));
+        if (SHARED(texture_table.current_name) == TEX_OBJ_RES_NAME)
+            getNewName(&SHARED(texture_table));
     }
 }
 
@@ -628,32 +628,32 @@ void mglFreeTextureObject(GLMContext ctx, Texture *tex)
 
 static void retireTexture(GLMContext ctx, Texture *tex)
 {
-    Texture **grown = (Texture **)realloc(STATE(retired_textures),
-                                          (STATE(retired_texture_count) + 1) * sizeof(Texture *));
+    Texture **grown = (Texture **)realloc(SHARED(retired_textures),
+                                          (SHARED(retired_texture_count) + 1) * sizeof(Texture *));
 
     // with nowhere to note it, keeping it is safer than freeing it
     if (grown == NULL)
         return;
 
-    STATE(retired_textures) = grown;
-    STATE(retired_textures)[STATE(retired_texture_count)++] = tex;
+    SHARED(retired_textures) = grown;
+    SHARED(retired_textures)[SHARED(retired_texture_count)++] = tex;
 }
 
 void mglSweepRetiredTextures(GLMContext ctx)
 {
     GLuint kept = 0;
 
-    for (GLuint i = 0; i < STATE(retired_texture_count); i++)
+    for (GLuint i = 0; i < SHARED(retired_texture_count); i++)
     {
-        Texture *tex = STATE(retired_textures)[i];
+        Texture *tex = SHARED(retired_textures)[i];
 
         if (framebufferHolds(ctx, tex))
-            STATE(retired_textures)[kept++] = tex;
+            SHARED(retired_textures)[kept++] = tex;
         else
             mglFreeTextureObject(ctx, tex);
     }
 
-    STATE(retired_texture_count) = kept;
+    SHARED(retired_texture_count) = kept;
 }
 
 void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
@@ -701,8 +701,11 @@ void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
 
             mglBindlessForgetTexture(ctx, tex);
 
+            // another context using it keeps all of it until it lets go
+            bool held = mglHoldIfUsedElsewhere(ctx, GL_TEXTURE, tex);
+
             // views keep the storage alive, so only the name goes
-            if (tex->view_count == 0)
+            if (tex->view_count == 0 && !held)
             {
                 if (tex->mtl_data)
                 {
@@ -714,7 +717,7 @@ void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
                 invalidateTexture(ctx, tex);
             }
 
-            deleteHashElement(&STATE(texture_table), name);
+            deleteHashElement(&SHARED(texture_table), name);
             mglForgetObjectLabel(ctx, GL_TEXTURE, name, NULL);
             mglForgetBufferTexture(name);
 
@@ -726,7 +729,9 @@ void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
 
             // a framebuffer still holding it keeps the emptied struct until
             // it lets go
-            if (framebufferHolds(ctx, tex))
+            if (held)
+                ;
+            else if (framebufferHolds(ctx, tex))
                 retireTexture(ctx, tex);
             else
                 mglFreeTextureObject(ctx, tex);
@@ -734,6 +739,7 @@ void mglDeleteTextures(GLMContext ctx, GLsizei n, const GLuint *textures)
     }
 
     mglSweepRetiredTextures(ctx);
+    mglSweepHeldObjects(ctx);
 }
 
 // GL 4.6 section 8.17: whether a texture can be sampled with these filters.
@@ -5032,8 +5038,8 @@ void mglTextureView(GLMContext ctx, GLuint texture, GLenum target, GLuint origte
     ERROR_CHECK_RETURN(texture != 0, GL_INVALID_VALUE);
 
     // a name glGenTextures handed out and nothing has bound yet
-    ERROR_CHECK_RETURN(texture < STATE(texture_table).current_name &&
-                       !isFreeName(&STATE(texture_table), texture) &&
+    ERROR_CHECK_RETURN(texture < SHARED(texture_table).current_name &&
+                       !isFreeName(&SHARED(texture_table), texture) &&
                        findTexture(ctx, texture) == NULL, GL_INVALID_OPERATION);
 
     orig = findTexture(ctx, origtexture);
