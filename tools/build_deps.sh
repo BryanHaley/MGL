@@ -2,7 +2,7 @@
 # Copyright (C) The MooGL Project
 #
 # Fetches and builds what MooGL links against, from a fresh clone:
-#   submodules/SPIRV-Tools, SPIRV-Cross, SPIRV-Headers, glslang, FidelityFX-FSR2-OpenGL, glfw, SDL2
+#   submodules/SPIRV-Tools, SPIRV-Cross, SPIRV-Headers, glslang, FidelityFX-FSR2-OpenGL, glfw, SDL2, imgui
 #     (SDL2 itself is built by make, after libmoogl)
 # The CTS and IDKEngine submodules are left alone; they are only for testing.
 #
@@ -26,7 +26,7 @@ cmake_build() {
 }
 
 git submodule update --init submodules/SPIRV-Tools submodules/SPIRV-Cross submodules/SPIRV-Headers \
-    submodules/glslang submodules/FidelityFX-FSR2-OpenGL submodules/glfw submodules/SDL2
+    submodules/glslang submodules/FidelityFX-FSR2-OpenGL submodules/glfw submodules/SDL2 submodules/imgui
 
 cmake_build submodules/SPIRV-Tools submodules/SPIRV-Tools/build \
     -DSPIRV-Headers_SOURCE_DIR="$root/submodules/SPIRV-Headers" -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF \
