@@ -1,3 +1,24 @@
+## MooGL 0.2.0
+
+### Added
+- Shared contexts. Contexts created to share with another one now have the same
+  textures, buffers, renderbuffers, samplers, programs, shaders and fences. Each
+  context still has its own vertex arrays, framebuffers and transform feedback
+  objects, as OpenGL requires. Before, asking for a shared context failed.
+  - Works with GLFW's `share` window argument and SDL2's
+    `SDL_GL_SHARE_WITH_CURRENT_CONTEXT`, and from C with `createGLMContextShared`.
+  - Each thread has its own current context, so contexts on different threads can
+    load and draw at the same time.
+  - An object deleted in one context stays alive while another context still uses
+    it, and is freed once none does.
+  - Fences work across contexts: `glWaitSync` makes one context's GPU work wait for
+    another's, and `glClientWaitSync` honours its timeout.
+- Dear ImGui in the SDK: `libimgui.a` (docking branch, with its GLFW, SDL2 and
+  OpenGL 3 backends) and a `MooGL::imgui` CMake target. Stock ImGui loads Apple's
+  OpenGL on a Mac; this build draws with MooGL. Two examples, one for GLFW and one
+  for SDL2, open ImGui's demo with multi-viewports, so windows dragged out of the
+  main one get their own shared context.
+
 ## MooGL 0.1.1
 
 ### Faster
