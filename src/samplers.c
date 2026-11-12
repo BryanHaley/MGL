@@ -67,14 +67,14 @@ Sampler *getSampler(GLMContext ctx, GLuint sampler)
 {
     Sampler *ptr;
 
-    ptr = (Sampler *)searchHashTable(&STATE(sampler_table), sampler);
+    ptr = (Sampler *)searchHashTable(&SHARED(sampler_table), sampler);
 
     if (!ptr)
     {
         ptr = newSampler(ctx, sampler);
 
         if (ptr)
-            insertHashElement(&STATE(sampler_table), sampler, ptr);
+            insertHashElement(&SHARED(sampler_table), sampler, ptr);
     }
 
     return ptr;
@@ -84,7 +84,7 @@ bool isSampler(GLMContext ctx, GLuint sampler)
 {
     Sampler *ptr;
 
-    ptr = (Sampler *)searchHashTable(&STATE(sampler_table), sampler);
+    ptr = (Sampler *)searchHashTable(&SHARED(sampler_table), sampler);
 
     if (ptr)
         return true;
@@ -96,7 +96,7 @@ Sampler *findSampler(GLMContext ctx, GLuint sampler)
 {
     Sampler *ptr;
 
-    ptr = (Sampler *)searchHashTable(&STATE(sampler_table), sampler);
+    ptr = (Sampler *)searchHashTable(&SHARED(sampler_table), sampler);
 
     return ptr;
 }
@@ -118,7 +118,7 @@ void mglGenSamplers(GLMContext ctx, GLsizei count, GLuint *samplers)
     {
         GLuint name;
 
-        name = getNewName(&ctx->state.sampler_table);
+        name = getNewName(&ctx->state.share->sampler_table);
 
         if (!getSampler(ctx, name))
         {
@@ -183,8 +183,12 @@ void mglDeleteSamplers(GLMContext ctx, GLsizei count, const GLuint *samplers)
             }
         }
 
-        deleteHashElement(&ctx->state.sampler_table, sampler);
+        deleteHashElement(&ctx->state.share->sampler_table, sampler);
         mglForgetObjectLabel(ctx, GL_SAMPLER, sampler, NULL);
+
+        // another context sampling with it keeps it until it lets go
+        if (mglHoldIfUsedElsewhere(ctx, GL_SAMPLER, ptr))
+            continue;
 
         if (ptr->mtl_data)
         {
@@ -193,6 +197,8 @@ void mglDeleteSamplers(GLMContext ctx, GLsizei count, const GLuint *samplers)
 
         free(ptr);
     }
+
+    mglSweepHeldObjects(ctx);
 }
 
 void mglCreateSamplers(GLMContext ctx, GLsizei n, GLuint *samplers)

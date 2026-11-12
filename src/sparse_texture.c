@@ -361,20 +361,20 @@ void mglTexturePageCommitment(GLMContext ctx, GLuint texture, GLint level, GLint
 }
 
 #ifdef MGL_GL_CORE
-extern GLMContext _ctx;
+extern __thread GLMContext _ctx;
 extern void mgl_lazy_init(void);
 
 void glTexPageCommitmentARB(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
                             GLsizei width, GLsizei height, GLsizei depth, GLboolean commit)
 {
     mgl_lazy_init();
-    mglTexPageCommitment(_ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, commit);
+    mglTexPageCommitment((mgl_lazy_init(), _ctx), target, level, xoffset, yoffset, zoffset, width, height, depth, commit);
 }
 
 void glTexturePageCommitmentEXT(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
                                 GLsizei width, GLsizei height, GLsizei depth, GLboolean commit)
 {
     mgl_lazy_init();
-    mglTexturePageCommitment(_ctx, texture, level, xoffset, yoffset, zoffset, width, height, depth, commit);
+    mglTexturePageCommitment((mgl_lazy_init(), _ctx), texture, level, xoffset, yoffset, zoffset, width, height, depth, commit);
 }
 #endif

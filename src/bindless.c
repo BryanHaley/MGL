@@ -30,7 +30,7 @@
 
 #ifdef MGL_GL_CORE
 
-extern GLMContext _ctx;
+extern __thread GLMContext _ctx;
 extern void mgl_lazy_init(void);
 
 Texture *findTexture(GLMContext ctx, GLuint texture);

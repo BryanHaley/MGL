@@ -33,6 +33,18 @@
 #include "hash_table.h"
 #include "glm_context.h"
 
+static void lockTable(HashTable *table)
+{
+    if (table && table->lock)
+        pthread_mutex_lock(table->lock);
+}
+
+static void unlockTable(HashTable *table)
+{
+    if (table && table->lock)
+        pthread_mutex_unlock(table->lock);
+}
+
 void initHashTable(HashTable *ptr, GLuint size)
 {
     size_t len;
@@ -59,7 +71,7 @@ void initHashTable(HashTable *ptr, GLuint size)
     bzero(ptr->keys, len);
 }
 
-GLuint getNewName(HashTable *table)
+static GLuint getNewNameUnlocked(HashTable *table)
 {
     // Reuse a deleted name if one is going spare. GL only asks that the name
     // is not currently in use, and recycling keeps the table from growing for
@@ -84,7 +96,7 @@ GLuint getNewName(HashTable *table)
 }
 
 // A name that was deleted and not handed out again: nobody holds it
-bool isFreeName(HashTable *table, GLuint name)
+static bool isFreeNameUnlocked(HashTable *table, GLuint name)
 {
     for (size_t i = 0; i < table->free_count; i++)
         if (table->free_names[i] == name)
@@ -120,7 +132,7 @@ static void releaseName(HashTable *table, GLuint name)
     table->free_names[table->free_count++] = name;
 }
 
-void *searchHashTable(HashTable *table, GLuint name)
+static void *searchHashTableUnlocked(HashTable *table, GLuint name)
 {
     // no GL context reaches here, so a bad table is logged and refused
     if (!table)
@@ -140,7 +152,7 @@ void *searchHashTable(HashTable *table, GLuint name)
     return table->keys[name].data;
 }
 
-void insertHashElement(HashTable *table, GLuint name, void *data)
+static void insertHashElementUnlocked(HashTable *table, GLuint name, void *data)
 {
     if (!table)
     {
@@ -219,7 +231,7 @@ void insertHashElement(HashTable *table, GLuint name, void *data)
     table->keys[name].data = data;
 }
 
-void deleteHashElement(HashTable *table, GLuint name)
+static void deleteHashElementUnlocked(HashTable *table, GLuint name)
 {
     if (!table)
     {
@@ -239,4 +251,42 @@ void deleteHashElement(HashTable *table, GLuint name)
     table->keys[name].data = NULL;
 
     releaseName(table, name);
+}
+
+GLuint getNewName(HashTable *table)
+{
+    lockTable(table);
+    GLuint r = getNewNameUnlocked(table);
+    unlockTable(table);
+    return r;
+}
+
+bool isFreeName(HashTable *table, GLuint name)
+{
+    lockTable(table);
+    bool r = isFreeNameUnlocked(table, name);
+    unlockTable(table);
+    return r;
+}
+
+void *searchHashTable(HashTable *table, GLuint name)
+{
+    lockTable(table);
+    void *r = searchHashTableUnlocked(table, name);
+    unlockTable(table);
+    return r;
+}
+
+void insertHashElement(HashTable *table, GLuint name, void *data)
+{
+    lockTable(table);
+    insertHashElementUnlocked(table, name, data);
+    unlockTable(table);
+}
+
+void deleteHashElement(HashTable *table, GLuint name)
+{
+    lockTable(table);
+    deleteHashElementUnlocked(table, name);
+    unlockTable(table);
 }

@@ -280,13 +280,13 @@ Shader *getShader(GLMContext ctx, GLenum type, GLuint shader)
 {
     Shader *ptr;
 
-    ptr = (Shader *)searchHashTable(&STATE(shader_table), shader);
+    ptr = (Shader *)searchHashTable(&SHARED(shader_table), shader);
 
     if (!ptr)
     {
         ptr = newShader(ctx, type, shader);
 
-        insertHashElement(&STATE(shader_table), shader, ptr);
+        insertHashElement(&SHARED(shader_table), shader, ptr);
     }
 
     return ptr;
@@ -296,7 +296,7 @@ int isShader(GLMContext ctx, GLuint shader)
 {
     Shader *ptr;
 
-    ptr = (Shader *)searchHashTable(&STATE(shader_table), shader);
+    ptr = (Shader *)searchHashTable(&SHARED(shader_table), shader);
 
     if (ptr)
         return 1;
@@ -308,7 +308,7 @@ Shader *findShader(GLMContext ctx, GLuint shader)
 {
     Shader *ptr;
 
-    ptr = (Shader *)searchHashTable(&STATE(shader_table), shader);
+    ptr = (Shader *)searchHashTable(&SHARED(shader_table), shader);
 
     return ptr;
 }
@@ -335,7 +335,7 @@ GLuint mglCreateShader(GLMContext ctx, GLenum type)
 
     // shaders and programs share one set of names, so a shader's name never
     // also names a program
-    shader = getNewName(&STATE(program_table));
+    shader = getNewName(&SHARED(program_table));
 
     getShader(ctx, type, shader);
 
@@ -385,7 +385,7 @@ void mglDeleteShader(GLMContext ctx, GLuint shader)
     // saying yes and glShaderSource still works on it, until it is detached.
     if (ptr->refcount == 0)
     {
-        deleteHashElement(&STATE(shader_table), shader);
+        deleteHashElement(&SHARED(shader_table), shader);
         mglForgetObjectLabel(ctx, GL_SHADER, shader, NULL);
         mglFreeShader(ctx, ptr);
     }
@@ -2669,13 +2669,13 @@ void mglSpecializeShader(GLMContext ctx, GLuint shader, const GLchar *pEntryPoin
 }
 
 #ifdef MGL_GL_CORE
-extern GLMContext _ctx;
+extern __thread GLMContext _ctx;
 extern void mgl_lazy_init(void);
 
 void glMaxShaderCompilerThreadsKHR(GLuint count)
 {
     mgl_lazy_init();
-    _ctx->max_shader_compiler_threads = (GLint)count;
+    (mgl_lazy_init(), _ctx)->max_shader_compiler_threads = (GLint)count;
 }
 
 void glMaxShaderCompilerThreadsARB(GLuint count)

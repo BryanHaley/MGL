@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <stdint.h>
+#include <pthread.h>
 
 #include <mach/vm_types.h>
 #include <glslang_c_interface.h>
@@ -60,6 +61,8 @@
 #define RETURN_ON_NULL(_expr_) if (_expr_ == NULL) { printf("failure %s:%d\n",__FUNCTION__,__LINE__); return; }
 
 #define STATE(_VAR_)     ctx->state._VAR_
+// what the contexts of a share group hold in common
+#define SHARED(_VAR_)    ctx->state.share->_VAR_
 #define STATE_VAR(_VAR_) ctx->state.var._VAR_
 
 #define VAO()   ctx->state.vao
@@ -1394,6 +1397,11 @@ void mglApplyClearsFor(GLMContext ctx, struct Framebuffer_t *fbo);
 typedef struct __GLsync {
     GLsizei name;
     void *mtl_event;
+    // signalled once the event reaches value; any context can wait on it
+    void *shared_event;
+    uint64_t value;
+    // the context that made it, only ever compared
+    void *owner;
     struct __GLsync *next;      // live list, so a bad GLsync can be spotted
 #ifdef __cplusplus
 } Sync;
@@ -1611,29 +1619,17 @@ typedef struct {
     Sampler     *texture_samplers[TEXTURE_UNITS];
     ImageUnit   image_units[TEXTURE_UNITS];
 
-    GLsizei sync_name;
-    Sync   *sync_list;          // every sync object still alive
+    // buffers, textures, renderbuffers, samplers, shaders, programs and syncs,
+    // which contexts made to share have in common
+    struct MGLShareGroup_t *share;
 
     HashTable vao_table;
-    HashTable buffer_table;
-    HashTable texture_table;
-    // deleted textures a framebuffer still had attached; each is freed once
-    // no framebuffer points at it
-    Texture **retired_textures;
-    GLuint retired_texture_count;
-    // deleted renderbuffers a framebuffer that was not bound still holds
-    struct Renderbuffer_t **retired_renderbuffers;
-    GLuint retired_renderbuffer_count;
     // texture 0: one per target for the whole context, made the first time
     // something asks for it
     Texture *default_textures[_MAX_TEXTURE_TYPES];
-    HashTable shader_table;
-    HashTable program_table;
     HashTable program_pipeline_table;
     HashTable transform_feedback_table;
-    HashTable renderbuffer_table;
     HashTable framebuffer_table;
-    HashTable sampler_table;
     HashTable query_table;
 
     Query *active_query[_MAX_QUERY_TARGETS][MAX_QUERY_STREAMS];
@@ -1681,6 +1677,37 @@ typedef struct {
 static_assert(TEXTURE_UNITS == 128, "active_texture_mask relies on this");
 
 typedef struct GLMContextRec_t *GLMContext;
+
+// GL 4.6 chapter 5: contexts made to share have these objects in common.
+// Each keeps its own vertex arrays, framebuffers, transform feedback objects,
+// program pipelines and queries.
+typedef struct MGLShareGroup_t {
+    pthread_mutex_t lock;
+    GLMContext *contexts;
+    GLuint context_count;
+
+    HashTable buffer_table;
+    HashTable texture_table;
+    HashTable shader_table;
+    HashTable program_table;
+    HashTable renderbuffer_table;
+    HashTable sampler_table;
+
+    GLsizei sync_name;
+    Sync   *sync_list;          // every sync object still alive
+
+    // deleted textures a framebuffer still had attached; each is freed once
+    // no framebuffer points at it
+    Texture **retired_textures;
+    GLuint retired_texture_count;
+    // deleted renderbuffers a framebuffer that was not bound still holds
+    struct Renderbuffer_t **retired_renderbuffers;
+    GLuint retired_renderbuffer_count;
+
+    // objects one context deleted while another still uses them
+    struct { GLenum type; void *obj; } *held;
+    GLuint held_count;
+} MGLShareGroup;
 
 // sparse_texture.c
 bool mglSparseTarget(GLenum target);
@@ -1850,6 +1877,22 @@ typedef struct GLMContextRec_t {
 GLMContext createGLMContext(GLenum format, GLenum type,
                             GLenum depth_format, GLenum depth_type,
                             GLenum stencil_format, GLenum stencil_type);
+GLMContext createGLMContextShared(GLenum format, GLenum type,
+                                  GLenum depth_format, GLenum depth_type,
+                                  GLenum stencil_format, GLenum stencil_type,
+                                  GLMContext share);
+
+// share_group.c
+void mglFreeHeldObjects(GLMContext ctx);
+void mglSweepHeldObjects(GLMContext ctx);
+bool mglHoldIfUsedElsewhere(GLMContext ctx, GLenum type, void *obj);
+
+// fence.c, and the Metal side in MGLRenderer.m
+void mglReleaseSync(GLMContext ctx, Sync *sync);
+bool mtlSyncSignaled(Sync *sync);
+bool mtlSyncWait(Sync *sync, uint64_t timeout_ns);
+void mtlServerWaitSync(GLMContext ctx, Sync *sync);
+void mtlSyncRelease(Sync *sync);
 
 void mgl_lazy_init(void);
 

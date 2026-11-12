@@ -39,7 +39,10 @@
 extern void getMacOSDefaults(GLMContext glm_ctx);
 extern void init_dispatch(GLMContext ctx);
 
-GLMContext _ctx = NULL;
+// GL has a current context per thread. A thread that never made one current
+// gets the last one made current anywhere, as when this was one global.
+__thread GLMContext _ctx = NULL;
+static GLMContext _last_ctx = NULL;
 
 /* Declared in MGLRenderer.m */
 extern void* CppCreateMGLRendererHeadless(void *glm_ctx);
@@ -53,6 +56,7 @@ static void mgl_auto_init(void) {
         _ctx = createGLMContext(GL_RGBA, GL_UNSIGNED_BYTE,
                                GL_DEPTH_COMPONENT24, GL_UNSIGNED_INT,
                                GL_STENCIL_INDEX8, GL_UNSIGNED_BYTE);
+        _last_ctx = _ctx;
         CppCreateMGLRendererHeadless(_ctx);
         MGL_INFO("MGL: Initialized headless Metal renderer\n");
     }
@@ -67,6 +71,9 @@ void mgl_lazy_init(void) {
         _ctx = NULL;
     }
 
+    if (_ctx == NULL)
+        _ctx = _last_ctx;
+
     if (_ctx == NULL) {
         mgl_auto_init();
     }
@@ -77,15 +84,118 @@ GLMContext mglGetContext(void)
     return _ctx;
 }
 
+// A new group, or a place in share's, for ctx. NULL if out of memory.
+static MGLShareGroup *joinShareGroup(GLMContext ctx, GLMContext share)
+{
+    MGLShareGroup *g = share ? share->state.share : NULL;
+
+    if (g == NULL)
+    {
+        pthread_mutexattr_t attr;
+
+        g = (MGLShareGroup *)calloc(1, sizeof(MGLShareGroup));
+
+        if (g == NULL)
+            return NULL;
+
+        // a context calls back into the group while holding it
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&g->lock, &attr);
+        pthread_mutexattr_destroy(&attr);
+
+        initHashTable(&g->buffer_table, 32);
+        initHashTable(&g->texture_table, 32);
+        initHashTable(&g->shader_table, 32);
+        initHashTable(&g->program_table, 32);
+        initHashTable(&g->renderbuffer_table, 32);
+        initHashTable(&g->sampler_table, 32);
+
+        g->sync_name = 1;
+    }
+
+    pthread_mutex_lock(&g->lock);
+
+    GLMContext *grown = (GLMContext *)realloc(g->contexts, (g->context_count + 1) * sizeof(GLMContext));
+
+    if (grown)
+    {
+        g->contexts = grown;
+        g->contexts[g->context_count++] = ctx;
+    }
+
+    // a context on its own skips the locking; from the second one on, the
+    // tables can be used from several threads at once
+    if (g->context_count == 2)
+    {
+        HashTable *tables[] = { &g->buffer_table, &g->texture_table, &g->shader_table,
+                                &g->program_table, &g->renderbuffer_table, &g->sampler_table };
+
+        for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++)
+            tables[i]->lock = &g->lock;
+    }
+
+    pthread_mutex_unlock(&g->lock);
+
+    if (grown == NULL && share == NULL)
+    {
+        free(g);
+        return NULL;
+    }
+
+    return grown ? g : NULL;
+}
+
+// Takes ctx out of its group. True when it was the last one, and the group's
+// objects are the caller's to free.
+static bool leaveShareGroup(GLMContext ctx)
+{
+    MGLShareGroup *g = ctx->state.share;
+    GLuint left;
+
+    pthread_mutex_lock(&g->lock);
+
+    for (GLuint i = 0; i < g->context_count; i++)
+        if (g->contexts[i] == ctx)
+        {
+            g->contexts[i] = g->contexts[--g->context_count];
+            break;
+        }
+
+    left = g->context_count;
+    pthread_mutex_unlock(&g->lock);
+
+    return left == 0;
+}
+
 GLMContext createGLMContext(GLenum format, GLenum type,
                             GLenum depth_format, GLenum depth_type,
                             GLenum stencil_format, GLenum stencil_type)
+{
+    return createGLMContextShared(format, type, depth_format, depth_type, stencil_format, stencil_type, NULL);
+}
+
+GLMContext createGLMContextShared(GLenum format, GLenum type,
+                                  GLenum depth_format, GLenum depth_type,
+                                  GLenum stencil_format, GLenum stencil_type,
+                                  GLMContext share)
 {
     GLMContext ctx = (GLMContext)malloc(sizeof(GLMContextRec));
     GLMContext save = _ctx;
     int err;
 
+    if (ctx == NULL)
+        return NULL;
+
     bzero((void *)ctx, sizeof(GLMContextRec));
+
+    ctx->state.share = joinShareGroup(ctx, share);
+
+    if (ctx->state.share == NULL)
+    {
+        free(ctx);
+        return NULL;
+    }
 
     _ctx = ctx;
 
@@ -310,15 +420,9 @@ GLMContext createGLMContext(GLenum format, GLenum type,
 
     STATE(var.cull_face_mode) = GL_BACK;
 
-    STATE(sync_name) = 1;
-
     STATE(dirty_bits) = DIRTY_ALL;
 
     initHashTable(&STATE(vao_table), 32);
-    initHashTable(&STATE(buffer_table), 32);
-    initHashTable(&STATE(texture_table), 32);
-    initHashTable(&STATE(shader_table), 32);
-    initHashTable(&STATE(program_table), 32);
     initHashTable(&STATE(program_pipeline_table), 32);
     initHashTable(&STATE(query_table), 32);
 
@@ -331,9 +435,7 @@ GLMContext createGLMContext(GLenum format, GLenum type,
     // the default object is always there
     if (STATE(transform_feedback))
         STATE(transform_feedback)->created = GL_TRUE;
-    initHashTable(&STATE(renderbuffer_table), 32);
     initHashTable(&STATE(framebuffer_table), 32);
-    initHashTable(&STATE(sampler_table), 32);
     
     init_dispatch(ctx);
 
@@ -355,6 +457,9 @@ GLMContext createGLMContext(GLenum format, GLenum type,
 void MGLsetCurrentContext(GLMContext ctx)
 {
     _ctx = ctx;
+
+    if (ctx)
+        _last_ctx = ctx;
 }
 
 GLMContext MGLgetCurrentContext(void)
@@ -488,6 +593,8 @@ static void freeSamplerObj(GLMContext ctx, void *obj)
     free(smp);
 }
 
+void mglUseProgram(GLMContext ctx, GLuint program);
+
 // Frees the context and everything in it. Whatever the GPU is still doing
 // finishes first, since it may be reading any of it.
 void destroyGLMContext(GLMContext ctx)
@@ -504,35 +611,59 @@ void destroyGLMContext(GLMContext ctx)
     if (ctx->mtl_funcs.mtlObj && ctx->mtl_funcs.mtlFlush)
         ctx->mtl_funcs.mtlFlush(ctx, true);
 
+    // the program this context had current lets go of it, the way switching
+    // away would
+    if (ctx->state.program)
+        mglUseProgram(ctx, 0);
+
+    bool last = leaveShareGroup(ctx);
+    MGLShareGroup *group = ctx->state.share;
+
+    // what the other contexts still share stays with them
+    if (!last)
+        goto own_objects;
+
     // programs before shaders: freeing a program lets go of the shaders it
     // held, and frees the ones already deleted
-    freeTable(ctx, &ctx->state.program_table, freeProgramObj);
-    freeTable(ctx, &ctx->state.shader_table, freeShaderObj);
-    freeTable(ctx, &ctx->state.texture_table, freeTextureObj);
+    freeTable(ctx, &ctx->state.share->program_table, freeProgramObj);
+    freeTable(ctx, &ctx->state.share->shader_table, freeShaderObj);
+    freeTable(ctx, &ctx->state.share->texture_table, freeTextureObj);
 
-    for (GLuint i = 0; i < ctx->state.retired_texture_count; i++)
-        mglFreeTextureObject(ctx, ctx->state.retired_textures[i]);
+    for (GLuint i = 0; i < ctx->state.share->retired_texture_count; i++)
+        mglFreeTextureObject(ctx, ctx->state.share->retired_textures[i]);
 
+    free(ctx->state.share->retired_textures);
+    ctx->state.share->retired_textures = NULL;
+    ctx->state.share->retired_texture_count = 0;
+
+    for (GLuint i = 0; i < ctx->state.share->retired_renderbuffer_count; i++)
+        freeRenderbufferObj(ctx, ctx->state.share->retired_renderbuffers[i]);
+
+    free(ctx->state.share->retired_renderbuffers);
+    ctx->state.share->retired_renderbuffers = NULL;
+    ctx->state.share->retired_renderbuffer_count = 0;
+
+    freeTable(ctx, &ctx->state.share->buffer_table, freeBufferObj);
+    freeTable(ctx, &ctx->state.share->renderbuffer_table, freeRenderbufferObj);
+    freeTable(ctx, &ctx->state.share->sampler_table, freeSamplerObj);
+
+    mglFreeHeldObjects(ctx);
+
+    while (ctx->state.share->sync_list)
+    {
+        Sync *sync = ctx->state.share->sync_list;
+
+        ctx->state.share->sync_list = sync->next;
+        mglReleaseSync(ctx, sync);
+    }
+
+own_objects:
     for (int i = 0; i < _MAX_TEXTURE_TYPES; i++)
         if (ctx->state.default_textures[i])
             mglFreeTextureObject(ctx, ctx->state.default_textures[i]);
 
-    free(ctx->state.retired_textures);
-    ctx->state.retired_textures = NULL;
-    ctx->state.retired_texture_count = 0;
-
-    for (GLuint i = 0; i < ctx->state.retired_renderbuffer_count; i++)
-        freeRenderbufferObj(ctx, ctx->state.retired_renderbuffers[i]);
-
-    free(ctx->state.retired_renderbuffers);
-    ctx->state.retired_renderbuffers = NULL;
-    ctx->state.retired_renderbuffer_count = 0;
-
-    freeTable(ctx, &ctx->state.buffer_table, freeBufferObj);
-    freeTable(ctx, &ctx->state.renderbuffer_table, freeRenderbufferObj);
     freeTable(ctx, &ctx->state.framebuffer_table, freePlainObj);
     freeTable(ctx, &ctx->state.vao_table, freePlainObj);
-    freeTable(ctx, &ctx->state.sampler_table, freeSamplerObj);
     freeTable(ctx, &ctx->state.query_table, freePlainObj);
     freeTable(ctx, &ctx->state.transform_feedback_table, freePlainObj);
     freeTable(ctx, &ctx->state.program_pipeline_table, freePlainObj);
@@ -540,21 +671,20 @@ void destroyGLMContext(GLMContext ctx)
     if (ctx->state.client_indices)
         freeBufferObj(ctx, ctx->state.client_indices);
 
-    while (ctx->state.sync_list)
-    {
-        Sync *sync = ctx->state.sync_list;
-
-        ctx->state.sync_list = sync->next;
-
-        if (ctx->mtl_funcs.mtlForgetSync)
-            ctx->mtl_funcs.mtlForgetSync(ctx, sync);
-
-        free(sync);
-    }
+    // objects only this context still held can go now
+    if (!last)
+        mglSweepHeldObjects(group->contexts[0]);
 
     free(ctx->bindless.handles);
 
     mglForgetContextLabels(ctx);
+
+    if (last)
+    {
+        free(group->contexts);
+        pthread_mutex_destroy(&group->lock);
+        free(group);
+    }
 
     // the renderer kept itself, and the view it draws into, alive through these
     if (ctx->mtl_funcs.mtlView)
@@ -567,6 +697,9 @@ void destroyGLMContext(GLMContext ctx)
     ctx->mtl_funcs.mtlObj = NULL;
 
     _ctx = (save == ctx) ? NULL : save;
+
+    if (_last_ctx == ctx)
+        _last_ctx = NULL;
 
     free(ctx);
 }
